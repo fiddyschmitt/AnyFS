@@ -1,0 +1,12 @@
+.idea/
+.vs
+.vscode
+packages/
+Certificates/
+*/obj/
+*/bin/
+*.suo
+*.nupkg
+**/*.lock.json
+**/*.user
+**/*.userprefs

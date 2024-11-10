@@ -1,0 +1,60 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.8.34511.84
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "AnyFS", "AnyFS\AnyFS.csproj", "{C226D4B5-822E-476A-A5B2-FB39D557D8DB}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "libVirtualFileSystem", "libFileSystem\libVirtualFileSystem.csproj", "{CF8BDF91-FD8D-4267-9DCF-3E9DAF6F51DA}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "libCommon", "libCommon\libCommon.csproj", "{BBDF4205-E861-4471-92BA-FD7905AD353B}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "NWebDav.Server", "nwebdav\NWebDav.Server\NWebDav.Server.csproj", "{B7AF8927-F628-401D-9581-3937EC65D60F}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "FileSystemAdapters", "FileSystemAdapters", "{3CEB97D8-4D51-4D8C-89B3-F0B1FB0B30F9}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "MountProviders", "MountProviders", "{0188DB4C-A99F-418B-8F7B-C1B09482B7B2}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "WebDAV", "WebDAV", "{E02D0A54-5C3E-48A0-9193-7B42F634C8A2}"
+EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "mirror", "mirror\mirror.csproj", "{FD0388EB-ABAF-4C9C-A142-E030307DE37D}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{C226D4B5-822E-476A-A5B2-FB39D557D8DB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C226D4B5-822E-476A-A5B2-FB39D557D8DB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C226D4B5-822E-476A-A5B2-FB39D557D8DB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C226D4B5-822E-476A-A5B2-FB39D557D8DB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{CF8BDF91-FD8D-4267-9DCF-3E9DAF6F51DA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{CF8BDF91-FD8D-4267-9DCF-3E9DAF6F51DA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{CF8BDF91-FD8D-4267-9DCF-3E9DAF6F51DA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{CF8BDF91-FD8D-4267-9DCF-3E9DAF6F51DA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BBDF4205-E861-4471-92BA-FD7905AD353B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BBDF4205-E861-4471-92BA-FD7905AD353B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BBDF4205-E861-4471-92BA-FD7905AD353B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BBDF4205-E861-4471-92BA-FD7905AD353B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B7AF8927-F628-401D-9581-3937EC65D60F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B7AF8927-F628-401D-9581-3937EC65D60F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B7AF8927-F628-401D-9581-3937EC65D60F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B7AF8927-F628-401D-9581-3937EC65D60F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FD0388EB-ABAF-4C9C-A142-E030307DE37D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FD0388EB-ABAF-4C9C-A142-E030307DE37D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FD0388EB-ABAF-4C9C-A142-E030307DE37D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FD0388EB-ABAF-4C9C-A142-E030307DE37D}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{B7AF8927-F628-401D-9581-3937EC65D60F} = {E02D0A54-5C3E-48A0-9193-7B42F634C8A2}
+		{E02D0A54-5C3E-48A0-9193-7B42F634C8A2} = {0188DB4C-A99F-418B-8F7B-C1B09482B7B2}
+		{FD0388EB-ABAF-4C9C-A142-E030307DE37D} = {3CEB97D8-4D51-4D8C-89B3-F0B1FB0B30F9}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {D8CEB0A6-15D3-40FC-85BC-BC4A1FB74BCF}
+	EndGlobalSection
+EndGlobal
