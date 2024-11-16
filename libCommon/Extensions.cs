@@ -1,6 +1,8 @@
 ﻿using Newtonsoft.Json;
 using System;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
 
 namespace libCommon
 {
@@ -9,6 +11,29 @@ namespace libCommon
         public static string ToString(this IEnumerable<string> values, string separator)
         {
             var result = string.Join(separator, values);
+            return result;
+        }
+
+        public static string ReadLine(this Stream stream)
+        {
+            var sb = new StringBuilder();
+
+            while (true)
+            {
+                var ch = (char)stream.ReadByte();
+
+                if (ch == '\n' || ch == '\r')
+                {
+                    if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    {
+                        stream.ReadByte();  //consume the LF
+                    }
+                    break;
+                }
+                sb.Append(ch);
+            }
+
+            var result = sb.ToString();
             return result;
         }
 

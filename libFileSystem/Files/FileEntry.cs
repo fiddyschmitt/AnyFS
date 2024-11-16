@@ -13,8 +13,8 @@ namespace libVirtualFileSystem.Files
         public string? FullPath { get; init; }
         public long Size { get; init; }
 
-        public DateTime Modified { get; init; }
-        public DateTime Created { get; init; }
-        public DateTime Accessed { get; init; }
+        public DateTime ModifiedUTC { get; set; }
+        public DateTime CreatedUTC { get; set; }
+        public DateTime AccessedUTC { get; set; }
     }
 }

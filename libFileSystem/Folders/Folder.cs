@@ -12,11 +12,11 @@ namespace libVirtualFileSystem.Folders
 {
     public class Folder
     {
-        public string? Name { get; init; }
-        public string? FullPath { get; init; }
+        public string? Name { get; set; }
+        public string? FullPath { get; set; }
 
-        public DateTime Modified { get; init; }
-        public DateTime Created { get; init; }
-        public DateTime Accessed { get; init; }
+        public DateTime ModifiedUTC { get; set; }
+        public DateTime CreatedUTC { get; set; }
+        public DateTime AccessedUTC { get; set; }
     }
 }

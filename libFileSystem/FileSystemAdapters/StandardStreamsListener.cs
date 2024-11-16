@@ -53,9 +53,7 @@ namespace libCommon.Adapters
 
                     if (command == "get files")
                     {
-                        var files = Adapter
-                                        .GetFiles(tokens[1])
-                                        .ToList();
+                        var files = Adapter.GetFiles(tokens[1]);
 
                         var filesJson = files.ToJson(false);
                         Console.WriteLine(filesJson);
@@ -63,9 +61,7 @@ namespace libCommon.Adapters
 
                     if (command == "get folders")
                     {
-                        var folders = Adapter
-                                                .GetFolders(tokens[1])
-                                                .ToList();
+                        var folders = Adapter.GetFolders(tokens[1]);
 
                         var foldersJson = folders.ToJson(false);
                         Console.WriteLine(foldersJson);
@@ -73,8 +69,6 @@ namespace libCommon.Adapters
 
                     if (command == "download file")
                     {
-                        //FPS 10/11/2024: This experiences deadlocks with the command read above. Use base64 for now
-
                         var fileStream = Adapter.Download(tokens[1]);
 
                         Console.WriteLine(fileStream.Length);

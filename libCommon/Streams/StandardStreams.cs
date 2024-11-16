@@ -125,7 +125,7 @@ namespace libCommon.Streams
             sendThread.Join();
         }
 
-        public override bool CanRead => throw new NotImplementedException();
+        public override bool CanRead => ReadFrom != null;
 
         public override bool CanSeek => throw new NotImplementedException();
 

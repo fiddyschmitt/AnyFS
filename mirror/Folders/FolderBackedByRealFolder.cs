@@ -17,9 +17,9 @@ namespace mirror.Folders
             Name = di.Name;
             FullPath = fullVirtualPath;
 
-            Created = di.CreationTime;
-            Modified = di.LastWriteTime;
-            Accessed = di.LastAccessTime;
+            CreatedUTC = di.CreationTime.ToUniversalTime();
+            ModifiedUTC = di.LastWriteTime.ToUniversalTime();
+            AccessedUTC = di.LastAccessTime.ToUniversalTime();
         }
     }
 }

@@ -19,9 +19,9 @@ namespace mirror.Files
 
             var fileInfo = new FileInfo(fullRealPath);
             Size = fileInfo.Length;
-            Created = fileInfo.CreationTime;
-            Modified = fileInfo.LastWriteTime;
-            Accessed = fileInfo.LastAccessTime;
+            CreatedUTC = fileInfo.CreationTime.ToUniversalTime();
+            ModifiedUTC = fileInfo.LastWriteTime.ToUniversalTime();
+            AccessedUTC = fileInfo.LastAccessTime.ToUniversalTime();
         }
     }
 }

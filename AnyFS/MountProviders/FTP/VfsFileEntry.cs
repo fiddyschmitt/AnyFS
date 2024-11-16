@@ -29,9 +29,9 @@ namespace AnyFS.MountProviders.FTP
 
         public IUnixPermissions Permissions { get; private set; }
 
-        public DateTimeOffset? LastWriteTime => FileEntry.Modified;
+        public DateTimeOffset? LastWriteTime => FileEntry.ModifiedUTC;
 
-        public DateTimeOffset? CreatedTime => FileEntry.Created;
+        public DateTimeOffset? CreatedTime => FileEntry.CreatedUTC;
 
         public long NumberOfLinks => throw new NotImplementedException();
 

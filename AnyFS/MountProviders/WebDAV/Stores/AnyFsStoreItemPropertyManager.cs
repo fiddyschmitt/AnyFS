@@ -21,7 +21,7 @@ public class AnyFsStoreItemPropertyManager : PropertyManager<AnyFsStoreItem>
         // RFC-2518 properties
         new DavCreationDate<AnyFsStoreItem>(httpContextAccessor)
         {
-            Getter = item => item.FileInfo.Created.ToUniversalTime(),
+            Getter = item => item.FileInfo.CreatedUTC,
             Setter = (item, value) => DavStatusCode.Forbidden
         },
         new DavDisplayName<AnyFsStoreItem>
@@ -54,7 +54,7 @@ public class AnyFsStoreItemPropertyManager : PropertyManager<AnyFsStoreItem>
         },
         new DavGetLastModified<AnyFsStoreItem>
         {
-            Getter = item => item.FileInfo.Modified.ToUniversalTime(),
+            Getter = item => item.FileInfo.ModifiedUTC,
             Setter = (item, value) => DavStatusCode.Forbidden
         },
         new DavGetResourceType<AnyFsStoreItem>
@@ -76,17 +76,17 @@ public class AnyFsStoreItemPropertyManager : PropertyManager<AnyFsStoreItem>
         // Win32 extensions
         new Win32CreationTime<AnyFsStoreItem>
         {
-            Getter = item => item.FileInfo.Created.ToUniversalTime(),
+            Getter = item => item.FileInfo.CreatedUTC,
             Setter = (item, value) => DavStatusCode.Forbidden
         },
         new Win32LastAccessTime<AnyFsStoreItem>
         {
-            Getter = item => item.FileInfo.Accessed.ToUniversalTime(),
+            Getter = item => item.FileInfo.AccessedUTC,
             Setter = (item, value) => DavStatusCode.Forbidden
         },
         new Win32LastModifiedTime<AnyFsStoreItem>
         {
-            Getter = item => item.FileInfo.Modified.ToUniversalTime(),
+            Getter = item => item.FileInfo.ModifiedUTC,
             Setter = (item, value) => DavStatusCode.Forbidden
         },
         new Win32FileAttributes<AnyFsStoreItem>

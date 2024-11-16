@@ -23,7 +23,7 @@ public class AnyFsStoreCollectionPropertyManager : PropertyManager<AnyFsStoreCol
         // RFC-2518 properties
         new DavCreationDate<AnyFsStoreCollection>(httpContextAccessor)
         {
-            Getter = collection => collection.DirectoryInfo.Created.ToUniversalTime(),
+            Getter = collection => collection.DirectoryInfo.CreatedUTC,
             Setter = (collection, value) => DavStatusCode.Forbidden
         },
         new DavDisplayName<AnyFsStoreCollection>
@@ -32,7 +32,7 @@ public class AnyFsStoreCollectionPropertyManager : PropertyManager<AnyFsStoreCol
         },
         new DavGetLastModified<AnyFsStoreCollection>
         {
-            Getter = collection => collection.DirectoryInfo.Modified.ToUniversalTime(),
+            Getter = collection => collection.DirectoryInfo.ModifiedUTC,
             Setter = (collection, value) => DavStatusCode.Forbidden
         },
         new DavGetResourceType<AnyFsStoreCollection>
@@ -110,17 +110,17 @@ public class AnyFsStoreCollectionPropertyManager : PropertyManager<AnyFsStoreCol
         // Win32 extensions
         new Win32CreationTime<AnyFsStoreCollection>
         {
-            Getter = collection => collection.DirectoryInfo.Created.ToUniversalTime(),
+            Getter = collection => collection.DirectoryInfo.CreatedUTC,
             Setter = (collection, value) => DavStatusCode.Forbidden
         },
         new Win32LastAccessTime<AnyFsStoreCollection>
         {
-            Getter = collection => collection.DirectoryInfo.Accessed.ToUniversalTime(),
+            Getter = collection => collection.DirectoryInfo.AccessedUTC,
             Setter = (collection, value) => DavStatusCode.Forbidden
         },
         new Win32LastModifiedTime<AnyFsStoreCollection>
         {
-            Getter = collection => collection.DirectoryInfo.Modified.ToUniversalTime(),
+            Getter = collection => collection.DirectoryInfo.ModifiedUTC,
             Setter = (collection, value) => DavStatusCode.Forbidden
         },
         new Win32FileAttributes<AnyFsStoreCollection>

@@ -23,7 +23,8 @@ namespace AnyFS.FileSystems
             var psi = new ProcessStartInfo(command, args)
             {
                 RedirectStandardInput = true,
-                RedirectStandardOutput = true
+                RedirectStandardOutput = true,
+                WorkingDirectory = Path.GetDirectoryName(command)
             };
             externalProc = Process.Start(psi);
 
@@ -47,6 +48,13 @@ namespace AnyFS.FileSystems
                 try
                 {
                     var result = responseJson.FromJson<FileEntry>();
+
+                    if (result != null)
+                    {
+                        if (result.CreatedUTC < DateTime.UnixEpoch) result.CreatedUTC = DateTime.UnixEpoch;
+                        if (result.ModifiedUTC < DateTime.UnixEpoch) result.ModifiedUTC = DateTime.UnixEpoch;
+                        if (result.AccessedUTC < DateTime.UnixEpoch) result.AccessedUTC = DateTime.UnixEpoch;
+                    }
 
                     return result;
                 }
@@ -76,6 +84,13 @@ namespace AnyFS.FileSystems
                 {
                     var result = responseJson.FromJson<Folder>();
 
+                    if (result != null)
+                    {
+                        if (result.CreatedUTC < DateTime.UnixEpoch) result.CreatedUTC = DateTime.UnixEpoch;
+                        if (result.ModifiedUTC < DateTime.UnixEpoch) result.ModifiedUTC = DateTime.UnixEpoch;
+                        if (result.AccessedUTC < DateTime.UnixEpoch) result.AccessedUTC = DateTime.UnixEpoch;
+                    }
+
                     return result;
                 }
                 catch
@@ -93,6 +108,10 @@ namespace AnyFS.FileSystems
 
             lock (externalProc)
             {
+                //check if the requested path is actually a folder
+                var f = GetFolder(path);
+                if (f == null) return [];
+
                 //externalProc.StandardInput.WriteLine($"get files: {path}");
                 sendUtil.WriteLine($"get files: {path}");
 
@@ -107,6 +126,13 @@ namespace AnyFS.FileSystems
                     var result = remoteFiles
                                     .OfType<FileEntry>()
                                     .ToList();
+
+                    foreach (var fileEntry in result)
+                    {
+                        if (fileEntry.CreatedUTC < DateTime.UnixEpoch) fileEntry.CreatedUTC = DateTime.UnixEpoch;
+                        if (fileEntry.ModifiedUTC < DateTime.UnixEpoch) fileEntry.ModifiedUTC = DateTime.UnixEpoch;
+                        if (fileEntry.AccessedUTC < DateTime.UnixEpoch) fileEntry.AccessedUTC = DateTime.UnixEpoch;
+                    };
 
                     return result;
                 }
@@ -125,6 +151,10 @@ namespace AnyFS.FileSystems
 
             lock (externalProc)
             {
+                //check if the requested path is actually a folder
+                var f = GetFolder(path);
+                if (f == null) return [];
+
                 //externalProc.StandardInput.WriteLine($"get folders: {path}");
                 sendUtil.WriteLine($"get folders: {path}");
 
@@ -136,49 +166,62 @@ namespace AnyFS.FileSystems
                 {
                     var result = responseJson.FromJson<List<Folder>>() ?? [];
 
+                    foreach (var folder in result)
+                    {
+                        if (folder.CreatedUTC < DateTime.UnixEpoch) folder.CreatedUTC = DateTime.UnixEpoch;
+                        if (folder.ModifiedUTC < DateTime.UnixEpoch) folder.ModifiedUTC = DateTime.UnixEpoch;
+                        if (folder.AccessedUTC < DateTime.UnixEpoch) folder.AccessedUTC = DateTime.UnixEpoch;
+                    };
+
                     return result;
                 }
-                catch
+                catch (Exception ex)
                 {
-                    //Debugger.Break();
+                    Debugger.Break();
                 }
 
                 return [];
             }
         }
 
-        public Stream Download(string path)
-        {
-            if (externalProc == null) return Stream.Null;
+        //public Stream Download(string path)
+        //{
+        //    if (externalProc == null) return Stream.Null;
 
-            lock (externalProc)
-            {
-                //externalProc.StandardInput.WriteLine($"download file: {path}");
-                sendUtil.WriteLine($"download file as base64: {path}");
+        //    lock (externalProc)
+        //    {
+        //        var fileInfo = GetFile(path);
+        //        if (fileInfo == null || fileInfo.Size == 0)
+        //        {
+        //            return Stream.Null;
+        //        }
 
-                var sizeStr = externalProc.StandardOutput.ReadLine();
-                var size = long.Parse(sizeStr);
+        //        //externalProc.StandardInput.WriteLine($"download file: {path}");
+        //        sendUtil.WriteLine($"download file as base64: {path}");
 
-                var tempFilePath = Path.GetTempFileName();
-                var fs = new FileStreamDeleteOnClose(tempFilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+        //        var sizeStr = externalProc.StandardOutput.ReadLine();
+        //        var size = long.Parse(sizeStr);
 
-                var totalRead = 0L;
-                while (true)
-                {
-                    var str = externalProc.StandardOutput.ReadLine();
-                    var bytes = Convert.FromBase64String(str);
+        //        var tempFilePath = Path.GetTempFileName();
+        //        var fs = new FileStreamDeleteOnClose(tempFilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
 
-                    fs.Write(bytes);
-                    totalRead += bytes.Length;
+        //        var totalRead = 0L;
+        //        while (true)
+        //        {
+        //            var str = externalProc.StandardOutput.ReadLine();
+        //            var bytes = Convert.FromBase64String(str);
 
-                    if (totalRead == size) break;
-                }
+        //            fs.Write(bytes);
+        //            totalRead += bytes.Length;
 
-                fs.Seek(0, SeekOrigin.Begin);
+        //            if (totalRead == size) break;
+        //        }
 
-                return fs;
-            }
-        }
+        //        fs.Seek(0, SeekOrigin.Begin);
+
+        //        return fs;
+        //    }
+        //}
 
         //public Stream Download(string path)
         //{
@@ -190,15 +233,16 @@ namespace AnyFS.FileSystems
         //        sendUtil.WriteLine($"download file: {path}");
 
         //        var sizeStr = externalProc.StandardOutput.ReadLine();
+        //        var stdStreams = new StandardStreams(externalProc.StandardOutput.BaseStream, Stream.Null);
+
         //        var size = long.Parse(sizeStr);
 
         //        var tempFilePath = Path.GetTempFileName();
         //        var fs = new FileStreamDeleteOnClose(tempFilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
 
         //        //externalProc.StandardOutput.BaseStream.CopyTo(fs, size, 65535);
-        //        var stdStreams = new StandardStreams(externalProc.StandardOutput.BaseStream, Stream.Null);
-        //        stdStreams.CopyTo(fs, size, 65535);
 
+        //        stdStreams.CopyTo(fs, size, 65535);
         //        stdStreams.Stop();
 
         //        fs.Seek(0, SeekOrigin.Begin);
@@ -206,5 +250,43 @@ namespace AnyFS.FileSystems
         //        return fs;
         //    }
         //}
+
+        public Stream Download(string path)
+        {
+            if (externalProc == null) return Stream.Null;
+
+            lock (externalProc)
+            {
+                try
+                {
+                    //externalProc.StandardInput.WriteLine($"download file: {path}");
+                    sendUtil.WriteLine($"download file: {path}");
+
+                    var sizeStr = externalProc.StandardOutput.BaseStream.ReadLine();
+
+                    //var stdStreams = new StandardStreams(externalProc.StandardOutput.BaseStream, Stream.Null);
+                    //var sizeStr = stdStreams.ReadLine();    //use this extension method because using a TextReader consumes more bytes than the line, eating into the file contents
+
+                    var size = long.Parse(sizeStr.ToString());
+
+                    var tempFilePath = Path.GetTempFileName();
+                    var fs = new FileStreamDeleteOnClose(tempFilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+
+                    externalProc.StandardOutput.BaseStream.CopyTo(fs, size, 65535);
+
+                    //stdStreams.CopyTo(fs, size, 65535);
+                    //stdStreams.Stop();
+
+                    fs.Seek(0, SeekOrigin.Begin);
+
+                    return fs;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine();
+                    return Stream.Null;
+                }
+            }
+        }
     }
 }
