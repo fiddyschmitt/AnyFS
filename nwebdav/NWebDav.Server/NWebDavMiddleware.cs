@@ -35,10 +35,18 @@ internal class NWebDavMiddleware
                     await context.ChallengeAsync().ConfigureAwait(false);
                     return;
                 }
-                    
+
                 var handler = (IRequestHandler)context.RequestServices.GetRequiredService(handlerType);
                 var handled = await handler.HandleRequestAsync(context).ConfigureAwait(false);
-                if (handled) return;
+
+                if (handled)
+                {
+                    //Address port exhaustion of the ephemeral ports.
+                    //Confirm by running:
+                    //Get-NetTCPConnection | Group-Object -Property State, OwningProcess | Select -Property Count, Name, @{Name="ProcessName";Expression={(Get-Process -PID ($_.Name.Split(',')[-1].Trim(' '))).Name}}, Group | Sort Count -Descending | Select-Object -First 10
+                    context.Connection.RequestClose();
+                    return;
+                }
             }
             else
             {
