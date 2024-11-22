@@ -3,6 +3,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using NWebDav.Server.Authentication;
@@ -31,7 +32,7 @@ public static class Extensions
             .AddScoped<PropPatchHandler>()
             .AddScoped<PutHandler>()
             .AddScoped<UnlockHandler>()
-            .AddSingleton<ILockingManager, InMemoryLockingManager>();
+            .AddSingleton<ILockingManager, InMemoryLockingManager>();   //todo: Consider using NoLocking from Mount 3DX
 
         var optionsBuilder = services
             .AddOptions<NWebDavOptions>()
@@ -62,7 +63,19 @@ public static class Extensions
             opts.Handlers["UNLOCK"] = typeof(UnlockHandler);
             configureOptions?.Invoke(opts);                
         });
-        
+
+        services.AddLogging((logging) =>
+        {
+            //logging.AddDebug();
+            //logging.AddConsole();
+        });
+
+        services.AddResponseCompression(options =>
+        {
+            options.Providers.Add<GzipCompressionProvider>();
+            options.Providers.Add<BrotliCompressionProvider>();
+        });
+
         return services;
     }
 
@@ -72,7 +85,7 @@ public static class Extensions
     public static IServiceCollection AddDiskStore(this IServiceCollection services, Action<DiskStoreOptions>? configure = null)
         => services
             .Configure<DiskStoreOptions>(opts =>
-            {
+    {
                 opts.BaseDirectory = Environment.GetEnvironmentVariable("HOME") ?? Environment.GetEnvironmentVariable("USERPROFILE") ?? string.Empty;
                 configure?.Invoke(opts);
             })
