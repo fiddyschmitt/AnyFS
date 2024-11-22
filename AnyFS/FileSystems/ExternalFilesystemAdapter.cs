@@ -18,6 +18,9 @@ namespace AnyFS.FileSystems
         Process? externalProc;
         SendUtil? sendUtil;
 
+        //Windows doesn't show dates earlier than 1/1/1980
+        static readonly DateTime MinDate = new(1980, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
         public void Initialise(string command, string args)
         {
             var psi = new ProcessStartInfo(command, args)
@@ -51,9 +54,9 @@ namespace AnyFS.FileSystems
 
                     if (result != null)
                     {
-                        if (result.CreatedUTC < DateTime.UnixEpoch) result.CreatedUTC = DateTime.UnixEpoch;
-                        if (result.ModifiedUTC < DateTime.UnixEpoch) result.ModifiedUTC = DateTime.UnixEpoch;
-                        if (result.AccessedUTC < DateTime.UnixEpoch) result.AccessedUTC = DateTime.UnixEpoch;
+                        if (result.CreatedUTC < MinDate) result.CreatedUTC = MinDate;
+                        if (result.ModifiedUTC < MinDate) result.ModifiedUTC = MinDate;
+                        if (result.AccessedUTC < MinDate) result.AccessedUTC = MinDate;
                     }
 
                     return result;
@@ -86,9 +89,9 @@ namespace AnyFS.FileSystems
 
                     if (result != null)
                     {
-                        if (result.CreatedUTC < DateTime.UnixEpoch) result.CreatedUTC = DateTime.UnixEpoch;
-                        if (result.ModifiedUTC < DateTime.UnixEpoch) result.ModifiedUTC = DateTime.UnixEpoch;
-                        if (result.AccessedUTC < DateTime.UnixEpoch) result.AccessedUTC = DateTime.UnixEpoch;
+                        if (result.CreatedUTC < MinDate) result.CreatedUTC = MinDate;
+                        if (result.ModifiedUTC < MinDate) result.ModifiedUTC = MinDate;
+                        if (result.AccessedUTC < MinDate) result.AccessedUTC = MinDate;
                     }
 
                     return result;
@@ -129,9 +132,9 @@ namespace AnyFS.FileSystems
 
                     foreach (var fileEntry in result)
                     {
-                        if (fileEntry.CreatedUTC < DateTime.UnixEpoch) fileEntry.CreatedUTC = DateTime.UnixEpoch;
-                        if (fileEntry.ModifiedUTC < DateTime.UnixEpoch) fileEntry.ModifiedUTC = DateTime.UnixEpoch;
-                        if (fileEntry.AccessedUTC < DateTime.UnixEpoch) fileEntry.AccessedUTC = DateTime.UnixEpoch;
+                        if (fileEntry.CreatedUTC < MinDate) fileEntry.CreatedUTC = MinDate;
+                        if (fileEntry.ModifiedUTC < MinDate) fileEntry.ModifiedUTC = MinDate;
+                        if (fileEntry.AccessedUTC < MinDate) fileEntry.AccessedUTC = MinDate;
                     };
 
                     return result;
@@ -168,9 +171,9 @@ namespace AnyFS.FileSystems
 
                     foreach (var folder in result)
                     {
-                        if (folder.CreatedUTC < DateTime.UnixEpoch) folder.CreatedUTC = DateTime.UnixEpoch;
-                        if (folder.ModifiedUTC < DateTime.UnixEpoch) folder.ModifiedUTC = DateTime.UnixEpoch;
-                        if (folder.AccessedUTC < DateTime.UnixEpoch) folder.AccessedUTC = DateTime.UnixEpoch;
+                        if (folder.CreatedUTC < MinDate) folder.CreatedUTC = MinDate;
+                        if (folder.ModifiedUTC < MinDate) folder.ModifiedUTC = MinDate;
+                        if (folder.AccessedUTC < MinDate) folder.AccessedUTC = MinDate;
                     };
 
                     return result;
