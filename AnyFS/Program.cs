@@ -34,6 +34,26 @@ namespace AnyFS
             webdavMountProvider.Start(args, fsProvider);
         }
 
+
+        static StreamWriter? logWriter;
+        public static void Log(string msg)
+        {
+            if (logWriter == null)
+            {
+                var logFolder = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
+                Directory.CreateDirectory(logFolder);
+
+                var logFile = Path.Combine(logFolder, $"anyfs {DateTime.Now:yyyy-MM-dd HHmm ss}.txt");
+                logWriter = new StreamWriter(logFile)
+                {
+                    AutoFlush = true
+                };
+            }
+
+            var line = $"{DateTime.Now} {msg}";
+            logWriter.WriteLine(line);
+        }
+
         //static void Main(string[] args)
         //{
         //    var mirrorFs = new Mirror(@"C:\Temp");
