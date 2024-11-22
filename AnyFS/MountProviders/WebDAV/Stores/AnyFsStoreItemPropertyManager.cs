@@ -63,38 +63,38 @@ public class AnyFsStoreItemPropertyManager : PropertyManager<AnyFsStoreItem>
         },
 
         // Default locking property handling via the LockingManager
-        new DavLockDiscoveryDefault<AnyFsStoreItem>(lockingManager),
-        new DavSupportedLockDefault<AnyFsStoreItem>(lockingManager),
+        //new DavLockDiscoveryDefault<AnyFsStoreItem>(lockingManager),
+        //new DavSupportedLockDefault<AnyFsStoreItem>(lockingManager),
 
-        // Hopmann/Lippert collection properties
-        // (although not a collection, the IsHidden property might be valuable)
-        new DavExtCollectionIsHidden<AnyFsStoreItem>
-        {
-            Getter = item => false
-        },
+        //// Hopmann/Lippert collection properties
+        //// (although not a collection, the IsHidden property might be valuable)
+        //new DavExtCollectionIsHidden<AnyFsStoreItem>
+        //{
+        //    Getter = item => false
+        //},
 
-        // Win32 extensions
-        new Win32CreationTime<AnyFsStoreItem>
-        {
-            Getter = item => item.FileInfo.CreatedUTC,
-            Setter = (item, value) => DavStatusCode.Forbidden
-        },
-        new Win32LastAccessTime<AnyFsStoreItem>
-        {
-            Getter = item => item.FileInfo.AccessedUTC,
-            Setter = (item, value) => DavStatusCode.Forbidden
-        },
-        new Win32LastModifiedTime<AnyFsStoreItem>
-        {
-            Getter = item => item.FileInfo.ModifiedUTC,
-            Setter = (item, value) => DavStatusCode.Forbidden
-        },
-        new Win32FileAttributes<AnyFsStoreItem>
-        {
-            Getter = item => {
-                return FileAttributes.None;
-            },
-            Setter = (item, value) => DavStatusCode.Forbidden
-        }
+        //// Win32 extensions
+        //new Win32CreationTime<AnyFsStoreItem>
+        //{
+        //    Getter = item => item.FileInfo.CreatedUTC,
+        //    Setter = (item, value) => DavStatusCode.Forbidden
+        //},
+        //new Win32LastAccessTime<AnyFsStoreItem>
+        //{
+        //    Getter = item => item.FileInfo.AccessedUTC,
+        //    Setter = (item, value) => DavStatusCode.Forbidden
+        //},
+        //new Win32LastModifiedTime<AnyFsStoreItem>
+        //{
+        //    Getter = item => item.FileInfo.ModifiedUTC,
+        //    Setter = (item, value) => DavStatusCode.Forbidden
+        //},
+        //new Win32FileAttributes<AnyFsStoreItem>
+        //{
+        //    Getter = item => {
+        //        return FileAttributes.None;
+        //    },
+        //    Setter = (item, value) => DavStatusCode.Forbidden
+        //}
     };
 }

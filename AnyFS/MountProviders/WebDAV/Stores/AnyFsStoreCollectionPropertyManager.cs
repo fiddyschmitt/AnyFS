@@ -45,88 +45,88 @@ public class AnyFsStoreCollectionPropertyManager : PropertyManager<AnyFsStoreCol
         new DavSupportedLockDefault<AnyFsStoreCollection>(lockingManager),
 
         // Hopmann/Lippert collection properties
-        new DavExtCollectionChildCount<AnyFsStoreCollection>
-        {
-            //Getter = collection => collection.DirectoryInfo.Children.Count()
-            Getter = collection =>
-            {
-                var fileCount = collection.FileSystemAdapter.GetFiles(collection.FullPath).Count;
-                var subfolderCount = collection.FileSystemAdapter.GetFolders(collection.FullPath).Count;
-                var childCount = fileCount + subfolderCount;
-                return childCount;
-            }
-        },
-        new DavExtCollectionIsFolder<AnyFsStoreCollection>
-        {
-            Getter = _ => true
-        },
-        new DavExtCollectionIsHidden<AnyFsStoreCollection>
-        {
-            Getter = collection => false
-        },
-        new DavExtCollectionIsStructuredDocument<AnyFsStoreCollection>
-        {
-            Getter = _ => false
-        },
-        new DavExtCollectionHasSubs<AnyFsStoreCollection>
-        {
-            //Getter = collection => collection.DirectoryInfo.Children.OfType<Folder>().Any()
-            Getter = collection =>
-            {
-                var hasSubs = collection.FileSystemAdapter.GetFolders(collection.FullPath).Any();
-                return hasSubs;
-            }
-        },
-        new DavExtCollectionNoSubs<AnyFsStoreCollection>
-        {
-            Getter = _ => false
-        },
-        new DavExtCollectionObjectCount<AnyFsStoreCollection>
-        {
-            //Getter = collection => collection.DirectoryInfo.Children.OfType<FileEntry>().Count()
-            Getter = collection =>
-            {
-                var fileCount = collection.FileSystemAdapter.GetFiles(collection.FullPath).Count;
-                var subfolderCount = collection.FileSystemAdapter.GetFolders(collection.FullPath).Count;
-                var childCount = fileCount + subfolderCount;
-                return childCount;
-            }
-        },
-        new DavExtCollectionReserved<AnyFsStoreCollection>
-        {
-            Getter = collection => !collection.IsWritable
-        },
-        new DavExtCollectionVisibleCount<AnyFsStoreCollection>
-        {
-            Getter = collection =>
-            {
-                var fileCount = collection.FileSystemAdapter.GetFiles(collection.FullPath).Count;
-                var subfolderCount = collection.FileSystemAdapter.GetFolders(collection.FullPath).Count;
-                var childCount = fileCount + subfolderCount;
-                return childCount;
-            }
-        },
+        //new DavExtCollectionChildCount<AnyFsStoreCollection>
+        //{
+        //    //Getter = collection => collection.DirectoryInfo.Children.Count()
+        //    Getter = collection =>
+        //    {
+        //        var fileCount = collection.FileSystemAdapter.GetFiles(collection.FullPath).Count;
+        //        var subfolderCount = collection.FileSystemAdapter.GetFolders(collection.FullPath).Count;
+        //        var childCount = fileCount + subfolderCount;
+        //        return childCount;
+        //    }
+        //},
+        //new DavExtCollectionIsFolder<AnyFsStoreCollection>
+        //{
+        //    Getter = _ => true
+        //},
+        //new DavExtCollectionIsHidden<AnyFsStoreCollection>
+        //{
+        //    Getter = collection => false
+        //},
+        //new DavExtCollectionIsStructuredDocument<AnyFsStoreCollection>
+        //{
+        //    Getter = _ => false
+        //},
+        //new DavExtCollectionHasSubs<AnyFsStoreCollection>
+        //{
+        //    //Getter = collection => collection.DirectoryInfo.Children.OfType<Folder>().Any()
+        //    Getter = collection =>
+        //    {
+        //        var hasSubs = collection.FileSystemAdapter.GetFolders(collection.FullPath).Any();
+        //        return hasSubs;
+        //    }
+        //},
+        //new DavExtCollectionNoSubs<AnyFsStoreCollection>
+        //{
+        //    Getter = _ => false
+        //},
+        //new DavExtCollectionObjectCount<AnyFsStoreCollection>
+        //{
+        //    //Getter = collection => collection.DirectoryInfo.Children.OfType<FileEntry>().Count()
+        //    Getter = collection =>
+        //    {
+        //        var fileCount = collection.FileSystemAdapter.GetFiles(collection.FullPath).Count;
+        //        var subfolderCount = collection.FileSystemAdapter.GetFolders(collection.FullPath).Count;
+        //        var childCount = fileCount + subfolderCount;
+        //        return childCount;
+        //    }
+        //},
+        //new DavExtCollectionReserved<AnyFsStoreCollection>
+        //{
+        //    Getter = collection => !collection.IsWritable
+        //},
+        //new DavExtCollectionVisibleCount<AnyFsStoreCollection>
+        //{
+        //    Getter = collection =>
+        //    {
+        //        var fileCount = collection.FileSystemAdapter.GetFiles(collection.FullPath).Count;
+        //        var subfolderCount = collection.FileSystemAdapter.GetFolders(collection.FullPath).Count;
+        //        var childCount = fileCount + subfolderCount;
+        //        return childCount;
+        //    }
+        //},
 
-        // Win32 extensions
-        new Win32CreationTime<AnyFsStoreCollection>
-        {
-            Getter = collection => collection.DirectoryInfo.CreatedUTC,
-            Setter = (collection, value) => DavStatusCode.Forbidden
-        },
-        new Win32LastAccessTime<AnyFsStoreCollection>
-        {
-            Getter = collection => collection.DirectoryInfo.AccessedUTC,
-            Setter = (collection, value) => DavStatusCode.Forbidden
-        },
-        new Win32LastModifiedTime<AnyFsStoreCollection>
-        {
-            Getter = collection => collection.DirectoryInfo.ModifiedUTC,
-            Setter = (collection, value) => DavStatusCode.Forbidden
-        },
-        new Win32FileAttributes<AnyFsStoreCollection>
-        {
-            Getter = collection => FileAttributes.Directory,
-            Setter = (collection, value) => DavStatusCode.Forbidden
-        }
+        //// Win32 extensions
+        //new Win32CreationTime<AnyFsStoreCollection>
+        //{
+        //    Getter = collection => collection.DirectoryInfo.CreatedUTC,
+        //    Setter = (collection, value) => DavStatusCode.Forbidden
+        //},
+        //new Win32LastAccessTime<AnyFsStoreCollection>
+        //{
+        //    Getter = collection => collection.DirectoryInfo.AccessedUTC,
+        //    Setter = (collection, value) => DavStatusCode.Forbidden
+        //},
+        //new Win32LastModifiedTime<AnyFsStoreCollection>
+        //{
+        //    Getter = collection => collection.DirectoryInfo.ModifiedUTC,
+        //    Setter = (collection, value) => DavStatusCode.Forbidden
+        //},
+        //new Win32FileAttributes<AnyFsStoreCollection>
+        //{
+        //    Getter = collection => FileAttributes.Directory,
+        //    Setter = (collection, value) => DavStatusCode.Forbidden
+        //}
     };
 }
