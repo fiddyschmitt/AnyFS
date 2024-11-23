@@ -18,6 +18,8 @@ namespace AnyFS.MountProviders.WebDAV
     {
         public void Start(string[] args, IFileSystemAdapter fileSystemAdapter)
         {
+            args = ["--urls", "http://localhost:12000"];
+
             //var builder = WebApplication.CreateBuilder(args);
             //builder.Services
             //    .AddNWebDav()
