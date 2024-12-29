@@ -73,7 +73,14 @@ namespace libCommon.Adapters
 
                         Console.WriteLine(fileStream.Length);
 
-                        fileStream.CopyTo(stdout);
+                        var totalRead = fileStream.CopyTo(stdout, fileStream.Length, 65535);
+
+                        if (totalRead < fileStream.Length)
+                        {
+                            var remaining = fileStream.Length - totalRead;
+                            Stream.Null.CopyTo(stdout, remaining, 65535);
+                        }
+
                         stdout.Flush();
                     }
 

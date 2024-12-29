@@ -17,6 +17,7 @@ namespace AnyFS.FileSystems
     {
         Process? externalProc;
         SendUtil? sendUtil;
+        //StandardStreams? standardStreams;
 
         //Windows doesn't show dates earlier than 1/1/1980
         static readonly DateTime MinDate = new(1980, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -32,7 +33,10 @@ namespace AnyFS.FileSystems
             externalProc = Process.Start(psi);
 
             sendUtil = new SendUtil(externalProc.StandardInput);
+            //standardStreams = new StandardStreams(externalProc.StandardOutput.BaseStream, Stream.Null);
         }
+
+        readonly Semaphore transferInProgress = new Semaphore(1, 1);
 
         public FileEntry? GetFile(string path)
         {
@@ -43,7 +47,17 @@ namespace AnyFS.FileSystems
                 //externalProc.StandardInput.WriteLine($"get file: {path}");
                 sendUtil.WriteLine($"get file: {path}");
 
-                var responseJson = externalProc.StandardOutput.ReadLine();
+                var responseJson = "";
+                transferInProgress.WaitOne();
+                try
+                {
+                    responseJson = externalProc.StandardOutput.ReadLine();
+                }
+                finally
+                {
+                    transferInProgress.Release();
+                }
+
 
                 if (string.IsNullOrEmpty(responseJson)) return null;
                 if (responseJson == "null") return null;
@@ -61,9 +75,9 @@ namespace AnyFS.FileSystems
 
                     return result;
                 }
-                catch
+                catch (Exception ex)
                 {
-                    //Debugger.Break();
+                    Debugger.Break();
                 }
 
                 return null;
@@ -79,7 +93,16 @@ namespace AnyFS.FileSystems
                 //externalProc.StandardInput.WriteLine($"get folder: {path}");
                 sendUtil.WriteLine($"get folder: {path}");
 
-                var responseJson = externalProc.StandardOutput.ReadLine();
+                var responseJson = "";
+                transferInProgress.WaitOne();
+                try
+                {
+                    responseJson = externalProc.StandardOutput.ReadLine();
+                }
+                finally
+                {
+                    transferInProgress.Release();
+                }
 
                 if (string.IsNullOrEmpty(responseJson)) return null;
 
@@ -96,9 +119,9 @@ namespace AnyFS.FileSystems
 
                     return result;
                 }
-                catch
+                catch (Exception ex)
                 {
-                    //Debugger.Break();
+                    Debugger.Break();
                 }
 
                 return null;
@@ -118,7 +141,16 @@ namespace AnyFS.FileSystems
                 //externalProc.StandardInput.WriteLine($"get files: {path}");
                 sendUtil.WriteLine($"get files: {path}");
 
-                var responseJson = externalProc.StandardOutput.ReadLine();
+                var responseJson = "";
+                transferInProgress.WaitOne();
+                try
+                {
+                    responseJson = externalProc.StandardOutput.ReadLine();
+                }
+                finally
+                {
+                    transferInProgress.Release();
+                }
 
                 if (string.IsNullOrEmpty(responseJson)) return [];
 
@@ -139,7 +171,7 @@ namespace AnyFS.FileSystems
 
                     return result;
                 }
-                catch
+                catch (Exception ex)
                 {
                     Debugger.Break();
                 }
@@ -161,7 +193,16 @@ namespace AnyFS.FileSystems
                 //externalProc.StandardInput.WriteLine($"get folders: {path}");
                 sendUtil.WriteLine($"get folders: {path}");
 
-                var responseJson = externalProc.StandardOutput.ReadLine();
+                var responseJson = "";
+                transferInProgress.WaitOne();
+                try
+                {
+                    responseJson = externalProc.StandardOutput.ReadLine();
+                }
+                finally
+                {
+                    transferInProgress.Release();
+                }
 
                 if (string.IsNullOrEmpty(responseJson)) return [];
 
@@ -187,73 +228,6 @@ namespace AnyFS.FileSystems
             }
         }
 
-        //public Stream Download(string path)
-        //{
-        //    if (externalProc == null) return Stream.Null;
-
-        //    lock (externalProc)
-        //    {
-        //        var fileInfo = GetFile(path);
-        //        if (fileInfo == null || fileInfo.Size == 0)
-        //        {
-        //            return Stream.Null;
-        //        }
-
-        //        //externalProc.StandardInput.WriteLine($"download file: {path}");
-        //        sendUtil.WriteLine($"download file as base64: {path}");
-
-        //        var sizeStr = externalProc.StandardOutput.ReadLine();
-        //        var size = long.Parse(sizeStr);
-
-        //        var tempFilePath = Path.GetTempFileName();
-        //        var fs = new FileStreamDeleteOnClose(tempFilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
-
-        //        var totalRead = 0L;
-        //        while (true)
-        //        {
-        //            var str = externalProc.StandardOutput.ReadLine();
-        //            var bytes = Convert.FromBase64String(str);
-
-        //            fs.Write(bytes);
-        //            totalRead += bytes.Length;
-
-        //            if (totalRead == size) break;
-        //        }
-
-        //        fs.Seek(0, SeekOrigin.Begin);
-
-        //        return fs;
-        //    }
-        //}
-
-        //public Stream Download(string path)
-        //{
-        //    if (externalProc == null) return Stream.Null;
-
-        //    lock (externalProc)
-        //    {
-        //        //externalProc.StandardInput.WriteLine($"download file: {path}");
-        //        sendUtil.WriteLine($"download file: {path}");
-
-        //        var sizeStr = externalProc.StandardOutput.ReadLine();
-        //        var stdStreams = new StandardStreams(externalProc.StandardOutput.BaseStream, Stream.Null);
-
-        //        var size = long.Parse(sizeStr);
-
-        //        var tempFilePath = Path.GetTempFileName();
-        //        var fs = new FileStreamDeleteOnClose(tempFilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
-
-        //        //externalProc.StandardOutput.BaseStream.CopyTo(fs, size, 65535);
-
-        //        stdStreams.CopyTo(fs, size, 65535);
-        //        stdStreams.Stop();
-
-        //        fs.Seek(0, SeekOrigin.Begin);
-
-        //        return fs;
-        //    }
-        //}
-
         public Stream Download(string path)
         {
             if (externalProc == null) return Stream.Null;
@@ -265,28 +239,27 @@ namespace AnyFS.FileSystems
                     //externalProc.StandardInput.WriteLine($"download file: {path}");
                     sendUtil.WriteLine($"download file: {path}");
 
+                    transferInProgress.WaitOne();
                     var sizeStr = externalProc.StandardOutput.BaseStream.ReadLine();
-
-                    //var stdStreams = new StandardStreams(externalProc.StandardOutput.BaseStream, Stream.Null);
-                    //var sizeStr = stdStreams.ReadLine();    //use this extension method because using a TextReader consumes more bytes than the line, eating into the file contents
-
                     var size = long.Parse(sizeStr.ToString());
 
-                    var tempFilePath = Path.GetTempFileName();
-                    var fs = new FileStreamDeleteOnClose(tempFilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+                    //var tempFilePath = Path.GetTempFileName();
+                    //var result = new FileStreamDeleteOnClose(tempFilePath, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+                    //externalProc.StandardOutput.BaseStream.CopyTo(result, size, 65535);
+                    //result.Seek(0, SeekOrigin.Begin);
+                    //transferInProgress.Release();
 
-                    externalProc.StandardOutput.BaseStream.CopyTo(fs, size, 65535);
+                    var result = new SubStream(externalProc.StandardOutput.BaseStream, 0, size);
+                    result.Closed += (s, a) =>
+                    {
+                        transferInProgress.Release();
+                    };
 
-                    //stdStreams.CopyTo(fs, size, 65535);
-                    //stdStreams.Stop();
-
-                    fs.Seek(0, SeekOrigin.Begin);
-
-                    return fs;
+                    return result;
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine();
+                    Debugger.Break();
                     return Stream.Null;
                 }
             }

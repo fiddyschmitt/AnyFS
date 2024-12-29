@@ -16,7 +16,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\libFileSystem\libVirtualFileSystem.csproj" />
-    <ProjectReference Include="..\mirror\mirror.csproj" />
     <ProjectReference Include="..\nwebdav\NWebDav.Server\NWebDav.Server.csproj" />
   </ItemGroup>
 

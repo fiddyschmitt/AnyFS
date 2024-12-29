@@ -57,11 +57,13 @@ namespace libCommon.Streams
 
                     while (!cancellationTokenSource.IsCancellationRequested)
                     {
-                        //var timeout = new CancellationTokenSource(5000);
                         var read = await ReadFrom.ReadAsync(buffer, cancellationTokenSource.Token);
-                        var readBytes = new byte[read];
-                        Array.Copy(buffer, readBytes, readBytes.Length);
-                        ReceiveQueue.Add(readBytes);
+                        if (read > 0)
+                        {
+                            var readBytes = new byte[read];
+                            Array.Copy(buffer, readBytes, readBytes.Length);
+                            ReceiveQueue.Add(readBytes);
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -86,28 +88,31 @@ namespace libCommon.Streams
 
         public override int Read(byte[] buffer, int offset, int count)
         {
-            var totalRead = 0;
-
-            while (true)
+            lock (this)
             {
-                var toRead = count - totalRead;
-                if (toRead == 0) break;
+                if (count == 0) return 0;
 
-                if (currentReadBlock == null || currentReadBlock.Length - posInCurrentReadBlock == 0)
+                if (currentReadBlock == null || posInCurrentReadBlock >= currentReadBlock.Length)
                 {
-                    currentReadBlock = ReceiveQueue.GetConsumingEnumerable(cancellationTokenSource.Token).First();
+                    try
+                    {
+                        currentReadBlock = ReceiveQueue.GetConsumingEnumerable(cancellationTokenSource.Token).First();
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine(ex);
+                    }
                     posInCurrentReadBlock = 0;
                 }
 
                 var leftInBlock = currentReadBlock.Length - posInCurrentReadBlock;
-                var toReadFromBlock = Math.Min(toRead, leftInBlock);
-                Array.Copy(currentReadBlock, posInCurrentReadBlock, buffer, totalRead, toReadFromBlock);
+                var toReadFromBlock = Math.Min(count, leftInBlock);
+                Array.Copy(currentReadBlock, posInCurrentReadBlock, buffer, offset, toReadFromBlock);
 
                 posInCurrentReadBlock += toReadFromBlock;
-                totalRead += toReadFromBlock;
-            }
 
-            return totalRead;
+                return toReadFromBlock;
+            }
         }
 
         readonly BlockingCollection<byte[]> SendQueue = [];

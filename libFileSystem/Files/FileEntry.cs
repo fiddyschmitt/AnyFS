@@ -10,7 +10,7 @@ namespace libVirtualFileSystem.Files
     public class FileEntry
     {
         public string? Name { get; init; }
-        public string? FullPath { get; init; }
+        public string? FullPath { get; set; }
         public long Size { get; init; }
 
         public DateTime ModifiedUTC { get; set; }
