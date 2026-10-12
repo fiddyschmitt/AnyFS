@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>AnyFS.Sources.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="MSTest" />
+    <PackageReference Include="coverlet.collector">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <ProjectReference Include="..\..\src\AnyFS.Sdk.Testing\AnyFS.Sdk.Testing.csproj" />
+    <ProjectReference Include="..\..\src\Sources\Mirror\AnyFS.Sources.Mirror.csproj" />
+    <ProjectReference Include="..\fixtures\MakeTree\MakeTree.csproj" />
+  </ItemGroup>
+</Project>

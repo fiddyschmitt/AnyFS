@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.SamplePlugin</AssemblyName>
+    <RootNamespace>AnyFS.SamplePlugin</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTrimmable>false</IsTrimmable>
+    <!-- a third-party plugin references the SDK package; here it's the project, with the DLL not copied so the
+         host's AnyFS.Sdk is the one that loads (as with the NuGet package's PrivateAssets) -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\AnyFS.Sdk\AnyFS.Sdk.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+  </ItemGroup>
+</Project>

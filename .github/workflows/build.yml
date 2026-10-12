@@ -1,0 +1,54 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            exe: anyfs.exe
+          - os: ubuntu-latest
+            rid: linux-x64
+            exe: anyfs
+          - os: macos-latest
+            rid: osx-arm64
+            exe: anyfs
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore AnyFS.slnx
+
+      - name: Build (warnings are errors)
+        run: dotnet build AnyFS.slnx -c Release --no-restore -nologo
+
+      - name: Unit tests
+        run: dotnet test AnyFS.slnx -c Release --no-build -nologo --blame-hang --blame-hang-timeout 5m --blame-hang-dump-type none
+
+      # the trimmed single file is what ships; trim warnings fail the publish because they're errors
+      - name: Publish (self-contained, single file, trimmed)
+        shell: pwsh
+        run: ./scripts/publish.ps1 -Rid ${{ matrix.rid }} -Clean
+
+      - name: Smoke test the published executable
+        shell: pwsh
+        run: ./scripts/smoke.ps1 -Exe publish/${{ matrix.rid }}/${{ matrix.exe }} -SamplePluginDll tests/fixtures/SamplePlugin/bin/Release/net10.0/AnyFS.SamplePlugin.dll
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anyfs-${{ matrix.rid }}
+          path: publish/${{ matrix.rid }}/${{ matrix.exe }}
+          if-no-files-found: error

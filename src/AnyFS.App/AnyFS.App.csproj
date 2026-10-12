@@ -1,0 +1,57 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>anyfs</AssemblyName>
+    <RootNamespace>AnyFS.App</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <RollForward>LatestMinor</RollForward>
+    <!-- plugin POCOs are deserialised by reflection; keep that path alive under trimming (spec 6.7, 14.1) -->
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+    <!-- the publish shape (spec 14): self-contained single file, trimmed; scripts/publish.ps1 passes the RID -->
+    <PublishSingleFile Condition="'$(RuntimeIdentifier)' != ''">true</PublishSingleFile>
+    <SelfContained Condition="'$(RuntimeIdentifier)' != ''">true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <PublishTrimmed Condition="'$(RuntimeIdentifier)' != '' and '$(NoTrim)' != 'true'">true</PublishTrimmed>
+    <TrimMode>full</TrimMode>
+    <TrimmerSingleWarn>false</TrimmerSingleWarn>
+    <!-- Our own trim problems are caught at build time (every library is IsTrimmable, warnings are errors).
+         At publish, rooting System.Private.CoreLib and keeping reflection-based JSON alive for plugin
+         POCOs makes ILLink report two framework-internal IL2026s (C++/CLI loader, ASP.NET's JsonOptions
+         default resolver) and the ClassInterface/ProgId IL2045s that spike 7 saw; they are expected. -->
+    <NoWarn>$(NoWarn);IL2026;IL2045</NoWarn>
+    <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
+    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+  </PropertyGroup>
+
+  <!-- The guaranteed set (spec 14.1): kept whole so third-party plugins can rely on it. Spike 7 showed that
+       without System.Runtime no plugin DLL loads at all. Changing this list needs a clean obj/ (incremental ILLink). -->
+  <ItemGroup Condition="'$(PublishTrimmed)' == 'true'">
+    <TrimmerRootAssembly Include="AnyFS.Sdk" />
+    <TrimmerRootAssembly Include="System.Private.CoreLib" />
+    <TrimmerRootAssembly Include="System.Runtime" />
+    <TrimmerRootAssembly Include="System.Collections" />
+    <TrimmerRootAssembly Include="System.Collections.Concurrent" />
+    <TrimmerRootAssembly Include="System.Linq" />
+    <TrimmerRootAssembly Include="System.Memory" />
+    <TrimmerRootAssembly Include="System.Threading" />
+    <TrimmerRootAssembly Include="System.Threading.Tasks" />
+    <TrimmerRootAssembly Include="System.IO.Compression" />
+    <TrimmerRootAssembly Include="System.IO.Pipelines" />
+    <TrimmerRootAssembly Include="System.Net.Http" />
+    <TrimmerRootAssembly Include="System.Net.Primitives" />
+    <TrimmerRootAssembly Include="System.Text.Json" />
+    <TrimmerRootAssembly Include="System.Text.RegularExpressions" />
+    <TrimmerRootAssembly Include="System.Security.Cryptography" />
+    <TrimmerRootAssembly Include="System.Diagnostics.Process" />
+    <TrimmerRootAssembly Include="System.ComponentModel.Primitives" />
+    <TrimmerRootAssembly Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <ProjectReference Include="..\AnyFS.Core\AnyFS.Core.csproj" />
+    <ProjectReference Include="..\Sources\Mirror\AnyFS.Sources.Mirror.csproj" />
+    <ProjectReference Include="..\Mounts\Http\AnyFS.Mounts.Http.csproj" />
+    <PackageReference Include="System.CommandLine" />
+  </ItemGroup>
+</Project>

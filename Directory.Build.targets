@@ -1,0 +1,12 @@
+<Project>
+  <!-- evaluated after each project file, so IsTestProject is known here -->
+  <PropertyGroup Condition="'$(IsTestProject)' == 'true'">
+    <IsTrimmable>false</IsTrimmable>
+    <!-- test doubles implement the plugin interfaces without the trim annotations; tests are never trimmed -->
+    <NoWarn>$(NoWarn);IL2093</NoWarn>
+  </PropertyGroup>
+  <!-- every library is trimmable; the app turns trimming on at publish (spec 14.1) -->
+  <PropertyGroup Condition="'$(IsTestProject)' != 'true' and '$(IsTrimmable)' == ''">
+    <IsTrimmable>true</IsTrimmable>
+  </PropertyGroup>
+</Project>

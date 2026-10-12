@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Core</AssemblyName>
+    <RootNamespace>AnyFS.Core</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection" />
+    <PackageReference Include="Microsoft.AspNetCore.DataProtection.Extensions" />
+    <PackageReference Include="ZLogger" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Core.Tests" />
+  </ItemGroup>
+</Project>

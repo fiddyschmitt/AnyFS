@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sdk</AssemblyName>
+    <RootNamespace>AnyFS.Sdk</RootNamespace>
+    <IsPackable>true</IsPackable>
+    <PackageId>AnyFS.Sdk</PackageId>
+    <Description>Plugin SDK for AnyFS: write a source (anything presented as files) or a mount provider.</Description>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+</Project>

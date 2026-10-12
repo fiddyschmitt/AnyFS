@@ -1,0 +1,114 @@
+# Writing a plugin
+
+A plugin is a .NET class library that references `AnyFS.Sdk` and contains a class implementing
+`ISourcePlugin` (a kind of source) or `IMountProviderPlugin` (a kind of mount). Drop the DLL
+into the `plugins` folder beside `settings` and AnyFS loads it at start. Nothing in the SDK
+references a UI framework.
+
+## A source in 60 lines
+
+[tests/fixtures/SamplePlugin](../tests/fixtures/SamplePlugin) is the complete example. The
+shape:
+
+```csharp
+public sealed class SampleSettings
+{
+    [Setting("Greeting", Hint = "Shown in hello.txt", Required = true)]
+    public string Greeting { get; set; } = "Hello from the sample plugin";
+
+    [Setting("API token", Secret = true)]
+    public string? Token { get; set; }
+}
+
+public sealed class SamplePlugin : ISourcePlugin
+{
+    public string TypeId => "sample";          // stable; stored in sources.json
+    public string DisplayName => "Sample";
+    public string Description => "A tiny read-only source.";
+    public string TypeFolder => "sample";      // first segment of the default source path
+    public Stream? OpenIcon() => null;
+
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
+    public Type SettingsType => typeof(SampleSettings);
+    public object CreateDefaultSettings() => new SampleSettings();
+    public ISource CreateSource(object settings) => new SampleSource((SampleSettings)settings);
+}
+
+public sealed class SampleSource(SampleSettings settings) : SourceBase
+{
+    protected override Task OnInitialiseAsync(CancellationToken ct) { ...; return Task.CompletedTask; }
+    public override IAsyncEnumerable<VfsEntry> ListAsync(string path, CancellationToken ct) { ... }
+    public override Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct) { ... }
+}
+```
+
+`SourceBase` gives you `StatAsync` (from a listing of the parent), refuses writes unless your
+`Capabilities` say `CanWrite`, and holds the `ISourceContext` (`Context`, `Logger`).
+
+## The contract
+
+- Paths are relative to your root, `/`-separated, no leading slash; the root is `""`. The host
+  normalises them and rejects `..` before they reach you.
+- `ListAsync` throws `VfsException` with `NotFound` or `NotADirectory`; `StatAsync` returns null
+  for a missing path; `OpenAsync` returns an `IVfsFile` whose `ReadAsync(offset, buffer)` is the
+  primitive (that's what every mount asks for; `VfsFileStream` wraps it when you need a `Stream`).
+- Throw `VfsException` for anything the client should see (`VfsException.FromIo` maps the usual
+  `System.IO` exceptions). Throw `SourceFailedException(message, permanent: true)` from
+  `InitialiseAsync` when the settings are wrong; any other failure is retried with backoff.
+- Report progress during a slow start with `Context.ReportProgress("Logging in", 0.3)`; ask
+  the user for a PIN or code with `Context.PromptAsync(...)` (headless without a terminal, the
+  source fails with "Needs input" until it's retried from the UI); report later trouble with
+  `Context.ReportHealth(ComponentHealth.Degraded, "root X unreachable")` and recovery with
+  `ComponentHealth.Ready`.
+- Everything may be called concurrently from many threads.
+- Read-only is not your setting: say what you *can* do in `Capabilities`; the user decides per
+  collection and per mount whether writes are allowed.
+
+## Settings
+
+A plain POCO with public get/set properties. `[Setting]` gives the label and, optionally,
+`Hint`, `Placeholder`, `Required`, `Kind` (text, multiline, password, number, bool, choice, file
+and folder pickers), `Group`, `Advanced`, `Order` and `Choices`. The host builds the form, the
+JSON (camelCase names in `sources.json`) and the secret handling: a `Secret` property is never
+written to the settings files; it's kept in the protected secret store and filled back into your
+POCO. Implement `IValidatable` to check settings before they're saved and `ITestable` to back a
+Test button.
+
+## Caching helpers
+
+Caching is the source's business; the SDK makes the common strategies one-liners:
+
+- `ListingCache`: memoises listings for a TTL, shares one upstream call between concurrent
+  misses, invalidate on writes.
+- `SpoolCache`: for upstreams that only stream sequentially. The first open starts the download
+  into `Context.CacheDirectory`; any sub-range is served as soon as the file has reached it;
+  concurrent readers share one download; eviction by size and age.
+- `RandomAccessOverStream`: for upstreams that support ranged requests but hand back streams
+  (SFTP, HTTP Range): keeps a few streams positioned where recent reads ended.
+
+## Testing
+
+Reference `AnyFS.Sdk.Testing` and derive a test class from `SourceContractTests`: point it at an
+initialised instance of your source and it checks list/stat/read/range/write semantics.
+`TestSourceContext` and `TestMountContext` stand in for the host; `MemorySource` is an in-memory
+source for testing a mount provider.
+
+## What a plugin may use from the framework
+
+The host is a trimmed single file. Besides the whole of `AnyFS.Sdk`, these framework assemblies
+are kept intact and may be used freely:
+
+`System.Private.CoreLib`, `System.Runtime`, `System.Collections`, `System.Collections.Concurrent`,
+`System.Linq`, `System.Memory`, `System.Threading`, `System.Threading.Tasks`,
+`System.IO.Compression`, `System.IO.Pipelines`, `System.Net.Http`, `System.Net.Primitives`,
+`System.Text.Json`, `System.Text.RegularExpressions`, `System.Security.Cryptography`,
+`System.Diagnostics.Process`, `System.ComponentModel.Primitives`,
+`Microsoft.Extensions.Logging.Abstractions`.
+
+Anything else (other framework assemblies, your NuGet packages) ships beside your DLL: the host
+loads each plugin in its own `AssemblyLoadContext` with `AnyFS.Sdk` resolved to the host's copy,
+and resolves the rest from your `.deps.json`. Set `<EnableDynamicLoading>true</EnableDynamicLoading>`
+in your project so the dependencies are copied next to it.
+
+The host refuses a plugin built against a newer SDK than its own; the version is
+`SdkInfo.SdkVersion`.

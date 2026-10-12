@@ -1,0 +1,26 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AnyFS.App/AnyFS.App.csproj" />
+    <Project Path="src/AnyFS.Core/AnyFS.Core.csproj" />
+    <Project Path="src/AnyFS.Sdk.Testing/AnyFS.Sdk.Testing.csproj" />
+    <Project Path="src/AnyFS.Sdk/AnyFS.Sdk.csproj" />
+  </Folder>
+  <Folder Name="/src/Mounts/" />
+  <Folder Name="/src/Mounts/Http/">
+    <Project Path="src/Mounts/Http/AnyFS.Mounts.Http.csproj" />
+  </Folder>
+  <Folder Name="/src/Sources/" />
+  <Folder Name="/src/Sources/Mirror/">
+    <Project Path="src/Sources/Mirror/AnyFS.Sources.Mirror.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AnyFS.Core.Tests/AnyFS.Core.Tests.csproj" />
+    <Project Path="tests/AnyFS.Mounts.Tests/AnyFS.Mounts.Tests.csproj" />
+    <Project Path="tests/AnyFS.Sdk.Tests/AnyFS.Sdk.Tests.csproj" />
+    <Project Path="tests/AnyFS.Sources.Tests/AnyFS.Sources.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/fixtures/">
+    <Project Path="tests/fixtures/MakeTree/MakeTree.csproj" />
+    <Project Path="tests/fixtures/SamplePlugin/SamplePlugin.csproj" />
+  </Folder>
+</Solution>

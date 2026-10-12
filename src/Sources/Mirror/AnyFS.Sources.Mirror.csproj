@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sources.Mirror</AssemblyName>
+    <RootNamespace>AnyFS.Sources.Mirror</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
+  </ItemGroup>
+</Project>

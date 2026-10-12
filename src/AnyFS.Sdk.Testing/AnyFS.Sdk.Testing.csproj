@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sdk.Testing</AssemblyName>
+    <RootNamespace>AnyFS.Sdk.Testing</RootNamespace>
+    <IsPackable>true</IsPackable>
+    <PackageId>AnyFS.Sdk.Testing</PackageId>
+    <Description>Contract tests and fakes for AnyFS plugin authors: point SourceContractTests at your ISource.</Description>
+    <IsTrimmable>false</IsTrimmable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <PackageReference Include="MSTest.TestFramework" />
+  </ItemGroup>
+</Project>
