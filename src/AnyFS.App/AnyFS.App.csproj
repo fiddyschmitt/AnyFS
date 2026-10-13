@@ -58,11 +58,27 @@
     <TrimmerRootAssembly Include="Microsoft.Extensions.Logging.Abstractions" />
   </ItemGroup>
 
+  <!-- Mount-provider libraries kept whole (spec 14.1): winfsp.net because the prefix-only mount reaches its internals
+       by reflection; FubarDev.FtpServer because its command handlers are found by assembly scanning (Scrutor). -->
+  <ItemGroup Condition="'$(PublishTrimmed)' == 'true'">
+    <TrimmerRootAssembly Include="winfsp-msil" />
+    <TrimmerRootAssembly Include="FubarDev.FtpServer" />
+    <TrimmerRootAssembly Include="FubarDev.FtpServer.Abstractions" />
+    <TrimmerRootAssembly Include="FubarDev.FtpServer.Commands" />
+    <TrimmerRootAssembly Include="Scrutor" />
+    <TrimmerRootAssembly Include="NGettext" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
     <ProjectReference Include="..\AnyFS.Core\AnyFS.Core.csproj" />
     <ProjectReference Include="..\Sources\Mirror\AnyFS.Sources.Mirror.csproj" />
     <ProjectReference Include="..\Mounts\Http\AnyFS.Mounts.Http.csproj" />
+    <ProjectReference Include="..\Mounts\WebDav\AnyFS.Mounts.WebDav.csproj" />
+    <ProjectReference Include="..\Mounts\Ftp\AnyFS.Mounts.Ftp.csproj" />
+    <ProjectReference Include="..\Mounts\Smb\AnyFS.Mounts.Smb.csproj" />
+    <ProjectReference Include="..\Mounts\WinFsp\AnyFS.Mounts.WinFsp.csproj" />
+    <ProjectReference Include="..\Mounts\Fuse\AnyFS.Mounts.Fuse.csproj" />
     <PackageReference Include="System.CommandLine" />
     <PackageReference Include="Avalonia" />
     <PackageReference Include="Avalonia.Desktop" />

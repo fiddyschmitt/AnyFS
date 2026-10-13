@@ -6,8 +6,23 @@
     <Project Path="src/AnyFS.Sdk/AnyFS.Sdk.csproj" />
   </Folder>
   <Folder Name="/src/Mounts/" />
+  <Folder Name="/src/Mounts/Ftp/">
+    <Project Path="src/Mounts/Ftp/AnyFS.Mounts.Ftp.csproj" />
+  </Folder>
+  <Folder Name="/src/Mounts/Fuse/">
+    <Project Path="src/Mounts/Fuse/AnyFS.Mounts.Fuse.csproj" />
+  </Folder>
   <Folder Name="/src/Mounts/Http/">
     <Project Path="src/Mounts/Http/AnyFS.Mounts.Http.csproj" />
+  </Folder>
+  <Folder Name="/src/Mounts/Smb/">
+    <Project Path="src/Mounts/Smb/AnyFS.Mounts.Smb.csproj" />
+  </Folder>
+  <Folder Name="/src/Mounts/WebDav/">
+    <Project Path="src/Mounts/WebDav/AnyFS.Mounts.WebDav.csproj" />
+  </Folder>
+  <Folder Name="/src/Mounts/WinFsp/">
+    <Project Path="src/Mounts/WinFsp/AnyFS.Mounts.WinFsp.csproj" />
   </Folder>
   <Folder Name="/src/Sources/" />
   <Folder Name="/src/Sources/Mirror/">

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Mounts.Fuse</AssemblyName>
+    <RootNamespace>AnyFS.Mounts.Fuse</RootNamespace>
+    <!-- Read/Write work on native-memory views handed over by libfuse -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- LTRData.FuseDotNet 1.0.0.14 (MIT) over libfuse3; Linux only (spec 8.3). The assembly builds on every OS;
+         the provider reports itself unavailable elsewhere. -->
+    <PackageReference Include="LTRData.FuseDotNet" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Mounts.Tests" />
+  </ItemGroup>
+</Project>

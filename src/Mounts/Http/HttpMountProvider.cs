@@ -49,51 +49,13 @@ public sealed class HttpMountProvider : IMountProviderPlugin, IValidatable
     public IEnumerable<ValidationMessage> Validate(object settings)
     {
         var s = (HttpMountSettings)settings;
-        if (!TryParseBindAddress(s.BindAddress, out _))
-        {
-            yield return new ValidationMessage("Use an IP address such as 127.0.0.1, 0.0.0.0 or ::, or 'localhost'.", nameof(HttpMountSettings.BindAddress));
-        }
-
-        if (s.Port is < 1 or > 65535)
-        {
-            yield return new ValidationMessage("The port must be between 1 and 65535.", nameof(HttpMountSettings.Port));
-        }
-        else if (s.Port < 1024)
-        {
-            yield return new ValidationMessage("Ports under 1024 need administrator rights on every OS.", nameof(HttpMountSettings.Port), IsError: false);
-        }
+        return BindAddress.Validate(s.BindAddress, s.Port, nameof(HttpMountSettings.BindAddress), nameof(HttpMountSettings.Port));
     }
 
-    public static bool TryParseBindAddress(string? text, out IPAddress address)
-    {
-        switch (text?.Trim().ToLowerInvariant())
-        {
-            case null or "" or "localhost" or "loopback":
-                address = IPAddress.Loopback;
-                return true;
-            case "*" or "any" or "all":
-                address = IPAddress.Any;
-                return true;
-            default:
-                return IPAddress.TryParse(text.Trim(), out address!);
-        }
-    }
+    public static bool TryParseBindAddress(string? text, out IPAddress address) => BindAddress.TryParse(text, out address);
 
     /// <summary>The host name to show in access paths for a bind address.</summary>
-    public static string HostFor(IPAddress address)
-    {
-        if (IPAddress.IsLoopback(address))
-        {
-            return "localhost";
-        }
-
-        if (address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any))
-        {
-            return Environment.MachineName.ToLowerInvariant();
-        }
-
-        return address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? $"[{address}]" : address.ToString();
-    }
+    public static string HostFor(IPAddress address) => BindAddress.HostFor(address);
 }
 
 internal sealed class HttpMount(HttpMountSettings settings, ICollectionInfo collection) : IMount

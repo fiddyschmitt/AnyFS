@@ -51,6 +51,28 @@ public interface IMountProviderPlugin
     IMount CreateMount(object settings, ICollectionInfo collection);
 }
 
+/// <summary>What <see cref="IInstallableProvider.InstallAsync"/> achieved.</summary>
+public sealed record InstallResult(bool Success, string Message);
+
+/// <summary>
+/// A mount provider that can install what it is missing (WinFsp through winget). The window shows a button
+/// with <see cref="InstallText"/> wherever <see cref="IMountProviderPlugin.UnavailableReason"/> is shown; after
+/// a successful install the provider is asked again whether it is available.
+/// </summary>
+public interface IInstallableProvider
+{
+    /// <summary>"Install WinFsp".</summary>
+    string InstallText { get; }
+
+    /// <summary>What the button will do, for the tooltip: "Runs: winget install WinFsp.WinFsp (administrator prompt)".</summary>
+    string InstallDetail { get; }
+
+    /// <summary>False when the installer itself isn't available here (no winget).</summary>
+    bool CanInstall { get; }
+
+    Task<InstallResult> InstallAsync(IProgress<string> progress, CancellationToken ct);
+}
+
 /// <summary>Where a mount can be reached, as shown (and copied) from its tile.</summary>
 /// <param name="Label">"URL", "UNC path", "Mount point"...</param>
 public sealed record AccessPath(string Label, string Value);
@@ -64,8 +86,11 @@ public abstract record MountOpenAction
     /// <summary>Open a URL in the default browser (or file manager, for ftp:// and dav://).</summary>
     public sealed record Browser(string Url) : MountOpenAction;
 
-    /// <summary>Run a command first (a device-less net use), then open <see cref="ThenOpen"/>.</summary>
-    public sealed record Command(string FileName, IReadOnlyList<string> Arguments, string? ThenOpen) : MountOpenAction;
+    /// <summary>
+    /// Run a command first (a device-less net use), then open <see cref="ThenOpen"/>. <paramref name="Elevated"/>
+    /// asks for administrator rights (an elevation prompt on Windows) because the command needs them (starting a service).
+    /// </summary>
+    public sealed record Command(string FileName, IReadOnlyList<string> Arguments, string? ThenOpen, bool Elevated = false) : MountOpenAction;
 
     /// <summary>Show text with a copy button (a mount command the user must run as root).</summary>
     public sealed record ShowText(string Title, string Text) : MountOpenAction;

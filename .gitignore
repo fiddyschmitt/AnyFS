@@ -492,3 +492,5 @@ cache/
 anyfs.log
 anyfs.*.log
 /scratch/
+# the Go server binaries scripts/fetch-go-servers.ps1 downloads (embedded per RID at publish)
+/tools/go-servers/

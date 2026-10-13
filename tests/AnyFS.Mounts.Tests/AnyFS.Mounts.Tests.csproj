@@ -16,5 +16,10 @@
     <ProjectReference Include="..\..\src\AnyFS.Sdk\AnyFS.Sdk.csproj" />
     <ProjectReference Include="..\..\src\AnyFS.Sdk.Testing\AnyFS.Sdk.Testing.csproj" />
     <ProjectReference Include="..\..\src\Mounts\Http\AnyFS.Mounts.Http.csproj" />
+    <ProjectReference Include="..\..\src\Mounts\WebDav\AnyFS.Mounts.WebDav.csproj" />
+    <ProjectReference Include="..\..\src\Mounts\Ftp\AnyFS.Mounts.Ftp.csproj" />
+    <ProjectReference Include="..\..\src\Mounts\Smb\AnyFS.Mounts.Smb.csproj" />
+    <ProjectReference Include="..\..\src\Mounts\WinFsp\AnyFS.Mounts.WinFsp.csproj" />
+    <ProjectReference Include="..\..\src\Mounts\Fuse\AnyFS.Mounts.Fuse.csproj" />
   </ItemGroup>
 </Project>

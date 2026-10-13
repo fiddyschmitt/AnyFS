@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Mounts.WinFsp</AssemblyName>
+    <RootNamespace>AnyFS.Mounts.WinFsp</RootNamespace>
+    <!-- Read/Write receive raw buffers from the WinFsp dispatcher -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 2.1.25156 is the current stable WinFsp .NET layer (2.2 is a beta); the driver is installed separately (spec 8.1).
+         The App roots this assembly whole at publish: the prefix-only mount reaches its internals by reflection. -->
+    <PackageReference Include="winfsp.net" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Mounts.Tests" />
+  </ItemGroup>
+</Project>

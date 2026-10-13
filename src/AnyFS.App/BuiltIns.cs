@@ -1,5 +1,7 @@
 using AnyFS.Core.Plugins;
+using AnyFS.Mounts.Ftp;
 using AnyFS.Mounts.Http;
+using AnyFS.Mounts.WebDav;
 using AnyFS.Sources.Mirror;
 
 namespace AnyFS.App;
@@ -12,6 +14,8 @@ public static class BuiltIns
         var registry = new PluginRegistry();
         registry.AddBuiltIn(new MirrorPlugin());
         registry.AddBuiltIn(new HttpMountProvider());
+        registry.AddBuiltIn(new WebDavMountProvider());
+        registry.AddBuiltIn(new FtpMountProvider());
         return registry;
     }
 }

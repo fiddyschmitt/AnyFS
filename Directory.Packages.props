@@ -2,11 +2,18 @@
   <ItemGroup>
     <!-- runtime -->
     <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.12" />
+    <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
     <PackageVersion Include="Microsoft.AspNetCore.DataProtection" Version="10.0.12" />
     <PackageVersion Include="Microsoft.AspNetCore.DataProtection.Extensions" Version="10.0.12" />
     <PackageVersion Include="ZLogger" Version="2.5.10" />
     <PackageVersion Include="System.CommandLine" Version="2.0.12" />
+    <!-- mount providers (spec 8, 15) -->
+    <PackageVersion Include="winfsp.net" Version="2.1.25156" />
+    <PackageVersion Include="LTRData.FuseDotNet" Version="1.0.0.14" />
+    <PackageVersion Include="FubarDev.FtpServer" Version="3.1.2" />
+    <!-- FubarDev.FtpServer 3.1.2 pulls Newtonsoft.Json 9.0.1 (GHSA-5crp-9r3c-p9vr); a direct reference lifts it -->
+    <PackageVersion Include="Newtonsoft.Json" Version="13.0.3" />
     <!-- the window (spec 11) -->
     <PackageVersion Include="Avalonia" Version="12.1.4" />
     <PackageVersion Include="Avalonia.Desktop" Version="12.1.4" />

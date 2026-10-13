@@ -24,7 +24,11 @@ public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? show
                     Launch(AppendUrl(browser.Url, subPath));
                     break;
                 case MountOpenAction.Command command:
-                    RunCommand(command.FileName, command.Arguments);
+                    if (!RunCommand(command.FileName, command.Arguments, command.Elevated))
+                    {
+                        logger.LogWarning("the command before opening {Target} did not succeed: {Command}", command.ThenOpen, command.FileName);
+                    }
+
                     if (command.ThenOpen is { } then)
                     {
                         Launch(AppendPath(then, subPath));
@@ -83,15 +87,27 @@ public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? show
         }
     }
 
-    private static void RunCommand(string fileName, IReadOnlyList<string> arguments)
+    /// <summary>Runs the command and waits for it (up to 15 s); elevated commands go through the shell's "run as administrator" on Windows (a UAC prompt).</summary>
+    private static bool RunCommand(string fileName, IReadOnlyList<string> arguments, bool elevated)
     {
-        var info = new ProcessStartInfo(fileName) { UseShellExecute = false, CreateNoWindow = true };
+        var info = new ProcessStartInfo(fileName) { UseShellExecute = elevated && OperatingSystem.IsWindows(), CreateNoWindow = true };
+        if (info.UseShellExecute)
+        {
+            info.Verb = "runas";
+            info.WindowStyle = ProcessWindowStyle.Hidden;
+        }
+
         foreach (var argument in arguments)
         {
             info.ArgumentList.Add(argument);
         }
 
         using var process = Process.Start(info);
-        process?.WaitForExit(15_000);
+        if (process is null)
+        {
+            return false;
+        }
+
+        return process.WaitForExit(15_000) && process.ExitCode == 0;
     }
 }

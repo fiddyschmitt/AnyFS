@@ -849,6 +849,28 @@ public sealed class AnyFsEngine : IAsyncDisposable
         }
     }
 
+    /// <summary>Stops and starts a mount again now (after a failure, or after its provider was installed).</summary>
+    public async Task RetryMountAsync(Guid collectionId, Guid mountId)
+    {
+        await _mutations.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            ThrowIfStopped();
+            if (FindCollectionRunner(collectionId) is { } runner && runner.Mounts.FirstOrDefault(m => m.Definition.Id == mountId) is { } old && old.Definition.Enabled)
+            {
+                await old.StopAsync().ConfigureAwait(false);
+                var replacement = CreateMountRunner(old.Definition, runner);
+                runner.ReplaceMount(old, replacement);
+                await runner.StartMountAsync(replacement, _shutdown.Token).ConfigureAwait(false);
+                OnChanged();
+            }
+        }
+        finally
+        {
+            _mutations.Release();
+        }
+    }
+
     public async Task SetMountEnabledAsync(Guid collectionId, Guid mountId, bool enabled)
     {
         await _mutations.WaitAsync().ConfigureAwait(false);
