@@ -326,7 +326,11 @@ public sealed partial class MountTileViewModel : TileViewModel
     public string IconKey => "mount:" + ProviderId;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowProvider))]
     public partial string ProviderName { get; set; } = "";
+
+    /// <summary>The provider is worth a line only when the mount isn't simply named after it ("HTTP" under "HTTP" says nothing).</summary>
+    public bool ShowProvider => !Name.Equals(ProviderName, StringComparison.OrdinalIgnoreCase);
 
     [ObservableProperty]
     public partial string Initial { get; set; } = "?";
@@ -365,6 +369,7 @@ public sealed partial class MountTileViewModel : TileViewModel
             Name = status.Name;
             ProviderId = status.Provider;
             ProviderName = providerName;
+            OnPropertyChanged(nameof(ShowProvider)); // Name lives on the base class, so a rename alone wouldn't notify it
             Initial = providerName.Length > 0 ? providerName[..1].ToUpperInvariant() : "?";
             Enabled = status.Enabled;
             ReadOnly = status.ReadOnly;

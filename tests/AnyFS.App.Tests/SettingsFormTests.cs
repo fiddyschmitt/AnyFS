@@ -194,21 +194,24 @@ public class SettingsFormTests
     }
 
     [TestMethod]
-    public void APluginCanWordHintsAndPlaceholdersForThisMachine()
+    public void APluginCanWordPlaceholdersAndHintsForThisMachine()
     {
         var plugin = new MirrorPlugin();
         var form = new SettingsFormViewModel(plugin.SettingsType, plugin.CreateDefaultSettings(), plugin, null, plugin, new FakeDialogs());
         var paths = form.Fields.Single(f => f.PropertyName == nameof(MirrorSettings.Paths));
-        Assert.AreEqual(MirrorPlugin.PathsHint(OperatingSystem.IsWindows(), OperatingSystem.IsMacOS()), paths.Hint);
-        Assert.AreEqual(OperatingSystem.IsWindows() ? @"C:\" : "/", paths.Placeholder, "a local drive for this OS");
-        StringAssert.Contains(paths.Hint!, "aus-files-01", "and a typical network path");
+        Assert.AreEqual("One per line", paths.Hint, "the hint is the attribute's (the provider returns null for it)");
+        Assert.AreEqual(MirrorPlugin.PathsPlaceholder(OperatingSystem.IsWindows(), OperatingSystem.IsMacOS()), paths.Placeholder);
+        var lines = paths.Placeholder.Split('\n');
+        Assert.AreEqual(2, lines.Length, "a local drive, then a typical network path");
+        Assert.AreEqual(OperatingSystem.IsWindows() ? @"C:\" : "/", lines[0]);
+        StringAssert.Contains(lines[1], "aus-files-01");
         Assert.AreEqual("How often unreachable paths are retried and reachable ones re-checked.", form.Fields.Single(f => f.PropertyName == nameof(MirrorSettings.CheckIntervalSeconds)).Hint, "other fields keep the attribute's text");
 
-        Assert.AreEqual(@"One per line, e.g. C:\ or \\aus-files-01\files. Each appears under its own folder chain (c, aus-files-01\files).", MirrorPlugin.PathsHint(windows: true, macOs: false));
-        StringAssert.Contains(MirrorPlugin.PathsHint(windows: false, macOs: false), "/mnt/aus-files-01");
-        StringAssert.Contains(MirrorPlugin.PathsHint(windows: false, macOs: true), "/Volumes/aus-files-01");
+        Assert.AreEqual("C:\\\n\\\\aus-files-01\\shared", MirrorPlugin.PathsPlaceholder(windows: true, macOs: false));
+        Assert.AreEqual("/\n/mnt/aus-files-01", MirrorPlugin.PathsPlaceholder(windows: false, macOs: false));
+        Assert.AreEqual("/\n/Volumes/aus-files-01", MirrorPlugin.PathsPlaceholder(windows: false, macOs: true));
 
         var without = new SettingsFormViewModel(plugin.SettingsType, plugin.CreateDefaultSettings(), plugin, null, null, new FakeDialogs());
-        Assert.AreEqual("One per line: a local drive or folder, or a network share.", without.Fields.Single(f => f.PropertyName == nameof(MirrorSettings.Paths)).Hint, "without the provider the attribute's text stands");
+        Assert.AreEqual("", without.Fields.Single(f => f.PropertyName == nameof(MirrorSettings.Paths)).Placeholder, "without the provider the attribute's (empty) placeholder stands");
     }
 }

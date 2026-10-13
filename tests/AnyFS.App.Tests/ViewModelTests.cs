@@ -300,6 +300,7 @@ public class ViewModelTests
         var source = await AddSourceAsync("alpha", "a.txt=A", path: "mem");
         var mount = await AddMountAsync(5);
         Assert.AreEqual("Fake", mount.ProviderName);
+        Assert.IsFalse(mount.ShowProvider, "named after its provider: no provider line");
         Assert.AreEqual(StatusColour.Green, mount.Colour);
         Assert.AreEqual("fake://5/work/", mount.AccessPaths.Single().Value);
         Assert.AreEqual("URL", mount.AccessPaths.Single().Label);

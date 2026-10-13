@@ -90,7 +90,8 @@
               <TextBlock Text="Read-only" />
             </Border>
           </StackPanel>
-          <TextBlock Classes="muted" Text="{Binding ProviderName}" />
+          <!-- the provider only when the mount isn't simply named after it -->
+          <TextBlock Classes="muted" Text="{Binding ProviderName}" IsVisible="{Binding ShowProvider}" />
         </StackPanel>
         <CheckBox Grid.Column="2" IsChecked="{Binding Enabled}" Content="Enabled" MinHeight="0" Padding="6,0,0,0" VerticalAlignment="Top" />
         <!-- the status line of a running mount is its access path (URL, UNC path), so the Copy button sits beside it -->

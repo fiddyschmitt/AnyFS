@@ -11,10 +11,13 @@
   appears in this collection."; "Count files on start" sits under "Enabled" and defaults on for
   source types that are quick to count (`ISourcePlugin.IsQuickToCount`, true for Mirror) unless
   `app.json`'s `countFilesOnStart` forces it (now `null` by default).
-- Mirror: the paths field shows a local drive and a typical network path for this OS (`C:\` and
-  `\\aus-files-01\files` on Windows, `/` and `/mnt/aus-files-01` on Linux, `/` and
-  `/Volumes/aus-files-01` on macOS); the placeholder is the local drive. "Count files on start"
-  walks every configured path at the same time, each on its own thread.
+- Mirror: the Paths box's ghost text is a local drive and a typical network path for this OS, one
+  per line (`C:\` and `\\aus-files-01\shared` on Windows, `/` and `/mnt/aus-files-01` on Linux,
+  `/` and `/Volumes/aus-files-01` on macOS); the hint is just "One per line". "Count files on
+  start" walks every configured path at the same time, each on its own thread.
+- Source dialog: Read-only, Enabled and Count files on start are evenly spaced.
+- Mount tiles no longer repeat the provider's name under a mount named after it (the line stays
+  for a mount with a name of its own).
 - SDK: `ICountable` (a source counts its own tree when "Count files on start" is on),
   `ISourcePlugin.IsQuickToCount` (optional, default false) and `ISettingTextProvider` (per-machine
   hints and placeholders).

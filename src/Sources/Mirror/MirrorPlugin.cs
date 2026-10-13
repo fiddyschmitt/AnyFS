@@ -5,9 +5,8 @@ namespace AnyFS.Sources.Mirror;
 
 public sealed class MirrorSettings
 {
-    // the hint and placeholder are per OS: MirrorPlugin.HintFor / PlaceholderFor
-    [Setting("Paths", Kind = SettingKind.Multiline, Required = true, Order = 0,
-        Hint = "One per line: a local drive or folder, or a network share.")]
+    // the placeholder (a local drive and a typical network path) is per OS: MirrorPlugin.PlaceholderFor
+    [Setting("Paths", Kind = SettingKind.Multiline, Required = true, Order = 0, Hint = "One per line")]
     public string Paths { get; set; } = "";
 
     [Setting("Check paths every (seconds)", Advanced = true, Order = 10, Hint = "How often unreachable paths are retried and reachable ones re-checked.")]
@@ -40,18 +39,16 @@ public sealed class MirrorPlugin : ISourcePlugin, IValidatable, ISettingTextProv
 
     public ISource CreateSource(object settings) => new MirrorSource((MirrorSettings)settings);
 
-    /// <summary>A local drive and a typical network path for this OS.</summary>
-    public string? HintFor(string propertyName) => propertyName != nameof(MirrorSettings.Paths) ? null : PathsHint(OperatingSystem.IsWindows(), OperatingSystem.IsMacOS());
+    public string? HintFor(string propertyName) => null;
 
-    public string? PlaceholderFor(string propertyName) => propertyName != nameof(MirrorSettings.Paths) ? null : PathsPlaceholder(OperatingSystem.IsWindows());
+    /// <summary>The ghost text of the Paths box: a local drive and a typical network path for this OS, one per line.</summary>
+    public string? PlaceholderFor(string propertyName) => propertyName != nameof(MirrorSettings.Paths) ? null : PathsPlaceholder(OperatingSystem.IsWindows(), OperatingSystem.IsMacOS());
 
-    public static string PathsHint(bool windows, bool macOs) => windows
-        ? @"One per line, e.g. C:\ or \\aus-files-01\files. Each appears under its own folder chain (c, aus-files-01\files)."
+    public static string PathsPlaceholder(bool windows, bool macOs) => windows
+        ? "C:\\\n\\\\aus-files-01\\shared"
         : macOs
-            ? "One per line, e.g. / or /Volumes/aus-files-01 (connect to the server in Finder first). Each appears under its own folder chain."
-            : "One per line, e.g. / or /mnt/aus-files-01 (mount network shares with the OS first). Each appears under its own folder chain.";
-
-    public static string PathsPlaceholder(bool windows) => windows ? @"C:\" : "/";
+            ? "/\n/Volumes/aus-files-01"
+            : "/\n/mnt/aus-files-01";
 
     public IEnumerable<ValidationMessage> Validate(object settings)
     {
