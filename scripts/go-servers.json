@@ -1,0 +1,13 @@
+{
+  "portable-smb-server": {
+    "repo": "fiddyschmitt/portable-smb-server",
+    "version": "v0.3.0",
+    "assets": {
+      "win-x64": { "name": "portable-smb-server-win-x64.exe", "sha256": "" },
+      "linux-x64": { "name": "portable-smb-server-linux-x64", "sha256": "" },
+      "linux-arm64": { "name": "portable-smb-server-linux-arm64", "sha256": "" },
+      "osx-x64": { "name": "portable-smb-server-osx-x64", "sha256": "" },
+      "osx-arm64": { "name": "portable-smb-server-osx-arm64", "sha256": "" }
+    }
+  }
+}
