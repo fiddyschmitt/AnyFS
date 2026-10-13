@@ -19,6 +19,6 @@ only unless the bind address says otherwise). Read-only by nature.
   resume at 3 GB is a ranged read of the source.
 
 ```
-curl -O -C - http://localhost:11001/ben/files/aus-files-01/shared/big.iso
-wget -c http://localhost:11001/ben/files/aus-files-01/shared/big.iso
+curl -O -C - http://localhost:11001/work/files/aus-files-01/shared/big.iso
+wget -c http://localhost:11001/work/files/aus-files-01/shared/big.iso
 ```

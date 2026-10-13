@@ -93,11 +93,15 @@
           <TextBlock Classes="muted" Text="{Binding ProviderName}" />
         </StackPanel>
         <CheckBox Grid.Column="2" IsChecked="{Binding Enabled}" Content="Enabled" MinHeight="0" Padding="6,0,0,0" VerticalAlignment="Top" />
-        <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
+        <!-- the status line of a running mount is its access path (URL, UNC path), so the Copy button sits beside it -->
+        <DockPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
+          <Button DockPanel.Dock="Right" Classes="icon" Command="{Binding StatusAccessPath.CopyCommand, FallbackValue={x:Null}}" IsVisible="{Binding HasStatusAccessPath}" ToolTip.Tip="{Binding StatusCopyTooltip}" Margin="6,0,0,0" VerticalAlignment="Center">
+            <PathIcon Classes="small" Data="{StaticResource IconCopy}" />
+          </Button>
           <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" />
           <TextBlock Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-        </StackPanel>
-        <ItemsControl Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding AccessPaths}" Margin="0,6,0,0">
+        </DockPanel>
+        <ItemsControl Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding OtherAccessPaths}" Margin="0,6,0,0">
           <ItemsControl.ItemTemplate>
             <DataTemplate x:DataType="vm:AccessPathViewModel">
               <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,4">

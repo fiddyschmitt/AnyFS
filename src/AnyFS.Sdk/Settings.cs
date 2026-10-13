@@ -44,6 +44,17 @@ public sealed class SettingAttribute(string label) : Attribute
     public string[]? Choices { get; set; }
 }
 
+/// <summary>
+/// A plugin whose hints or placeholders depend on the machine (an example path for this OS). The host asks
+/// for each property after reading its <see cref="SettingAttribute"/>; return null to keep the attribute's text.
+/// </summary>
+public interface ISettingTextProvider
+{
+    string? HintFor(string propertyName);
+
+    string? PlaceholderFor(string propertyName);
+}
+
 public sealed record ValidationMessage(string Message, string? Property = null, bool IsError = true);
 
 /// <summary>A plugin that checks its settings before they're saved.</summary>

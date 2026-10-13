@@ -185,6 +185,62 @@ public class SourceRunnerTests
         await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready after counting");
     }
 
+    [TestMethod]
+    public async Task CountOnStartLetsACountableSourceCountItself()
+    {
+        var plugin = new SelfCountingPlugin();
+        await using var runner = Runner(new MemoryPluginSettings(), countOnStart: true, plugin: plugin);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Current?.Counters.State == EnumerationState.Complete, what: "count complete");
+        Assert.AreEqual((42L, true), runner.Handle.FileCount(), "the source's own numbers, nothing walked");
+        Assert.AreEqual(3, runner.Handle.Current!.Counters.DirectoriesKnown);
+        Assert.AreEqual(1, plugin.Counted, "CountFilesAsync was used instead of ListAsync");
+        await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready after counting");
+    }
+
+    private sealed class SelfCountingPlugin : ISourcePlugin
+    {
+        public int Counted;
+
+        public string TypeId => "selfcount";
+
+        public string DisplayName => "Self-counting";
+
+        public string Description => "";
+
+        public string TypeFolder => "selfcount";
+
+        public Stream? OpenIcon() => null;
+
+        public Type SettingsType => typeof(MemoryPluginSettings);
+
+        public object CreateDefaultSettings() => new MemoryPluginSettings();
+
+        public ISource CreateSource(object settings) => new SelfCountingSource(this);
+    }
+
+    /// <summary>Lists nothing (a walk would find 0 files) but reports 42 files and 3 folders through <see cref="ICountable"/>.</summary>
+    private sealed class SelfCountingSource(SelfCountingPlugin plugin) : SourceBase, ICountable
+    {
+        protected override Task OnInitialiseAsync(CancellationToken ct) => Task.CompletedTask;
+
+        public override async IAsyncEnumerable<VfsEntry> ListAsync(string path, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.CompletedTask;
+            yield break;
+        }
+
+        public override Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct) => throw VfsException.NotFound(path);
+
+        public async Task CountFilesAsync(CancellationToken ct)
+        {
+            Interlocked.Increment(ref plugin.Counted);
+            Counters.Add(40, 3);
+            await Task.Delay(20, ct);
+            Counters.Add(2, 0);
+        }
+    }
+
     private sealed class GatedPlugin(TaskCompletionSource gate) : ISourcePlugin
     {
         public string TypeId => "gated";

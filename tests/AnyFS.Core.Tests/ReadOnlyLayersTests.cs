@@ -52,7 +52,7 @@ public class ReadOnlyLayersTests
     {
         var source = new MemorySource(canWrite).AddFile("existing.txt", "e");
         var handle = await Handles.ReadyAsync("src", source);
-        var vfs = Handles.Vfs("ben", new CollectionMember(handle, "files", membershipReadOnly));
+        var vfs = Handles.Vfs("work", new CollectionMember(handle, "files", membershipReadOnly));
         return (new SourceHandleBundle(source), vfs.ForMount(mountReadOnly));
     }
 
@@ -78,7 +78,7 @@ public class ReadOnlyLayersTests
         {
             var (bundle, fs) = await SetupAsync(canWrite: true, membershipReadOnly: true, mountReadOnly: false);
             var ex = await Handles.ExpectAsync(VfsError.ReadOnly, () => RunAsync(fs, op));
-            StringAssert.Contains(ex.Message, "read-only in collection 'ben'", op);
+            StringAssert.Contains(ex.Message, "read-only in collection 'work'", op);
             Assert.IsFalse(fs.ReadOnly, "the mount itself is writable");
             Assert.IsFalse(fs.CanWrite("files/existing.txt"));
             Assert.IsTrue(bundle.Source.Exists("existing.txt"), op);

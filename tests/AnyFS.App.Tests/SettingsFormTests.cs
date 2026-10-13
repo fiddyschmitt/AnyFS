@@ -65,7 +65,7 @@ public class SettingsFormTests
     }
 
     private static SettingsFormViewModel Form(EverySetting settings)
-        => new(typeof(EverySetting), settings, settings, null, new FakeDialogs());
+        => new(typeof(EverySetting), settings, settings, null, null, new FakeDialogs());
 
     [TestMethod]
     public void FieldsFollowTheAttributesAndTheTypes()
@@ -152,7 +152,7 @@ public class SettingsFormTests
     {
         var dialogs = new FakeDialogs { FileToPick = @"D:\picked.key" };
         var settings = new EverySetting();
-        var form = new SettingsFormViewModel(typeof(EverySetting), settings, settings, null, dialogs);
+        var form = new SettingsFormViewModel(typeof(EverySetting), settings, settings, null, null, dialogs);
         var field = form.Fields.Single(f => f.PropertyName == "KeyFile");
         await field.BrowseCommand.ExecuteAsync(null);
         Assert.AreEqual(@"D:\picked.key", field.Text);
@@ -163,7 +163,7 @@ public class SettingsFormTests
     {
         var plugin = new MirrorPlugin();
         var settings = (MirrorSettings)plugin.CreateDefaultSettings();
-        var form = new SettingsFormViewModel(plugin.SettingsType, settings, plugin, null, new FakeDialogs());
+        var form = new SettingsFormViewModel(plugin.SettingsType, settings, plugin, null, plugin as ISettingTextProvider, new FakeDialogs());
         var paths = form.Fields.Single(f => f.PropertyName == nameof(MirrorSettings.Paths));
         Assert.AreEqual("Multiline", paths.TemplateKey);
         Assert.IsTrue(paths.IsRequired);
@@ -185,11 +185,30 @@ public class SettingsFormTests
     {
         var plugin = new MemoryPlugin();
         var settings = new MemoryPluginSettings { Files = "a.txt=A", Secret = "s" };
-        var form = new SettingsFormViewModel(plugin.SettingsType, settings, null, null, new FakeDialogs());
+        var form = new SettingsFormViewModel(plugin.SettingsType, settings, null, null, null, new FakeDialogs());
         Assert.AreEqual("Multiline", form.Fields.Single(f => f.PropertyName == "Files").TemplateKey);
         Assert.AreEqual("Password", form.Fields.Single(f => f.PropertyName == "Secret").TemplateKey);
         form.Fields.Single(f => f.PropertyName == "FailTimes").Text = "3";
         Assert.IsTrue(form.Validate());
         Assert.AreEqual(3, settings.FailTimes);
+    }
+
+    [TestMethod]
+    public void APluginCanWordHintsAndPlaceholdersForThisMachine()
+    {
+        var plugin = new MirrorPlugin();
+        var form = new SettingsFormViewModel(plugin.SettingsType, plugin.CreateDefaultSettings(), plugin, null, plugin, new FakeDialogs());
+        var paths = form.Fields.Single(f => f.PropertyName == nameof(MirrorSettings.Paths));
+        Assert.AreEqual(MirrorPlugin.PathsHint(OperatingSystem.IsWindows(), OperatingSystem.IsMacOS()), paths.Hint);
+        Assert.AreEqual(OperatingSystem.IsWindows() ? @"C:\" : "/", paths.Placeholder, "a local drive for this OS");
+        StringAssert.Contains(paths.Hint!, "aus-files-01", "and a typical network path");
+        Assert.AreEqual("How often unreachable paths are retried and reachable ones re-checked.", form.Fields.Single(f => f.PropertyName == nameof(MirrorSettings.CheckIntervalSeconds)).Hint, "other fields keep the attribute's text");
+
+        Assert.AreEqual(@"One per line, e.g. C:\ or \\aus-files-01\files. Each appears under its own folder chain (c, aus-files-01\files).", MirrorPlugin.PathsHint(windows: true, macOs: false));
+        StringAssert.Contains(MirrorPlugin.PathsHint(windows: false, macOs: false), "/mnt/aus-files-01");
+        StringAssert.Contains(MirrorPlugin.PathsHint(windows: false, macOs: true), "/Volumes/aus-files-01");
+
+        var without = new SettingsFormViewModel(plugin.SettingsType, plugin.CreateDefaultSettings(), plugin, null, null, new FakeDialogs());
+        Assert.AreEqual("One per line: a local drive or folder, or a network share.", without.Fields.Single(f => f.PropertyName == nameof(MirrorSettings.Paths)).Hint, "without the provider the attribute's text stands");
     }
 }

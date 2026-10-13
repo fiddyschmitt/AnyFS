@@ -56,7 +56,7 @@ public class HeadlessDialogTests
                 var membership = collection.Definition.Sources.Single();
                 await ShowAsync(new SourceDialog(new SourceDialogViewModel(engine, dialogs, definition, membership, askPath: true)));
                 await ShowAsync(new SourceDialog(new SourceDialogViewModel(engine, dialogs, definition, null, askPath: false)));
-                await ShowAsync(new ExistingSourceDialog(new ExistingSourceDialogViewModel("alpha", "mem/alpha", "ben")));
+                await ShowAsync(new ExistingSourceDialog(new ExistingSourceDialogViewModel("alpha", "mem/alpha", "work")));
 
                 await ShowAsync(new MountDialog(new MountDialogViewModel(engine, dialogs, collection, null)));
                 await ShowAsync(new MountDialog(new MountDialogViewModel(engine, dialogs, collection, collection.Definition.Mounts.Single())));
@@ -67,9 +67,9 @@ public class HeadlessDialogTests
                     await ShowAsync(new PromptDialog(new PromptDialogViewModel("aus-files-01", request)));
                 }
 
-                await ShowAsync(new ConfirmDialog(new ConfirmDialogViewModel("Delete collection", "Delete 'ben'?", "Delete", "No", "Cancel", "Also delete the orphaned sources", true)));
+                await ShowAsync(new ConfirmDialog(new ConfirmDialogViewModel("Delete collection", "Delete 'work'?", "Delete", "No", "Cancel", "Also delete the orphaned sources", true)));
                 await ShowAsync(new ConfirmDialog(new ConfirmDialogViewModel("Oops", "Something went wrong.", "OK", cancelText: null)));
-                await ShowAsync(new TextDialog(new TextDialogViewModel("Mount command", "sudo mount -t nfs host:/ben ~/anyfs/ben", clipboard)));
+                await ShowAsync(new TextDialog(new TextDialogViewModel("Mount command", "sudo mount -t nfs host:/work ~/anyfs/work", clipboard)));
                 return true;
             }, CancellationToken.None);
         }

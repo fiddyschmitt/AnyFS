@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Runtime.InteropServices;
 using System.Windows.Input;
 using AnyFS.App.Gui.Services;
 using AnyFS.Core.Model;
@@ -42,7 +41,6 @@ public sealed partial class CollectionsViewModel : ObservableObject
         _opener = opener;
         _clipboard = clipboard;
         _ops = ops;
-        MountGuidance = BuildMountGuidance(engine.Registry.MountProviders.Values);
     }
 
     public ObservableCollection<CollectionTileViewModel> Collections { get; } = [];
@@ -55,7 +53,6 @@ public sealed partial class CollectionsViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasSelectedCollection))]
-    [NotifyPropertyChangedFor(nameof(SelectedHeader))]
     [NotifyCanExecuteChangedFor(nameof(EditCollectionCommand))]
     [NotifyCanExecuteChangedFor(nameof(DeleteCollectionCommand))]
     [NotifyCanExecuteChangedFor(nameof(AddNewSourceCommand))]
@@ -82,11 +79,6 @@ public sealed partial class CollectionsViewModel : ObservableObject
 
     public bool HasExistingSources => ExistingSources.Count > 0;
 
-    public string SelectedHeader => SelectedCollection is null ? "Collection" : $"Collection: {SelectedCollection.Name}";
-
-    /// <summary>Worded from PerformanceTier for this OS (spec 11.1).</summary>
-    public string MountGuidance { get; }
-
     /// <summary>Brings every list in step with the engine. Called by the window on a timer and after changes.</summary>
     public void Refresh(StatusSnapshot snapshot)
     {
@@ -110,7 +102,6 @@ public sealed partial class CollectionsViewModel : ObservableObject
         }
 
         RefreshSelected();
-        OnPropertyChanged(nameof(SelectedHeader));
     }
 
     partial void OnSelectedCollectionChanged(CollectionTileViewModel? value) => RefreshSelected();
@@ -446,36 +437,4 @@ public sealed partial class CollectionsViewModel : ObservableObject
     private string ProviderNameOf(string providerId) => _engine.Registry.FindMountProvider(providerId)?.DisplayName ?? SettingsStore.DefaultMountName(providerId);
 
     private static string Plural(int n, string noun) => $"{n} {noun}{(n == 1 ? "" : "s")}";
-
-    /// <summary>"WinFsp gives the best performance; SMB and NFS serve other machines; WebDAV, FTP and HTTP are for compatibility."</summary>
-    public static string BuildMountGuidance(IEnumerable<IMountProviderPlugin> providers)
-    {
-        var here = providers.Where(p => p.SupportedPlatforms.Any(RuntimeInformation.IsOSPlatform)).ToList();
-        var parts = new List<string>();
-        var native = Names(here, PerformanceTier.Native);
-        var network = Names(here, PerformanceTier.Network);
-        var protocol = Names(here, PerformanceTier.Protocol);
-        if (native.Count > 0)
-        {
-            parts.Add($"{Join(native)} {(native.Count == 1 ? "gives" : "give")} the best performance");
-        }
-
-        if (network.Count > 0)
-        {
-            parts.Add($"{Join(network)} {(network.Count == 1 ? "serves" : "serve")} other machines");
-        }
-
-        if (protocol.Count > 0)
-        {
-            parts.Add($"{Join(protocol)} {(protocol.Count == 1 ? "is" : "are")} for compatibility");
-        }
-
-        return parts.Count == 0 ? "No mount provider is available on this operating system." : string.Join("; ", parts) + ".";
-
-        static List<string> Names(IEnumerable<IMountProviderPlugin> list, PerformanceTier tier)
-            => list.Where(p => p.Tier == tier).Select(p => p.DisplayName).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
-
-        static string Join(List<string> names)
-            => names.Count <= 1 ? string.Concat(names) : string.Join(", ", names.Take(names.Count - 1)) + " and " + names[^1];
-    }
 }

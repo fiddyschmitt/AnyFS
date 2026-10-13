@@ -68,12 +68,12 @@ public class StatsCollectorTests
             FilesServed = 10,
             BytesRead = 1000,
             BytesWritten = 50,
-            Collections = { ["ben"] = new CollectionCounters { FilesServed = 10, BytesRead = 1000, BytesWritten = 50 } },
+            Collections = { ["work"] = new CollectionCounters { FilesServed = 10, BytesRead = 1000, BytesWritten = 50 } },
         });
 
-        stats.FileServed("ben");
-        stats.BytesRead("ben", 300);
-        stats.BytesWritten("ben", 20);
+        stats.FileServed("work");
+        stats.BytesRead("work", 300);
+        stats.BytesWritten("work", 20);
         stats.FileServed("other");
         stats.BytesRead("other", 7);
 
@@ -84,7 +84,7 @@ public class StatsCollectorTests
         Assert.AreEqual(1307, s.Total.BytesRead);
         Assert.AreEqual(20, s.Session.BytesWritten);
         Assert.AreEqual(70, s.Total.BytesWritten);
-        Assert.AreEqual(11, s.Collections["ben"].Total.FilesServed);
+        Assert.AreEqual(11, s.Collections["work"].Total.FilesServed);
         Assert.AreEqual(1, s.Collections["other"].Session.FilesServed);
         Assert.AreEqual(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero), s.TotalsSince);
 
@@ -99,13 +99,13 @@ public class StatsCollectorTests
     public void ConnectionsAreCountedPerCollectionAndOverall()
     {
         var stats = new StatsCollector();
-        stats.ConnectionOpened("ben");
-        stats.ConnectionOpened("ben");
+        stats.ConnectionOpened("work");
+        stats.ConnectionOpened("work");
         stats.ConnectionOpened("bob");
-        stats.ConnectionClosed("ben");
+        stats.ConnectionClosed("work");
         var s = stats.Snapshot();
         Assert.AreEqual(2, s.ActiveConnections);
-        Assert.AreEqual(1, s.Collections["ben"].ActiveConnections);
+        Assert.AreEqual(1, s.Collections["work"].ActiveConnections);
         Assert.AreEqual(1, s.Collections["bob"].ActiveConnections);
     }
 
@@ -114,14 +114,14 @@ public class StatsCollectorTests
     {
         var stats = new StatsCollector();
         stats.LoadLifetime(new StatsFile { FilesServed = 100, BytesRead = 5000 });
-        stats.FileServed("ben");
-        stats.BytesRead("ben", 10);
+        stats.FileServed("work");
+        stats.BytesRead("work", 10);
         stats.ResetTotals();
         var s = stats.Snapshot();
         Assert.AreEqual(1, s.Session.FilesServed);
         Assert.AreEqual(0, s.Total.FilesServed);
         Assert.AreEqual(0, s.Total.BytesRead);
-        stats.FileServed("ben");
+        stats.FileServed("work");
         s = stats.Snapshot();
         Assert.AreEqual(2, s.Session.FilesServed);
         Assert.AreEqual(1, s.Total.FilesServed);

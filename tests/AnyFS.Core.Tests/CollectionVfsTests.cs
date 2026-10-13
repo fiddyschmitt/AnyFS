@@ -15,7 +15,7 @@ public class CollectionVfsTests
     {
         var files = await Handles.ReadyAsync("aus-files-01", new MemorySource().AddFile("shared/doc.txt", "doc"));
         var ssh = await Handles.ReadyAsync("aus-files-02", new MemorySource().AddFile("home/smith/.bashrc", "rc"));
-        var vfs = Handles.Vfs("ben", new CollectionMember(files, "files/aus-files-01", false), new CollectionMember(ssh, "sshfs/aus-files-02", false));
+        var vfs = Handles.Vfs("work", new CollectionMember(files, "files/aus-files-01", false), new CollectionMember(ssh, "sshfs/aus-files-02", false));
 
         CollectionAssert.AreEqual(new[] { "files/", "sshfs/" }, await Handles.NamesAsync(vfs, ""));
         CollectionAssert.AreEqual(new[] { "aus-files-01/" }, await Handles.NamesAsync(vfs, "files"));
@@ -37,7 +37,7 @@ public class CollectionVfsTests
     {
         var local = await Handles.ReadyAsync("local", new MemorySource().AddFile("c/users/me/a.txt", "a").AddFile("h/x.txt", "x"));
         var shares = await Handles.ReadyAsync("shares", new MemorySource().AddFile("aus-files-01/shared/b.txt", "b"));
-        var vfs = Handles.Vfs("ben", new CollectionMember(local, "files", false), new CollectionMember(shares, "files", false));
+        var vfs = Handles.Vfs("work", new CollectionMember(local, "files", false), new CollectionMember(shares, "files", false));
 
         CollectionAssert.AreEqual(new[] { "files/" }, await Handles.NamesAsync(vfs, ""));
         CollectionAssert.AreEqual(new[] { "c/", "h/", "aus-files-01/" }, await Handles.NamesAsync(vfs, "files"));
@@ -51,7 +51,7 @@ public class CollectionVfsTests
     {
         var alpha = await Handles.ReadyAsync("alpha", new MemorySource().AddFile("c/from-alpha.txt", "alpha"));
         var beta = await Handles.ReadyAsync("beta", new MemorySource().AddFile("c/from-beta.txt", "beta").AddFile("only-beta.txt", "ob"));
-        var vfs = Handles.Vfs("ben", new CollectionMember(beta, "files", false), new CollectionMember(alpha, "files", false));
+        var vfs = Handles.Vfs("work", new CollectionMember(beta, "files", false), new CollectionMember(alpha, "files", false));
 
         var names = await Handles.NamesAsync(vfs, "files");
         CollectionAssert.AreEqual(new[] { "c/", "only-beta.txt" }, names, "alpha's 'c' wins by name order; beta's 'c' is hidden");
@@ -83,7 +83,7 @@ public class CollectionVfsTests
     {
         var files = await Handles.ReadyAsync("files", new MemorySource().AddFile("a.txt", "a").AddFile("archive/inner.txt", "inner"));
         var archive = await Handles.ReadyAsync("archive", new MemorySource().AddFile("2020.zip", "zip"));
-        var vfs = Handles.Vfs("ben", new CollectionMember(files, "files", false), new CollectionMember(archive, "files/archive", false));
+        var vfs = Handles.Vfs("work", new CollectionMember(files, "files", false), new CollectionMember(archive, "files/archive", false));
 
         CollectionAssert.AreEqual(new[] { "archive/", "a.txt" }, await Handles.NamesAsync(vfs, "files"));
         CollectionAssert.AreEqual(new[] { "2020.zip" }, await Handles.NamesAsync(vfs, "files/archive"));
@@ -95,7 +95,7 @@ public class CollectionVfsTests
     {
         var a = await Handles.ReadyAsync("a", new MemorySource().AddFile("x", "x"));
         var b = await Handles.ReadyAsync("b", new MemorySource().AddFile("y", "y"));
-        var vfs = Handles.Vfs("ben", new CollectionMember(a, "files/a", false), new CollectionMember(b, "files/b", false));
+        var vfs = Handles.Vfs("work", new CollectionMember(a, "files/a", false), new CollectionMember(b, "files/b", false));
         CollectionAssert.AreEqual(new[] { "a/", "b/" }, await Handles.NamesAsync(vfs, "files"));
 
         vfs.Update([new CollectionMember(a, "files/a", false)]);
@@ -110,7 +110,7 @@ public class CollectionVfsTests
     public async Task SyntheticLevelsMatchCaseInsensitively()
     {
         var a = await Handles.ReadyAsync("a", new MemorySource().AddFile("x.txt", "x"));
-        var vfs = Handles.Vfs("ben", new CollectionMember(a, "Files/A", false));
+        var vfs = Handles.Vfs("work", new CollectionMember(a, "Files/A", false));
         Assert.AreEqual("x", await Handles.ReadTextAsync(vfs, "FILES/a/x.txt"));
         Assert.AreEqual("Files", (await vfs.StatAsync("files", CancellationToken.None))!.Name, "the configured spelling is reported");
     }
@@ -123,7 +123,7 @@ public class CollectionVfsTests
             .AddFile("Docs/dup.txt", "lower")
             .AddFile("Docs/DUP.txt", "upper");
         var a = await Handles.ReadyAsync("a", src);
-        var vfs = Handles.Vfs("ben", new CollectionMember(a, "files", false));
+        var vfs = Handles.Vfs("work", new CollectionMember(a, "files", false));
 
         Assert.AreEqual("readme", await Handles.ReadTextAsync(vfs, "files/docs/readme.txt"), "exact miss, unique case-insensitive hit");
         Assert.AreEqual("Readme.TXT", (await vfs.StatAsync("files/docs/README.txt", CancellationToken.None))!.Name);
@@ -136,7 +136,7 @@ public class CollectionVfsTests
     {
         var ready = await Handles.ReadyAsync("ready", new MemorySource().AddFile("ok.txt", "ok"));
         var starting = Handles.Starting("slow");
-        var vfs = Handles.Vfs("ben", new CollectionMember(ready, "files/ready", false), new CollectionMember(starting, "files/slow", false));
+        var vfs = Handles.Vfs("work", new CollectionMember(ready, "files/ready", false), new CollectionMember(starting, "files/slow", false));
 
         CollectionAssert.AreEqual(new[] { "ready/", "slow/" }, await Handles.NamesAsync(vfs, "files"));
         var slow = await vfs.StatAsync("files/slow", CancellationToken.None);
@@ -155,7 +155,7 @@ public class CollectionVfsTests
         var b = await Handles.ReadyAsync("b", new MemorySource().AddFile("y", "y"));
         await a.Current!.SetTimesAsync("", null, older, CancellationToken.None);
         await b.Current!.SetTimesAsync("", null, newer, CancellationToken.None);
-        var vfs = Handles.Vfs("ben", new CollectionMember(a, "files", false), new CollectionMember(b, "files", false));
+        var vfs = Handles.Vfs("work", new CollectionMember(a, "files", false), new CollectionMember(b, "files", false));
         var files = await vfs.StatAsync("files", CancellationToken.None);
         Assert.AreEqual(newer, files!.Modified);
         Assert.AreEqual(0, files.Length);
@@ -166,7 +166,7 @@ public class CollectionVfsTests
     {
         var a = await Handles.ReadyAsync("a", new MemorySource().AddDirectory("docs"));
         var b = await Handles.ReadyAsync("b", new MemorySource(canWrite: false).AddFile("ro.txt", "ro"));
-        var vfs = Handles.Vfs("ben", new CollectionMember(a, "files", false), new CollectionMember(b, "files", false));
+        var vfs = Handles.Vfs("work", new CollectionMember(a, "files", false), new CollectionMember(b, "files", false));
 
         await Handles.WriteTextAsync(vfs, "files/docs/new.txt", "hello", VfsOpenMode.CreateNew);
         Assert.AreEqual("hello", await Handles.ReadTextAsync(vfs, "files/docs/new.txt"));
@@ -196,7 +196,7 @@ public class CollectionVfsTests
     {
         var stats = new StatsCollector();
         var a = await Handles.ReadyAsync("a", new MemorySource().AddFile("x.txt", "0123456789"));
-        var vfs = Handles.Vfs("ben", stats);
+        var vfs = Handles.Vfs("work", stats);
         vfs.Update([new CollectionMember(a, "files", false)]);
 
         await using (var f = await vfs.OpenAsync("files/x.txt", VfsOpenMode.Read, CancellationToken.None))
@@ -216,7 +216,7 @@ public class CollectionVfsTests
         Assert.AreEqual(1, snapshot.Session.FilesServed, "one read handle delivered bytes");
         Assert.AreEqual(8, snapshot.Session.BytesRead);
         Assert.AreEqual(3, snapshot.Session.BytesWritten);
-        Assert.AreEqual(8, snapshot.Collections["ben"].Session.BytesRead);
+        Assert.AreEqual(8, snapshot.Collections["work"].Session.BytesRead);
     }
 
     [TestMethod]
@@ -224,7 +224,7 @@ public class CollectionVfsTests
     {
         var src = new MemorySource().AddFile("a/1", "1").AddFile("a/2", "2").AddFile("b/3", "3").AddFile("top", "t");
         var a = await Handles.ReadyAsync("a", src);
-        var vfs = Handles.Vfs("ben", new CollectionMember(a, "files", false));
+        var vfs = Handles.Vfs("work", new CollectionMember(a, "files", false));
         await Handles.NamesAsync(vfs, "files");
         Assert.AreEqual((1L, false), a.FileCount());
         await Handles.NamesAsync(vfs, "files/a");
@@ -241,7 +241,7 @@ public class CollectionVfsTests
     {
         var rw = await Handles.ReadyAsync("rw", new MemorySource());
         var ro = await Handles.ReadyAsync("ro", new MemorySource(canWrite: false));
-        var vfs = Handles.Vfs("ben", new CollectionMember(rw, "files/rw", false), new CollectionMember(ro, "files/ro", false), new CollectionMember(rw, "locked", true));
+        var vfs = Handles.Vfs("work", new CollectionMember(rw, "files/rw", false), new CollectionMember(ro, "files/ro", false), new CollectionMember(rw, "locked", true));
         Assert.IsFalse(vfs.CanWrite(""));
         Assert.IsFalse(vfs.CanWrite("files"));
         Assert.IsTrue(vfs.CanWrite("files/rw/anything/new.txt"));

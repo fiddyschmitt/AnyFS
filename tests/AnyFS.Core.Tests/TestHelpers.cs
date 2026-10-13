@@ -23,7 +23,7 @@ internal static class Handles
     public static SourceHandle Starting(string name)
         => new(Guid.NewGuid(), name, "memory") { Status = new ComponentStatus(ComponentState.Starting, "Starting") };
 
-    public static CollectionVfs Vfs(string name = "ben", StatsCollector? stats = null)
+    public static CollectionVfs Vfs(string name = "work", StatsCollector? stats = null)
         => new(Guid.NewGuid(), name, stats, NullLogger.Instance);
 
     public static CollectionVfs Vfs(string name, params CollectionMember[] members)

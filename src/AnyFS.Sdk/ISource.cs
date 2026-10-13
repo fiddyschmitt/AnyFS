@@ -30,6 +30,24 @@ public interface ISourcePlugin
     object CreateDefaultSettings();
 
     ISource CreateSource(object settings);
+
+    /// <summary>
+    /// True when walking the whole tree is quick for this kind of source (local disks), so "Count files on
+    /// start" is ticked by default for new sources of it. Slow or metered sources (SSH, web APIs) keep the
+    /// default false. Optional: the default is false.
+    /// </summary>
+    bool IsQuickToCount => false;
+}
+
+/// <summary>
+/// A source that counts its own tree when "Count files on start" is on, instead of the host's generic
+/// directory-by-directory walk: it knows a faster way (Mirror walks every configured path at once).
+/// Update <see cref="ISource.Counters"/> as you go (the tile shows the running total); the host sets
+/// the state to <see cref="EnumerationState.Complete"/> when the task finishes.
+/// </summary>
+public interface ICountable
+{
+    Task CountFilesAsync(CancellationToken ct);
 }
 
 /// <summary>What a source can do. Whether it is <em>allowed</em> to is decided per collection and per mount.</summary>

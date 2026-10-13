@@ -92,7 +92,7 @@ public class EngineTests
             var a = Source("alpha", "a.txt=A");
             var b = Source("beta", "b.txt=B");
             store.Sources.AddRange([a, b]);
-            var collection = new CollectionDefinition { Name = "ben" };
+            var collection = new CollectionDefinition { Name = "work" };
             collection.Sources.Add(new SourceMembership { Id = a.Id, Path = "mem/alpha" });
             collection.Sources.Add(new SourceMembership { Id = b.Id, Path = "mem", ReadOnly = true });
             collection.Mounts.Add(Mount("fake-rw"));
@@ -106,12 +106,12 @@ public class EngineTests
         await Wait.UntilAsync(() => engine.Snapshot().AllGreen, what: "all green");
 
         var snapshot = engine.Snapshot();
-        var ben = snapshot.Collections.Single();
-        Assert.AreEqual("Green", ben.Colour);
-        Assert.AreEqual("2 sources ready, 2 mounts ready", ben.Text);
-        Assert.AreEqual("mem/alpha", ben.Sources.Single(s => s.Name == "alpha").Path);
-        Assert.IsTrue(ben.Sources.Single(s => s.Name == "beta").ReadOnly);
-        Assert.AreEqual("fake://1/ben/", ben.Mounts.Single(m => m.Name == "fake-rw").AccessPaths.Single().Value);
+        var work = snapshot.Collections.Single();
+        Assert.AreEqual("Green", work.Colour);
+        Assert.AreEqual("2 sources ready, 2 mounts ready", work.Text);
+        Assert.AreEqual("mem/alpha", work.Sources.Single(s => s.Name == "alpha").Path);
+        Assert.IsTrue(work.Sources.Single(s => s.Name == "beta").ReadOnly);
+        Assert.AreEqual("fake://1/work/", work.Mounts.Single(m => m.Name == "fake-rw").AccessPaths.Single().Value);
         CollectionAssert.AreEquivalent(new[] { "memory", "fake" }, snapshot.Plugins.Select(p => p.TypeId).ToArray());
 
         var rw = FakeMountProvider.Mounts.Single(m => m.Fs is { ReadOnly: false });
@@ -128,7 +128,7 @@ public class EngineTests
         engine.WriteStatus();
         var (read, running) = StatusFileReader.Read(_paths);
         Assert.IsTrue(running);
-        Assert.AreEqual("ben", read!.Collections.Single().Name);
+        Assert.AreEqual("work", read!.Collections.Single().Name);
         Assert.AreEqual(Environment.ProcessId, read.Pid);
 
         await engine.StopAsync();

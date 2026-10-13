@@ -228,6 +228,80 @@ public class MirrorSourceTests
         var source = (MirrorSource)new MirrorPlugin().CreateSource(new MirrorSettings());
         Assert.AreEqual(OperatingSystem.IsWindows() || OperatingSystem.IsMacOS(), source.Capabilities.CaseInsensitive);
     }
+
+    [TestMethod]
+    public async Task CountFilesWalksEveryPathAtOnceAndAgreesWithAWalkOfTheListings()
+    {
+        var a = Path.Combine(_root, "A");
+        var b = Path.Combine(_root, "B");
+        Directory.CreateDirectory(Path.Combine(a, "sub", "deep"));
+        Directory.CreateDirectory(Path.Combine(a, "empty"));
+        Directory.CreateDirectory(b);
+        File.WriteAllText(Path.Combine(a, "x.txt"), "x");
+        File.WriteAllText(Path.Combine(a, "sub", "y.txt"), "y");
+        File.WriteAllText(Path.Combine(a, "sub", "deep", "z.txt"), "z");
+        File.WriteAllText(Path.Combine(b, "q.txt"), "q");
+
+        var source = await StartAsync(a + "\n" + b);
+        Assert.IsTrue(source is ICountable, "Mirror counts its own tree");
+        await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+        var (files, directories) = await WalkAsync(source);
+        Assert.AreEqual(4, files);
+        Assert.AreEqual(files, source.Counters.FilesKnown);
+        Assert.AreEqual(directories, source.Counters.DirectoriesKnown, "chain levels plus the real folders, each once");
+        Assert.AreEqual(EnumerationState.InProgress, source.Counters.State, "the host marks it Complete");
+    }
+
+    [TestMethod]
+    public async Task CountFilesCountsAPathInsideAnotherOnceAndSkipsAnUnreachableOne()
+    {
+        var a = Path.Combine(_root, "A");
+        Directory.CreateDirectory(Path.Combine(a, "sub", "deep"));
+        File.WriteAllText(Path.Combine(a, "x.txt"), "x");
+        File.WriteAllText(Path.Combine(a, "sub", "y.txt"), "y");
+        File.WriteAllText(Path.Combine(a, "sub", "deep", "z.txt"), "z");
+        var missing = Path.Combine(_root, "missing");
+
+        var source = await StartAsync(a + "\n" + Path.Combine(a, "sub") + "\n" + missing);
+        Assert.AreEqual(1, source.Unreachable.Count);
+        await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+        var (files, directories) = await WalkAsync(source);
+        Assert.AreEqual(3, files);
+        Assert.AreEqual(files, source.Counters.FilesKnown);
+        Assert.AreEqual(directories, source.Counters.DirectoriesKnown);
+    }
+
+    /// <summary>What the host's generic count would find: every listing, directory by directory.</summary>
+    private static async Task<(long Files, long Directories)> WalkAsync(ISource source)
+    {
+        long files = 0, directories = 0;
+        var queue = new Queue<string>();
+        queue.Enqueue("");
+        while (queue.Count > 0)
+        {
+            var dir = queue.Dequeue();
+            try
+            {
+                await foreach (var entry in source.ListAsync(dir, CancellationToken.None))
+                {
+                    if (entry.IsDirectory)
+                    {
+                        directories++;
+                        queue.Enqueue(VfsPath.Join(dir, entry.Name));
+                    }
+                    else
+                    {
+                        files++;
+                    }
+                }
+            }
+            catch (VfsException)
+            {
+            }
+        }
+
+        return (files, directories);
+    }
 }
 
 /// <summary>The SDK contract suite against a real temp tree.</summary>

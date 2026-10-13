@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased (fixes after milestone 2)
+
+- Collections tab: the "Collection: name" header over the Sources and Mounts box is gone (the
+  selected tile on the left says it), and so is the guidance line under Mounts.
+- Mount tiles: a running mount's status line is its access path (URL, UNC path), so the Copy
+  button now sits beside it and the separate box that repeated it is gone; any further access
+  paths a provider reports still get their own box.
+- Add source: the membership path is labelled "Virtual Path" with the hint "Where the source
+  appears in this collection."; "Count files on start" sits under "Enabled" and defaults on for
+  source types that are quick to count (`ISourcePlugin.IsQuickToCount`, true for Mirror) unless
+  `app.json`'s `countFilesOnStart` forces it (now `null` by default).
+- Mirror: the paths field shows a local drive and a typical network path for this OS (`C:\` and
+  `\\aus-files-01\files` on Windows, `/` and `/mnt/aus-files-01` on Linux, `/` and
+  `/Volumes/aus-files-01` on macOS); the placeholder is the local drive. "Count files on start"
+  walks every configured path at the same time, each on its own thread.
+- SDK: `ICountable` (a source counts its own tree when "Count files on start" is on),
+  `ISourcePlugin.IsQuickToCount` (optional, default false) and `ISettingTextProvider` (per-machine
+  hints and placeholders).
+- The example collection in the docs is now `work`.
+
 ## Unreleased (milestone 2: the window)
 
 - `anyfs` with no arguments opens the window (Avalonia 12, Fluent, follows the OS light/dark

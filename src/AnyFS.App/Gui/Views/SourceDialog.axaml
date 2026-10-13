@@ -50,13 +50,13 @@
           <TextBlock Classes="hint" Text="{x:Static vm:SourceDialogViewModel.NameTip}" />
 
           <StackPanel IsVisible="{Binding AskPath}" Margin="0,10,0,0">
-            <TextBlock Classes="caption" Text="Path" />
+            <TextBlock Classes="caption" Text="Virtual Path" />
             <TextBox Text="{Binding Path}" PlaceholderText="(collection root)" />
-            <TextBlock Classes="hint" Text="{Binding PathCaption}" />
+            <TextBlock Classes="hint" Text="{x:Static vm:SourceDialogViewModel.PathCaption}" />
             <CheckBox IsChecked="{Binding ReadOnly}" IsEnabled="{Binding !ReadOnlyLocked}" Content="Read-only in this collection" Margin="0,6,0,0" />
           </StackPanel>
 
-          <StackPanel Orientation="Horizontal" Spacing="16" Margin="0,8,0,0">
+          <StackPanel Margin="0,8,0,0">
             <CheckBox IsChecked="{Binding Enabled}" Content="Enabled" />
             <CheckBox IsChecked="{Binding CountFilesOnStart}" Content="Count files on start" ToolTip.Tip="Walk the whole tree in the background after the source starts, so the file count is exact" />
           </StackPanel>

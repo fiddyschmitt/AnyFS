@@ -25,12 +25,13 @@ public sealed partial class SettingsFormViewModel : ObservableObject
         object settings,
         IValidatable? validator,
         ITestable? tester,
+        ISettingTextProvider? texts,
         IDialogs dialogs)
     {
         Settings = settings;
         _validator = validator;
         _tester = tester;
-        Fields = PluginSettingsBinder.Describe(settingsType).Select(p => new SettingFieldViewModel(p, dialogs)).ToList();
+        Fields = PluginSettingsBinder.Describe(settingsType).Select(p => new SettingFieldViewModel(p, texts, dialogs)).ToList();
         foreach (var field in Fields)
         {
             field.Load(settings);
@@ -171,7 +172,7 @@ public sealed partial class SettingFieldViewModel : ObservableObject
     private readonly IDialogs _dialogs;
     private readonly Type _type;
 
-    public SettingFieldViewModel(SettingProperty property, IDialogs dialogs)
+    public SettingFieldViewModel(SettingProperty property, ISettingTextProvider? texts, IDialogs dialogs)
     {
         _property = property;
         _dialogs = dialogs;
@@ -180,6 +181,8 @@ public sealed partial class SettingFieldViewModel : ObservableObject
         Choices = Kind == SettingKind.Choice
             ? property.Attribute.Choices ?? (_type.IsEnum ? Enum.GetNames(_type) : [])
             : [];
+        Hint = texts?.HintFor(property.Name) ?? property.Attribute.Hint;
+        Placeholder = texts?.PlaceholderFor(property.Name) ?? property.Attribute.Placeholder ?? "";
         BrowseCommand = new AsyncRelayCommand(BrowseAsync);
     }
 
@@ -189,11 +192,12 @@ public sealed partial class SettingFieldViewModel : ObservableObject
 
     public string LabelWithMark => _property.Attribute.Required ? Label + " *" : Label;
 
-    public string? Hint => _property.Attribute.Hint;
+    /// <summary>The attribute's hint, unless the plugin (an <see cref="ISettingTextProvider"/>) gave one for this machine.</summary>
+    public string? Hint { get; }
 
     public bool HasHint => !string.IsNullOrEmpty(Hint);
 
-    public string Placeholder => _property.Attribute.Placeholder ?? "";
+    public string Placeholder { get; }
 
     public bool IsRequired => _property.Attribute.Required;
 

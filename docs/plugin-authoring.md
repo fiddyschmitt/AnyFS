@@ -63,6 +63,11 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
 - Everything may be called concurrently from many threads.
 - Read-only is not your setting: say what you *can* do in `Capabilities`; the user decides per
   collection and per mount whether writes are allowed.
+- File counts: keep `Counters` up to date if you know your tree's size. When the user ticks
+  "Count files on start" the host walks your tree directory by directory, unless your source
+  implements `ICountable`, in which case it calls your `CountFilesAsync` instead (Mirror walks every
+  configured path at the same time). Return `true` from the plugin's `IsQuickToCount` when that walk
+  is cheap for your kind of source (local disks): the checkbox then defaults on for new sources of it.
 
 ## Settings
 
@@ -76,7 +81,9 @@ are chosen explicitly. `Group` puts fields under a heading and `Advanced` collap
 JSON (camelCase names in `sources.json`) and the secret handling: a `Secret` property is never
 written to the settings files; it's kept in the protected secret store and filled back into your
 POCO. Implement `IValidatable` to check settings before they're saved and `ITestable` to back a
-Test button.
+Test button. When a hint or placeholder depends on the machine (an example path for this OS),
+implement `ISettingTextProvider` on the plugin: `HintFor(propertyName)` and
+`PlaceholderFor(propertyName)` are asked for each property and null keeps the attribute's text.
 
 ## Caching helpers
 

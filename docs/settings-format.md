@@ -27,7 +27,7 @@ its siblings.
   "logLevel": "info",          // trace, debug, info, warn, error (--log-level overrides)
   "bindAddress": "127.0.0.1",  // default offered to new network mounts
   "theme": "system",           // system (follow the OS), light or dark; the window reads it at start
-  "countFilesOnStart": false,  // default for new sources
+  "countFilesOnStart": null,   // default for new sources: null follows the source type (quick ones, like Mirror, count), true or false forces it
   "window": { "x": 0, "y": 0, "width": 0, "height": 0, "maximised": false }   // written by the window when it closes
 }
 ```
@@ -74,7 +74,7 @@ secret properties never enter it.
   "collections": [
     {
       "id": "22222222-2222-2222-2222-222222222222",
-      "name": "ben",
+      "name": "work",
       "enabled": true,
       "sources": [
         { "id": "11111111-1111-1111-1111-111111111111", "path": "files", "readOnly": false }

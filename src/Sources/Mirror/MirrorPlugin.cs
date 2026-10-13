@@ -5,9 +5,9 @@ namespace AnyFS.Sources.Mirror;
 
 public sealed class MirrorSettings
 {
+    // the hint and placeholder are per OS: MirrorPlugin.HintFor / PlaceholderFor
     [Setting("Paths", Kind = SettingKind.Multiline, Required = true, Order = 0,
-        Hint = "One per line. Windows: \\\\server\\share, C:\\, D:\\Photos. Linux and macOS: any folder, e.g. /mnt/nas (mount shares with the OS first).",
-        Placeholder = "\\\\aus-files-01\\shared")]
+        Hint = "One per line: a local drive or folder, or a network share.")]
     public string Paths { get; set; } = "";
 
     [Setting("Check paths every (seconds)", Advanced = true, Order = 10, Hint = "How often unreachable paths are retried and reachable ones re-checked.")]
@@ -18,7 +18,7 @@ public sealed class MirrorSettings
 /// Mirror (type <c>mirror</c>, folder <c>files</c>, spec 7.1): a list of UNC paths, drive roots and folders,
 /// each becoming a folder chain inside the source: \\h\s\x is h\s\x, C:\a is c\a, /mnt/nas is mnt\nas.
 /// </summary>
-public sealed class MirrorPlugin : ISourcePlugin, IValidatable
+public sealed class MirrorPlugin : ISourcePlugin, IValidatable, ISettingTextProvider
 {
     public string TypeId => "mirror";
 
@@ -33,9 +33,25 @@ public sealed class MirrorPlugin : ISourcePlugin, IValidatable
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public Type SettingsType => typeof(MirrorSettings);
 
+    /// <summary>Local disks walk quickly, so new Mirror sources count on start (every path at once, <see cref="MirrorSource.CountFilesAsync"/>).</summary>
+    public bool IsQuickToCount => true;
+
     public object CreateDefaultSettings() => new MirrorSettings();
 
     public ISource CreateSource(object settings) => new MirrorSource((MirrorSettings)settings);
+
+    /// <summary>A local drive and a typical network path for this OS.</summary>
+    public string? HintFor(string propertyName) => propertyName != nameof(MirrorSettings.Paths) ? null : PathsHint(OperatingSystem.IsWindows(), OperatingSystem.IsMacOS());
+
+    public string? PlaceholderFor(string propertyName) => propertyName != nameof(MirrorSettings.Paths) ? null : PathsPlaceholder(OperatingSystem.IsWindows());
+
+    public static string PathsHint(bool windows, bool macOs) => windows
+        ? @"One per line, e.g. C:\ or \\aus-files-01\files. Each appears under its own folder chain (c, aus-files-01\files)."
+        : macOs
+            ? "One per line, e.g. / or /Volumes/aus-files-01 (connect to the server in Finder first). Each appears under its own folder chain."
+            : "One per line, e.g. / or /mnt/aus-files-01 (mount network shares with the OS first). Each appears under its own folder chain.";
+
+    public static string PathsPlaceholder(bool windows) => windows ? @"C:\" : "/";
 
     public IEnumerable<ValidationMessage> Validate(object settings)
     {

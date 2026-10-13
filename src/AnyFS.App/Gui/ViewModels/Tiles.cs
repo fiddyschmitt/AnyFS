@@ -337,7 +337,21 @@ public sealed partial class MountTileViewModel : TileViewModel
     [ObservableProperty]
     public partial bool ReadOnly { get; set; }
 
+    /// <summary>Every access path of the running mount, in the provider's order.</summary>
     public ObservableCollection<AccessPathViewModel> AccessPaths { get; } = [];
+
+    /// <summary>The access paths not already shown as the status line (<see cref="StatusAccessPath"/>), each with its own box and Copy button.</summary>
+    public ObservableCollection<AccessPathViewModel> OtherAccessPaths { get; } = [];
+
+    /// <summary>The access path the status line shows (a Ready mount's first one), copied by the button beside it; null otherwise.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasStatusAccessPath))]
+    [NotifyPropertyChangedFor(nameof(StatusCopyTooltip))]
+    public partial AccessPathViewModel? StatusAccessPath { get; set; }
+
+    public bool HasStatusAccessPath => StatusAccessPath is not null;
+
+    public string StatusCopyTooltip => StatusAccessPath is null ? "" : $"Copy the {StatusAccessPath.Label}";
 
     public bool HasAccessPaths => AccessPaths.Count > 0;
 
@@ -366,11 +380,31 @@ public sealed partial class MountTileViewModel : TileViewModel
                 OnPropertyChanged(nameof(HasAccessPaths));
             }
 
+            SplitAccessPaths();
             SetOpenTargets(targets);
         }
         finally
         {
             _syncing = false;
+        }
+    }
+
+    private void SplitAccessPaths()
+    {
+        var shown = AccessPaths.FirstOrDefault(p => p.Value == StatusText);
+        if (!ReferenceEquals(shown, StatusAccessPath))
+        {
+            StatusAccessPath = shown;
+        }
+
+        var others = AccessPaths.Where(p => !ReferenceEquals(p, shown)).ToList();
+        if (!others.SequenceEqual(OtherAccessPaths))
+        {
+            OtherAccessPaths.Clear();
+            foreach (var path in others)
+            {
+                OtherAccessPaths.Add(path);
+            }
         }
     }
 

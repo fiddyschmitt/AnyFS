@@ -7,9 +7,9 @@
         Width="460" SizeToContent="Height" CanResize="False"
         WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
   <StackPanel Margin="16">
-    <TextBlock Classes="caption" Text="Path" />
+    <TextBlock Classes="caption" Text="Virtual Path" />
     <TextBox Name="PathBox" Text="{Binding Path}" PlaceholderText="(collection root)" />
-    <TextBlock Classes="hint" Text="Where the source appears in this collection, '/'-separated. Empty means the source is the collection's root." />
+    <TextBlock Classes="hint" Text="{x:Static vm:SourceDialogViewModel.PathCaption}" />
     <CheckBox IsChecked="{Binding ReadOnly}" Content="Read-only in this collection" Margin="0,8,0,0" />
     <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" />
     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">

@@ -3,7 +3,7 @@
              xmlns:vm="using:AnyFS.App.Gui.ViewModels"
              x:Class="AnyFS.App.Gui.Views.CollectionsTab"
              x:DataType="vm:CollectionsViewModel">
-  <!-- spec 11.1: three tile lists; Sources and Mounts boxed together under "Collection: <name>" -->
+  <!-- spec 11.1: three tile lists; Sources and Mounts of the selected collection boxed together -->
   <Grid ColumnDefinitions="3*,12,6*" Margin="4">
     <DockPanel Grid.Column="0">
       <TextBlock DockPanel.Dock="Top" Classes="header" Text="Collections" />
@@ -32,7 +32,6 @@
 
     <Border Grid.Column="2" Classes="group">
       <DockPanel>
-        <TextBlock DockPanel.Dock="Top" Classes="header" Text="{Binding SelectedHeader}" />
         <Grid ColumnDefinitions="*,12,*">
           <!-- Sources of the selected collection -->
           <DockPanel Grid.Column="0">
@@ -77,7 +76,6 @@
           <!-- Mounts of the selected collection -->
           <DockPanel Grid.Column="2">
             <TextBlock DockPanel.Dock="Top" Classes="subheader" Text="Mounts" />
-            <TextBlock DockPanel.Dock="Top" Classes="hint" Text="{Binding MountGuidance}" Margin="0,0,0,8" />
             <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Classes="buttons" Margin="0,8,0,0">
               <Button Command="{Binding AddMountCommand}" AutomationProperties.Name="Add mount">
                 <StackPanel Orientation="Horizontal" Spacing="6">

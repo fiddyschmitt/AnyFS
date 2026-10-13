@@ -89,7 +89,8 @@ public sealed class AppSettings
     /// <summary>system, light or dark.</summary>
     public string Theme { get; set; } = "system";
 
-    public bool CountFilesOnStart { get; set; }
+    /// <summary>The default for new sources: null follows the source type (its plugin's IsQuickToCount), true or false forces it.</summary>
+    public bool? CountFilesOnStart { get; set; }
 
     public WindowPlacement? Window { get; set; }
 }

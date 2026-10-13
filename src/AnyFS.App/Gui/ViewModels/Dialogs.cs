@@ -69,24 +69,29 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
 {
     public const string NameTip = "Tip: use the server's name, e.g. aus-files-01";
 
+    public const string PathCaption = "Where the source appears in this collection.";
+
     private readonly IDialogs _dialogs;
+    private readonly bool? _countDefault;
     private bool _pathFollowsName;
     private bool _settingPath;
+    private bool _countFollowsPlugin;
+    private bool _settingCount;
 
     public SourceDialogViewModel(AnyFsEngine engine, IDialogs dialogs, SourceDefinition? existing, SourceMembership? membership, bool askPath, bool readOnlyLocked = false)
     {
         _dialogs = dialogs;
+        _countDefault = engine.Settings.App.CountFilesOnStart;
         IsNew = existing is null;
         AskPath = askPath;
         Title = existing is null ? "Add source" : $"Edit source: {existing.Name}";
         PluginChoices = engine.Registry.SourcePlugins.Values.OrderBy(p => p.DisplayName, StringComparer.OrdinalIgnoreCase).Select(p => new PluginChoiceViewModel(p)).ToList();
         ReadOnlyLocked = readOnlyLocked;
-        CountFilesOnStart = engine.Settings.App.CountFilesOnStart;
-        PathCaption = "Where the source appears in this collection. Shorten to just 'files' to get " + ExampleAccessPath("files", "c") + ".";
 
         if (existing is null)
         {
             _pathFollowsName = true;
+            _countFollowsPlugin = true;
             SelectedPlugin = PluginChoices.FirstOrDefault();
         }
         else
@@ -118,8 +123,6 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
 
     /// <summary>False when adding from the All sources tab: the source belongs to no collection yet.</summary>
     public bool AskPath { get; }
-
-    public string PathCaption { get; }
 
     public IReadOnlyList<PluginChoiceViewModel> PluginChoices { get; }
 
@@ -196,6 +199,28 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
         {
             SetPath(DefaultPath);
         }
+
+        if (_countFollowsPlugin && value is not null)
+        {
+            // on by default for sources that are quick to count, unless app.json forces it
+            _settingCount = true;
+            try
+            {
+                CountFilesOnStart = _countDefault ?? value.Plugin.IsQuickToCount;
+            }
+            finally
+            {
+                _settingCount = false;
+            }
+        }
+    }
+
+    partial void OnCountFilesOnStartChanged(bool value)
+    {
+        if (!_settingCount)
+        {
+            _countFollowsPlugin = false;
+        }
     }
 
     partial void OnNameChanged(string value)
@@ -230,10 +255,7 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
     }
 
     private SettingsFormViewModel BuildForm(ISourcePlugin plugin, object settings)
-        => new(plugin.SettingsType, settings, plugin as IValidatable, plugin as ITestable, _dialogs);
-
-    private static string ExampleAccessPath(string sourcePath, string tail)
-        => OperatingSystem.IsWindows() ? $@"\\anyfs\ben\{sourcePath}\{tail}" : $"~/anyfs/ben/{sourcePath}/{tail}";
+        => new(plugin.SettingsType, settings, plugin as IValidatable, plugin as ITestable, plugin as ISettingTextProvider, _dialogs);
 }
 
 /// <summary>"Existing source ▸": only the path and read-only are asked (spec 11.1).</summary>
@@ -435,7 +457,7 @@ public sealed partial class MountDialogViewModel : DialogViewModelBase
     }
 
     private SettingsFormViewModel BuildForm(IMountProviderPlugin provider, object settings)
-        => new(provider.SettingsType, settings, provider as IValidatable, provider as ITestable, _dialogs);
+        => new(provider.SettingsType, settings, provider as IValidatable, provider as ITestable, provider as ISettingTextProvider, _dialogs);
 }
 
 /// <summary>A plugin's question to the user (spec 6.4, 11.4).</summary>

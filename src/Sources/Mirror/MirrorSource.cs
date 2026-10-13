@@ -10,9 +10,12 @@ namespace AnyFS.Sources.Mirror;
 /// with FileShare.ReadWrite | Delete. Status: Ready when every root is reachable, Degraded naming the ones
 /// that aren't, Failed only when none is. Writes go through when the collection and mount allow them.
 /// </summary>
-public sealed class MirrorSource : SourceBase
+public sealed class MirrorSource : SourceBase, ICountable
 {
     private static readonly EnumerationOptions Enumeration = new() { AttributesToSkip = 0, IgnoreInaccessible = true, ReturnSpecialDirectories = false };
+
+    /// <summary>How many entries a counting walk sees between updates of <see cref="SourceBase.Counters"/>.</summary>
+    private const int CountBatch = 1024;
 
     private readonly MirrorSettings _settings;
     private readonly Node _root = new("");
@@ -44,6 +47,83 @@ public sealed class MirrorSource : SourceBase
 
     /// <summary>For tests: re-check reachability now.</summary>
     public void CheckRoots() => CheckRootsCore(report: true);
+
+    /// <summary>
+    /// "Count files on start": every configured path is walked at the same time, each on its own thread,
+    /// with <see cref="SourceBase.Counters"/> updated as the walks go. A path configured inside another
+    /// (C:\ and C:\Photos) is counted once, by its own walk; junctions and symlinks are counted but not
+    /// followed; an unreachable path contributes nothing until the next count.
+    /// </summary>
+    public async Task CountFilesAsync(CancellationToken ct)
+    {
+        // every level of the folder chains is a folder of the source
+        Counters.Set(0, CountNodes(_root, underRoot: _root.Root is not null), EnumerationState.InProgress);
+        var chains = new HashSet<string>(_roots.Select(r => r.ChainPath), StringComparer.OrdinalIgnoreCase);
+        var walks = _roots.Select(root => Task.Run(() => WalkForCount(root, chains, ct), ct)).ToList();
+        await Task.WhenAll(walks).ConfigureAwait(false);
+    }
+
+    /// <summary>Chain levels the walks won't see: those above any configured path, and configured paths inside another (which the outer walk skips).</summary>
+    private static long CountNodes(Node node, bool underRoot)
+        => node.Children.Values.Sum(child => (child.Root is not null || !underRoot ? 1 : 0) + CountNodes(child, underRoot || child.Root is not null));
+
+    private void WalkForCount(MirrorRoot root, HashSet<string> chains, CancellationToken ct)
+    {
+        if (!Directory.Exists(root.FullPath))
+        {
+            Logger.LogDebug("mirror: count skipped {Path}: not reachable", root.Original);
+            return;
+        }
+
+        long files = 0, directories = 0;
+        var pending = 0;
+        var stack = new Stack<(string Real, string Chain)>();
+        stack.Push((root.FullPath, root.ChainPath));
+        while (stack.Count > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            var (real, chain) = stack.Pop();
+            try
+            {
+                foreach (var entry in new DirectoryInfo(real).EnumerateFileSystemInfos("*", Enumeration))
+                {
+                    if (entry.Attributes.HasFlag(FileAttributes.Directory))
+                    {
+                        var childChain = chain.Length == 0 ? entry.Name : chain + "/" + entry.Name;
+                        if (chains.Count > 1 && chains.Contains(childChain))
+                        {
+                            // another configured path appears here and walks it (and it's a chain node, counted already)
+                            continue;
+                        }
+
+                        directories++;
+                        if (!entry.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                        {
+                            stack.Push((entry.FullName, childChain));
+                        }
+                    }
+                    else
+                    {
+                        files++;
+                    }
+
+                    if (++pending == CountBatch)
+                    {
+                        Counters.Add(files, directories);
+                        files = directories = 0;
+                        pending = 0;
+                        ct.ThrowIfCancellationRequested();
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                Logger.LogDebug("mirror: count skipped {Path}: {Error}", real, ex.Message);
+            }
+        }
+
+        Counters.Add(files, directories);
+    }
 
     protected override Task OnInitialiseAsync(CancellationToken ct)
     {

@@ -73,7 +73,7 @@ public class SettingsStoreTests
             Settings = new JsonObject { ["paths"] = "\\\\aus-files-01\\shared", ["checkIntervalSeconds"] = 30 },
         };
         store.Sources.Add(source);
-        var collection = new CollectionDefinition { Name = "ben" };
+        var collection = new CollectionDefinition { Name = "work" };
         collection.Sources.Add(new SourceMembership { Id = source.Id, Path = "files", ReadOnly = true });
         collection.Mounts.Add(new MountDefinition { Name = "HTTP", Provider = "http", ReadOnly = true, Settings = new JsonObject { ["port"] = 11001 } });
         store.Collections.Add(collection);
@@ -93,7 +93,7 @@ public class SettingsStoreTests
         Assert.AreEqual("\\\\aus-files-01\\shared", s.Settings!["paths"]!.GetValue<string>());
         Assert.AreEqual(30, s.Settings["checkIntervalSeconds"]!.GetValue<int>());
         var c = reloaded.Collections.Single();
-        Assert.AreEqual("ben", c.Name);
+        Assert.AreEqual("work", c.Name);
         Assert.AreEqual("files", c.Sources.Single().Path);
         Assert.IsTrue(c.Sources.Single().ReadOnly);
         Assert.IsTrue(c.Mounts.Single().ReadOnly);
@@ -147,7 +147,7 @@ public class SettingsStoreTests
         Directory.CreateDirectory(_paths.Settings);
         var unknown = Guid.NewGuid();
         File.WriteAllText(_paths.SourcesFile, """{ "version": 99, "sources": [] }""");
-        File.WriteAllText(_paths.CollectionsFile, $$"""{ "version": 1, "collections": [ { "name": "ben", "sources": [ { "id": "{{unknown}}", "path": " /Files\\x/ ", "readOnly": false } ], "mounts": [ { "provider": "http" } ] } ] }""");
+        File.WriteAllText(_paths.CollectionsFile, $$"""{ "version": 1, "collections": [ { "name": "work", "sources": [ { "id": "{{unknown}}", "path": " /Files\\x/ ", "readOnly": false } ], "mounts": [ { "provider": "http" } ] } ] }""");
         var store = new SettingsStore(_paths, NullLogger.Instance);
         store.Load();
         var c = store.Collections.Single();

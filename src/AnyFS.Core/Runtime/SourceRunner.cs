@@ -254,50 +254,25 @@ public sealed class SourceRunner : IAsyncDisposable
         }
     }
 
-    /// <summary>The opt-in "Count files on start" walk (spec 6.8): throttled, with the spinner on.</summary>
+    /// <summary>
+    /// The opt-in "Count files on start" walk (spec 6.8), with the spinner on: the source's own
+    /// <see cref="ICountable.CountFilesAsync"/> when it has one, else a throttled directory-by-directory walk.
+    /// </summary>
     private async Task CountAsync(ISource source, CancellationToken ct)
     {
         var healthy = Handle.Status;
         Handle.Status = new ComponentStatus(ComponentState.Enumerating, "Counting files");
         source.Counters.SetState(EnumerationState.InProgress);
-        long files = 0, directories = 0;
-        var queue = new Queue<string>();
-        queue.Enqueue("");
         try
         {
-            while (queue.Count > 0)
+            if (source is ICountable countable)
             {
-                ct.ThrowIfCancellationRequested();
-                var dir = queue.Dequeue();
-                try
-                {
-                    await foreach (var entry in source.ListAsync(dir, ct).ConfigureAwait(false))
-                    {
-                        if (entry.IsDirectory)
-                        {
-                            directories++;
-                            queue.Enqueue(VfsPath.Join(dir, entry.Name));
-                        }
-                        else
-                        {
-                            files++;
-                        }
-                    }
-                }
-                catch (VfsException ex)
-                {
-                    _logger.LogDebug("source {Source}: count skipped '{Dir}': {Error}", Definition.Name, dir, ex.Message);
-                }
-
-                source.Counters.Set(files, directories, EnumerationState.InProgress);
-                Handle.Status = new ComponentStatus(ComponentState.Enumerating, $"Counting files ({files:N0} so far)");
-                if (CountThrottle > TimeSpan.Zero)
-                {
-                    await Task.Delay(CountThrottle, _time, ct).ConfigureAwait(false);
-                }
+                await CountViaSourceAsync(source, countable, ct).ConfigureAwait(false);
             }
-
-            source.Counters.Set(files, directories, EnumerationState.Complete);
+            else
+            {
+                await WalkAsync(source, ct).ConfigureAwait(false);
+            }
         }
         finally
         {
@@ -311,6 +286,60 @@ public sealed class SourceRunner : IAsyncDisposable
                 Handle.Status = healthy;
             }
         }
+    }
+
+    private async Task CountViaSourceAsync(ISource source, ICountable countable, CancellationToken ct)
+    {
+        var counting = countable.CountFilesAsync(ct);
+        while (!counting.IsCompleted)
+        {
+            await Task.WhenAny(counting, Task.Delay(250, ct)).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            Handle.Status = new ComponentStatus(ComponentState.Enumerating, $"Counting files ({source.Counters.FilesKnown:N0} so far)");
+        }
+
+        await counting.ConfigureAwait(false);
+        source.Counters.SetState(EnumerationState.Complete);
+    }
+
+    private async Task WalkAsync(ISource source, CancellationToken ct)
+    {
+        long files = 0, directories = 0;
+        var queue = new Queue<string>();
+        queue.Enqueue("");
+        while (queue.Count > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            var dir = queue.Dequeue();
+            try
+            {
+                await foreach (var entry in source.ListAsync(dir, ct).ConfigureAwait(false))
+                {
+                    if (entry.IsDirectory)
+                    {
+                        directories++;
+                        queue.Enqueue(VfsPath.Join(dir, entry.Name));
+                    }
+                    else
+                    {
+                        files++;
+                    }
+                }
+            }
+            catch (VfsException ex)
+            {
+                _logger.LogDebug("source {Source}: count skipped '{Dir}': {Error}", Definition.Name, dir, ex.Message);
+            }
+
+            source.Counters.Set(files, directories, EnumerationState.InProgress);
+            Handle.Status = new ComponentStatus(ComponentState.Enumerating, $"Counting files ({files:N0} so far)");
+            if (CountThrottle > TimeSpan.Zero)
+            {
+                await Task.Delay(CountThrottle, _time, ct).ConfigureAwait(false);
+            }
+        }
+
+        source.Counters.Set(files, directories, EnumerationState.Complete);
     }
 
     private async Task DisposeCurrentAsync()

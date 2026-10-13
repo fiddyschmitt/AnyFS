@@ -42,7 +42,7 @@ public class HttpMountTests
         .AddFile("unicode/ünïcödé ✓ 日本語.txt", "unicode names")
         .AddDirectory("emptydir");
 
-    private async Task<(IMount Mount, TestMountContext Context, HttpClient Client, string Base)> StartAsync(ISource source, string collection = "ben", int? port = null, TestMountContext? shareWith = null, bool readOnly = false)
+    private async Task<(IMount Mount, TestMountContext Context, HttpClient Client, string Base)> StartAsync(ISource source, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool readOnly = false)
     {
         await source.InitialiseAsync(new TestSourceContext(collection), CancellationToken.None);
         var p = port ?? FreePort();
@@ -83,9 +83,9 @@ public class HttpMountTests
         CollectionAssert.AreEqual(new[] { "sub", "b.txt", "a.txt" }, bySize.RootElement.EnumerateArray().Select(i => i.GetProperty("name").GetString()).ToArray());
 
         var index = await client.GetStringAsync("/");
-        StringAssert.Contains(index, "<a href=\"/ben/\">ben/</a>");
+        StringAssert.Contains(index, "<a href=\"/work/\">work/</a>");
         using var indexJson = JsonDocument.Parse(await client.GetStringAsync("/?format=json"));
-        Assert.AreEqual("ben", indexJson.RootElement[0].GetProperty("name").GetString());
+        Assert.AreEqual("work", indexJson.RootElement[0].GetProperty("name").GetString());
     }
 
     [TestMethod]
@@ -94,13 +94,13 @@ public class HttpMountTests
         var (_, _, client, _) = await StartAsync(Tree());
         using var handler = new HttpClientHandler { AllowAutoRedirect = false };
         using var raw = new HttpClient(handler) { BaseAddress = client.BaseAddress };
-        var r = await raw.GetAsync("ben");
+        var r = await raw.GetAsync("work");
         Assert.AreEqual(HttpStatusCode.MovedPermanently, r.StatusCode);
-        Assert.AreEqual("/ben/", r.Headers.Location!.ToString());
-        r = await raw.GetAsync("ben/docs/sub?format=json");
+        Assert.AreEqual("/work/", r.Headers.Location!.ToString());
+        r = await raw.GetAsync("work/docs/sub?format=json");
         Assert.AreEqual(HttpStatusCode.MovedPermanently, r.StatusCode);
-        Assert.AreEqual("/ben/docs/sub/?format=json", r.Headers.Location!.ToString());
-        r = await raw.GetAsync("ben/readme.txt/");
+        Assert.AreEqual("/work/docs/sub/?format=json", r.Headers.Location!.ToString());
+        r = await raw.GetAsync("work/readme.txt/");
         Assert.AreEqual(HttpStatusCode.NotFound, r.StatusCode, "a file with a trailing slash is not a directory");
     }
 
@@ -218,15 +218,15 @@ public class HttpMountTests
     public async Task TwoCollectionsShareOneListener()
     {
         var port = FreePort();
-        var (benMount, benContext, client, _) = await StartAsync(Tree(), "ben", port);
-        var (bobMount, bobContext, _, _) = await StartAsync(new MemorySource().AddFile("bob.txt", "bob"), "bob", port, shareWith: benContext);
-        Assert.AreEqual(1, benContext.SharedCount, "one Kestrel for the port");
-        Assert.AreEqual("hello readme", await client.GetStringAsync("ben/readme.txt"));
+        var (workMount, workContext, client, _) = await StartAsync(Tree(), "work", port);
+        var (bobMount, bobContext, _, _) = await StartAsync(new MemorySource().AddFile("bob.txt", "bob"), "bob", port, shareWith: workContext);
+        Assert.AreEqual(1, workContext.SharedCount, "one Kestrel for the port");
+        Assert.AreEqual("hello readme", await client.GetStringAsync("work/readme.txt"));
         Assert.AreEqual("bob", await client.GetStringAsync("bob/bob.txt"));
         StringAssert.Contains(await client.GetStringAsync("/"), "bob/");
 
-        await benMount.StopAsync(CancellationToken.None);
-        Assert.AreEqual(HttpStatusCode.NotFound, (await client.GetAsync("ben/readme.txt")).StatusCode, "ben is gone");
+        await workMount.StopAsync(CancellationToken.None);
+        Assert.AreEqual(HttpStatusCode.NotFound, (await client.GetAsync("work/readme.txt")).StatusCode, "work is gone");
         Assert.AreEqual("bob", await client.GetStringAsync("bob/bob.txt"), "bob still served by the shared listener");
         Assert.AreEqual(1, bobContext.SharedCount);
 
@@ -239,9 +239,9 @@ public class HttpMountTests
     public async Task TheSameCollectionNameTwiceOnOnePortFails()
     {
         var port = FreePort();
-        var (_, context, _, _) = await StartAsync(Tree(), "ben", port);
-        var second = new HttpMountProvider().CreateMount(new HttpMountSettings { Port = port }, new Info("BEN"));
-        var ex = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => second.StartAsync(new SingleSourceVfs(new MemorySource(), "BEN"), new TestMountContext("BEN", shareWith: context), CancellationToken.None));
+        var (_, context, _, _) = await StartAsync(Tree(), "work", port);
+        var second = new HttpMountProvider().CreateMount(new HttpMountSettings { Port = port }, new Info("WORK"));
+        var ex = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => second.StartAsync(new SingleSourceVfs(new MemorySource(), "WORK"), new TestMountContext("WORK", shareWith: context), CancellationToken.None));
         StringAssert.Contains(ex.Message, "already served");
         Assert.AreEqual(1, context.SharedCount, "the failed mount released its lease");
     }
@@ -252,7 +252,7 @@ public class HttpMountTests
         using var blocker = new TcpListener(IPAddress.Loopback, 0);
         blocker.Start();
         var port = ((IPEndPoint)blocker.LocalEndpoint).Port;
-        var mount = new HttpMountProvider().CreateMount(new HttpMountSettings { Port = port }, new Info("ben"));
+        var mount = new HttpMountProvider().CreateMount(new HttpMountSettings { Port = port }, new Info("work"));
         var ex = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => mount.StartAsync(new SingleSourceVfs(new MemorySource()), new TestMountContext(), CancellationToken.None));
         StringAssert.Contains(ex.Message, "could not listen");
     }
@@ -313,7 +313,7 @@ public class HttpMountTests
         Assert.AreEqual("localhost", HttpMountProvider.HostFor(IPAddress.IPv6Loopback));
         Assert.AreEqual("[fe80::1]", HttpMountProvider.HostFor(IPAddress.Parse("fe80::1")));
         Assert.AreEqual("1.5 KB", HttpServer.HumanSize(1536));
-        Assert.AreEqual("/ben/a%20b/c%23.txt", HttpServer.UrlFor("ben", "a b/c#.txt", false));
+        Assert.AreEqual("/work/a%20b/c%23.txt", HttpServer.UrlFor("work", "a b/c#.txt", false));
     }
 
     private sealed record Info(string Name) : ICollectionInfo

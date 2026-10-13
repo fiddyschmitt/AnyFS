@@ -34,6 +34,7 @@ public class ViewModelTests
 
         var registry = new PluginRegistry();
         registry.AddBuiltIn(new MemoryPlugin());
+        registry.AddBuiltIn(new QuickPlugin());
         registry.AddBuiltIn(new FakeMountProvider());
         _engine = new AnyFsEngine(_paths, registry, NullLoggerFactory.Instance);
         _engine.Load();
@@ -113,7 +114,6 @@ public class ViewModelTests
         var tile = Collections.Collections.Single();
         Assert.AreEqual("Collection 1", tile.Name);
         Assert.AreSame(tile, Collections.SelectedCollection);
-        Assert.AreEqual("Collection: Collection 1", Collections.SelectedHeader);
         Assert.IsTrue(tile.Enabled);
         Assert.AreEqual("\u2014", tile.FilesText, "no sources: no count");
         Assert.IsTrue(tile.HasNoOpenTarget);
@@ -123,7 +123,7 @@ public class ViewModelTests
         Assert.AreEqual(SettingsStore.DefaultMountName(SettingsStore.NativeProviderForThisOs()), mount.Name);
         Assert.AreEqual(StatusColour.Red, mount.Colour, "the native provider isn't in this registry");
         StringAssert.Contains(mount.StatusText, "not available");
-        Assert.AreEqual("Fake is for compatibility.", Collections.MountGuidance);
+        Assert.IsFalse(mount.HasStatusAccessPath, "nothing to copy from a failed mount");
         Assert.AreEqual(StatusColour.Red, _vm.OverallColour);
         StringAssert.Contains(_vm.StatusText, "failure");
         StringAssert.Contains(_vm.FilesServedText, "0 files served");
@@ -132,15 +132,15 @@ public class ViewModelTests
     [TestMethod]
     public async Task AddingACollectionSelectsItAndARejectedNameStaysInTheDialog()
     {
-        var ben = await AddCollectionAsync("ben");
-        Assert.AreSame(ben, Collections.SelectedCollection);
-        Assert.IsTrue(_engine.Settings.Collections.Any(c => c.Name == "ben"));
+        var work = await AddCollectionAsync("work");
+        Assert.AreSame(work, Collections.SelectedCollection);
+        Assert.IsTrue(_engine.Settings.Collections.Any(c => c.Name == "work"));
 
         CollectionDialogViewModel? dialog = null;
         _dialogs.OnCollection = d =>
         {
             dialog = d;
-            d.Name = "BEN";
+            d.Name = "WORK";
             return Task.FromResult(true);
         };
         await Collections.AddCollectionCommand.ExecuteAsync(null);
@@ -151,7 +151,7 @@ public class ViewModelTests
     [TestMethod]
     public async Task AddingANewSourceFromACollectionCreatesItAndItsMembership()
     {
-        await AddCollectionAsync("ben");
+        await AddCollectionAsync("work");
         SourceDialogViewModel? seen = null;
         _dialogs.OnSource = d =>
         {
@@ -179,11 +179,11 @@ public class ViewModelTests
         Assert.AreEqual("0+ files", tile.FilesText, "a lazy source: nothing listed yet (spec 6.8)");
         Assert.IsFalse(tile.ReadOnlyLocked, "the memory source can write");
 
-        var membership = _engine.Settings.Collections.Single(c => c.Name == "ben").Sources.Single();
+        var membership = _engine.Settings.Collections.Single(c => c.Name == "work").Sources.Single();
         Assert.AreEqual("mem", membership.Path);
         Assert.AreEqual("alpha", _engine.Settings.Sources.Single().Name);
 
-        await ListAsync(_engine.Collections.Single(c => c.Name == "ben").Vfs, "mem");
+        await ListAsync(_engine.Collections.Single(c => c.Name == "work").Vfs, "mem");
         _vm.Refresh();
         Assert.AreEqual("1+ files", tile.FilesText, "what the router has seen go by");
         Assert.AreEqual("1+ files", Collections.SelectedCollection!.FilesText);
@@ -192,7 +192,7 @@ public class ViewModelTests
     [TestMethod]
     public async Task TileCheckboxesDriveTheEngineAndPersist()
     {
-        await AddCollectionAsync("ben");
+        await AddCollectionAsync("work");
         var tile = await AddSourceAsync("alpha", "a.txt=A");
 
         tile.Enabled = false;
@@ -204,12 +204,12 @@ public class ViewModelTests
 
         tile.ReadOnly = true;
         await _vm.Operations.Last;
-        Assert.IsTrue(_engine.Settings.Collections.Single(c => c.Name == "ben").Sources.Single().ReadOnly);
+        Assert.IsTrue(_engine.Settings.Collections.Single(c => c.Name == "work").Sources.Single().ReadOnly);
 
         var collection = Collections.SelectedCollection!;
         collection.Enabled = false;
         await _vm.Operations.Last;
-        Assert.IsFalse(_engine.Settings.Collections.Single(c => c.Name == "ben").Enabled);
+        Assert.IsFalse(_engine.Settings.Collections.Single(c => c.Name == "work").Enabled);
         _vm.Refresh();
         Assert.AreEqual("Disabled", collection.StatusText);
         Assert.AreEqual(0, _dialogs.Messages.Count, "no error dialogs");
@@ -218,7 +218,7 @@ public class ViewModelTests
     [TestMethod]
     public async Task ExistingSourceFlyoutAddsAMembershipWithTheDefaultPath()
     {
-        await AddCollectionAsync("ben");
+        await AddCollectionAsync("work");
         var alpha = await AddSourceAsync("alpha", "a.txt=A");
         await AddCollectionAsync("bob");
         Assert.AreEqual(0, Collections.Sources.Count);
@@ -245,13 +245,13 @@ public class ViewModelTests
         _vm.AllSources.Refresh();
         var all = _vm.AllSources.Sources.Single();
         Assert.IsTrue(all.ShowUses);
-        CollectionAssert.AreEqual(new[] { "ben: mem/alpha", "bob: mem/alpha  [read-only]" }, all.Uses.ToList());
+        CollectionAssert.AreEqual(new[] { "bob: mem/alpha  [read-only]", "work: mem/alpha" }, all.Uses.ToList());
     }
 
     [TestMethod]
     public async Task RemovingTheLastUseOffersToDeleteTheDefinition()
     {
-        await AddCollectionAsync("ben");
+        await AddCollectionAsync("work");
         var tile = await AddSourceAsync("alpha", "a.txt=A");
         Collections.SelectedSource = tile;
         _dialogs.OnConfirm = c =>
@@ -271,7 +271,7 @@ public class ViewModelTests
     [TestMethod]
     public async Task EditingASourceAppliesSettingsEverywhereAndPathHere()
     {
-        await AddCollectionAsync("ben");
+        await AddCollectionAsync("work");
         var tile = await AddSourceAsync("alpha", "a.txt=A");
         Collections.SelectedSource = tile;
         _dialogs.OnSource = d =>
@@ -290,21 +290,25 @@ public class ViewModelTests
         _vm.Refresh();
         Assert.AreEqual("alpha2", tile.Name);
         Assert.AreEqual("files", tile.Path);
-        CollectionAssert.AreEqual(new[] { "b.txt" }, (await ListAsync(_engine.Collections.Single(c => c.Name == "ben").Vfs, "files")));
+        CollectionAssert.AreEqual(new[] { "b.txt" }, (await ListAsync(_engine.Collections.Single(c => c.Name == "work").Vfs, "files")));
     }
 
     [TestMethod]
     public async Task MountsShowAccessPathsAndGiveEveryTileAnOpenTarget()
     {
-        await AddCollectionAsync("ben");
+        await AddCollectionAsync("work");
         var source = await AddSourceAsync("alpha", "a.txt=A", path: "mem");
         var mount = await AddMountAsync(5);
         Assert.AreEqual("Fake", mount.ProviderName);
         Assert.AreEqual(StatusColour.Green, mount.Colour);
-        Assert.AreEqual("fake://5/ben/", mount.AccessPaths.Single().Value);
+        Assert.AreEqual("fake://5/work/", mount.AccessPaths.Single().Value);
         Assert.AreEqual("URL", mount.AccessPaths.Single().Label);
-        await mount.AccessPaths.Single().CopyCommand.ExecuteAsync(null);
-        CollectionAssert.AreEqual(new[] { "fake://5/ben/" }, _clipboard.Texts);
+        Assert.AreEqual("fake://5/work/", mount.StatusText, "a running mount's status line is its access path");
+        Assert.AreSame(mount.AccessPaths.Single(), mount.StatusAccessPath, "so the Copy button sits beside the status line");
+        Assert.AreEqual("Copy the URL", mount.StatusCopyTooltip);
+        Assert.AreEqual(0, mount.OtherAccessPaths.Count, "and no separate box repeats it");
+        await mount.StatusAccessPath!.CopyCommand.ExecuteAsync(null);
+        CollectionAssert.AreEqual(new[] { "fake://5/work/" }, _clipboard.Texts);
 
         Assert.IsTrue(mount.HasOneOpenTarget);
         Assert.IsTrue(Collections.SelectedCollection!.HasOneOpenTarget);
@@ -312,7 +316,7 @@ public class ViewModelTests
         source.OpenSingleCommand.Execute(null);
         var (action, subPath) = _opener.Opened.Single();
         Assert.AreEqual("mem", subPath, "a source opens at its path inside the mount");
-        Assert.AreEqual("fake://5/ben/", ((MountOpenAction.Browser)action).Url);
+        Assert.AreEqual("fake://5/work/", ((MountOpenAction.Browser)action).Url);
 
         await AddMountAsync2(6);
         _vm.Refresh();
@@ -342,10 +346,10 @@ public class ViewModelTests
     [TestMethod]
     public async Task DeletingACollectionListsMountsAndOrphans()
     {
-        var ben = await AddCollectionAsync("ben");
+        var work = await AddCollectionAsync("work");
         await AddSourceAsync("alpha", "a.txt=A");
         await AddMountAsync(7);
-        Collections.SelectedCollection = ben;
+        Collections.SelectedCollection = work;
         _dialogs.OnConfirm = c =>
         {
             StringAssert.Contains(c.Message, "Fake");
@@ -355,7 +359,7 @@ public class ViewModelTests
         await Collections.DeleteCollectionCommand.ExecuteAsync(null);
         await _vm.Operations.Last;
         _vm.Refresh();
-        Assert.IsFalse(Collections.Collections.Any(c => c.Name == "ben"));
+        Assert.IsFalse(Collections.Collections.Any(c => c.Name == "work"));
         Assert.AreEqual(1, _engine.Settings.Sources.Count, "the orphan was kept (checkbox off)");
         Assert.AreEqual("Collection 1", Collections.SelectedCollection!.Name, "selection falls back");
     }
@@ -363,10 +367,10 @@ public class ViewModelTests
     [TestMethod]
     public async Task StatsTabReflectsServedFiles()
     {
-        await AddCollectionAsync("ben");
+        await AddCollectionAsync("work");
         await AddSourceAsync("alpha", "a.txt=A", path: "");
         await AddMountAsync(8);
-        var fs = FakeMountProvider.Mounts.Single(m => m.Collection.Name == "ben" && m.Fs is not null).Fs!;
+        var fs = FakeMountProvider.Mounts.Single(m => m.Collection.Name == "work" && m.Fs is not null).Fs!;
         await using (var file = await fs.OpenAsync("a.txt", VfsOpenMode.Read, CancellationToken.None))
         {
             var buffer = new byte[8];
@@ -377,7 +381,7 @@ public class ViewModelTests
         Assert.AreEqual("1", _vm.Stats.FilesServedSession);
         Assert.AreEqual("1 B", _vm.Stats.BytesServedSession);
         Assert.AreEqual("1 files served this session", _vm.FilesServedText);
-        var row = _vm.Stats.Rows.Single(r => r.Collection == "ben");
+        var row = _vm.Stats.Rows.Single(r => r.Collection == "work");
         Assert.AreEqual("1", row.FilesSession);
 
         _dialogs.OnConfirm = _ => new ConfirmAnswer(ConfirmButton.Yes, false);
@@ -408,6 +412,26 @@ public class ViewModelTests
     }
 
     [TestMethod]
+    public void SourceDialogCountsOnStartByDefaultForQuickSourcesUntilToggledByHand()
+    {
+        var dialog = new SourceDialogViewModel(_engine, _dialogs, null, null, askPath: true);
+        Assert.AreEqual("memory", dialog.SelectedPlugin!.TypeId);
+        Assert.IsFalse(dialog.CountFilesOnStart, "Memory doesn't say it's quick");
+        dialog.SelectedPlugin = dialog.PluginChoices.Single(p => p.TypeId == "quick");
+        Assert.IsTrue(dialog.CountFilesOnStart, "Quick does");
+        dialog.CountFilesOnStart = false;
+        dialog.SelectedPlugin = dialog.PluginChoices.Single(p => p.TypeId == "memory");
+        dialog.SelectedPlugin = dialog.PluginChoices.Single(p => p.TypeId == "quick");
+        Assert.IsFalse(dialog.CountFilesOnStart, "toggled by hand: stops following the plugin");
+
+        _engine.Settings.App.CountFilesOnStart = false;
+        var forced = new SourceDialogViewModel(_engine, _dialogs, null, null, askPath: true);
+        forced.SelectedPlugin = forced.PluginChoices.Single(p => p.TypeId == "quick");
+        Assert.IsFalse(forced.CountFilesOnStart, "app.json's countFilesOnStart overrides the plugin");
+        _engine.Settings.App.CountFilesOnStart = null;
+    }
+
+    [TestMethod]
     public void MountDialogNameFollowsTheProviderAndTheFormComesFromIt()
     {
         var runner = _engine.Collections.Single();
@@ -430,20 +454,13 @@ public class ViewModelTests
     }
 
     [TestMethod]
-    public void MountGuidanceIsWordedFromTheTiers()
-    {
-        var text = CollectionsViewModel.BuildMountGuidance([new FakeMountProvider(), new TierProvider("WinFsp", PerformanceTier.Native), new TierProvider("SMB", PerformanceTier.Network), new TierProvider("NFS", PerformanceTier.Network), new TierProvider("HTTP", PerformanceTier.Protocol)]);
-        Assert.AreEqual("WinFsp gives the best performance; NFS and SMB serve other machines; Fake and HTTP are for compatibility.", text);
-    }
-
-    [TestMethod]
     public void OpenerBuildsPathsAndUrls()
     {
-        Assert.AreEqual("http://h/ben/mem/alpha/", ShellOpener.AppendUrl("http://h/ben/", "mem/alpha"));
-        Assert.AreEqual("http://h/ben/", ShellOpener.AppendUrl("http://h/ben/", null));
-        Assert.AreEqual("http://h/ben/a%20b/", ShellOpener.AppendUrl("http://h/ben", "a b"));
-        var expected = @"\\anyfs\ben" + Path.DirectorySeparatorChar + "mem" + Path.DirectorySeparatorChar + "alpha";
-        Assert.AreEqual(expected, ShellOpener.AppendPath(@"\\anyfs\ben", "mem/alpha"));
+        Assert.AreEqual("http://h/work/mem/alpha/", ShellOpener.AppendUrl("http://h/work/", "mem/alpha"));
+        Assert.AreEqual("http://h/work/", ShellOpener.AppendUrl("http://h/work/", null));
+        Assert.AreEqual("http://h/work/a%20b/", ShellOpener.AppendUrl("http://h/work", "a b"));
+        var expected = @"\\anyfs\work" + Path.DirectorySeparatorChar + "mem" + Path.DirectorySeparatorChar + "alpha";
+        Assert.AreEqual(expected, ShellOpener.AppendPath(@"\\anyfs\work", "mem/alpha"));
     }
 
     private static async Task<List<string>> ListAsync(IVfsOperations ops, string path)
@@ -457,28 +474,27 @@ public class ViewModelTests
         return names;
     }
 
-    private sealed class TierProvider(string name, PerformanceTier tier) : IMountProviderPlugin
+    /// <summary>A Memory source that says it is quick to count, so "Count files on start" defaults on for it.</summary>
+    private sealed class QuickPlugin : ISourcePlugin
     {
-        public string TypeId => name.ToLowerInvariant();
+        private readonly MemoryPlugin _inner = new();
 
-        public string DisplayName => name;
+        public string TypeId => "quick";
 
-        public string Description => name;
+        public string DisplayName => "Quick";
+
+        public string Description => "quick to count";
+
+        public string TypeFolder => "quick";
 
         public Stream? OpenIcon() => null;
 
-        public IReadOnlyList<System.Runtime.InteropServices.OSPlatform> SupportedPlatforms { get; } = [System.Runtime.InteropServices.OSPlatform.Windows, System.Runtime.InteropServices.OSPlatform.Linux, System.Runtime.InteropServices.OSPlatform.OSX];
+        public Type SettingsType => _inner.SettingsType;
 
-        public string? UnavailableReason => null;
+        public bool IsQuickToCount => true;
 
-        public PerformanceTier Tier => tier;
+        public object CreateDefaultSettings() => _inner.CreateDefaultSettings();
 
-        public bool SupportsWrites => true;
-
-        public Type SettingsType => typeof(FakeMountSettings);
-
-        public object CreateDefaultSettings(ICollectionInfo collection) => new FakeMountSettings();
-
-        public IMount CreateMount(object settings, ICollectionInfo collection) => throw new NotSupportedException();
+        public ISource CreateSource(object settings) => _inner.CreateSource(settings);
     }
 }
