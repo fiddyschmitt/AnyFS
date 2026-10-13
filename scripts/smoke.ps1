@@ -65,7 +65,10 @@ $treeJson = $tree -replace '\\', '/'
 @"
 { "version": 1, "collections": [ { "id": "33333333-3333-3333-3333-333333333333", "name": "smoke", "enabled": true,
   "sources": [ { "id": "$mirrorId", "path": "", "readOnly": false }, { "id": "$sampleId", "path": "sample", "readOnly": true } ],
-  "mounts": [ { "id": "44444444-4444-4444-4444-444444444444", "name": "HTTP", "provider": "http", "enabled": true, "readOnly": false, "settings": { "bindAddress": "127.0.0.1", "port": $Port } } ] } ] }
+  "mounts": [ { "id": "44444444-4444-4444-4444-444444444444", "name": "HTTP", "provider": "http", "enabled": true, "readOnly": false, "settings": { "bindAddress": "127.0.0.1", "port": $Port } },
+              { "id": "55555555-5555-5555-5555-555555555555", "name": "WebDAV", "provider": "webdav", "enabled": true, "readOnly": false, "settings": { "bindAddress": "127.0.0.1", "port": $($Port + 1) } },
+              { "id": "66666666-6666-6666-6666-666666666666", "name": "FTP", "provider": "ftp", "enabled": true, "readOnly": false, "settings": { "bindAddress": "127.0.0.1", "port": $($Port + 2), "allowAnonymous": true } },
+              { "id": "77777777-7777-7777-7777-777777777777", "name": "SMB", "provider": "smb", "enabled": true, "readOnly": false, "settings": { "bindAddress": "127.0.0.1", "port": $($Port + 3), "guest": true } } ] } ] }
 "@ | Set-Content -Path (Join-Path $settings 'collections.json') -Encoding utf8
 
 $serveOut = Join-Path $work 'serve.out'
@@ -108,6 +111,34 @@ try {
         Check ($greeting.Content.Trim() -eq 'smoke says hi') "the sample plugin's file through the trimmed host"
         try { $null = Invoke-WebRequest -UseBasicParsing -Uri "${base}nope.txt"; Check $false "404 for a missing file" } catch { Check ($_.Exception.Response.StatusCode.value__ -eq 404) "404 for a missing file" }
 
+        Write-Host "== WebDAV, FTP and SMB mounts of the same collection"
+        Add-Type -AssemblyName System.Net.Http
+        $dav = New-Object System.Net.Http.HttpClient
+        $propfind = New-Object System.Net.Http.HttpRequestMessage ((New-Object System.Net.Http.HttpMethod 'PROPFIND'), "http://127.0.0.1:$($Port + 1)/smoke/")
+        $propfind.Headers.TryAddWithoutValidation('Depth', '1') | Out-Null
+        $davResponse = $dav.SendAsync($propfind).GetAwaiter().GetResult()
+        # bytes, not ReadAsStringAsync: .NET Framework's HttpClient refuses the quoted charset in text/xml; charset="utf-8"
+        $davBody = [System.Text.Encoding]::UTF8.GetString($davResponse.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult())
+        Check ([int]$davResponse.StatusCode -eq 207 -and $davBody -match '<D:href>/smoke/sample/</D:href>') "WebDAV PROPFIND depth 1 lists the collection (207)"
+        $davGet = $dav.GetStringAsync("http://127.0.0.1:$($Port + 1)/smoke/sample/hello.txt").GetAwaiter().GetResult()
+        Check ($davGet.Trim() -eq 'smoke says hi') "WebDAV GET reads a file"
+        $dav.Dispose()
+        try {
+            $ftp = [System.Net.FtpWebRequest]::Create("ftp://127.0.0.1:$($Port + 2)/smoke/")
+            $ftp.Method = [System.Net.WebRequestMethods+Ftp]::ListDirectory
+            $ftp.Credentials = New-Object System.Net.NetworkCredential('anonymous', 'smoke@anyfs')
+            $ftp.UsePassive = $true
+            $ftpResponse = $ftp.GetResponse()
+            $reader = New-Object System.IO.StreamReader ($ftpResponse.GetResponseStream())
+            $ftpList = $reader.ReadToEnd()
+            $reader.Dispose(); $ftpResponse.Dispose()
+            Check ($ftpList -match 'sample') "FTP anonymous LIST shows the collection"
+        }
+        catch { Check $false "FTP anonymous LIST shows the collection ($($_.Exception.Message))" }
+        $smbUp = $false
+        try { $tcp = New-Object System.Net.Sockets.TcpClient; $tcp.Connect('127.0.0.1', $Port + 3); $smbUp = $tcp.Connected; $tcp.Dispose() } catch { }
+        Check $smbUp "SMB server (bundled portable-smb-server) listening on port $($Port + 3)"
+
         # status.json is refreshed every two seconds, so give the counters a moment to land
         $status = ''
         $statusExit = -1
@@ -116,7 +147,8 @@ try {
             $status = & $Exe status --settings-dir $settings 2>&1 | Out-String
             $statusExit = $LASTEXITCODE
         }
-        Check ($statusExit -eq 0) "anyfs status exit 0 while serving (all green)"
+        # exit 1 is allowed only for the WebDAV mount's yellow on Windows (the WebClient service is usually stopped); nothing may be Failed
+        Check (($statusExit -eq 0) -or ($statusExit -eq 1 -and $status -match 'WebClient' -and $status -notmatch 'Failed')) "anyfs status while serving: all green, or only WebDAV yellow about WebClient (exit $statusExit)"
         Check ($status -match 'Files served: [1-9]') "status reports files served"
     }
 }
@@ -127,6 +159,7 @@ finally {
 $log = Get-Content (Join-Path $work 'anyfs.log') -Raw -ErrorAction SilentlyContinue
 Check ($log -match 'is up at') "anyfs.log written with the mount's access path"
 Check (-not ($log -match ' ERROR ')) "no ERROR lines in anyfs.log"
+if ($log -match ' ERROR ') { Write-Host "--- ERROR lines"; ($log -split "`n") | Where-Object { $_ -match ' ERROR ' } | Select-Object -First 10 }
 if ($failures -gt 0) {
     Write-Host "--- serve stdout"; Get-Content $serveOut -ErrorAction SilentlyContinue | Select-Object -Last 40
     Write-Host "--- serve stderr"; Get-Content $serveErr -ErrorAction SilentlyContinue | Select-Object -Last 40

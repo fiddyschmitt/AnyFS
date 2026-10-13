@@ -2,10 +2,10 @@
   <PropertyGroup>
     <AssemblyName>AnyFS.Mounts.Smb</AssemblyName>
     <RootNamespace>AnyFS.Mounts.Smb</RootNamespace>
-    <!-- the Go server binaries fetched by scripts/fetch-go-servers.ps1 (spec 8.2, 14); one is embedded per RID at publish -->
-    <GoServersDir>$(MSBuildThisFileDirectory)..\..\..\tools\go-servers</GoServersDir>
-    <SmbServerExt Condition="$(RuntimeIdentifier.StartsWith('win'))">.exe</SmbServerExt>
-    <SmbServerBinary Condition="'$(RuntimeIdentifier)' != ''">$(GoServersDir)\$(RuntimeIdentifier)\portable-smb-server$(SmbServerExt)</SmbServerBinary>
+    <!-- the Windows job object that ties the server process to anyfs is declared with LibraryImport -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- the portable-smb-server binary is embedded by src/AnyFS.App (the SDK builds library references without the
+         RuntimeIdentifier, so only the executable knows which one to take); SmbServerBinary looks there too -->
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
@@ -13,13 +13,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
   </ItemGroup>
-  <ItemGroup Condition="'$(SmbServerBinary)' != '' and Exists('$(SmbServerBinary)')">
-    <EmbeddedResource Include="$(SmbServerBinary)" LogicalName="portable-smb-server" />
-  </ItemGroup>
-  <Target Name="ReportSmbServerBinary" BeforeTargets="CoreCompile" Condition="'$(SmbServerBinary)' != ''">
-    <Message Importance="high" Text="SMB: embedding $(SmbServerBinary)" Condition="Exists('$(SmbServerBinary)')" />
-    <Message Importance="high" Text="SMB: no server binary at $(SmbServerBinary); run scripts/fetch-go-servers.ps1 first or the SMB provider will be unavailable in this build" Condition="!Exists('$(SmbServerBinary)')" />
-  </Target>
   <ItemGroup>
     <InternalsVisibleTo Include="AnyFS.Mounts.Tests" />
   </ItemGroup>

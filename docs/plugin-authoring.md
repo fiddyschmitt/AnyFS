@@ -86,6 +86,18 @@ Test button. When a hint or placeholder depends on the machine (an example path 
 implement `ISettingTextProvider` on the plugin: `HintFor(propertyName)` and
 `PlaceholderFor(propertyName)` are asked for each property and null keeps the attribute's text.
 
+## Mount providers
+
+A mount provider implements `IMountProviderPlugin` and returns an `IMount` per collection; the
+mount gets an `IVirtualFileSystem` (the whole collection with the read-only layers applied, plus
+`CanWrite(path)`) and an `IMountContext` (logger, state folder, stats sink, health reports and
+`AcquireSharedAsync` for one listener shared by every mount on the same port). Report where the
+mount can be reached in `AccessPaths` and what Open should do in `OpenAction` (a path for the
+file manager, a URL, a command to run first, or text to show). `BindAddress` parses the usual
+bind-address setting and names the host for access paths. A provider that can install what it is
+missing (WinFsp through winget) implements `IInstallableProvider`: the tile and the Add mount
+dialog show its button while `UnavailableReason` is set, and retry the mount after a success.
+
 ## Caching helpers
 
 Caching is the source's business; the SDK makes the common strategies one-liners:

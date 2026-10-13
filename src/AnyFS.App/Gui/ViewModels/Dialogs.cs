@@ -312,6 +312,13 @@ public sealed class ProviderChoiceViewModel(IMountProviderPlugin provider)
     public string Caption => IsAvailable ? Description : $"{Description}  ({UnavailableReason})";
 
     public string Initial => Provider.DisplayName.Length > 0 ? Provider.DisplayName[..1].ToUpperInvariant() : "?";
+
+    /// <summary>The provider is missing something it can install here (N6).</summary>
+    public bool CanInstall => OnThisOs && Provider is IInstallableProvider { CanInstall: true } && Provider.UnavailableReason is not null;
+
+    public string InstallText => (Provider as IInstallableProvider)?.InstallText ?? "";
+
+    public string InstallDetail => (Provider as IInstallableProvider)?.InstallDetail ?? "";
 }
 
 /// <summary>The Add mount / Edit mount dialog (spec 11.1): provider (unavailable ones greyed with the reason), name, read-only, the provider's form.</summary>
@@ -368,7 +375,56 @@ public sealed partial class MountDialogViewModel : DialogViewModelBase
     [NotifyPropertyChangedFor(nameof(ReadOnlyLocked))]
     [NotifyPropertyChangedFor(nameof(ProviderUnavailableReason))]
     [NotifyPropertyChangedFor(nameof(ProviderUnavailable))]
+    [NotifyPropertyChangedFor(nameof(CanInstall))]
+    [NotifyCanExecuteChangedFor(nameof(InstallCommand))]
     public partial ProviderChoiceViewModel? SelectedProvider { get; set; }
+
+    /// <summary>The selected provider can install what it is missing (N6); the button runs it right here.</summary>
+    public bool CanInstall => SelectedProvider is { CanInstall: true };
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(InstallCommand))]
+    public partial bool Installing { get; set; }
+
+    [ObservableProperty]
+    public partial string? InstallProgress { get; set; }
+
+    public AsyncRelayCommand InstallCommand => _installCommand ??= new AsyncRelayCommand(InstallAsync, () => CanInstall && !Installing);
+
+    private AsyncRelayCommand? _installCommand;
+
+    private async Task InstallAsync()
+    {
+        if (SelectedProvider?.Provider is not IInstallableProvider installable)
+        {
+            return;
+        }
+
+        Installing = true;
+        InstallProgress = "Starting the installer...";
+        Error = null;
+        try
+        {
+            var result = await installable.InstallAsync(new Progress<string>(line => InstallProgress = line), CancellationToken.None);
+            if (!result.Success)
+            {
+                Error = result.Message;
+            }
+        }
+        catch (Exception ex)
+        {
+            Error = ex.GetBaseException().Message;
+        }
+        finally
+        {
+            Installing = false;
+            InstallProgress = null;
+            OnPropertyChanged(nameof(ProviderUnavailableReason));
+            OnPropertyChanged(nameof(ProviderUnavailable));
+            OnPropertyChanged(nameof(CanInstall));
+            InstallCommand.NotifyCanExecuteChanged();
+        }
+    }
 
     [ObservableProperty]
     public partial string Name { get; set; } = "";

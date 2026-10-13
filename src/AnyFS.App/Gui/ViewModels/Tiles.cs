@@ -306,17 +306,68 @@ public sealed class AccessPathViewModel(string label, string value, ITextClipboa
     public IAsyncRelayCommand CopyCommand { get; } = new AsyncRelayCommand(() => clipboard.SetTextAsync(value));
 }
 
+/// <summary>What the tile's Install button offers when a provider can install what it is missing (N6).</summary>
+public sealed record InstallOffer(string Text, string Detail);
+
 public sealed partial class MountTileViewModel : TileViewModel
 {
     private readonly Func<bool, Task> _setEnabled;
+    private readonly Func<Task> _retry;
+    private readonly Func<IProgress<string>, Task> _install;
     private readonly ITextClipboard _clipboard;
     private bool _syncing;
 
-    public MountTileViewModel(Guid id, Func<bool, Task> setEnabled, ITextClipboard clipboard)
+    public MountTileViewModel(Guid id, Func<bool, Task> setEnabled, Func<Task> retry, Func<IProgress<string>, Task> install, ITextClipboard clipboard)
         : base(id)
     {
         _setEnabled = setEnabled;
+        _retry = retry;
+        _install = install;
         _clipboard = clipboard;
+        RetryCommand = new AsyncRelayCommand(() => _retry(), () => CanRetry);
+        InstallCommand = new AsyncRelayCommand(InstallAsync, () => CanInstall && !Installing);
+    }
+
+    /// <summary>A failed or degraded mount can be started again now.</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(RetryCommand))]
+    public partial bool CanRetry { get; set; }
+
+    public AsyncRelayCommand RetryCommand { get; }
+
+    /// <summary>The provider is missing something it can install (WinFsp through winget).</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(InstallCommand))]
+    public partial bool CanInstall { get; set; }
+
+    [ObservableProperty]
+    public partial string InstallText { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string InstallDetail { get; set; } = "";
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(InstallCommand))]
+    public partial bool Installing { get; set; }
+
+    [ObservableProperty]
+    public partial string? InstallProgress { get; set; }
+
+    public AsyncRelayCommand InstallCommand { get; }
+
+    private async Task InstallAsync()
+    {
+        Installing = true;
+        InstallProgress = "Starting the installer...";
+        try
+        {
+            await _install(new Progress<string>(line => InstallProgress = line));
+        }
+        finally
+        {
+            Installing = false;
+            InstallProgress = null;
+        }
     }
 
     [ObservableProperty]
@@ -361,7 +412,7 @@ public sealed partial class MountTileViewModel : TileViewModel
 
     public override string NoOpenTooltip => "The mount isn't running";
 
-    public void Update(MountStatus status, string providerName, IReadOnlyList<OpenTargetViewModel> targets)
+    public void Update(MountStatus status, string providerName, IReadOnlyList<OpenTargetViewModel> targets, InstallOffer? install = null)
     {
         _syncing = true;
         try
@@ -374,6 +425,10 @@ public sealed partial class MountTileViewModel : TileViewModel
             Enabled = status.Enabled;
             ReadOnly = status.ReadOnly;
             SetStatus(status.State, status.Text);
+            CanRetry = status.Enabled && status.State is nameof(ComponentState.Failed) or nameof(ComponentState.Degraded);
+            CanInstall = install is not null && status.Enabled;
+            InstallText = install?.Text ?? "";
+            InstallDetail = install?.Detail ?? "";
             if (!status.AccessPaths.Select(p => (p.Label, p.Value)).SequenceEqual(AccessPaths.Select(p => (p.Label, p.Value))))
             {
                 AccessPaths.Clear();

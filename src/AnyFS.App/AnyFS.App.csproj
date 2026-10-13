@@ -28,11 +28,31 @@
          POCOs makes ILLink report two framework-internal IL2026s (C++/CLI loader, ASP.NET's JsonOptions
          default resolver) and the ClassInterface/ProgId IL2045s that spike 7 saw; they are expected. -->
     <NoWarn>$(NoWarn);IL2026;IL2045</NoWarn>
+    <!-- FubarDev.FtpServer, Scrutor and Newtonsoft.Json (M3) activate command handlers and decorators by reflection;
+         they are rooted whole above, so nothing they reach for is trimmed, and ILLink's analysis of their own code
+         (IL2046/IL2055/IL2067/IL2070/IL2072) is noise here. Our libraries keep the trim analyzer at build time. -->
+    <NoWarn>$(NoWarn);IL2046;IL2055;IL2067;IL2070;IL2072</NoWarn>
     <!-- AVLN3001: views are constructed in code with their view models, never by the runtime XAML loader -->
     <NoWarn>$(NoWarn);AVLN3001</NoWarn>
     <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
     <UseSystemResourceKeys>true</UseSystemResourceKeys>
   </PropertyGroup>
+
+  <!-- The Go server portable-smb-server (spec 8.2, 14): scripts/fetch-go-servers.ps1 puts one per RID under
+       tools/go-servers/, and a RID-specific publish embeds that RID's copy for the SMB provider to extract on first use.
+       It lives here rather than in src/Mounts/Smb because the SDK builds library references without the RuntimeIdentifier. -->
+  <PropertyGroup>
+    <GoServersDir>$(MSBuildThisFileDirectory)..\..\tools\go-servers</GoServersDir>
+    <SmbServerExt Condition="'$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.StartsWith('win'))">.exe</SmbServerExt>
+    <SmbServerBinary Condition="'$(RuntimeIdentifier)' != ''">$(GoServersDir)\$(RuntimeIdentifier)\portable-smb-server$(SmbServerExt)</SmbServerBinary>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(SmbServerBinary)' != '' and Exists('$(SmbServerBinary)')">
+    <EmbeddedResource Include="$(SmbServerBinary)" LogicalName="portable-smb-server" />
+  </ItemGroup>
+  <Target Name="ReportSmbServerBinary" BeforeTargets="CoreCompile" Condition="'$(SmbServerBinary)' != ''">
+    <Message Importance="high" Text="SMB: embedding $(SmbServerBinary)" Condition="Exists('$(SmbServerBinary)')" />
+    <Message Importance="high" Text="SMB: no server binary at $(SmbServerBinary); run scripts/fetch-go-servers.ps1 first or the SMB provider will be unavailable in this build" Condition="!Exists('$(SmbServerBinary)')" />
+  </Target>
 
   <!-- The guaranteed set (spec 14.1): kept whole so third-party plugins can rely on it. Spike 7 showed that
        without System.Runtime no plugin DLL loads at all. Changing this list needs a clean obj/ (incremental ILLink). -->

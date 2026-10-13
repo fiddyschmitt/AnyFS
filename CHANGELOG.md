@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased (milestone 3: mount providers)
+
+- **WinFsp** (Windows): one WinFsp network file system per collection at `\\anyfs\<collection>`,
+  with no drive letter (a letter is an opt-in setting) through a prefix-only mount of winfsp.net
+  2.1.25156; case-insensitive and preserving, read-only layers shown as the read-only attribute,
+  normalized names, delete-on-close, rename, times. When the WinFsp driver is missing the tile and
+  the Add mount dialog offer **Install WinFsp** (`winget install WinFsp.WinFsp`) and retry the mount
+  afterwards.
+- **SMB** (all OSes) through portable-smb-server 0.3.0: one server process per bind address and
+  port serving every collection mounted there, fed by a loopback VFS endpoint that only answers
+  requests carrying the per-launch token; per-file read-only reaches the share as
+  `FILE_ATTRIBUTE_READONLY`; the process restarts when the set of shares changes. Access paths and
+  Open: the device-less `net use \\host\<collection> /TCPPORT:1445` on Windows, `smb://` for Finder,
+  the `mount -t cifs` line on Linux. `scripts/fetch-go-servers.ps1` fetches (or copies from a local
+  build) the binaries that the publish embeds per RID; `ANYFS_SMB_SERVER` or a copy beside anyfs
+  override it.
+- **FUSE** (Linux) through LTRData.FuseDotNet over libfuse3: `~/anyfs/<collection>` by default,
+  `allow_other` when `/etc/fuse.conf` permits it (otherwise a note), `default_permissions` with
+  mode bits from the read-only layers, stale mounts from a crash cleaned up, the soname resolved
+  for distros without the -dev package.
+- **WebDAV** (all OSes): our own RFC 4918 server on Kestrel: OPTIONS, PROPFIND depth 0/1,
+  PROPPATCH (dead properties accepted, live ones refused), GET with ranges, HEAD, PUT, MKCOL,
+  DELETE, recursive MOVE and COPY, class 2 exclusive write locks in memory with refresh and
+  lock-null files, optional Basic authentication, quota properties. On Windows the tile shows
+  `\\host@port\DavWWWRoot\<collection>` and Open starts the WebClient service when it is stopped
+  (administrator prompt); on macOS Open mounts it through Finder; on Linux `dav://`.
+- **FTP** (all OSes) through FubarDev.FtpServer 3.1.2: each collection a folder under the server
+  root, resume, passive mode with an optional port range and public address, anonymous and named
+  logins that each see their own collections.
+- Mount tiles gained a Retry item (failed or degraded mounts) and the Install button; the engine
+  gained `RetryMountAsync`; the SDK gained `IInstallableProvider`, `BindAddress` and an `Elevated`
+  flag on `MountOpenAction.Command`.
+- The tile status text trims with an ellipsis instead of overflowing.
+- Trimming: winfsp.net, FubarDev.FtpServer, Scrutor and NGettext are rooted whole at publish;
+  ILLink's analysis of those libraries' own reflection is suppressed with a justification.
+
 ## Unreleased (fixes after milestone 2)
 
 - Collections tab: the "Collection: name" header over the Sources and Mounts box is gone (the

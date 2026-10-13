@@ -36,6 +36,8 @@ public class ViewModelTests
         registry.AddBuiltIn(new MemoryPlugin());
         registry.AddBuiltIn(new QuickPlugin());
         registry.AddBuiltIn(new FakeMountProvider());
+        _installable = new InstallableProvider();
+        registry.AddBuiltIn(_installable);
         _engine = new AnyFsEngine(_paths, registry, NullLoggerFactory.Instance);
         _engine.Load();
         await _engine.StartAsync(null, CancellationToken.None);
@@ -473,6 +475,98 @@ public class ViewModelTests
         }
 
         return names;
+    }
+
+    private InstallableProvider _installable = null!;
+
+    [TestMethod]
+    public async Task InstallButtonInstallsTheProviderAndRetriesTheMount()
+    {
+        await AddCollectionAsync("work");
+        _dialogs.OnMount = d =>
+        {
+            d.SelectedProvider = d.Providers.Single(p => p.TypeId == "needy");
+            Assert.IsTrue(d.ProviderUnavailable, "the dialog shows why");
+            Assert.IsTrue(d.CanInstall, "and offers the install");
+            d.Form!.Fields.Single(f => f.PropertyName == "Port").Text = "7701";
+            return Task.FromResult(true);
+        };
+        await Collections.AddMountCommand.ExecuteAsync(null);
+        _vm.Refresh();
+        var tile = Collections.Mounts.Single(m => m.ProviderId == "needy");
+        Assert.AreEqual(StatusColour.Red, tile.Colour);
+        StringAssert.Contains(tile.StatusText, "not installed");
+        Assert.IsTrue(tile.CanInstall);
+        Assert.AreEqual("Install Needy", tile.InstallText);
+        Assert.IsTrue(tile.CanRetry, "a failed mount can be retried");
+
+        await tile.InstallCommand.ExecuteAsync(null);
+        await _vm.Operations.Last;
+        Assert.AreEqual(1, _installable.Installs);
+        Assert.IsTrue(_installable.Installed);
+        await Wait.UntilAsync(() => { _vm.Refresh(); return tile.Colour == StatusColour.Green; }, what: "the mount restarted after the install");
+        Assert.IsFalse(tile.CanInstall, "nothing left to install");
+        Assert.IsFalse(tile.Installing);
+    }
+
+    [TestMethod]
+    public async Task MountDialogInstallsFromTheUnavailablePanel()
+    {
+        var runner = _engine.Collections.Single();
+        var dialog = new MountDialogViewModel(_engine, _dialogs, runner, null);
+        dialog.SelectedProvider = dialog.Providers.Single(p => p.TypeId == "needy");
+        Assert.IsTrue(dialog.ProviderUnavailable);
+        Assert.IsTrue(dialog.CanInstall);
+        Assert.AreEqual("Install Needy", dialog.SelectedProvider!.InstallText);
+        await dialog.InstallCommand.ExecuteAsync(null);
+        Assert.IsNull(dialog.Error);
+        Assert.IsFalse(dialog.ProviderUnavailable, "installed: the reason is gone");
+        Assert.IsFalse(dialog.CanInstall);
+        Assert.AreEqual(1, _installable.Installs);
+    }
+
+    /// <summary>A Fake mount provider that is "not installed" until its Install runs (the WinFsp shape, N6).</summary>
+    private sealed class InstallableProvider : IMountProviderPlugin, IInstallableProvider
+    {
+        public bool Installed { get; set; }
+
+        public int Installs { get; private set; }
+
+        public string TypeId => "needy";
+
+        public string DisplayName => "Needy";
+
+        public string Description => "needs installing";
+
+        public Stream? OpenIcon() => null;
+
+        public IReadOnlyList<System.Runtime.InteropServices.OSPlatform> SupportedPlatforms { get; } = [System.Runtime.InteropServices.OSPlatform.Windows, System.Runtime.InteropServices.OSPlatform.Linux, System.Runtime.InteropServices.OSPlatform.OSX];
+
+        public string? UnavailableReason => Installed ? null : "Needy is not installed";
+
+        public PerformanceTier Tier => PerformanceTier.Native;
+
+        public bool SupportsWrites => true;
+
+        public Type SettingsType => typeof(FakeMountSettings);
+
+        public object CreateDefaultSettings(ICollectionInfo collection) => new FakeMountSettings();
+
+        public IMount CreateMount(object settings, ICollectionInfo collection) => new FakeMount((FakeMountSettings)settings, collection);
+
+        public string InstallText => "Install Needy";
+
+        public string InstallDetail => "Pretends to install";
+
+        public bool CanInstall => true;
+
+        public Task<InstallResult> InstallAsync(IProgress<string> progress, CancellationToken ct)
+        {
+            progress.Report("installing");
+            Installed = true;
+            Installs++;
+            return Task.FromResult(new InstallResult(true, "done"));
+        }
     }
 
     /// <summary>A Memory source that says it is quick to count, so "Count files on start" defaults on for it.</summary>

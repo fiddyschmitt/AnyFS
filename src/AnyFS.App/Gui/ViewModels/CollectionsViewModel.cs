@@ -135,8 +135,13 @@ public sealed partial class CollectionsViewModel : ObservableObject
             status?.Mounts ?? [],
             m => m.Id,
             vm => vm.Id,
-            m => new MountTileViewModel(m.Id, enabled => _ops.Run("Enable mount", () => _engine.SetMountEnabledAsync(collectionId, m.Id, enabled)), _clipboard),
-            (vm, m) => vm.Update(m, ProviderNameOf(m.Provider), MountOpenTargets(runner, m.Id, null)));
+            m => new MountTileViewModel(
+                m.Id,
+                enabled => _ops.Run("Enable mount", () => _engine.SetMountEnabledAsync(collectionId, m.Id, enabled)),
+                () => _ops.Run("Retry mount", () => _engine.RetryMountAsync(collectionId, m.Id)),
+                progress => _ops.Run("Install", () => InstallForMountAsync(collectionId, m.Id, progress)),
+                _clipboard),
+            (vm, m) => vm.Update(m, ProviderNameOf(m.Provider), MountOpenTargets(runner, m.Id, null), InstallOfferFor(m.Provider)));
 
         if (SelectedSource is not null && !Sources.Contains(SelectedSource))
         {
@@ -430,6 +435,33 @@ public sealed partial class CollectionsViewModel : ObservableObject
 
         var detail = mount.AccessPaths.Count > 0 ? mount.AccessPaths[0].Value : "";
         return [new OpenTargetViewModel(mount.Definition.Name, detail, action, string.IsNullOrEmpty(sourcePath) ? null : sourcePath, _opener)];
+    }
+
+    /// <summary>The Install button, when the provider is missing something it can install (WinFsp through winget, N6).</summary>
+    private InstallOffer? InstallOfferFor(string providerId)
+    {
+        var provider = _engine.Registry.FindMountProvider(providerId);
+        return provider is IInstallableProvider { CanInstall: true } installable && provider.UnavailableReason is not null
+            ? new InstallOffer(installable.InstallText, installable.InstallDetail)
+            : null;
+    }
+
+    private async Task InstallForMountAsync(Guid collectionId, Guid mountId, IProgress<string> progress)
+    {
+        var definition = _engine.FindCollectionRunner(collectionId)?.Mounts.FirstOrDefault(m => m.Definition.Id == mountId)?.Definition
+            ?? throw new InvalidOperationException("That mount no longer exists.");
+        if (_engine.Registry.FindMountProvider(definition.Provider) is not IInstallableProvider installable)
+        {
+            throw new InvalidOperationException("This mount provider has nothing to install.");
+        }
+
+        var result = await installable.InstallAsync(progress, CancellationToken.None);
+        if (!result.Success)
+        {
+            throw new InvalidOperationException(result.Message);
+        }
+
+        await _engine.RetryMountAsync(collectionId, mountId);
     }
 
     private string TypeNameOf(string typeId) => _engine.Registry.FindSource(typeId)?.DisplayName ?? typeId;

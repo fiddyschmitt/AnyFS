@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
@@ -182,6 +183,7 @@ internal sealed class SmbServerProcess : IAsyncDisposable
 
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
+        ChildJob.Attach(process, _logger);
         _stopping = false;
         _process = process;
 
@@ -228,6 +230,8 @@ internal sealed class SmbServerProcess : IAsyncDisposable
 
         yield return "-vfs-token";
         yield return _endpoint.Token;
+        // the server quits when anyfs dies (a crash, a kill): no orphan holding the port on the next start
+        yield return "-exit-with-parent";
         foreach (var share in _shares.Keys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase))
         {
             yield return "-vfs";
@@ -325,6 +329,107 @@ internal sealed class SmbServerProcess : IAsyncDisposable
 }
 
 /// <summary>
+/// On Windows, a job object with kill-on-close: when anyfs ends in any way (a crash, Stop-Process), the server
+/// process goes with it instead of lingering on the port. Elsewhere the server's own -exit-with-parent does this.
+/// </summary>
+internal static partial class ChildJob
+{
+    private const int ExtendedLimitInformationClass = 9;
+    private const uint JobObjectLimitKillOnJobClose = 0x2000;
+    private static readonly object Gate = new();
+    private static IntPtr _job;
+
+    public static void Attach(Process process, ILogger logger)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        try
+        {
+            lock (Gate)
+            {
+                if (_job == IntPtr.Zero)
+                {
+                    _job = CreateJobObjectW(IntPtr.Zero, null);
+                    if (_job == IntPtr.Zero)
+                    {
+                        return;
+                    }
+
+                    var info = new JobObjectExtendedLimitInformation { BasicLimitInformation = { LimitFlags = JobObjectLimitKillOnJobClose } };
+                    var size = Marshal.SizeOf<JobObjectExtendedLimitInformation>();
+                    var buffer = Marshal.AllocHGlobal(size);
+                    try
+                    {
+                        Marshal.StructureToPtr(info, buffer, false);
+                        SetInformationJobObject(_job, ExtendedLimitInformationClass, buffer, (uint)size);
+                    }
+                    finally
+                    {
+                        Marshal.FreeHGlobal(buffer);
+                    }
+                }
+
+                AssignProcessToJobObject(_job, process.Handle);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            logger.LogDebug(ex, "SMB server: could not attach the job object");
+        }
+    }
+
+    [LibraryImport("kernel32.dll", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial IntPtr CreateJobObjectW(IntPtr attributes, string? name);
+
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length);
+
+    [LibraryImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectBasicLimitInformation
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public nuint MinimumWorkingSetSize;
+        public nuint MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public nuint Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IoCounters
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JobObjectExtendedLimitInformation
+    {
+        public JobObjectBasicLimitInformation BasicLimitInformation;
+        public IoCounters IoInfo;
+        public nuint ProcessMemoryLimit;
+        public nuint JobMemoryLimit;
+        public nuint PeakProcessMemoryUsed;
+        public nuint PeakJobMemoryUsed;
+    }
+}
+
+/// <summary>
 /// Finds the portable-smb-server executable: ANYFS_SMB_SERVER, a copy beside anyfs, or the one embedded at publish
 /// (extracted into the state folder on first use, named by its hash so a new build never runs an old copy).
 /// </summary>
@@ -367,7 +472,7 @@ internal static class SmbServerBinary
             return beside;
         }
 
-        using var resource = typeof(SmbServerBinary).Assembly.GetManifestResourceStream(ResourceName)
+        using var resource = OpenEmbedded()
             ?? throw new InvalidOperationException($"the SMB server is not bundled in this build; put {FileName} beside anyfs or set {EnvironmentVariable}");
         using var buffer = new MemoryStream();
         resource.CopyTo(buffer);
@@ -402,5 +507,23 @@ internal static class SmbServerBinary
         return File.Exists(path) ? path : null;
     }
 
-    private static bool HasEmbedded() => typeof(SmbServerBinary).Assembly.GetManifestResourceNames().Contains(ResourceName, StringComparer.Ordinal);
+    private static bool HasEmbedded()
+    {
+        using var stream = OpenEmbedded();
+        return stream is not null;
+    }
+
+    /// <summary>The embedded copy: the host executable carries it (it alone knows its RID at publish), this assembly may too.</summary>
+    private static Stream? OpenEmbedded()
+    {
+        foreach (var assembly in new[] { Assembly.GetEntryAssembly(), typeof(SmbServerBinary).Assembly })
+        {
+            if (assembly?.GetManifestResourceStream(ResourceName) is { } stream)
+            {
+                return stream;
+            }
+        }
+
+        return null;
+    }
 }

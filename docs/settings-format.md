@@ -107,8 +107,50 @@ secret properties never enter it.
 | `bindAddress` | `127.0.0.1` (this machine), `0.0.0.0` (the LAN), an IP, `localhost`, `*`. |
 | `port` | Default 11001. Mounts on the same address and port share one server; each collection is at `http://host:port/<collection>/`. |
 
-Other providers (WinFsp, SMB, FUSE, NFS, WebDAV, FTP) arrive in later milestones; a mount of a
-provider this build doesn't have shows as Failed and is otherwise ignored.
+### WinFsp mount (`winfsp`, Windows)
+
+| Property | Meaning |
+|---|---|
+| `driveLetter` | Optional, D to Z: also map a drive letter for programs that can't open UNC paths. Empty (the default) means `\\anyfs\<collection>` only. |
+
+### SMB mount (`smb`)
+
+| Property | Meaning |
+|---|---|
+| `bindAddress` | As for HTTP. |
+| `port` | Default 1445. Every collection mounted on the same address and port shares one server process and one login. |
+| `guest` | `true` for guest access (no password; Windows refuses it unless `EnableInsecureGuestLogons` is on). |
+| `user` | The login (default `user`) when `guest` is false. |
+| `password` | Secret: lives in `state/secrets.json`, never here. Required unless `guest`. |
+
+### FUSE mount (`fuse`, Linux)
+
+| Property | Meaning |
+|---|---|
+| `mountPoint` | The folder, created if missing; `~` is the home folder. Default `~/anyfs/<collection>`. |
+| `allowOther` | `allow_other` (default true), honoured when `/etc/fuse.conf` has `user_allow_other`. |
+
+### WebDAV mount (`webdav`)
+
+| Property | Meaning |
+|---|---|
+| `bindAddress` | As for HTTP. |
+| `port` | Default 11000; mounts on the same address and port share one server. |
+| `user`, `password` | Optional Basic authentication (the password is a secret). |
+
+### FTP mount (`ftp`)
+
+| Property | Meaning |
+|---|---|
+| `bindAddress` | As for HTTP. |
+| `port` | Default 2121; mounts on the same address and port share one server. |
+| `allowAnonymous` | Default true: `anonymous` with any password sees this collection. |
+| `user`, `password` | A named login that sees this collection (the password is a secret). |
+| `passivePortFrom`, `passivePortTo` | Optional passive-mode port range, for firewalls. |
+| `publicAddress` | Optional IP clients connect back to in passive mode (NAT). |
+
+NFS arrives in milestone 7; a mount of a provider this build doesn't have shows as Failed and is
+otherwise ignored.
 
 ## state/
 

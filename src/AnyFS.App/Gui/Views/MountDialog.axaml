@@ -49,9 +49,16 @@
 
         <StackPanel Grid.Column="2">
           <Border Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" CornerRadius="6" Padding="10,8" Margin="0,0,0,10" IsVisible="{Binding ProviderUnavailable}">
-            <StackPanel Orientation="Horizontal" Spacing="8">
-              <PathIcon Classes="small" Data="{StaticResource IconWarning}" />
-              <TextBlock Text="{Binding ProviderUnavailableReason}" TextWrapping="Wrap" MaxWidth="380" />
+            <StackPanel Spacing="8">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <PathIcon Classes="small" Data="{StaticResource IconWarning}" />
+                <TextBlock Text="{Binding ProviderUnavailableReason}" TextWrapping="Wrap" MaxWidth="380" />
+              </StackPanel>
+              <!-- N6: install it from here (WinFsp through winget), then the mount can be created and started -->
+              <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding CanInstall}">
+                <Button Content="{Binding SelectedProvider.InstallText, FallbackValue=''}" Command="{Binding InstallCommand}" ToolTip.Tip="{Binding SelectedProvider.InstallDetail, FallbackValue=''}" />
+                <TextBlock Classes="muted" Text="{Binding InstallProgress}" IsVisible="{Binding Installing}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" MaxWidth="300" />
+              </StackPanel>
             </StackPanel>
           </Border>
           <TextBlock Classes="caption" Text="Name *" />

@@ -10,10 +10,11 @@
       <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto">
         <TextBlock Classes="name" Text="{Binding Name}" VerticalAlignment="Center" />
         <CheckBox Grid.Column="1" IsChecked="{Binding Enabled}" Content="Enabled" MinHeight="0" Padding="6,0,0,0" />
-        <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
+        <Grid Grid.Row="1" Grid.ColumnSpan="2" ColumnDefinitions="Auto,Auto" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
           <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" />
-          <TextBlock Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-        </StackPanel>
+          <TextBlock Grid.Column="1" Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                     MaxWidth="{Binding $parent[Grid].Bounds.Width, Converter={x:Static g:Converters.Minus}, ConverterParameter=18}" />
+        </Grid>
         <DockPanel Grid.Row="2" Grid.ColumnSpan="2" Margin="0,8,0,0">
           <views:OpenButton DockPanel.Dock="Right" />
           <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" ClipToBounds="True" Margin="0,0,8,0">
@@ -51,10 +52,11 @@
             </Button.Flyout>
           </Button>
         </StackPanel>
-        <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
+        <Grid Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" ColumnDefinitions="Auto,Auto" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
           <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" />
-          <TextBlock Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-        </StackPanel>
+          <TextBlock Grid.Column="1" Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                     MaxWidth="{Binding $parent[Grid].Bounds.Width, Converter={x:Static g:Converters.Minus}, ConverterParameter=18}" />
+        </Grid>
         <ItemsControl Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding Uses}" IsVisible="{Binding ShowUses}" Margin="0,4,0,0">
           <ItemsControl.ItemTemplate>
             <DataTemplate x:DataType="x:String">
@@ -76,8 +78,8 @@
 
   <DataTemplate x:Key="MountTile" x:DataType="vm:MountTileViewModel">
     <Border Classes="tile">
-      <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
-        <Border Grid.RowSpan="4" Classes="badge">
+      <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
+        <Border Grid.RowSpan="5" Classes="badge">
           <Panel>
             <TextBlock Text="{Binding Initial}" />
             <Image Width="22" Height="22" Source="{Binding IconKey, Converter={x:Static g:Converters.PluginIcon}}" />
@@ -93,7 +95,17 @@
           <!-- the provider only when the mount isn't simply named after it -->
           <TextBlock Classes="muted" Text="{Binding ProviderName}" IsVisible="{Binding ShowProvider}" />
         </StackPanel>
-        <CheckBox Grid.Column="2" IsChecked="{Binding Enabled}" Content="Enabled" MinHeight="0" Padding="6,0,0,0" VerticalAlignment="Top" />
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Top">
+          <CheckBox IsChecked="{Binding Enabled}" Content="Enabled" MinHeight="0" Padding="6,0,0,0" />
+          <Button Classes="icon" IsVisible="{Binding CanRetry}" ToolTip.Tip="Retry now">
+            <PathIcon Classes="small" Data="{StaticResource IconMore}" />
+            <Button.Flyout>
+              <MenuFlyout>
+                <MenuItem Header="Retry now" Command="{Binding RetryCommand}" />
+              </MenuFlyout>
+            </Button.Flyout>
+          </Button>
+        </StackPanel>
         <!-- the status line of a running mount is its access path (URL, UNC path), so the Copy button follows the end of
              the text; the text's MaxWidth leaves room for the circle and the button so a long path still trims -->
         <Grid Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" ColumnDefinitions="Auto,Auto,Auto" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
@@ -117,7 +129,12 @@
             </DataTemplate>
           </ItemsControl.ItemTemplate>
         </ItemsControl>
-        <views:OpenButton Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" HorizontalAlignment="Right" Margin="0,4,0,0" />
+        <!-- N6: a provider that can install what it is missing (WinFsp via winget) offers it here -->
+        <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Spacing="8" Margin="0,4,0,0" IsVisible="{Binding CanInstall}">
+          <Button Content="{Binding InstallText}" Command="{Binding InstallCommand}" ToolTip.Tip="{Binding InstallDetail}" AutomationProperties.Name="{Binding InstallText}" />
+          <TextBlock Classes="muted" Text="{Binding InstallProgress}" IsVisible="{Binding Installing}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" MaxWidth="260" />
+        </StackPanel>
+        <views:OpenButton Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" HorizontalAlignment="Right" Margin="0,4,0,0" />
       </Grid>
     </Border>
   </DataTemplate>

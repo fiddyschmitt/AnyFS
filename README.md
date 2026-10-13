@@ -13,7 +13,7 @@ can write their own.
 
 ## Status
 
-Milestones 1 and 2 are done:
+Milestones 1 to 3 are done:
 
 - `AnyFS.Sdk`: the plugin contract (sources, mount providers, settings attributes, prompts),
   `SourceBase`, and helpers for caching (`ListingCache`, `SpoolCache`, `RandomAccessOverStream`).
@@ -23,13 +23,16 @@ Milestones 1 and 2 are done:
 - The window (Avalonia): Collections, All sources and Stats tabs with tile lists, Add/Edit/Delete
   dialogs, a settings form generated from each plugin's `[Setting]` attributes, prompts, and a
   status bar. It follows the OS light/dark theme.
-- Built-in **Mirror** source (local folders, drives and, on Windows, UNC shares) and **HTTP**
-  mount (directory pages, JSON, resumable downloads).
+- Built-in **Mirror** source (local folders, drives and, on Windows, UNC shares).
+- Built-in mounts: **WinFsp** (`\\anyfs\<collection>` on Windows, no drive letter, with an Install
+  button when the driver is missing), **SMB** (the bundled portable-smb-server, for Windows, Linux
+  and macOS clients), **FUSE** (Linux), **WebDAV** (our own server, with the Windows UNC form),
+  **FTP** and **HTTP** (directory pages, JSON, resumable downloads). [docs/mounts.md](docs/mounts.md)
+  says how to reach each one without mapping anything.
 - `anyfs serve` and `anyfs status` for headless use.
 - Unit and GUI tests, a trimmed single-file publish, CI.
 
-Coming next: WinFsp, SMB, WebDAV, FTP and FUSE mounts (M3), SSHFS and Import/Export (M4), the
-end-to-end lab (M5), a macOS `.app` (M6), NFS (M7).
+Coming next: SSHFS and Import/Export (M4), the end-to-end lab (M5), a macOS `.app` (M6), NFS (M7).
 
 ## Try it
 
@@ -41,10 +44,10 @@ dotnet run --project src/AnyFS.App -- --settings-dir ./scratch/settings
 
 The last line opens the window against a scratch settings folder. The first start creates
 "Collection 1" with the native mount provider for the OS (WinFsp on Windows, FUSE on Linux, SMB on
-macOS; those providers arrive in milestone 3, so the tile shows the mount as failed until then).
-Use **Add ▾ › New source...** under Sources to add a Mirror of a folder, and **Add** under Mounts to
-add an HTTP mount; then **Open containing folder** on the mount opens
-<http://localhost:11001/Collection%201/> in the browser.
+macOS). Use **Add ▾ › New source...** under Sources to add a Mirror of a folder; on Windows with
+WinFsp installed (the tile offers to install it) the collection is at `\\anyfs\Collection 1` at
+once, and **Open containing folder** opens it in Explorer. **Add** under Mounts adds the others:
+an HTTP mount, say, serves <http://localhost:11001/Collection%201/> to a browser.
 
 Headless, the same settings files drive `anyfs serve`. The format is in
 [docs/settings-format.md](docs/settings-format.md); for example a folder over HTTP:
@@ -88,6 +91,7 @@ afterwards) or `Start-Process -Wait`.
 ## Publish
 
 ```
+.\scripts\fetch-go-servers.ps1        # the pinned portable-smb-server binaries into tools/go-servers/<rid>/
 .\scripts\publish.ps1                 # every RID into publish/<rid>/
 .\scripts\publish.ps1 -Rid win-x64    # one
 .\scripts\smoke.ps1 -Exe publish\win-x64\anyfs.exe -SamplePluginDll tests\fixtures\SamplePlugin\bin\Release\net10.0\AnyFS.SamplePlugin.dll
@@ -95,7 +99,10 @@ afterwards) or `Start-Process -Wait`.
 
 The executable is self-contained, single file and trimmed; a documented set of framework
 assemblies is kept whole so third-party plugins can rely on it (see
-[docs/plugin-authoring.md](docs/plugin-authoring.md)).
+[docs/plugin-authoring.md](docs/plugin-authoring.md)). The SMB provider's server is a separate Go
+executable ([portable-smb-server](https://github.com/fiddyschmitt/portable-smb-server)) that
+the publish embeds for the RID being built, from `tools/go-servers/`; without it the SMB provider
+reports itself unavailable, and `ANYFS_SMB_SERVER` or a copy beside `anyfs` can point at one.
 
 ## Plugins
 
@@ -112,9 +119,15 @@ src/AnyFS.Sdk.Testing    contract tests and fakes for plugin authors (and our ow
 src/AnyFS.Core           model, plugin host, router, read-only layers, status, settings, secrets, stats, logging
 src/AnyFS.App            anyfs: the window (Gui/) and the command line (Cli/)
 src/Sources/Mirror       the Mirror source
+src/Mounts/WinFsp        the WinFsp mount (Windows)
+src/Mounts/Smb           the SMB mount: the VFS endpoint and the portable-smb-server process
+src/Mounts/Fuse          the FUSE mount (Linux)
+src/Mounts/WebDav        the WebDAV server and mount
+src/Mounts/Ftp           the FTP mount over FubarDev.FtpServer
 src/Mounts/Http          the HTTP mount
 tests/                   unit tests per assembly, GUI tests (headless Avalonia), fixtures/MakeTree, fixtures/SamplePlugin
-scripts/                 publish.ps1, smoke.ps1
+scripts/                 publish.ps1, smoke.ps1, fetch-go-servers.ps1 (+ go-servers.json)
+tools/go-servers/        the fetched Go server binaries per RID (not in git)
 docs/                    settings-format.md, plugin-authoring.md, mounts.md
 ```
 
