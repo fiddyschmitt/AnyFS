@@ -1,0 +1,73 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+        xmlns:views="using:AnyFS.App.Gui.Views"
+        x:Class="AnyFS.App.Gui.Views.SourceDialog"
+        x:DataType="vm:SourceDialogViewModel"
+        Title="{Binding Title}"
+        Width="720" SizeToContent="Height" MaxHeight="820" CanResize="True"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+  <!-- spec 11.1: (1) pick the plugin, (2) name, path, read-only, then the plugin's settings form -->
+  <DockPanel Margin="16">
+    <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
+      <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" Margin="0,0,0,8" />
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+        <Button Content="OK" IsDefault="True" Click="Ok_Click" IsEnabled="{Binding !Busy}" MinWidth="80" />
+        <Button Content="Cancel" IsCancel="True" Click="Cancel_Click" MinWidth="80" />
+      </StackPanel>
+    </StackPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <Grid ColumnDefinitions="240,16,*">
+        <!-- (1) the plugin -->
+        <DockPanel Grid.Column="0" IsVisible="{Binding IsNew}">
+          <TextBlock DockPanel.Dock="Top" Classes="caption" Text="Source type" />
+          <ListBox ItemsSource="{Binding PluginChoices}" SelectedItem="{Binding SelectedPlugin}" MinHeight="200">
+            <ListBox.ItemTemplate>
+              <DataTemplate x:DataType="vm:PluginChoiceViewModel">
+                <Grid ColumnDefinitions="Auto,*" Margin="0,2">
+                  <Border Classes="badge" Width="26" Height="26" Margin="0,0,8,0">
+                    <TextBlock Text="{Binding Initial}" />
+                  </Border>
+                  <StackPanel Grid.Column="1">
+                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                    <TextBlock Classes="muted" Text="{Binding Description}" TextWrapping="Wrap" />
+                  </StackPanel>
+                </Grid>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+        </DockPanel>
+        <StackPanel Grid.Column="0" IsVisible="{Binding !IsNew}">
+          <TextBlock Classes="caption" Text="Source type" />
+          <TextBlock Text="{Binding SelectedPlugin.DisplayName, FallbackValue=''}" FontWeight="SemiBold" />
+          <TextBlock Classes="muted" Text="{Binding SelectedPlugin.Description, FallbackValue=''}" TextWrapping="Wrap" />
+        </StackPanel>
+
+        <!-- (2) name, path, flags, the form -->
+        <StackPanel Grid.Column="2">
+          <TextBlock Classes="caption" Text="Name *" />
+          <TextBox Name="NameBox" Text="{Binding Name}" />
+          <TextBlock Classes="hint" Text="{x:Static vm:SourceDialogViewModel.NameTip}" />
+
+          <StackPanel IsVisible="{Binding AskPath}" Margin="0,10,0,0">
+            <TextBlock Classes="caption" Text="Path" />
+            <TextBox Text="{Binding Path}" PlaceholderText="(collection root)" />
+            <TextBlock Classes="hint" Text="{Binding PathCaption}" />
+            <CheckBox IsChecked="{Binding ReadOnly}" IsEnabled="{Binding !ReadOnlyLocked}" Content="Read-only in this collection" Margin="0,6,0,0" />
+          </StackPanel>
+
+          <StackPanel Orientation="Horizontal" Spacing="16" Margin="0,8,0,0">
+            <CheckBox IsChecked="{Binding Enabled}" Content="Enabled" />
+            <CheckBox IsChecked="{Binding CountFilesOnStart}" Content="Count files on start" ToolTip.Tip="Walk the whole tree in the background after the source starts, so the file count is exact" />
+          </StackPanel>
+
+          <Separator Margin="0,12,0,10" />
+          <TextBlock Classes="subheader" Text="Settings" />
+          <Panel IsVisible="{Binding HasForm}">
+            <views:SettingsFormView DataContext="{Binding Form}" />
+          </Panel>
+        </StackPanel>
+      </Grid>
+    </ScrollViewer>
+  </DockPanel>
+</Window>

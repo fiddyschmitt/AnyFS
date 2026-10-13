@@ -1,0 +1,12 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+             x:Class="AnyFS.App.Gui.Views.FieldFooter"
+             x:DataType="vm:SettingFieldViewModel">
+  <!-- hint, warning and error under a form field -->
+  <StackPanel>
+    <TextBlock Classes="hint" Text="{Binding Hint}" IsVisible="{Binding HasHint}" />
+    <TextBlock Classes="warning" Text="{Binding Warning}" IsVisible="{Binding HasWarning}" />
+    <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" />
+  </StackPanel>
+</UserControl>

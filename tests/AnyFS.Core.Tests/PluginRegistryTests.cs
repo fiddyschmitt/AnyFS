@@ -1,6 +1,7 @@
 using AnyFS.Core.Plugins;
 using AnyFS.Core.Settings;
 using AnyFS.Sdk;
+using AnyFS.Sdk.Testing;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Core.Tests;

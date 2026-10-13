@@ -1,0 +1,107 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+             x:Class="AnyFS.App.Gui.Views.CollectionsTab"
+             x:DataType="vm:CollectionsViewModel">
+  <!-- spec 11.1: three tile lists; Sources and Mounts boxed together under "Collection: <name>" -->
+  <Grid ColumnDefinitions="3*,12,6*" Margin="4">
+    <DockPanel Grid.Column="0">
+      <TextBlock DockPanel.Dock="Top" Classes="header" Text="Collections" />
+      <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Classes="buttons" Margin="0,8,0,0">
+        <Button Command="{Binding AddCollectionCommand}" AutomationProperties.Name="Add collection">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <PathIcon Classes="small" Data="{StaticResource IconAdd}" />
+            <TextBlock Text="Add" />
+          </StackPanel>
+        </Button>
+        <Button Command="{Binding EditCollectionCommand}">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <PathIcon Classes="small" Data="{StaticResource IconEdit}" />
+            <TextBlock Text="Edit" />
+          </StackPanel>
+        </Button>
+        <Button Command="{Binding DeleteCollectionCommand}">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <PathIcon Classes="small" Data="{StaticResource IconDelete}" />
+            <TextBlock Text="Delete" />
+          </StackPanel>
+        </Button>
+      </StackPanel>
+      <ListBox Classes="tiles" Name="CollectionsList" ItemsSource="{Binding Collections}" SelectedItem="{Binding SelectedCollection}" ItemTemplate="{StaticResource CollectionTile}" SelectionMode="Single" />
+    </DockPanel>
+
+    <Border Grid.Column="2" Classes="group">
+      <DockPanel>
+        <TextBlock DockPanel.Dock="Top" Classes="header" Text="{Binding SelectedHeader}" />
+        <Grid ColumnDefinitions="*,12,*">
+          <!-- Sources of the selected collection -->
+          <DockPanel Grid.Column="0">
+            <TextBlock DockPanel.Dock="Top" Classes="subheader" Text="Sources" />
+            <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Classes="buttons" Margin="0,8,0,0">
+              <Button IsEnabled="{Binding HasSelectedCollection}" AutomationProperties.Name="Add source">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <PathIcon Classes="small" Data="{StaticResource IconAdd}" />
+                  <TextBlock Text="Add" />
+                  <PathIcon Width="10" Height="10" Data="{StaticResource IconChevronDown}" />
+                </StackPanel>
+                <Button.Flyout>
+                  <MenuFlyout>
+                    <MenuItem Header="New source..." Command="{Binding AddNewSourceCommand}" />
+                    <MenuItem Header="Existing source" ItemsSource="{Binding ExistingSources}" IsEnabled="{Binding HasExistingSources}">
+                      <MenuItem.ItemContainerTheme>
+                        <ControlTheme TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}" x:DataType="vm:ExistingSourceChoiceViewModel">
+                          <Setter Property="Header" Value="{Binding Header}" />
+                          <Setter Property="Command" Value="{Binding AddCommand}" />
+                        </ControlTheme>
+                      </MenuItem.ItemContainerTheme>
+                    </MenuItem>
+                  </MenuFlyout>
+                </Button.Flyout>
+              </Button>
+              <Button Command="{Binding EditSourceCommand}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <PathIcon Classes="small" Data="{StaticResource IconEdit}" />
+                  <TextBlock Text="Edit" />
+                </StackPanel>
+              </Button>
+              <Button Command="{Binding DeleteSourceCommand}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <PathIcon Classes="small" Data="{StaticResource IconDelete}" />
+                  <TextBlock Text="Delete" />
+                </StackPanel>
+              </Button>
+            </StackPanel>
+            <ListBox Classes="tiles" Name="SourcesList" ItemsSource="{Binding Sources}" SelectedItem="{Binding SelectedSource}" ItemTemplate="{StaticResource SourceTile}" SelectionMode="Single" />
+          </DockPanel>
+
+          <!-- Mounts of the selected collection -->
+          <DockPanel Grid.Column="2">
+            <TextBlock DockPanel.Dock="Top" Classes="subheader" Text="Mounts" />
+            <TextBlock DockPanel.Dock="Top" Classes="hint" Text="{Binding MountGuidance}" Margin="0,0,0,8" />
+            <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Classes="buttons" Margin="0,8,0,0">
+              <Button Command="{Binding AddMountCommand}" AutomationProperties.Name="Add mount">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <PathIcon Classes="small" Data="{StaticResource IconAdd}" />
+                  <TextBlock Text="Add" />
+                </StackPanel>
+              </Button>
+              <Button Command="{Binding EditMountCommand}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <PathIcon Classes="small" Data="{StaticResource IconEdit}" />
+                  <TextBlock Text="Edit" />
+                </StackPanel>
+              </Button>
+              <Button Command="{Binding DeleteMountCommand}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                  <PathIcon Classes="small" Data="{StaticResource IconDelete}" />
+                  <TextBlock Text="Delete" />
+                </StackPanel>
+              </Button>
+            </StackPanel>
+            <ListBox Classes="tiles" Name="MountsList" ItemsSource="{Binding Mounts}" SelectedItem="{Binding SelectedMount}" ItemTemplate="{StaticResource MountTile}" SelectionMode="Single" />
+          </DockPanel>
+        </Grid>
+      </DockPanel>
+    </Border>
+  </Grid>
+</UserControl>

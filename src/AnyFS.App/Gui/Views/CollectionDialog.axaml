@@ -1,0 +1,19 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+        x:Class="AnyFS.App.Gui.Views.CollectionDialog"
+        x:DataType="vm:CollectionDialogViewModel"
+        Title="{Binding Title}"
+        Width="420" SizeToContent="Height" CanResize="False"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+  <StackPanel Margin="16">
+    <TextBlock Classes="caption" Text="Name" />
+    <TextBox Name="NameBox" Text="{Binding Name}" />
+    <TextBlock Classes="hint" Text="The name is part of every access path: \\anyfs\&lt;name&gt;, http://host:port/&lt;name&gt;/." />
+    <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" />
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
+      <Button Content="OK" IsDefault="True" Click="Ok_Click" IsEnabled="{Binding !Busy}" MinWidth="80" />
+      <Button Content="Cancel" IsCancel="True" Click="Cancel_Click" MinWidth="80" />
+    </StackPanel>
+  </StackPanel>
+</Window>

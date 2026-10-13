@@ -1,0 +1,160 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- Only Fluent's dynamic resources, so light and dark both work (spike 6) -->
+
+  <!-- tiles -->
+  <Style Selector="Border.tile">
+    <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundAltHighBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseLowBrush}" />
+    <Setter Property="BorderThickness" Value="2" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Padding" Value="10,8" />
+  </Style>
+  <Style Selector="Border.tile:pointerover">
+    <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseMediumLowBrush}" />
+  </Style>
+  <Style Selector="ListBox.tiles">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Padding" Value="0,0,4,0" />
+  </Style>
+  <Style Selector="ListBox.tiles > ListBoxItem">
+    <Setter Property="Padding" Value="0" />
+    <Setter Property="Margin" Value="0,0,0,8" />
+    <Setter Property="MinHeight" Value="0" />
+    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="ListBox.tiles > ListBoxItem /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="CornerRadius" Value="6" />
+  </Style>
+  <Style Selector="ListBox.tiles > ListBoxItem:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="ListBox.tiles > ListBoxItem:pressed /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="ListBox.tiles > ListBoxItem:selected /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="ListBox.tiles > ListBoxItem:selected:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="ListBox.tiles > ListBoxItem:selected:focus /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="ListBox.tiles > ListBoxItem:selected:focus:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="ListBox.tiles > ListBoxItem:selected Border.tile">
+    <Setter Property="BorderBrush" Value="{DynamicResource SystemControlHighlightAccentBrush}" />
+  </Style>
+
+  <!-- tabs: Fluent's default header is 24px; the spec wants an ordinary window -->
+  <Style Selector="TabControl > TabItem">
+    <Setter Property="FontSize" Value="15" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Padding" Value="12,6" />
+    <Setter Property="MinHeight" Value="36" />
+  </Style>
+
+  <!-- text -->
+  <Style Selector="TextBlock.name">
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+  </Style>
+  <Style Selector="TextBlock.muted">
+    <Setter Property="Foreground" Value="{DynamicResource SystemControlForegroundBaseMediumBrush}" />
+    <Setter Property="FontSize" Value="12" />
+  </Style>
+  <Style Selector="TextBlock.hint">
+    <Setter Property="Foreground" Value="{DynamicResource SystemControlForegroundBaseMediumBrush}" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+    <Setter Property="Margin" Value="0,3,0,0" />
+  </Style>
+  <Style Selector="TextBlock.error">
+    <Setter Property="Foreground" Value="{DynamicResource SystemControlErrorTextForegroundBrush}" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+    <Setter Property="Margin" Value="0,3,0,0" />
+  </Style>
+  <Style Selector="TextBlock.warning">
+    <Setter Property="Foreground" Value="#C8860A" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+    <Setter Property="Margin" Value="0,3,0,0" />
+  </Style>
+  <Style Selector="TextBlock.header">
+    <Setter Property="FontSize" Value="16" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Margin" Value="0,0,0,8" />
+  </Style>
+  <Style Selector="TextBlock.subheader">
+    <Setter Property="FontSize" Value="14" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Margin" Value="0,0,0,6" />
+  </Style>
+  <Style Selector="TextBlock.group">
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Margin" Value="0,8,0,6" />
+  </Style>
+  <Style Selector="TextBlock.caption">
+    <Setter Property="Margin" Value="0,0,0,4" />
+  </Style>
+
+  <!-- status circle, badge, buttons -->
+  <Style Selector="Ellipse.status">
+    <Setter Property="Width" Value="10" />
+    <Setter Property="Height" Value="10" />
+    <Setter Property="Margin" Value="0,0,6,0" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Border.badge">
+    <Setter Property="Width" Value="30" />
+    <Setter Property="Height" Value="30" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Background" Value="{DynamicResource SystemControlHighlightAccentBrush}" />
+    <Setter Property="Margin" Value="0,0,10,0" />
+    <Setter Property="VerticalAlignment" Value="Top" />
+  </Style>
+  <Style Selector="Border.badge > TextBlock">
+    <Setter Property="Foreground" Value="White" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="HorizontalAlignment" Value="Center" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Border.readonly">
+    <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundBaseLowBrush}" />
+    <Setter Property="CornerRadius" Value="4" />
+    <Setter Property="Padding" Value="6,1" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+  </Style>
+  <Style Selector="Border.readonly > TextBlock">
+    <Setter Property="FontSize" Value="11" />
+  </Style>
+  <Style Selector="StackPanel.buttons > Button">
+    <Setter Property="Margin" Value="0,0,6,0" />
+  </Style>
+  <Style Selector="Button.icon">
+    <Setter Property="Padding" Value="6" />
+    <Setter Property="MinWidth" Value="0" />
+  </Style>
+  <Style Selector="PathIcon.small">
+    <Setter Property="Width" Value="14" />
+    <Setter Property="Height" Value="14" />
+  </Style>
+  <Style Selector="TextBox.access">
+    <Setter Property="IsReadOnly" Value="True" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="MinHeight" Value="26" />
+    <Setter Property="Padding" Value="6,3" />
+  </Style>
+  <Style Selector="Border.group">
+    <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseLowBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="8" />
+    <Setter Property="Padding" Value="10" />
+  </Style>
+</Styles>

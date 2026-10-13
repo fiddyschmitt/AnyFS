@@ -7,38 +7,47 @@ decides how they are mounted, so `\\anyfs\ben\files\aus-files-01\shared\report.d
 file on a share, `\\anyfs\ben\jira\aus-jira-01\issues\GB-501\attachments\foo.png` an attachment,
 and both open in any program.
 
-One self-contained executable per OS (Windows, Linux, macOS), with a GUI or headless. Built-in
+One self-contained executable per OS (Windows, Linux, macOS), with a window or headless. Built-in
 sources and mount providers are compiled in; the same plugin interfaces are published so anyone
 can write their own.
 
 ## Status
 
-Milestone 1 (headless core) is done:
+Milestones 1 and 2 are done:
 
 - `AnyFS.Sdk`: the plugin contract (sources, mount providers, settings attributes, prompts),
   `SourceBase`, and helpers for caching (`ListingCache`, `SpoolCache`, `RandomAccessOverStream`).
 - `AnyFS.Core`: collections and the router that synthesises one tree per collection from its
   sources' paths, the three read-only layers, settings files, secrets, status, stats, logging,
-  plugin loading.
+  plugin loading; everything can be changed while it runs.
+- The window (Avalonia): Collections, All sources and Stats tabs with tile lists, Add/Edit/Delete
+  dialogs, a settings form generated from each plugin's `[Setting]` attributes, prompts, and a
+  status bar. It follows the OS light/dark theme.
 - Built-in **Mirror** source (local folders, drives and, on Windows, UNC shares) and **HTTP**
   mount (directory pages, JSON, resumable downloads).
-- `anyfs serve` and `anyfs status`.
-- Unit tests, a trimmed single-file publish, CI.
+- `anyfs serve` and `anyfs status` for headless use.
+- Unit and GUI tests, a trimmed single-file publish, CI.
 
-Coming next: the Avalonia window (M2), WinFsp, SMB, WebDAV, FTP and FUSE mounts (M3), SSHFS (M4),
-the end-to-end lab (M5), NFS (M7).
+Coming next: WinFsp, SMB, WebDAV, FTP and FUSE mounts (M3), SSHFS and Import/Export (M4), the
+end-to-end lab (M5), a macOS `.app` (M6), NFS (M7).
 
 ## Try it
 
 ```
 dotnet build
 dotnet test
-dotnet run --project src/AnyFS.App -- status --settings-dir ./scratch/settings
+dotnet run --project src/AnyFS.App -- --settings-dir ./scratch/settings
 ```
 
-A first `anyfs serve` creates `settings/collections.json` with "Collection 1". To serve
-something, edit `settings/sources.json` and `settings/collections.json` (format in
-[docs/settings-format.md](docs/settings-format.md)), for example a folder over HTTP:
+The last line opens the window against a scratch settings folder. The first start creates
+"Collection 1" with the native mount provider for the OS (WinFsp on Windows, FUSE on Linux, SMB on
+macOS; those providers arrive in milestone 3, so the tile shows the mount as failed until then).
+Use **Add ▾ › New source...** under Sources to add a Mirror of a folder, and **Add** under Mounts to
+add an HTTP mount; then **Open containing folder** on the mount opens
+<http://localhost:11001/Collection%201/> in the browser.
+
+Headless, the same settings files drive `anyfs serve`. The format is in
+[docs/settings-format.md](docs/settings-format.md); for example a folder over HTTP:
 
 ```json
 // settings/sources.json
@@ -57,16 +66,24 @@ something, edit `settings/sources.json` and `settings/collections.json` (format 
 Then `anyfs serve`, open <http://localhost:11001/ben/>, and `anyfs status` in another terminal.
 
 ```
-anyfs                                  the window (milestone 2)
+anyfs                                  the window
 anyfs serve [--collection NAME]...     run all (or the named) enabled collections until Ctrl+C
 anyfs status                           collections, sources, mounts, states, access paths; exit 0 when all green
-anyfs --settings-dir DIR ...           use another settings folder
+anyfs --settings-dir DIR ...           use another settings folder (window or command)
 anyfs --log-level LEVEL ...            trace, debug, info, warn, error
 anyfs --version
 ```
 
 Settings live beside the executable when that folder is writable, else in the user's config
 folder (`%APPDATA%\AnyFS`, `~/.config/anyfs`, `~/Library/Application Support/AnyFS`).
+
+On Windows `anyfs.exe` is a GUI program, so a console window never flashes up when the window
+starts. With arguments it attaches to the console it was started from and prints there; because the
+shell does not wait for GUI programs, `anyfs status` returns the prompt at once unless its output
+goes through a pipeline (`anyfs status | more`, `$s = anyfs status | Out-String`; a plain
+`$s = anyfs status` does not wait), and `anyfs serve` keeps running in the background of that
+console until Ctrl+C. Scripts that need the exit code use a pipeline (`$LASTEXITCODE` is set
+afterwards) or `Start-Process -Wait`.
 
 ## Publish
 
@@ -91,12 +108,12 @@ attributes and the host builds the form, the JSON and the secret handling.
 
 ```
 src/AnyFS.Sdk            interfaces, DTOs, SourceBase, caching helpers
-src/AnyFS.Sdk.Testing    contract tests and fakes for plugin authors
+src/AnyFS.Sdk.Testing    contract tests and fakes for plugin authors (and our own tests)
 src/AnyFS.Core           model, plugin host, router, read-only layers, status, settings, secrets, stats, logging
-src/AnyFS.App            anyfs: command line (and, from M2, the window)
+src/AnyFS.App            anyfs: the window (Gui/) and the command line (Cli/)
 src/Sources/Mirror       the Mirror source
 src/Mounts/Http          the HTTP mount
-tests/                   unit tests per assembly, fixtures/MakeTree (deterministic test tree), fixtures/SamplePlugin
+tests/                   unit tests per assembly, GUI tests (headless Avalonia), fixtures/MakeTree, fixtures/SamplePlugin
 scripts/                 publish.ps1, smoke.ps1
 docs/                    settings-format.md, plugin-authoring.md, mounts.md
 ```

@@ -1,0 +1,43 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+        xmlns:g="using:AnyFS.App.Gui"
+        xmlns:views="using:AnyFS.App.Gui.Views"
+        x:Class="AnyFS.App.Gui.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="{Binding Title}"
+        Width="1180" Height="760" MinWidth="820" MinHeight="520"
+        WindowStartupLocation="CenterScreen">
+  <DockPanel>
+    <!-- status bar (spec 11) -->
+    <Border DockPanel.Dock="Bottom" Padding="12,6" BorderThickness="0,1,0,0" BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
+      <DockPanel>
+        <Button DockPanel.Dock="Right" Command="{Binding OpenLogCommand}" ToolTip.Tip="Open anyfs.log">
+          <StackPanel Orientation="Horizontal" Spacing="6">
+            <PathIcon Classes="small" Data="{StaticResource IconLog}" />
+            <TextBlock Text="Open log" />
+          </StackPanel>
+        </Button>
+        <TextBlock DockPanel.Dock="Right" Classes="muted" Text="{Binding SettingsLocation}" VerticalAlignment="Center" Margin="16,0,16,0" MaxWidth="360" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding SettingsLocation}" />
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Spacing="6" ClipToBounds="True">
+          <Ellipse Classes="status" Fill="{Binding OverallColour, Converter={x:Static g:Converters.StatusBrush}}" />
+          <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+          <TextBlock Text="·" Classes="muted" VerticalAlignment="Center" />
+          <TextBlock Text="{Binding FilesServedText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <TabControl Name="Tabs" Margin="8" Padding="4,8,4,4">
+      <TabItem Header="Collections">
+        <views:CollectionsTab DataContext="{Binding Collections}" />
+      </TabItem>
+      <TabItem Header="All sources">
+        <views:AllSourcesTab DataContext="{Binding AllSources}" />
+      </TabItem>
+      <TabItem Header="Stats">
+        <views:StatsTab DataContext="{Binding Stats}" />
+      </TabItem>
+    </TabControl>
+  </DockPanel>
+</Window>

@@ -26,9 +26,9 @@ its siblings.
   "version": 1,
   "logLevel": "info",          // trace, debug, info, warn, error (--log-level overrides)
   "bindAddress": "127.0.0.1",  // default offered to new network mounts
-  "theme": "system",           // system, light, dark (the window, M2)
+  "theme": "system",           // system (follow the OS), light or dark; the window reads it at start
   "countFilesOnStart": false,  // default for new sources
-  "window": { "x": 0, "y": 0, "width": 0, "height": 0, "maximised": false }
+  "window": { "x": 0, "y": 0, "width": 0, "height": 0, "maximised": false }   // written by the window when it closes
 }
 ```
 

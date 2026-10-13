@@ -1,0 +1,97 @@
+using System.Diagnostics;
+using AnyFS.Sdk;
+using Microsoft.Extensions.Logging;
+
+namespace AnyFS.App.Gui.Services;
+
+/// <summary>
+/// Opens access paths with the OS: a path in the file manager, a URL in the browser (or the file
+/// manager for ftp:// and dav://), a command first when a provider needs one (the device-less
+/// <c>net use</c> for SMB). Never maps a drive (spec 8.9).
+/// </summary>
+public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? showText = null) : IOpener
+{
+    public void Open(MountOpenAction action, string? subPath)
+    {
+        try
+        {
+            switch (action)
+            {
+                case MountOpenAction.FileManager fm:
+                    Launch(AppendPath(fm.Path, subPath));
+                    break;
+                case MountOpenAction.Browser browser:
+                    Launch(AppendUrl(browser.Url, subPath));
+                    break;
+                case MountOpenAction.Command command:
+                    RunCommand(command.FileName, command.Arguments);
+                    if (command.ThenOpen is { } then)
+                    {
+                        Launch(AppendPath(then, subPath));
+                    }
+
+                    break;
+                case MountOpenAction.ShowText text:
+                    showText?.Invoke(text.Title, text.Text);
+                    break;
+            }
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or InvalidOperationException)
+        {
+            logger.LogWarning(ex, "could not open {Action}", action);
+        }
+    }
+
+    public void OpenFile(string path) => Launch(path);
+
+    /// <summary><c>&lt;mount root&gt;\&lt;source path&gt;</c> in the OS's separator.</summary>
+    public static string AppendPath(string root, string? subPath)
+    {
+        if (string.IsNullOrEmpty(subPath))
+        {
+            return root;
+        }
+
+        var tail = subPath.Replace('/', Path.DirectorySeparatorChar);
+        return root.EndsWith(Path.DirectorySeparatorChar) ? root + tail : root + Path.DirectorySeparatorChar + tail;
+    }
+
+    public static string AppendUrl(string url, string? subPath)
+    {
+        if (string.IsNullOrEmpty(subPath))
+        {
+            return url;
+        }
+
+        var segments = subPath.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.EscapeDataString);
+        return url.TrimEnd('/') + "/" + string.Join("/", segments) + "/";
+    }
+
+    private static void Launch(string target)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Process.Start(new ProcessStartInfo(target) { UseShellExecute = true })?.Dispose();
+        }
+        else if (OperatingSystem.IsMacOS())
+        {
+            Process.Start(new ProcessStartInfo("open", [target]) { UseShellExecute = false })?.Dispose();
+        }
+        else
+        {
+            Process.Start(new ProcessStartInfo("xdg-open", [target]) { UseShellExecute = false })?.Dispose();
+        }
+    }
+
+    private static void RunCommand(string fileName, IReadOnlyList<string> arguments)
+    {
+        var info = new ProcessStartInfo(fileName) { UseShellExecute = false, CreateNoWindow = true };
+        foreach (var argument in arguments)
+        {
+            info.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(info);
+        process?.WaitForExit(15_000);
+    }
+}

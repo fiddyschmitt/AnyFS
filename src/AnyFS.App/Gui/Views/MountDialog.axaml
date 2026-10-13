@@ -1,0 +1,72 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+        xmlns:views="using:AnyFS.App.Gui.Views"
+        x:Class="AnyFS.App.Gui.Views.MountDialog"
+        x:DataType="vm:MountDialogViewModel"
+        Title="{Binding Title}"
+        Width="720" SizeToContent="Height" MaxHeight="820" CanResize="True"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+  <!-- spec 11.1: provider list (unavailable ones greyed with the reason), name, the provider's settings form -->
+  <DockPanel Margin="16">
+    <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
+      <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" Margin="0,0,0,8" />
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+        <Button Content="OK" IsDefault="True" Click="Ok_Click" IsEnabled="{Binding !Busy}" MinWidth="80" />
+        <Button Content="Cancel" IsCancel="True" Click="Cancel_Click" MinWidth="80" />
+      </StackPanel>
+    </StackPanel>
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+      <Grid ColumnDefinitions="260,16,*">
+        <DockPanel Grid.Column="0" IsVisible="{Binding IsNew}">
+          <TextBlock DockPanel.Dock="Top" Classes="caption" Text="Mount provider" />
+          <ListBox ItemsSource="{Binding Providers}" SelectedItem="{Binding SelectedProvider}" MinHeight="200">
+            <ListBox.ItemContainerTheme>
+              <ControlTheme TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}" x:DataType="vm:ProviderChoiceViewModel">
+                <Setter Property="IsEnabled" Value="{Binding OnThisOs}" />
+              </ControlTheme>
+            </ListBox.ItemContainerTheme>
+            <ListBox.ItemTemplate>
+              <DataTemplate x:DataType="vm:ProviderChoiceViewModel">
+                <Grid ColumnDefinitions="Auto,*" Margin="0,2">
+                  <Border Classes="badge" Width="26" Height="26" Margin="0,0,8,0">
+                    <TextBlock Text="{Binding Initial}" />
+                  </Border>
+                  <StackPanel Grid.Column="1">
+                    <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />
+                    <TextBlock Classes="muted" Text="{Binding Caption}" TextWrapping="Wrap" />
+                  </StackPanel>
+                </Grid>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+        </DockPanel>
+        <StackPanel Grid.Column="0" IsVisible="{Binding !IsNew}">
+          <TextBlock Classes="caption" Text="Mount provider" />
+          <TextBlock Text="{Binding SelectedProvider.DisplayName, FallbackValue=''}" FontWeight="SemiBold" />
+          <TextBlock Classes="muted" Text="{Binding SelectedProvider.Description, FallbackValue=''}" TextWrapping="Wrap" />
+        </StackPanel>
+
+        <StackPanel Grid.Column="2">
+          <Border Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" CornerRadius="6" Padding="10,8" Margin="0,0,0,10" IsVisible="{Binding ProviderUnavailable}">
+            <StackPanel Orientation="Horizontal" Spacing="8">
+              <PathIcon Classes="small" Data="{StaticResource IconWarning}" />
+              <TextBlock Text="{Binding ProviderUnavailableReason}" TextWrapping="Wrap" MaxWidth="380" />
+            </StackPanel>
+          </Border>
+          <TextBlock Classes="caption" Text="Name *" />
+          <TextBox Name="NameBox" Text="{Binding Name}" />
+          <StackPanel Orientation="Horizontal" Spacing="16" Margin="0,8,0,0">
+            <CheckBox IsChecked="{Binding Enabled}" Content="Enabled" />
+            <CheckBox IsChecked="{Binding ReadOnly}" IsEnabled="{Binding !ReadOnlyLocked}" Content="Read-only" ToolTip.Tip="Everything through this mount is read-only, whatever the sources and collection allow" />
+          </StackPanel>
+          <Separator Margin="0,12,0,10" />
+          <TextBlock Classes="subheader" Text="Settings" />
+          <Panel IsVisible="{Binding HasForm}">
+            <views:SettingsFormView DataContext="{Binding Form}" />
+          </Panel>
+        </StackPanel>
+      </Grid>
+    </ScrollViewer>
+  </DockPanel>
+</Window>

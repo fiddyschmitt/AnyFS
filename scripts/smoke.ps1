@@ -34,7 +34,8 @@ function Check([bool]$ok, [string]$what) {
 }
 
 Write-Host "== anyfs --version"
-$version = & $Exe --version
+# a pipeline, because PowerShell does not wait for a GUI-subsystem exe (anyfs.exe on Windows) unless its output is piped
+$version = (& $Exe --version 2>&1 | Out-String).Trim()
 Check ($LASTEXITCODE -eq 0 -and $version -match '^\d+\.\d+\.\d+') "version printed: $version"
 
 Write-Host "== anyfs status on a fresh settings folder (not running)"

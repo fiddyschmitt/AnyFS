@@ -1,0 +1,18 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+        x:Class="AnyFS.App.Gui.Views.ConfirmDialog"
+        x:DataType="vm:ConfirmDialogViewModel"
+        Title="{Binding Title}"
+        Width="480" SizeToContent="Height" CanResize="False"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+  <StackPanel Margin="16">
+    <TextBlock Text="{Binding Message}" TextWrapping="Wrap" />
+    <CheckBox IsChecked="{Binding Checked}" Content="{Binding CheckboxText}" IsVisible="{Binding HasCheckbox}" Margin="0,12,0,0" />
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
+      <Button Content="{Binding YesText}" IsDefault="True" Click="Yes_Click" MinWidth="80" />
+      <Button Content="{Binding NoText}" Click="No_Click" IsVisible="{Binding HasNo}" MinWidth="80" />
+      <Button Content="{Binding CancelText}" IsCancel="True" Click="Cancel_Click" IsVisible="{Binding HasCancel}" MinWidth="80" />
+    </StackPanel>
+  </StackPanel>
+</Window>

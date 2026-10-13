@@ -1,10 +1,16 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <!-- WinExe: no console window when the GUI starts from Explorer; with arguments the process attaches
+         to the console it was started from (spec 12, Program.cs). On Linux and macOS this is just an exe. -->
+    <OutputType>WinExe</OutputType>
     <AssemblyName>anyfs</AssemblyName>
     <RootNamespace>AnyFS.App</RootNamespace>
     <IsPackable>false</IsPackable>
     <RollForward>LatestMinor</RollForward>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <BuiltInComInteropSupport>true</BuiltInComInteropSupport>
+    <!-- compiled bindings everywhere: no reflection binding paths, so trimming can't break a binding (spec 11, 14.1) -->
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <!-- plugin POCOs are deserialised by reflection; keep that path alive under trimming (spec 6.7, 14.1) -->
     <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
     <!-- the publish shape (spec 14): self-contained single file, trimmed; scripts/publish.ps1 passes the RID -->
@@ -19,6 +25,8 @@
          POCOs makes ILLink report two framework-internal IL2026s (C++/CLI loader, ASP.NET's JsonOptions
          default resolver) and the ClassInterface/ProgId IL2045s that spike 7 saw; they are expected. -->
     <NoWarn>$(NoWarn);IL2026;IL2045</NoWarn>
+    <!-- AVLN3001: views are constructed in code with their view models, never by the runtime XAML loader -->
+    <NoWarn>$(NoWarn);AVLN3001</NoWarn>
     <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
     <UseSystemResourceKeys>true</UseSystemResourceKeys>
   </PropertyGroup>
@@ -53,5 +61,19 @@
     <ProjectReference Include="..\Sources\Mirror\AnyFS.Sources.Mirror.csproj" />
     <ProjectReference Include="..\Mounts\Http\AnyFS.Mounts.Http.csproj" />
     <PackageReference Include="System.CommandLine" />
+    <PackageReference Include="Avalonia" />
+    <PackageReference Include="Avalonia.Desktop" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="Avalonia.Fonts.Inter" />
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <!-- F12 developer tools in Debug builds only; nothing of it ships -->
+    <PackageReference Include="AvaloniaUI.DiagnosticsSupport">
+      <IncludeAssets Condition="'$(Configuration)' != 'Debug'">None</IncludeAssets>
+      <PrivateAssets Condition="'$(Configuration)' != 'Debug'">All</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.App.Tests" />
   </ItemGroup>
 </Project>

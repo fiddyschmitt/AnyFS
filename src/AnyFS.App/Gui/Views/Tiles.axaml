@@ -1,0 +1,117 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+                    xmlns:g="using:AnyFS.App.Gui"
+                    xmlns:views="using:AnyFS.App.Gui.Views">
+  <!-- The three tile kinds (spec 11.1): card with icon, bold name, status circle + text, counters, controls -->
+
+  <DataTemplate x:Key="CollectionTile" x:DataType="vm:CollectionTileViewModel">
+    <Border Classes="tile">
+      <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto,Auto">
+        <TextBlock Classes="name" Text="{Binding Name}" VerticalAlignment="Center" />
+        <CheckBox Grid.Column="1" IsChecked="{Binding Enabled}" Content="Enabled" MinHeight="0" Padding="6,0,0,0" />
+        <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
+          <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" />
+          <TextBlock Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+        </StackPanel>
+        <DockPanel Grid.Row="2" Grid.ColumnSpan="2" Margin="0,8,0,0">
+          <views:OpenButton DockPanel.Dock="Right" />
+          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" ClipToBounds="True" Margin="0,0,8,0">
+            <TextBlock Text="{Binding FilesText}" VerticalAlignment="Center" />
+            <ProgressBar IsIndeterminate="True" Width="44" Height="4" MinWidth="44" IsVisible="{Binding Counting}" VerticalAlignment="Center" />
+          </StackPanel>
+        </DockPanel>
+      </Grid>
+    </Border>
+  </DataTemplate>
+
+  <DataTemplate x:Key="SourceTile" x:DataType="vm:SourceTileViewModel">
+    <Border Classes="tile">
+      <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
+        <Border Grid.RowSpan="4" Classes="badge">
+          <Panel>
+            <TextBlock Text="{Binding Initial}" />
+            <Image Width="22" Height="22" Source="{Binding IconKey, Converter={x:Static g:Converters.PluginIcon}}" />
+          </Panel>
+        </Border>
+        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+          <TextBlock Classes="name" Text="{Binding Name}" />
+          <TextBlock Classes="muted" Text="{Binding PathCaption}" IsVisible="{Binding ShowPath}" ToolTip.Tip="The source path: where this source sits in the collection" />
+          <TextBlock Classes="muted" Text="{Binding TypeName}" IsVisible="{Binding ShowUses}" />
+        </StackPanel>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Top">
+          <CheckBox IsChecked="{Binding Enabled}" Content="Enabled" MinHeight="0" Padding="6,0,0,0" />
+          <CheckBox IsChecked="{Binding ReadOnly}" IsEnabled="{Binding !ReadOnlyLocked}" IsVisible="{Binding ShowReadOnly}" Content="Read-only" MinHeight="0" Padding="6,0,0,0" ToolTip.Tip="{Binding ReadOnlyTooltip}" />
+          <Button Classes="icon" IsVisible="{Binding CanRetry}" ToolTip.Tip="Retry now">
+            <PathIcon Classes="small" Data="{StaticResource IconMore}" />
+            <Button.Flyout>
+              <MenuFlyout>
+                <MenuItem Header="Retry now" Command="{Binding RetryCommand}" />
+              </MenuFlyout>
+            </Button.Flyout>
+          </Button>
+        </StackPanel>
+        <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
+          <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" />
+          <TextBlock Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+        </StackPanel>
+        <ItemsControl Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding Uses}" IsVisible="{Binding ShowUses}" Margin="0,4,0,0">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="x:String">
+              <TextBlock Classes="muted" Text="{Binding}" />
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <DockPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,8,0,0">
+          <views:OpenButton DockPanel.Dock="Right" IsVisible="{Binding ShowPath}" />
+          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" ClipToBounds="True" Margin="0,0,8,0">
+            <TextBlock Text="{Binding FilesText}" VerticalAlignment="Center" />
+            <ProgressBar IsIndeterminate="True" Width="44" Height="4" MinWidth="44" IsVisible="{Binding Counting}" VerticalAlignment="Center" />
+            <ProgressBar Minimum="0" Maximum="1" Value="{Binding Progress, Mode=OneWay, FallbackValue=0}" Width="44" Height="4" MinWidth="44" IsVisible="{Binding HasProgress}" VerticalAlignment="Center" />
+          </StackPanel>
+        </DockPanel>
+      </Grid>
+    </Border>
+  </DataTemplate>
+
+  <DataTemplate x:Key="MountTile" x:DataType="vm:MountTileViewModel">
+    <Border Classes="tile">
+      <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
+        <Border Grid.RowSpan="4" Classes="badge">
+          <Panel>
+            <TextBlock Text="{Binding Initial}" />
+            <Image Width="22" Height="22" Source="{Binding IconKey, Converter={x:Static g:Converters.PluginIcon}}" />
+          </Panel>
+        </Border>
+        <StackPanel Grid.Column="1" VerticalAlignment="Center">
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <TextBlock Classes="name" Text="{Binding Name}" />
+            <Border Classes="readonly" IsVisible="{Binding ReadOnly}">
+              <TextBlock Text="Read-only" />
+            </Border>
+          </StackPanel>
+          <TextBlock Classes="muted" Text="{Binding ProviderName}" />
+        </StackPanel>
+        <CheckBox Grid.Column="2" IsChecked="{Binding Enabled}" Content="Enabled" MinHeight="0" Padding="6,0,0,0" VerticalAlignment="Top" />
+        <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
+          <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" />
+          <TextBlock Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+        </StackPanel>
+        <ItemsControl Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding AccessPaths}" Margin="0,6,0,0">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate x:DataType="vm:AccessPathViewModel">
+              <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,4">
+                <TextBlock Classes="muted" Text="{Binding Label}" VerticalAlignment="Center" Margin="0,0,8,0" MinWidth="60" />
+                <TextBox Grid.Column="1" Classes="access" Text="{Binding Value, Mode=OneWay}" />
+                <Button Grid.Column="2" Classes="icon" Command="{Binding CopyCommand}" ToolTip.Tip="Copy" Margin="4,0,0,0">
+                  <PathIcon Classes="small" Data="{StaticResource IconCopy}" />
+                </Button>
+              </Grid>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+        <views:OpenButton Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" HorizontalAlignment="Right" Margin="0,4,0,0" />
+      </Grid>
+    </Border>
+  </DataTemplate>
+</ResourceDictionary>

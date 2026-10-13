@@ -7,7 +7,15 @@
     <PackageVersion Include="Microsoft.AspNetCore.DataProtection.Extensions" Version="10.0.12" />
     <PackageVersion Include="ZLogger" Version="2.5.10" />
     <PackageVersion Include="System.CommandLine" Version="2.0.12" />
+    <!-- the window (spec 11) -->
+    <PackageVersion Include="Avalonia" Version="12.1.4" />
+    <PackageVersion Include="Avalonia.Desktop" Version="12.1.4" />
+    <PackageVersion Include="Avalonia.Themes.Fluent" Version="12.1.4" />
+    <PackageVersion Include="Avalonia.Fonts.Inter" Version="12.1.4" />
+    <PackageVersion Include="AvaloniaUI.DiagnosticsSupport" Version="2.2.3" />
+    <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <!-- tests -->
+    <PackageVersion Include="Avalonia.Headless" Version="12.1.4" />
     <PackageVersion Include="MSTest" Version="4.5.1" />
     <PackageVersion Include="MSTest.TestFramework" Version="4.5.1" />
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />

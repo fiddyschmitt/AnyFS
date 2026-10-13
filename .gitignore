@@ -491,3 +491,4 @@ state/
 cache/
 anyfs.log
 anyfs.*.log
+/scratch/

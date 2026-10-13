@@ -1,6 +1,40 @@
 # Changelog
 
-## Unreleased (milestone 1: headless core)
+## Unreleased (milestone 2: the window)
+
+- `anyfs` with no arguments opens the window (Avalonia 12, Fluent, follows the OS light/dark
+  theme; `theme` in `app.json` overrides it). On Windows the executable is a GUI program that
+  attaches to the console it was started from when given arguments, so `anyfs serve`, `anyfs status`
+  and `--help` still print to the terminal.
+- Collections tab: tiles for collections, the selected collection's sources and its mounts (boxed
+  together), status circles and text with the full message as a tooltip, Enabled checkboxes,
+  per-collection Read-only for a source (ticked and locked when the plugin can't write), file counts
+  with a spinner while a source starts or counts, Open containing folder (one mount opens it, several
+  show a flyout, none disables it), access paths in copyable boxes, a retry item on failed sources,
+  guidance under Mounts worded from the providers' tiers.
+- Add/Edit/Delete for collections, sources (New source... / Existing source ▸, with the path
+  following the name until edited) and mounts; delete confirmations name the mounts and offer to
+  delete orphaned source definitions.
+- The settings form generated from `[Setting]` attributes: text, multiline, password (with reveal),
+  number, bool, choice (enums or `Choices`), file and folder pickers, groups, a collapsed Advanced
+  section, required marks, hints, inline errors and warnings from `IValidatable`, a Test button for
+  `ITestable`.
+- All sources tab: every source with the collections using it, Add (no collection yet), Edit, Delete.
+- Stats tab: files and bytes served (total and session), active connections, a per-collection
+  breakdown, Reset totals.
+- Plugin prompts (PIN, code, yes/no, choice) as modal dialogs, one at a time, with the source's name.
+- Status bar: overall circle and summary, files served this session, where the settings live, Open log.
+- Window placement is remembered in `app.json`.
+- `AnyFS.Core`: the engine now accepts changes while running (add, edit, enable, disable and delete
+  sources, memberships, collections and mounts), applies them live (a source restarts only when its
+  settings changed; editing or renaming restarts the mounts concerned) and persists them; a `Changed`
+  event for the UI.
+- `AnyFS.Sdk.Testing`: the in-memory source plugin and the recording mount provider moved here from
+  the Core tests so GUI tests (and plugin authors) can use them.
+- Tests: `AnyFS.App.Tests` drives the view models over the real engine with scripted dialogs, and
+  opens the window and every dialog on Avalonia's headless platform.
+
+## Milestone 1 (headless core)
 
 - `AnyFS.Sdk`: `ISourcePlugin`/`ISource`, `IMountProviderPlugin`/`IMount`, `IVirtualFileSystem`,
   `IVfsFile` (positionless ranged reads), `VfsEntry`, `VfsException`, `[Setting]` attributes,

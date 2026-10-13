@@ -1,0 +1,21 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+        x:Class="AnyFS.App.Gui.Views.TextDialog"
+        x:DataType="vm:TextDialogViewModel"
+        Title="{Binding Title}"
+        Width="560" SizeToContent="Height" CanResize="True"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+  <StackPanel Margin="16">
+    <TextBox Text="{Binding Text, Mode=OneWay}" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="80" MaxHeight="400" FontFamily="Cascadia Mono,Consolas,Menlo,DejaVu Sans Mono,monospace" />
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,12,0,0">
+      <Button Command="{Binding CopyCommand}" MinWidth="80">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <PathIcon Classes="small" Data="{StaticResource IconCopy}" />
+          <TextBlock Text="Copy" />
+        </StackPanel>
+      </Button>
+      <Button Content="Close" IsDefault="True" IsCancel="True" Click="Close_Click" MinWidth="80" />
+    </StackPanel>
+  </StackPanel>
+</Window>

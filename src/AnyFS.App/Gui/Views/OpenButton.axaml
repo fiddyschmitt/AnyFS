@@ -1,0 +1,38 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+             x:Class="AnyFS.App.Gui.Views.OpenButton"
+             x:DataType="vm:TileViewModel">
+  <!-- Open containing folder (spec 11.1): one mount opens it; several show a flyout; none is disabled with a tooltip -->
+  <Panel>
+    <Button Command="{Binding OpenSingleCommand}" IsVisible="{Binding HasOneOpenTarget}" ToolTip.Tip="{Binding SingleTargetDetail}">
+      <StackPanel Orientation="Horizontal" Spacing="6">
+        <PathIcon Classes="small" Data="{StaticResource IconFolderOpen}" />
+        <TextBlock Text="Open containing folder" />
+      </StackPanel>
+    </Button>
+    <Button IsVisible="{Binding HasManyOpenTargets}">
+      <StackPanel Orientation="Horizontal" Spacing="6">
+        <PathIcon Classes="small" Data="{StaticResource IconFolderOpen}" />
+        <TextBlock Text="Open containing folder" />
+        <PathIcon Width="10" Height="10" Data="{StaticResource IconChevronDown}" />
+      </StackPanel>
+      <Button.Flyout>
+        <MenuFlyout ItemsSource="{Binding OpenTargets}">
+          <MenuFlyout.ItemContainerTheme>
+            <ControlTheme TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}" x:DataType="vm:OpenTargetViewModel">
+              <Setter Property="Header" Value="{Binding Header}" />
+              <Setter Property="Command" Value="{Binding OpenCommand}" />
+            </ControlTheme>
+          </MenuFlyout.ItemContainerTheme>
+        </MenuFlyout>
+      </Button.Flyout>
+    </Button>
+    <Button IsEnabled="False" IsVisible="{Binding HasNoOpenTarget}" ToolTip.Tip="{Binding NoOpenTooltip}">
+      <StackPanel Orientation="Horizontal" Spacing="6">
+        <PathIcon Classes="small" Data="{StaticResource IconFolderOpen}" />
+        <TextBlock Text="Open containing folder" />
+      </StackPanel>
+    </Button>
+  </Panel>
+</UserControl>

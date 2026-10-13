@@ -1,0 +1,18 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AnyFS.App.App"
+             RequestedThemeVariant="Default">
+  <!-- RequestedThemeVariant Default follows the OS light/dark setting (spec 11); app.json's theme may override it -->
+  <Application.Styles>
+    <FluentTheme />
+    <StyleInclude Source="avares://anyfs/Gui/Views/Styles.axaml" />
+  </Application.Styles>
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceInclude Source="avares://anyfs/Gui/Views/Icons.axaml" />
+        <ResourceInclude Source="avares://anyfs/Gui/Views/Tiles.axaml" />
+      </ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+</Application>

@@ -1,0 +1,59 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+             x:Class="AnyFS.App.Gui.Views.StatsTab"
+             x:DataType="vm:StatsViewModel">
+  <!-- spec 11.3: total and session, a per-collection breakdown, Reset totals -->
+  <ScrollViewer Margin="4">
+    <StackPanel MaxWidth="900" HorizontalAlignment="Left">
+      <TextBlock Classes="header" Text="Stats" />
+      <Grid ColumnDefinitions="200,160,160" RowDefinitions="Auto,Auto,Auto,Auto" Margin="0,0,0,16">
+        <TextBlock Grid.Column="1" Classes="muted" Text="Total" />
+        <TextBlock Grid.Column="2" Classes="muted" Text="Session" />
+        <TextBlock Grid.Row="1" Text="Files served" Margin="0,6,0,0" />
+        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding FilesServedTotal}" Margin="0,6,0,0" />
+        <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding FilesServedSession}" Margin="0,6,0,0" />
+        <TextBlock Grid.Row="2" Text="Bytes served" Margin="0,6,0,0" />
+        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding BytesServedTotal}" Margin="0,6,0,0" />
+        <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding BytesServedSession}" Margin="0,6,0,0" />
+        <TextBlock Grid.Row="3" Text="Active connections" Margin="0,6,0,0" />
+        <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding ActiveConnections}" Margin="0,6,0,0" />
+      </Grid>
+      <StackPanel Orientation="Horizontal" Spacing="16" Margin="0,0,0,20">
+        <TextBlock Classes="muted" Text="{Binding TotalsSince, StringFormat='Totals {0}'}" VerticalAlignment="Center" />
+        <TextBlock Classes="muted" Text="{Binding SessionSince, StringFormat='Session {0}'}" VerticalAlignment="Center" />
+        <Button Content="Reset totals" Command="{Binding ResetTotalsCommand}" />
+      </StackPanel>
+      <TextBlock Classes="hint" Margin="0,0,0,12" Text="A file is served when a handle opened for reading has delivered its first byte. Bytes served are bytes returned by reads plus bytes accepted by writes. Active connections are what each mount provider reports (connections, sessions, or open handles)." />
+
+      <TextBlock Classes="subheader" Text="Per collection" />
+      <TextBlock Classes="muted" Text="Nothing served yet." IsVisible="{Binding !HasRows}" />
+      <Grid ColumnDefinitions="2*,*,*,*,*,*,*,*" IsVisible="{Binding HasRows}" Margin="0,0,0,4">
+        <TextBlock Classes="muted" Text="Collection" />
+        <TextBlock Grid.Column="1" Classes="muted" Text="Files (total)" />
+        <TextBlock Grid.Column="2" Classes="muted" Text="Files (session)" />
+        <TextBlock Grid.Column="3" Classes="muted" Text="Read (total)" />
+        <TextBlock Grid.Column="4" Classes="muted" Text="Read (session)" />
+        <TextBlock Grid.Column="5" Classes="muted" Text="Written (total)" />
+        <TextBlock Grid.Column="6" Classes="muted" Text="Written (session)" />
+        <TextBlock Grid.Column="7" Classes="muted" Text="Connections" />
+      </Grid>
+      <ItemsControl ItemsSource="{Binding Rows}">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="vm:StatsRowViewModel">
+            <Grid ColumnDefinitions="2*,*,*,*,*,*,*,*" Margin="0,2">
+              <TextBlock Text="{Binding Collection}" />
+              <TextBlock Grid.Column="1" Text="{Binding FilesTotal}" />
+              <TextBlock Grid.Column="2" Text="{Binding FilesSession}" />
+              <TextBlock Grid.Column="3" Text="{Binding ReadTotal}" />
+              <TextBlock Grid.Column="4" Text="{Binding ReadSession}" />
+              <TextBlock Grid.Column="5" Text="{Binding WrittenTotal}" />
+              <TextBlock Grid.Column="6" Text="{Binding WrittenSession}" />
+              <TextBlock Grid.Column="7" Text="{Binding Connections}" />
+            </Grid>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+    </StackPanel>
+  </ScrollViewer>
+</UserControl>
