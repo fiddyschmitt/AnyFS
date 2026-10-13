@@ -44,6 +44,9 @@ public class SettingsFormTests
         [Setting("Timeout", Advanced = true, Order = 8)]
         public double? Timeout { get; set; }
 
+        [Setting("Comment", Order = 9)]
+        public string Comment { get; set; } = "";
+
         public IEnumerable<ValidationMessage> Validate(object settings)
         {
             var s = (EverySetting)settings;
@@ -130,7 +133,8 @@ public class SettingsFormTests
         Assert.IsTrue(form.Validate());
         Assert.AreEqual("aus-files-01", settings.Host, "trimmed");
         Assert.AreEqual(2222, settings.Port);
-        Assert.IsNull(settings.Password, "empty secret is null");
+        Assert.IsNull(settings.Password, "empty secret is null (declared string?)");
+        Assert.AreEqual("", settings.Comment, "an empty box for a plain string is \"\", never a null the plugin didn't declare");
         Assert.AreEqual("a\nb", settings.Notes, "multiline keeps lines, normalised");
         Assert.IsFalse(settings.Verify);
         Assert.AreEqual(Flavour.Plain, settings.Flavour);
@@ -166,10 +170,11 @@ public class SettingsFormTests
         var form = new SettingsFormViewModel(plugin.SettingsType, settings, plugin, null, plugin as ISettingTextProvider, new FakeDialogs());
         var paths = form.Fields.Single(f => f.PropertyName == nameof(MirrorSettings.Paths));
         Assert.AreEqual("Multiline", paths.TemplateKey);
-        Assert.IsTrue(paths.IsRequired);
+        Assert.AreEqual("Paths (one per line)", paths.LabelWithMark, "no asterisk: the plugin's own validation insists on a path");
+        Assert.IsFalse(paths.IsRequired);
         Assert.IsTrue(form.Groups.Last().IsAdvanced);
         Assert.IsFalse(form.Validate(), "no paths yet");
-        Assert.AreEqual("Required.", paths.Error);
+        Assert.AreEqual("Add at least one path.", paths.Error);
 
         paths.Text = OperatingSystem.IsWindows() ? "relative\\path" : "relative/path";
         Assert.IsFalse(form.Validate(), "the Mirror plugin validates each line");
@@ -199,7 +204,7 @@ public class SettingsFormTests
         var plugin = new MirrorPlugin();
         var form = new SettingsFormViewModel(plugin.SettingsType, plugin.CreateDefaultSettings(), plugin, null, plugin, new FakeDialogs());
         var paths = form.Fields.Single(f => f.PropertyName == nameof(MirrorSettings.Paths));
-        Assert.AreEqual("One per line", paths.Hint, "the hint is the attribute's (the provider returns null for it)");
+        Assert.IsFalse(paths.HasHint, "no hint: the label says 'one per line' and the ghost text shows the forms");
         Assert.AreEqual(MirrorPlugin.PathsPlaceholder(OperatingSystem.IsWindows(), OperatingSystem.IsMacOS()), paths.Placeholder);
         var lines = paths.Placeholder.Split('\n');
         Assert.AreEqual(2, lines.Length, "a local drive, then a typical network path");

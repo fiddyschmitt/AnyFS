@@ -13,6 +13,9 @@
     <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
     <!-- plugin POCOs are deserialised by reflection; keep that path alive under trimming (spec 6.7, 14.1) -->
     <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+    <!-- the settings form writes an empty box as null only for properties declared nullable (string?); the
+         annotations and NullabilityInfoContext must survive trimming for that to hold for the built-ins -->
+    <NullabilityInfoContextSupport>true</NullabilityInfoContextSupport>
     <!-- the publish shape (spec 14): self-contained single file, trimmed; scripts/publish.ps1 passes the RID -->
     <PublishSingleFile Condition="'$(RuntimeIdentifier)' != ''">true</PublishSingleFile>
     <SelfContained Condition="'$(RuntimeIdentifier)' != ''">true</SelfContained>

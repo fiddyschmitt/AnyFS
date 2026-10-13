@@ -94,14 +94,16 @@
           <TextBlock Classes="muted" Text="{Binding ProviderName}" IsVisible="{Binding ShowProvider}" />
         </StackPanel>
         <CheckBox Grid.Column="2" IsChecked="{Binding Enabled}" Content="Enabled" MinHeight="0" Padding="6,0,0,0" VerticalAlignment="Top" />
-        <!-- the status line of a running mount is its access path (URL, UNC path), so the Copy button sits beside it -->
-        <DockPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
-          <Button DockPanel.Dock="Right" Classes="icon" Command="{Binding StatusAccessPath.CopyCommand, FallbackValue={x:Null}}" IsVisible="{Binding HasStatusAccessPath}" ToolTip.Tip="{Binding StatusCopyTooltip}" Margin="6,0,0,0" VerticalAlignment="Center">
+        <!-- the status line of a running mount is its access path (URL, UNC path), so the Copy button follows the end of
+             the text; the text's MaxWidth leaves room for the circle and the button so a long path still trims -->
+        <Grid Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" ColumnDefinitions="Auto,Auto,Auto" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
+          <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" />
+          <TextBlock Grid.Column="1" Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                     MaxWidth="{Binding $parent[Grid].Bounds.Width, Converter={x:Static g:Converters.Minus}, ConverterParameter=52}" />
+          <Button Grid.Column="2" Classes="icon" Command="{Binding StatusAccessPath.CopyCommand, FallbackValue={x:Null}}" IsVisible="{Binding HasStatusAccessPath}" ToolTip.Tip="{Binding StatusCopyTooltip}" Margin="6,0,0,0" VerticalAlignment="Center">
             <PathIcon Classes="small" Data="{StaticResource IconCopy}" />
           </Button>
-          <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" />
-          <TextBlock Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-        </DockPanel>
+        </Grid>
         <ItemsControl Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding OtherAccessPaths}" Margin="0,6,0,0">
           <ItemsControl.ItemTemplate>
             <DataTemplate x:DataType="vm:AccessPathViewModel">

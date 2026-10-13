@@ -77,7 +77,8 @@ A plain POCO with public get/set properties. `[Setting]` gives the label and, op
 `long`, `double`, `float` and `decimal` are number boxes (nullable ones may be left empty), an
 enum or a property with `Choices` is a drop-down, a `Secret` string is a masked password box,
 anything else is a text box; `Multiline`, `FilePath` and `FolderPath` (with a Browse button)
-are chosen explicitly. `Group` puts fields under a heading and `Advanced` collapses them. The host builds the form, the
+are chosen explicitly. An empty box becomes null for a property declared nullable (`string?`,
+`int?`) and `""` for a plain `string`, so you only ever see a null you declared. `Group` puts fields under a heading and `Advanced` collapses them. The host builds the form, the
 JSON (camelCase names in `sources.json`) and the secret handling: a `Secret` property is never
 written to the settings files; it's kept in the protected secret store and filled back into your
 POCO. Implement `IValidatable` to check settings before they're saved and `ITestable` to back a

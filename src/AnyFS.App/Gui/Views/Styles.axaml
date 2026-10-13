@@ -119,7 +119,8 @@
     <Setter Property="Margin" Value="0,0,10,0" />
     <Setter Property="VerticalAlignment" Value="Top" />
   </Style>
-  <Style Selector="Border.badge > TextBlock">
+  <!-- descendant, not child: the tiles put the letter in a Panel under an optional plugin icon -->
+  <Style Selector="Border.badge TextBlock">
     <Setter Property="Foreground" Value="White" />
     <Setter Property="FontWeight" Value="Bold" />
     <Setter Property="HorizontalAlignment" Value="Center" />

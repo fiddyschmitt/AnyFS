@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
+using System.Reflection;
 using AnyFS.App.Gui.Services;
 using AnyFS.Core.Settings;
 using AnyFS.Sdk;
@@ -171,12 +172,37 @@ public sealed partial class SettingFieldViewModel : ObservableObject
     private readonly SettingProperty _property;
     private readonly IDialogs _dialogs;
     private readonly Type _type;
+    private readonly bool _nullable;
+
+    /// <summary>
+    /// Whether an empty box may be written as null: a Nullable&lt;T&gt; value type, or a reference type the plugin
+    /// declared nullable (<c>string?</c>). A plain <c>string</c> gets "" so the plugin never sees a null it didn't
+    /// declare (the host keeps the nullable annotations in trimmed builds: NullabilityInfoContextSupport).
+    /// </summary>
+    private static bool IsNullable(PropertyInfo property)
+    {
+        if (property.PropertyType.IsValueType)
+        {
+            return Nullable.GetUnderlyingType(property.PropertyType) is not null;
+        }
+
+        try
+        {
+            return new NullabilityInfoContext().Create(property).WriteState == NullabilityState.Nullable;
+        }
+        catch (InvalidOperationException)
+        {
+            // nullability metadata unavailable in this build: the safe answer is "not nullable"
+            return false;
+        }
+    }
 
     public SettingFieldViewModel(SettingProperty property, ISettingTextProvider? texts, IDialogs dialogs)
     {
         _property = property;
         _dialogs = dialogs;
         _type = Nullable.GetUnderlyingType(property.Property.PropertyType) ?? property.Property.PropertyType;
+        _nullable = IsNullable(property.Property);
         Kind = ResolveKind(property.Attribute, _type);
         Choices = Kind == SettingKind.Choice
             ? property.Attribute.Choices ?? (_type.IsEnum ? Enum.GetNames(_type) : [])
@@ -274,7 +300,7 @@ public sealed partial class SettingFieldViewModel : ObservableObject
     /// <summary>Writes the field into the POCO; returns the error to show, or null.</summary>
     public string? Apply(object settings)
     {
-        var nullable = !_type.IsValueType || Nullable.GetUnderlyingType(_property.Property.PropertyType) is not null;
+        var nullable = _nullable;
         try
         {
             switch (Kind)

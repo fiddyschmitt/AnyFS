@@ -15,7 +15,11 @@
   per line (`C:\` and `\\aus-files-01\shared` on Windows, `/` and `/mnt/aus-files-01` on Linux,
   `/` and `/Volumes/aus-files-01` on macOS); the hint is just "One per line". "Count files on
   start" walks every configured path at the same time, each on its own thread.
-- Source dialog: Read-only, Enabled and Count files on start are evenly spaced.
+- Source dialog: Read-only, Enabled and Count files on start are evenly spaced. Mirror's field is
+  labelled "Paths (one per line)" with no hint and no asterisk (the plugin's own validation asks
+  for a path).
+- Mount tiles: the Copy button follows the end of the status text instead of sitting at the tile's
+  right edge; the letter in a tile's badge is centred.
 - Mount tiles no longer repeat the provider's name under a mount named after it (the line stays
   for a mount with a name of its own).
 - SDK: `ICountable` (a source counts its own tree when "Count files on start" is on),

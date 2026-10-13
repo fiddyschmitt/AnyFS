@@ -5,8 +5,9 @@ namespace AnyFS.Sources.Mirror;
 
 public sealed class MirrorSettings
 {
-    // the placeholder (a local drive and a typical network path) is per OS: MirrorPlugin.PlaceholderFor
-    [Setting("Paths", Kind = SettingKind.Multiline, Required = true, Order = 0, Hint = "One per line")]
+    // the placeholder (a local drive and a typical network path) is per OS: MirrorPlugin.PlaceholderFor;
+    // not Required (no asterisk): Validate below says "Add at least one path." instead
+    [Setting("Paths (one per line)", Kind = SettingKind.Multiline, Order = 0)]
     public string Paths { get; set; } = "";
 
     [Setting("Check paths every (seconds)", Advanced = true, Order = 10, Hint = "How often unreachable paths are retried and reachable ones re-checked.")]
@@ -91,8 +92,8 @@ public sealed record MirrorRoot(string Original, string FullPath, string[] Chain
 {
     public string ChainPath => string.Join('/', Chain);
 
-    public static IEnumerable<string> Lines(string paths)
-        => paths.Split('\n').Select(l => l.Trim().TrimEnd('\r')).Where(l => l.Length > 0 && !l.StartsWith('#'));
+    public static IEnumerable<string> Lines(string? paths)
+        => (paths ?? "").Split('\n').Select(l => l.Trim().TrimEnd('\r')).Where(l => l.Length > 0 && !l.StartsWith('#'));
 
     /// <summary>Parses one line. <paramref name="windows"/> says which forms this OS can open.</summary>
     public static bool TryParse(string line, bool windows, out MirrorRoot root, out string error)

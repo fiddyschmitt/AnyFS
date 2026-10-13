@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using AnyFS.Core.Plugins;
 using AnyFS.Core.Status;
 using Avalonia.Data.Converters;
@@ -28,6 +29,26 @@ public static class Converters
     public static readonly IValueConverter PluginIcon = new FuncValueConverter<string?, IImage?>(PluginIcons.For);
 
     public static readonly IValueConverter IsNotNull = new FuncValueConverter<object?, bool>(value => value is not null);
+
+    /// <summary>The value minus the converter parameter, never below zero: a MaxWidth bound to a parent's width, leaving room for what sits beside.</summary>
+    public static readonly IValueConverter Minus = new MinusConverter();
+
+    private sealed class MinusConverter : IValueConverter
+    {
+        public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+        {
+            var width = value is double d ? d : 0;
+            var less = parameter switch
+            {
+                double p => p,
+                string s when double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var p) => p,
+                _ => 0,
+            };
+            return Math.Max(0, width - less);
+        }
+
+        public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => throw new NotSupportedException();
+    }
 }
 
 /// <summary>
