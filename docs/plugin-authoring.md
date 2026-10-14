@@ -72,13 +72,17 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
 ## Settings
 
 A plain POCO with public get/set properties. `[Setting]` gives the label and, optionally,
-`Hint`, `Placeholder`, `Required`, `Kind`, `Group`, `Advanced`, `Order` and `Choices`. With
+`Hint`, `Placeholder`, `Required`, `Kind`, `Group`, `Advanced`, `Order`, `Choices` and `Platforms`. With
 `Kind = Auto` (the default) the form follows the property type: `bool` is a checkbox, `int`,
 `long`, `double`, `float` and `decimal` are number boxes (nullable ones may be left empty), an
 enum or a property with `Choices` is a drop-down, a `Secret` string is a masked password box,
 anything else is a text box; `Multiline`, `FilePath` and `FolderPath` (with a Browse button)
 are chosen explicitly. An empty box becomes null for a property declared nullable (`string?`,
-`int?`) and `""` for a plain `string`, so you only ever see a null you declared. `Group` puts fields under a heading and `Advanced` collapses them. The host builds the form, the
+`int?`) and `""` for a plain `string`, so you only ever see a null you declared. `Group` puts fields under a heading and `Advanced` collapses them. `Platforms`
+(`new[] { "windows" }`, names as `OperatingSystem.IsOSPlatform` takes them) shows a field only on
+those operating systems; the JSON keeps the value everywhere, so a shared settings file travels,
+and your `Validate` should ignore the property elsewhere (`DriveLetter.Validate` is the helper
+for a letter). The host builds the form, the
 JSON (camelCase names in `sources.json`) and the secret handling: a `Secret` property is never
 written to the settings files; it's kept in the protected secret store and filled back into your
 POCO. Implement `IValidatable` to check settings before they're saved and `ITestable` to back a

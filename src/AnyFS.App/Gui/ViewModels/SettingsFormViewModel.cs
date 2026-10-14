@@ -12,9 +12,9 @@ namespace AnyFS.App.Gui.ViewModels;
 
 /// <summary>
 /// The settings form a plugin gets for free (spec 6.7): one field per <c>[Setting]</c> property, grouped,
-/// Advanced ones collapsed, validation inline, a Test button when the plugin is <see cref="ITestable"/>.
-/// Reads and writes the plugin's POCO by reflection; the annotation on <c>SettingsType</c> keeps the
-/// properties in trimmed builds.
+/// Advanced ones collapsed, fields for other operating systems left out, validation inline, a Test button
+/// when the plugin is <see cref="ITestable"/>. Reads and writes the plugin's POCO by reflection; the
+/// annotation on <c>SettingsType</c> keeps the properties in trimmed builds.
 /// </summary>
 public sealed partial class SettingsFormViewModel : ObservableObject
 {
@@ -32,7 +32,7 @@ public sealed partial class SettingsFormViewModel : ObservableObject
         Settings = settings;
         _validator = validator;
         _tester = tester;
-        Fields = PluginSettingsBinder.Describe(settingsType).Select(p => new SettingFieldViewModel(p, texts, dialogs)).ToList();
+        Fields = PluginSettingsBinder.Describe(settingsType).Where(p => p.IsForThisPlatform).Select(p => new SettingFieldViewModel(p, texts, dialogs)).ToList();
         foreach (var field in Fields)
         {
             field.Load(settings);

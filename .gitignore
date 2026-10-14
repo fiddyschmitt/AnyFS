@@ -494,3 +494,5 @@ anyfs.*.log
 /scratch/
 # the Go server binaries scripts/fetch-go-servers.ps1 downloads (embedded per RID at publish)
 /tools/go-servers/
+# the WinFsp installer scripts/fetch-winfsp.ps1 downloads (embedded in Windows builds for the Install button)
+/tools/winfsp/

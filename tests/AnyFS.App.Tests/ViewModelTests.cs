@@ -386,11 +386,35 @@ public class ViewModelTests
         Assert.AreEqual("1 files served this session", _vm.FilesServedText);
         var row = _vm.Stats.Rows.Single(r => r.Collection == "work");
         Assert.AreEqual("1", row.FilesSession);
+        var idle = _vm.Stats.Rows.Single(r => r.Collection == "Collection 1");
+        Assert.AreEqual("0", idle.FilesSession, "every collection has a row in the table, served or not");
 
         _dialogs.OnConfirm = _ => new ConfirmAnswer(ConfirmButton.Yes, false);
         await _vm.Stats.ResetTotalsCommand.ExecuteAsync(null);
         Assert.AreEqual("0", _vm.Stats.FilesServedTotal);
         Assert.AreEqual("1", _vm.Stats.FilesServedSession, "the session keeps counting");
+    }
+
+    [TestMethod]
+    public void SettingsFormLeavesOutFieldsForOtherOperatingSystems()
+    {
+        var form = new SettingsFormViewModel(typeof(PlatformSettings), new PlatformSettings(), null, null, null, _dialogs);
+        var names = form.Fields.Select(f => f.PropertyName).ToList();
+        CollectionAssert.Contains(names, nameof(PlatformSettings.Everywhere));
+        CollectionAssert.Contains(names, nameof(PlatformSettings.Here));
+        CollectionAssert.DoesNotContain(names, nameof(PlatformSettings.Elsewhere));
+    }
+
+    public sealed class PlatformSettings
+    {
+        [Setting("Everywhere")]
+        public string? Everywhere { get; set; }
+
+        [Setting("Here", Platforms = new[] { "windows", "linux", "macos", "freebsd" })]
+        public string? Here { get; set; }
+
+        [Setting("Elsewhere", Platforms = new[] { "plan9" })]
+        public string? Elsewhere { get; set; }
     }
 
     [TestMethod]

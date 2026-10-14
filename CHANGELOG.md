@@ -18,6 +18,22 @@
   "A file is served when a handle..." line is gone.
 - `scripts/go-servers.json` carries the SHA-256s of the portable-smb-server v0.3.0 release, so
   `scripts/fetch-go-servers.ps1` now verifies every binary it downloads.
+- Stats: the per-collection breakdown is a table (bordered, shaded two-row header, a row for every
+  collection whether it has served anything or not).
+- Status bar: the settings path beside **Open log** is gone.
+- SMB: a **Drive letter** box (Windows only) maps the letter to the share while the mount runs
+  (`net use X: \\<host>\<collection> /TCPPORT:<port>`), Open opens the letter, and the mapping is
+  removed when the mount stops; a letter in use by something else leaves the mount yellow with the
+  UNC path still working, and a guest share gets no letter where Windows blocks guest logons (said
+  at once). The Add mount dialog no longer talks about where to put
+  portable-smb-server or `ANYFS_SMB_SERVER`: every build embeds the server for the runtime it
+  targets (a plain build takes the SDK's own RID), so a Debug run has it too.
+- WinFsp: Windows builds embed the WinFsp 2.1.25156 installer (`scripts/fetch-winfsp.ps1`,
+  `tools/winfsp/`), and **Install WinFsp driver** runs it silently through `msiexec /qn` behind one
+  administrator prompt; winget stays the fallback for a build without it. With a drive letter set,
+  Open opens the letter.
+- SDK: `SettingAttribute.Platforms` shows a field only on the named operating systems (the JSON
+  keeps the value everywhere), and `DriveLetter` normalises and validates a letter setting.
 
 ## Unreleased (milestone 3: mount providers)
 

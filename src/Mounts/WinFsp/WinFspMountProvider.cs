@@ -19,8 +19,9 @@ public sealed class WinFspMountSettings
 /// <summary>
 /// WinFsp (type <c>winfsp</c>, spec 8.1): one WinFsp network file system per collection with the prefix
 /// \anyfs\&lt;collection&gt;, so \\anyfs\&lt;collection&gt; works in Explorer, cmd and every program with no DNS and no
-/// drive letter (a letter is opt-in). The WinFsp runtime is a driver installed separately; the provider notices its
-/// absence and offers to install it with winget (N6).
+/// drive letter (a letter is opt-in; Open uses it when set). The WinFsp runtime is a driver installed separately; the
+/// provider notices its absence and offers to install it, silently from the bundled installer (<see cref="WinFspInstaller"/>)
+/// or through winget when a build has none (N6).
 /// </summary>
 public sealed class WinFspMountProvider : IMountProviderPlugin, IValidatable, IInstallableProvider
 {
@@ -38,7 +39,7 @@ public sealed class WinFspMountProvider : IMountProviderPlugin, IValidatable, II
 
     public string? UnavailableReason => !OperatingSystem.IsWindows() ? "WinFsp is a Windows driver"
         : WinFspRuntime.IsInstalled() ? null
-        : "WinFsp is not installed. Install it (the button runs winget install WinFsp.WinFsp) or get it from https://winfsp.dev; no reboot is needed.";
+        : "The WinFsp driver is not installed.";
 
     public PerformanceTier Tier => PerformanceTier.Native;
 
@@ -57,23 +58,30 @@ public sealed class WinFspMountProvider : IMountProviderPlugin, IValidatable, II
     public IEnumerable<ValidationMessage> Validate(object settings)
     {
         var s = (WinFspMountSettings)settings;
-        if (!string.IsNullOrWhiteSpace(s.DriveLetter) && NormaliseLetter(s.DriveLetter) is null)
+        if (DriveLetter.Validate(s.DriveLetter, nameof(WinFspMountSettings.DriveLetter)) is { } message)
         {
-            yield return new ValidationMessage("A drive letter is a single letter, D to Z.", nameof(WinFspMountSettings.DriveLetter));
+            yield return message;
         }
     }
 
-    public string InstallText => "Install WinFsp";
+    public string InstallText => "Install WinFsp driver";
 
-    public string InstallDetail => $"Runs: winget install --id {WingetId} (an administrator prompt appears for the installer; no reboot)";
+    public string InstallDetail => WinFspInstaller.HasEmbedded()
+        ? $"Installs the bundled WinFsp {WinFspInstaller.Version} driver with no installer windows (an administrator prompt appears; no reboot)"
+        : $"Runs: winget install --id {WingetId} (an administrator prompt appears for the installer; no reboot)";
 
-    public bool CanInstall => OperatingSystem.IsWindows() && WinFspRuntime.FindWinget() is not null;
+    public bool CanInstall => OperatingSystem.IsWindows() && (WinFspInstaller.HasEmbedded() || WinFspRuntime.FindWinget() is not null);
 
     public async Task<InstallResult> InstallAsync(IProgress<string> progress, CancellationToken ct)
     {
         if (!OperatingSystem.IsWindows())
         {
             return new InstallResult(false, "WinFsp is a Windows driver.");
+        }
+
+        if (WinFspInstaller.HasEmbedded())
+        {
+            return await WinFspInstaller.InstallAsync(progress, ct).ConfigureAwait(false);
         }
 
         var winget = WinFspRuntime.FindWinget();
@@ -120,11 +128,7 @@ public sealed class WinFspMountProvider : IMountProviderPlugin, IValidatable, II
         }
     }
 
-    public static string? NormaliseLetter(string? text)
-    {
-        var letter = text?.Trim().TrimEnd(':', '\\', '/').ToUpperInvariant();
-        return letter is { Length: 1 } && letter[0] is >= 'D' and <= 'Z' ? letter : null;
-    }
+    public static string? NormaliseLetter(string? text) => DriveLetter.Normalise(text);
 }
 
 internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo collection) : IMount
@@ -198,11 +202,12 @@ internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo 
         var paths = new List<AccessPath> { new("UNC path", unc) };
         if (letter is not null)
         {
-            paths.Add(new AccessPath("Drive", letter + @":\"));
+            paths.Add(new AccessPath("Drive", DriveLetter.Root(letter)));
         }
 
         AccessPaths = paths;
-        OpenAction = new MountOpenAction.FileManager(unc);
+        // the letter opens in a blink; the UNC path makes Windows look the name up on the network first (docs/mounts.md)
+        OpenAction = new MountOpenAction.FileManager(letter is null ? unc : DriveLetter.Root(letter));
     }
 
     public Task StopAsync(CancellationToken ct)

@@ -44,9 +44,11 @@ public sealed partial class StatsRowViewModel(string collection) : ObservableObj
     }
 }
 
-/// <summary>The Stats tab (spec 11.3, 13): totals and session, a per-collection breakdown, Reset totals.</summary>
+/// <summary>The Stats tab (spec 11.3, 13): totals and session, a per-collection table, Reset totals.</summary>
 public sealed partial class StatsViewModel : ObservableObject
 {
+    private static readonly CollectionStats Nothing = new();
+
     private readonly AnyFsEngine _engine;
     private readonly IDialogs _dialogs;
     private readonly Operations _ops;
@@ -93,7 +95,12 @@ public sealed partial class StatsViewModel : ObservableObject
         TotalsSince = stats.TotalsSince is { } since ? $"since {since.ToLocalTime():d MMM yyyy HH:mm}" : "";
         SessionSince = $"since {stats.SessionStarted.ToLocalTime():d MMM yyyy HH:mm}";
 
-        var names = stats.Collections.Keys.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        // every collection has a row, served or not (plus any the counters still know), so the table reads as a table
+        var names = _engine.Settings.Collections.Select(c => c.Name)
+            .Concat(stats.Collections.Keys)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+            .ToList();
         for (var i = Rows.Count - 1; i >= 0; i--)
         {
             if (!names.Contains(Rows[i].Collection))
@@ -115,7 +122,7 @@ public sealed partial class StatsViewModel : ObservableObject
                 Rows.Move(Rows.IndexOf(row), i);
             }
 
-            row.Update(stats.Collections[names[i]]);
+            row.Update(stats.Collections.TryGetValue(names[i], out var counters) ? counters : Nothing);
         }
 
         OnPropertyChanged(nameof(HasRows));

@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using AnyFS.Sdk;
+using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Mounts.Smb;
 
@@ -12,21 +13,24 @@ public sealed class SmbMountSettings
     [Setting("Port", Required = true, Order = 1, Hint = "1445 needs no administrator rights and doesn't clash with Windows' own SMB on 445. Collections on the same address and port share one server.")]
     public int Port { get; set; } = SmbMountProvider.DefaultPort;
 
-    [Setting("Guest access", Order = 2, Group = "Authentication", Hint = "No password at all. Windows refuses guest shares unless its EnableInsecureGuestLogons policy is on, so a user and password is the usual choice.")]
+    [Setting("Drive letter", Order = 2, Platforms = new[] { "windows" }, Placeholder = "X", Hint = "Optional. Maps the letter to the share while the mount runs, so Explorer and every program open it at once; leave empty to use the UNC path alone.")]
+    public string? DriveLetter { get; set; }
+
+    [Setting("Guest access", Order = 3, Group = "Authentication", Hint = "No password at all. Windows refuses guest shares unless its EnableInsecureGuestLogons policy is on, so a user and password is the usual choice.")]
     public bool Guest { get; set; }
 
-    [Setting("User name", Order = 3, Group = "Authentication", Hint = "Every collection on the same port uses the same login.")]
+    [Setting("User name", Order = 4, Group = "Authentication", Hint = "Every collection on the same port uses the same login.")]
     public string? User { get; set; } = "user";
 
-    [Setting("Password", Secret = true, Order = 4, Group = "Authentication")]
+    [Setting("Password", Secret = true, Order = 5, Group = "Authentication")]
     public string? Password { get; set; }
 }
 
 /// <summary>
 /// SMB (type <c>smb</c>, spec 8.2) through portable-smb-server: one Go process per bind address and port serving every
 /// collection mounted there, fed by a loopback VFS endpoint protected by a per-launch token. Reached with a device-less
-/// <c>net use \\host\collection /TCPPORT:1445</c> on Windows 11, <c>mount -t cifs</c> on Linux and Finder's
-/// <c>smb://host:1445/collection</c> on macOS; no drive is ever mapped (spec 8.9).
+/// <c>net use \\host\collection /TCPPORT:1445</c> on Windows 11 (or an opt-in drive letter mapped the same way while
+/// the mount runs), <c>mount -t cifs</c> on Linux and Finder's <c>smb://host:1445/collection</c> on macOS.
 /// </summary>
 public sealed class SmbMountProvider : IMountProviderPlugin, IValidatable
 {
@@ -68,6 +72,12 @@ public sealed class SmbMountProvider : IMountProviderPlugin, IValidatable
             yield return new ValidationMessage("Port 445 is held by Windows' own file sharing on Windows and needs administrator rights elsewhere; 1445 is the usual choice.", nameof(SmbMountSettings.Port), IsError: false);
         }
 
+        // the letter is a Windows setting: elsewhere the box isn't shown and a value from a shared settings file is ignored
+        if (OperatingSystem.IsWindows() && DriveLetter.Validate(s.DriveLetter, nameof(SmbMountSettings.DriveLetter)) is { } letterMessage)
+        {
+            yield return letterMessage;
+        }
+
         if (!s.Guest)
         {
             if (string.IsNullOrWhiteSpace(s.User))
@@ -86,10 +96,20 @@ public sealed class SmbMountProvider : IMountProviderPlugin, IValidatable
         }
     }
 
-    /// <summary>The device-less connection Windows 11 24H2+ needs for a port other than 445 (spike 2): registers the port for that server, then the UNC path just works.</summary>
-    public static IReadOnlyList<string> WindowsConnectArguments(string unc, int port, SmbCredentialsView credentials)
+    /// <summary>
+    /// The connection Windows 11 24H2+ needs for a port other than 445 (spike 2): device-less, it registers the port for
+    /// that server and the UNC path just works; with a <paramref name="letter"/>, it maps the letter to the share.
+    /// </summary>
+    public static IReadOnlyList<string> WindowsConnectArguments(string unc, int port, SmbCredentialsView credentials, string? letter = null)
     {
-        var args = new List<string> { "use", unc, $"/TCPPORT:{port}" };
+        var args = new List<string> { "use" };
+        if (letter is not null)
+        {
+            args.Add(letter + ":");
+        }
+
+        args.Add(unc);
+        args.Add($"/TCPPORT:{port}");
         if (!credentials.Guest)
         {
             args.Add($"/USER:{credentials.User}");
@@ -116,6 +136,8 @@ internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collec
     private ISharedLease<SmbServerProcess>? _lease;
     private string? _registeredName;
     private Action<string>? _onDied;
+    private string? _mappedLetter;
+    private ILogger? _logger;
 
     public IReadOnlyList<AccessPath> AccessPaths { get; private set; } = [];
 
@@ -139,6 +161,7 @@ internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collec
             throw new InvalidOperationException("the share needs a user name and password, or guest access");
         }
 
+        _logger = context.Logger;
         var binary = SmbServerBinary.Locate(context.StateDirectory);
         var key = $"smb:{address}:{settings.Port}";
         _lease = await context.AcquireSharedAsync(key, token => SmbServerProcess.StartAsync(address, settings.Port, binary, context.Logger, token), ct).ConfigureAwait(false);
@@ -163,9 +186,27 @@ internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collec
         var paths = new List<AccessPath>();
         if (OperatingSystem.IsWindows())
         {
+            var letter = DriveLetter.Normalise(settings.DriveLetter);
+            var withPassword = new SmbCredentialsView(credentials.User, credentials.Password, credentials.Guest);
             paths.Add(new AccessPath("UNC path", unc));
-            paths.Add(new AccessPath("Connect command", "net " + string.Join(' ', SmbMountProvider.WindowsConnectArguments(unc, settings.Port, view).Select(a => a.Contains(' ') ? '"' + a + '"' : a)).TrimEnd()));
-            OpenAction = new MountOpenAction.Command("net", SmbMountProvider.WindowsConnectArguments(unc, settings.Port, new SmbCredentialsView(credentials.User, credentials.Password, credentials.Guest)), unc);
+            paths.Add(new AccessPath("Connect command", "net " + string.Join(' ', SmbMountProvider.WindowsConnectArguments(unc, settings.Port, view, letter).Select(a => a.Contains(' ') ? '"' + a + '"' : a)).TrimEnd()));
+            OpenAction = new MountOpenAction.Command("net", SmbMountProvider.WindowsConnectArguments(unc, settings.Port, withPassword), unc);
+            if (letter is not null)
+            {
+                // the letter is mapped now, while the mount runs, and removed in StopAsync; a letter that can't be had
+                // leaves the mount usable through the UNC path with a yellow note (the runner keeps a note made during start)
+                var outcome = await WindowsDriveMapping.MapAsync(letter, unc, SmbMountProvider.WindowsConnectArguments(unc, settings.Port, withPassword, letter), credentials.Guest, context.Logger, ct).ConfigureAwait(false);
+                if (outcome.Success)
+                {
+                    _mappedLetter = letter;
+                    paths.Insert(1, new AccessPath("Drive", DriveLetter.Root(letter)));
+                    OpenAction = new MountOpenAction.FileManager(DriveLetter.Root(letter));
+                }
+                else
+                {
+                    context.ReportHealth(ComponentHealth.Degraded, outcome.Message);
+                }
+            }
         }
         else if (OperatingSystem.IsMacOS())
         {
@@ -187,6 +228,12 @@ internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collec
 
     public async Task StopAsync(CancellationToken ct)
     {
+        if (_mappedLetter is not null && OperatingSystem.IsWindows())
+        {
+            await WindowsDriveMapping.UnmapAsync(_mappedLetter, _logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance).ConfigureAwait(false);
+            _mappedLetter = null;
+        }
+
         if (_lease is not null && _onDied is not null)
         {
             _lease.Value.Died -= _onDied;

@@ -430,8 +430,9 @@ internal static partial class ChildJob
 }
 
 /// <summary>
-/// Finds the portable-smb-server executable: ANYFS_SMB_SERVER, a copy beside anyfs, or the one embedded at publish
-/// (extracted into the state folder on first use, named by its hash so a new build never runs an old copy).
+/// Finds the portable-smb-server executable: the one embedded in the build (extracted into the state folder on first
+/// use, named by its hash so a new build never runs an old copy). For development, ANYFS_SMB_SERVER or a copy beside
+/// anyfs take precedence; neither is mentioned to users, since every build carries the server.
 /// </summary>
 internal static class SmbServerBinary
 {
@@ -455,7 +456,7 @@ internal static class SmbServerBinary
             return true;
         }
 
-        reason = $"The SMB server (portable-smb-server) is not bundled in this build. Put {FileName} beside anyfs, or set {EnvironmentVariable} to its path.";
+        reason = "The bundled SMB server is missing from this build: run scripts/fetch-go-servers.ps1 and build again.";
         return false;
     }
 
@@ -473,7 +474,7 @@ internal static class SmbServerBinary
         }
 
         using var resource = OpenEmbedded()
-            ?? throw new InvalidOperationException($"the SMB server is not bundled in this build; put {FileName} beside anyfs or set {EnvironmentVariable}");
+            ?? throw new InvalidOperationException("the bundled SMB server is missing from this build: run scripts/fetch-go-servers.ps1 and build again");
         using var buffer = new MemoryStream();
         resource.CopyTo(buffer);
         var bytes = buffer.ToArray();

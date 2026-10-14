@@ -42,6 +42,14 @@ public sealed class SettingAttribute(string label) : Attribute
 
     /// <summary>For <see cref="SettingKind.Choice"/> on string properties.</summary>
     public string[]? Choices { get; set; }
+
+    /// <summary>
+    /// Shown only on these operating systems, named as <see cref="OperatingSystem.IsOSPlatform(string)"/> takes
+    /// them: "windows", "linux", "macos". The JSON keeps the value everywhere, so a settings file travels between
+    /// machines; the form just leaves the field out elsewhere (and a plugin's Validate should ignore it there).
+    /// Null (the default): shown everywhere.
+    /// </summary>
+    public string[]? Platforms { get; set; }
 }
 
 /// <summary>

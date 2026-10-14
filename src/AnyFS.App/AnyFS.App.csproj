@@ -38,20 +38,35 @@
     <UseSystemResourceKeys>true</UseSystemResourceKeys>
   </PropertyGroup>
 
-  <!-- The Go server portable-smb-server (spec 8.2, 14): scripts/fetch-go-servers.ps1 puts one per RID under
-       tools/go-servers/, and a RID-specific publish embeds that RID's copy for the SMB provider to extract on first use.
-       It lives here rather than in src/Mounts/Smb because the SDK builds library references without the RuntimeIdentifier. -->
+  <!-- Bundled tools (spec 8.1, 8.2, 14). Every build embeds them for the runtime it targets: the publish RID, or the
+       SDK's own RID for a plain build, so a Debug run from the IDE has them too. They live here rather than in the
+       mount projects because the SDK builds library references without the RuntimeIdentifier.
+       - portable-smb-server: scripts/fetch-go-servers.ps1 puts one per RID under tools/go-servers/; the SMB provider
+         extracts it on first use.
+       - the WinFsp installer: scripts/fetch-winfsp.ps1 puts the pinned MSI under tools/winfsp/; Windows builds embed
+         it so the Install button installs the driver silently (winget is the fallback when a build has none). -->
   <PropertyGroup>
+    <BundleRid Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</BundleRid>
+    <BundleRid Condition="'$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</BundleRid>
+    <BundleIsWindows Condition="$(BundleRid.StartsWith('win'))">true</BundleIsWindows>
     <GoServersDir>$(MSBuildThisFileDirectory)..\..\tools\go-servers</GoServersDir>
-    <SmbServerExt Condition="'$(RuntimeIdentifier)' != '' and $(RuntimeIdentifier.StartsWith('win'))">.exe</SmbServerExt>
-    <SmbServerBinary Condition="'$(RuntimeIdentifier)' != ''">$(GoServersDir)\$(RuntimeIdentifier)\portable-smb-server$(SmbServerExt)</SmbServerBinary>
+    <SmbServerExt Condition="'$(BundleIsWindows)' == 'true'">.exe</SmbServerExt>
+    <SmbServerBinary>$(GoServersDir)\$(BundleRid)\portable-smb-server$(SmbServerExt)</SmbServerBinary>
+    <WinFspMsiDir>$(MSBuildThisFileDirectory)..\..\tools\winfsp</WinFspMsiDir>
   </PropertyGroup>
-  <ItemGroup Condition="'$(SmbServerBinary)' != '' and Exists('$(SmbServerBinary)')">
+  <ItemGroup Condition="Exists('$(SmbServerBinary)')">
     <EmbeddedResource Include="$(SmbServerBinary)" LogicalName="portable-smb-server" />
   </ItemGroup>
-  <Target Name="ReportSmbServerBinary" BeforeTargets="CoreCompile" Condition="'$(SmbServerBinary)' != ''">
+  <ItemGroup Condition="'$(BundleIsWindows)' == 'true'">
+    <WinFspMsi Include="$(WinFspMsiDir)\winfsp-*.msi" />
+    <EmbeddedResource Include="@(WinFspMsi)" LogicalName="winfsp.msi" />
+  </ItemGroup>
+  <Target Name="ReportBundledTools" BeforeTargets="CoreCompile">
     <Message Importance="high" Text="SMB: embedding $(SmbServerBinary)" Condition="Exists('$(SmbServerBinary)')" />
     <Message Importance="high" Text="SMB: no server binary at $(SmbServerBinary); run scripts/fetch-go-servers.ps1 first or the SMB provider will be unavailable in this build" Condition="!Exists('$(SmbServerBinary)')" />
+    <Message Importance="high" Text="WinFsp: embedding @(WinFspMsi)" Condition="'@(WinFspMsi)' != ''" />
+    <Message Importance="high" Text="WinFsp: no installer under $(WinFspMsiDir); run scripts/fetch-winfsp.ps1 first or the Install button will fall back to winget" Condition="'$(BundleIsWindows)' == 'true' and '@(WinFspMsi)' == ''" />
+    <Error Text="WinFsp: more than one installer under $(WinFspMsiDir) (@(WinFspMsi)); keep the one scripts/winfsp.json pins" Condition="'@(WinFspMsi->Count())' &gt; '1'" />
   </Target>
 
   <!-- The guaranteed set (spec 14.1): kept whole so third-party plugins can rely on it. Spike 7 showed that

@@ -157,8 +157,13 @@ public class WinFspMountTests
         var provider = new WinFspMountProvider();
         Assert.AreEqual(0, provider.Validate(new WinFspMountSettings()).Count());
         Assert.IsTrue(provider.Validate(new WinFspMountSettings { DriveLetter = "1" }).Any(m => m.IsError));
-        Assert.AreEqual("Install WinFsp", provider.InstallText);
-        StringAssert.Contains(provider.InstallDetail, "winget install");
+        Assert.AreEqual("Install WinFsp driver", provider.InstallText);
+        Assert.IsTrue(provider.InstallDetail.Contains("winget install") || provider.InstallDetail.Contains("bundled"), provider.InstallDetail);
+        CollectionAssert.AreEqual(new[] { "/i", @"C:\t\winfsp.msi", "/qn", "/norestart", "/l*v", @"C:\t\winfsp.log" }, WinFspInstaller.Arguments(@"C:\t\winfsp.msi", @"C:\t\winfsp.log").ToList());
+        StringAssert.Contains(WinFspInstaller.Describe(1602, installed: false), "cancelled");
+        StringAssert.Contains(WinFspInstaller.Describe(1618, installed: false), "in progress");
+        StringAssert.Contains(WinFspInstaller.Describe(0, installed: false), "still not found");
+        StringAssert.Contains(WinFspInstaller.Describe(1234, installed: false), "1234");
     }
 
     /// <summary>The provider's log lines into the test output.</summary>

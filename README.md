@@ -92,6 +92,7 @@ afterwards) or `Start-Process -Wait`.
 
 ```
 .\scripts\fetch-go-servers.ps1        # the pinned portable-smb-server binaries into tools/go-servers/<rid>/
+.\scripts\fetch-winfsp.ps1            # the pinned WinFsp installer into tools/winfsp/ (Windows builds embed it)
 .\scripts\publish.ps1                 # every RID into publish/<rid>/
 .\scripts\publish.ps1 -Rid win-x64    # one
 .\scripts\smoke.ps1 -Exe publish\win-x64\anyfs.exe -SamplePluginDll tests\fixtures\SamplePlugin\bin\Release\net10.0\AnyFS.SamplePlugin.dll
@@ -99,10 +100,13 @@ afterwards) or `Start-Process -Wait`.
 
 The executable is self-contained, single file and trimmed; a documented set of framework
 assemblies is kept whole so third-party plugins can rely on it (see
-[docs/plugin-authoring.md](docs/plugin-authoring.md)). The SMB provider's server is a separate Go
-executable ([portable-smb-server](https://github.com/fiddyschmitt/portable-smb-server)) that
-the publish embeds for the RID being built, from `tools/go-servers/`; without it the SMB provider
-reports itself unavailable, and `ANYFS_SMB_SERVER` or a copy beside `anyfs` can point at one.
+[docs/plugin-authoring.md](docs/plugin-authoring.md)). Two tools ride inside it: the SMB provider's
+server, a separate Go executable ([portable-smb-server](https://github.com/fiddyschmitt/portable-smb-server)),
+and the WinFsp installer behind the **Install WinFsp driver** button. Every build embeds them for
+the runtime it targets (the publish RID, or the SDK's own RID for a plain `dotnet build`, so a
+Debug run has them too) from `tools/go-servers/` and `tools/winfsp/`; run the two fetch scripts
+once before building, or the SMB provider says its server is missing and the Install button falls
+back to winget.
 
 ## Plugins
 
@@ -126,9 +130,18 @@ src/Mounts/WebDav        the WebDAV server and mount
 src/Mounts/Ftp           the FTP mount over FubarDev.FtpServer
 src/Mounts/Http          the HTTP mount
 tests/                   unit tests per assembly, GUI tests (headless Avalonia), fixtures/MakeTree, fixtures/SamplePlugin
-scripts/                 publish.ps1, smoke.ps1, fetch-go-servers.ps1 (+ go-servers.json)
+scripts/                 publish.ps1, smoke.ps1, fetch-go-servers.ps1 (+ go-servers.json), fetch-winfsp.ps1 (+ winfsp.json)
 tools/go-servers/        the fetched Go server binaries per RID (not in git)
+tools/winfsp/            the fetched WinFsp installer (not in git)
 docs/                    settings-format.md, plugin-authoring.md, mounts.md
 ```
 
-MIT licence.
+## Licence and third-party components
+
+AnyFS is MIT licensed. It embeds two unmodified third-party binaries:
+
+- [portable-smb-server](https://github.com/fiddyschmitt/portable-smb-server) (MIT), one per
+  runtime, extracted into the state folder on first use.
+- The [WinFsp](https://github.com/winfsp/winfsp) installer `winfsp-2.1.25156.msi` (GPLv3 with the
+  FLOSS exception), in Windows builds, for the Install button. Its corresponding source is that
+  repository at tag `v2.1`.

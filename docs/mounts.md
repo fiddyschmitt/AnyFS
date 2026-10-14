@@ -25,7 +25,7 @@ One WinFsp *network* file system per collection with the prefix `\anyfs\<collect
 network provider resolves `\\anyfs\<collection>\...` in Explorer, cmd and every program, with no
 DNS and no drive letter. `\\anyfs` itself is not browsable (error 53); the tile's Open button is
 the way in, or type the path. A drive letter is an opt-in setting (Advanced) for programs that
-cannot take UNC paths.
+cannot take UNC paths; when one is set, Open opens the letter.
 
 The first **Open containing folder** after a start takes a few seconds (about five on the
 development PC, and two to three for the first `\\anyfs\...` from any other new program); after
@@ -38,9 +38,13 @@ Explorer's first open still takes two to four seconds. The drive letter setting 
 entirely: the letter opens in about 0.1 s from a fresh program, because a letter resolves without
 the network providers.
 
-The WinFsp driver is installed separately and needs no reboot. Without it the tile is red and
-shows **Install WinFsp**, which runs `winget install WinFsp.WinFsp` (an administrator prompt
-appears) and then starts the mount; the Add mount dialog offers the same.
+The WinFsp driver is a separate install with no reboot. Without it the tile is red ("The WinFsp
+driver is not installed.") and shows **Install WinFsp driver**: the WinFsp 2.1.25156 installer
+that Windows builds of anyfs carry runs silently (`msiexec /i winfsp.msi /qn /norestart`, so the
+only thing you see is the administrator prompt), and the mount starts once it is in; the Add mount
+dialog offers the same. A build without the installer inside it falls back to
+`winget install WinFsp.WinFsp`. WinFsp is GPLv3 with a FLOSS exception; the installer is conveyed
+unmodified and its source is at <https://github.com/winfsp/winfsp>.
 
 The read-only layers show as the read-only file attribute, and writes they refuse get "access
 denied" (or "write protected" when the whole mount is read-only). Names are case-insensitive and
@@ -60,7 +64,14 @@ per-launch token.
   `net use \\<host>\<collection> /TCPPORT:1445 /USER:<user>` once per session (no drive
   letter: it just registers the port for that server); afterwards `\\<host>\<collection>` is a
   plain UNC path everywhere. Open runs exactly that, with the password, then opens the path.
-  `net use \\<host>\<collection> /delete` forgets it.
+  `net use \\<host>\<collection> /delete` forgets it. Give the mount a **Drive letter** instead
+  and anyfs maps it while the mount runs (`net use X: \\<host>\<collection> /TCPPORT:1445 ...`),
+  Open opens the letter (which Explorer shows at once, unlike a new UNC server name), and the
+  mapping is removed when the mount stops. A letter already in use by something else leaves the
+  mount yellow with the reason; the UNC path still works. A guest share gets no letter where
+  Windows blocks guest logons (the default on Pro and Enterprise), said at once rather than after
+  `net use`'s twenty-second refusal: give the share a user and password. The box only appears on
+  Windows.
 - **Linux**: `sudo mount -t cifs //<host>/<collection> /mnt/<collection> -o port=1445,vers=3.0,user=<user>`
   (Open shows the line with a Copy button).
 - **macOS**: Finder → Go → Connect to Server, `smb://<user>@<host>:1445/<collection>`, which Open

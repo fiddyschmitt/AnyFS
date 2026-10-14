@@ -207,8 +207,90 @@ public class SmbMountTests
         var user = new SmbCredentialsView("alice", "pw", false);
         CollectionAssert.AreEqual(new[] { "use", @"\\localhost\work", "/TCPPORT:1445", "/USER:alice", "pw" }, SmbMountProvider.WindowsConnectArguments(@"\\localhost\work", 1445, user).ToList());
         CollectionAssert.AreEqual(new[] { "use", @"\\localhost\work", "/TCPPORT:1445" }, SmbMountProvider.WindowsConnectArguments(@"\\localhost\work", 1445, new SmbCredentialsView(null, null, true)).ToList());
+        CollectionAssert.AreEqual(new[] { "use", "Y:", @"\\localhost\work", "/TCPPORT:1445", "/USER:alice", "pw" }, SmbMountProvider.WindowsConnectArguments(@"\\localhost\work", 1445, user, "Y").ToList());
         Assert.AreEqual("sudo mount -t cifs //nas/work /mnt/work -o port=1445,vers=3.0,user=alice", SmbMountProvider.LinuxMountCommand("nas", 1445, "work", user));
         Assert.AreEqual("smb://alice@nas:1445/work", SmbMountProvider.MacUrl("nas", 1445, "work", user));
+
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.IsTrue(provider.Validate(new SmbMountSettings { Password = "pw", DriveLetter = "1" }).Any(m => m.IsError && m.Property == nameof(SmbMountSettings.DriveLetter)), "a bad letter is refused");
+            Assert.AreEqual(0, provider.Validate(new SmbMountSettings { Password = "pw", DriveLetter = "y:" }).Count(m => m.IsError));
+            Assert.IsNull(WindowsDriveMapping.CurrentTarget("C:"), "a local disk is not a network connection");
+        }
+        else
+        {
+            Assert.AreEqual(0, provider.Validate(new SmbMountSettings { Password = "pw", DriveLetter = "1" }).Count(m => m.IsError), "the letter is a Windows setting; elsewhere it is ignored");
+        }
+    }
+
+    /// <summary>Spec 8.2 with the opt-in letter: net use maps it to the running server and the stop removes it (needs Windows 11 24H2's /TCPPORT).</summary>
+    [TestMethod]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public async Task ADriveLetterIsMappedWhileTheMountRunsOnWindows()
+    {
+        if (!OperatingSystem.IsWindows() || Environment.OSVersion.Version.Build < 26100)
+        {
+            Assert.Inconclusive("net use /TCPPORT needs Windows 11 24H2");
+            return;
+        }
+
+        var binary = FindServerBinary();
+        if (binary is null)
+        {
+            Assert.Inconclusive("portable-smb-server binary not found: run scripts/fetch-go-servers.ps1 or set ANYFS_SMB_SERVER");
+        }
+
+        var letter = "ZYXWVUTSRQPONMLKJIHGFED".Select(c => c.ToString()).FirstOrDefault(l => !Directory.Exists(l + @":\") && WindowsDriveMapping.CurrentTarget(l + ":") is null);
+        if (letter is null)
+        {
+            Assert.Inconclusive("no free drive letter");
+        }
+
+        Environment.SetEnvironmentVariable(SmbServerBinary.EnvironmentVariable, binary);
+        try
+        {
+            var source = Tree();
+            await source.InitialiseAsync(new TestSourceContext("work"), CancellationToken.None);
+            var provider = new SmbMountProvider();
+            var settings = (SmbMountSettings)provider.CreateDefaultSettings(new Collection("work"));
+            settings.Port = FreePort();
+            settings.User = "user";
+            settings.Password = "password";
+            settings.DriveLetter = letter;
+            var mount = provider.CreateMount(settings, new Collection("work"));
+            var context = new TestMountContext("work", "smb");
+            await mount.StartAsync(new SingleSourceVfs(source, "work"), context, CancellationToken.None);
+            _cleanup.Add(mount);
+            Assert.AreEqual(0, context.HealthReports.Count, string.Join(" | ", context.HealthReports.Select(h => h.Detail)));
+            Assert.IsTrue(mount.AccessPaths.Any(p => p.Value == letter + @":\"), string.Join(" | ", mount.AccessPaths.Select(p => p.Value)));
+            Assert.IsInstanceOfType<MountOpenAction.FileManager>(mount.OpenAction);
+            Assert.AreEqual(letter + @":\", ((MountOpenAction.FileManager)mount.OpenAction!).Path);
+            Assert.AreEqual("hello readme", File.ReadAllText(Path.Combine(letter + @":\", "readme.txt")), "the share is readable through the letter");
+
+            await mount.StopAsync(CancellationToken.None);
+            Assert.IsNull(WindowsDriveMapping.CurrentTarget(letter + ":"), "the letter is gone once the mount stops");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(SmbServerBinary.EnvironmentVariable, null);
+        }
+    }
+
+    /// <summary>A guest share gets no letter where Windows blocks guest logons, and anyfs says so at once (net use would take twenty seconds to).</summary>
+    [TestMethod]
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    public async Task AGuestShareGetsNoLetterWhereWindowsBlocksGuestLogons()
+    {
+        if (!OperatingSystem.IsWindows() || WindowsDriveMapping.GuestLogonsAllowed())
+        {
+            Assert.Inconclusive("Windows with guest logons blocked only");
+            return;
+        }
+
+        var outcome = await WindowsDriveMapping.MapAsync("Q", @"\\localhost\nothing", ["use", "Q:", @"\\localhost\nothing", "/TCPPORT:1"], guest: true, NullLogger.Instance, CancellationToken.None);
+        Assert.IsFalse(outcome.Success);
+        StringAssert.Contains(outcome.Message, "guest");
+        StringAssert.Contains(outcome.Message, "user name and password");
     }
 
     /// <summary>tools/go-servers/&lt;rid&gt;/ in the repo (walking up from the test binaries), or ANYFS_SMB_SERVER.</summary>

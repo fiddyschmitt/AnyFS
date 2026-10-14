@@ -3,7 +3,43 @@
              xmlns:vm="using:AnyFS.App.Gui.ViewModels"
              x:Class="AnyFS.App.Gui.Views.StatsTab"
              x:DataType="vm:StatsViewModel">
-  <!-- spec 11.3: total and session, a per-collection breakdown, Reset totals -->
+  <!-- spec 11.3: total and session, a per-collection table, Reset totals -->
+  <UserControl.Styles>
+    <!-- the per-collection table: a bordered box, a shaded two-row header, a rule above each row, numbers on the right -->
+    <Style Selector="Border.table">
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseLowBrush}" />
+      <Setter Property="CornerRadius" Value="4" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+    <Style Selector="Border.tablehead">
+      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundBaseLowBrush}" />
+    </Style>
+    <Style Selector="Border.tablerow">
+      <Setter Property="BorderThickness" Value="0,1,0,0" />
+      <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseLowBrush}" />
+    </Style>
+    <Style Selector="TextBlock.th">
+      <Setter Property="Margin" Value="10,6,10,2" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="TextBlock.th.sub">
+      <Setter Property="Margin" Value="10,0,10,6" />
+      <Setter Property="FontWeight" Value="Normal" />
+      <Setter Property="Foreground" Value="{DynamicResource SystemControlForegroundBaseMediumBrush}" />
+    </Style>
+    <Style Selector="TextBlock.th.tall">
+      <Setter Property="Margin" Value="10,6" />
+    </Style>
+    <Style Selector="TextBlock.td">
+      <Setter Property="Margin" Value="10,6" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="TextBlock.num">
+      <Setter Property="HorizontalAlignment" Value="Right" />
+    </Style>
+  </UserControl.Styles>
   <ScrollViewer Margin="4">
     <StackPanel MaxWidth="900" HorizontalAlignment="Left">
       <TextBlock Classes="header" Text="Stats" />
@@ -25,33 +61,44 @@
         <Button Content="Reset totals" Command="{Binding ResetTotalsCommand}" />
       </StackPanel>
       <TextBlock Classes="subheader" Text="Per collection" />
-      <TextBlock Classes="muted" Text="Nothing served yet." IsVisible="{Binding !HasRows}" />
-      <Grid ColumnDefinitions="2*,*,*,*,*,*,*,*" IsVisible="{Binding HasRows}" Margin="0,0,0,4">
-        <TextBlock Classes="muted" Text="Collection" />
-        <TextBlock Grid.Column="1" Classes="muted" Text="Files (total)" />
-        <TextBlock Grid.Column="2" Classes="muted" Text="Files (session)" />
-        <TextBlock Grid.Column="3" Classes="muted" Text="Read (total)" />
-        <TextBlock Grid.Column="4" Classes="muted" Text="Read (session)" />
-        <TextBlock Grid.Column="5" Classes="muted" Text="Written (total)" />
-        <TextBlock Grid.Column="6" Classes="muted" Text="Written (session)" />
-        <TextBlock Grid.Column="7" Classes="muted" Text="Connections" />
-      </Grid>
-      <ItemsControl ItemsSource="{Binding Rows}">
-        <ItemsControl.ItemTemplate>
-          <DataTemplate x:DataType="vm:StatsRowViewModel">
-            <Grid ColumnDefinitions="2*,*,*,*,*,*,*,*" Margin="0,2">
-              <TextBlock Text="{Binding Collection}" />
-              <TextBlock Grid.Column="1" Text="{Binding FilesTotal}" />
-              <TextBlock Grid.Column="2" Text="{Binding FilesSession}" />
-              <TextBlock Grid.Column="3" Text="{Binding ReadTotal}" />
-              <TextBlock Grid.Column="4" Text="{Binding ReadSession}" />
-              <TextBlock Grid.Column="5" Text="{Binding WrittenTotal}" />
-              <TextBlock Grid.Column="6" Text="{Binding WrittenSession}" />
-              <TextBlock Grid.Column="7" Text="{Binding Connections}" />
+      <TextBlock Classes="muted" Text="No collections yet." IsVisible="{Binding !HasRows}" />
+      <Border Classes="table" IsVisible="{Binding HasRows}" HorizontalAlignment="Left">
+        <StackPanel>
+          <Border Classes="tablehead">
+            <Grid ColumnDefinitions="180,96,96,96,96,96,96,104" RowDefinitions="Auto,Auto">
+              <TextBlock Grid.RowSpan="2" Classes="th tall" Text="Collection" VerticalAlignment="Bottom" />
+              <TextBlock Grid.Column="1" Grid.ColumnSpan="2" Classes="th" Text="Files served" HorizontalAlignment="Center" />
+              <TextBlock Grid.Column="3" Grid.ColumnSpan="2" Classes="th" Text="Bytes read" HorizontalAlignment="Center" />
+              <TextBlock Grid.Column="5" Grid.ColumnSpan="2" Classes="th" Text="Bytes written" HorizontalAlignment="Center" />
+              <TextBlock Grid.Column="7" Grid.RowSpan="2" Classes="th tall num" Text="Connections" VerticalAlignment="Bottom" />
+              <TextBlock Grid.Row="1" Grid.Column="1" Classes="th sub num" Text="Total" />
+              <TextBlock Grid.Row="1" Grid.Column="2" Classes="th sub num" Text="Session" />
+              <TextBlock Grid.Row="1" Grid.Column="3" Classes="th sub num" Text="Total" />
+              <TextBlock Grid.Row="1" Grid.Column="4" Classes="th sub num" Text="Session" />
+              <TextBlock Grid.Row="1" Grid.Column="5" Classes="th sub num" Text="Total" />
+              <TextBlock Grid.Row="1" Grid.Column="6" Classes="th sub num" Text="Session" />
             </Grid>
-          </DataTemplate>
-        </ItemsControl.ItemTemplate>
-      </ItemsControl>
+          </Border>
+          <ItemsControl ItemsSource="{Binding Rows}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:StatsRowViewModel">
+                <Border Classes="tablerow">
+                  <Grid ColumnDefinitions="180,96,96,96,96,96,96,104">
+                    <TextBlock Classes="td" Text="{Binding Collection}" TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding Collection}" />
+                    <TextBlock Grid.Column="1" Classes="td num" Text="{Binding FilesTotal}" />
+                    <TextBlock Grid.Column="2" Classes="td num" Text="{Binding FilesSession}" />
+                    <TextBlock Grid.Column="3" Classes="td num" Text="{Binding ReadTotal}" />
+                    <TextBlock Grid.Column="4" Classes="td num" Text="{Binding ReadSession}" />
+                    <TextBlock Grid.Column="5" Classes="td num" Text="{Binding WrittenTotal}" />
+                    <TextBlock Grid.Column="6" Classes="td num" Text="{Binding WrittenSession}" />
+                    <TextBlock Grid.Column="7" Classes="td num" Text="{Binding Connections}" />
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </StackPanel>
+      </Border>
     </StackPanel>
   </ScrollViewer>
 </UserControl>

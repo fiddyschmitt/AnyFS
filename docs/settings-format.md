@@ -111,7 +111,7 @@ secret properties never enter it.
 
 | Property | Meaning |
 |---|---|
-| `driveLetter` | Optional, D to Z: also map a drive letter for programs that can't open UNC paths. Empty (the default) means `\\anyfs\<collection>` only. |
+| `driveLetter` | Optional, D to Z: also map a drive letter for programs that can't open UNC paths; Open then opens the letter. Empty (the default) means `\\anyfs\<collection>` only. |
 
 ### SMB mount (`smb`)
 
@@ -119,6 +119,7 @@ secret properties never enter it.
 |---|---|
 | `bindAddress` | As for HTTP. |
 | `port` | Default 1445. Every collection mounted on the same address and port shares one server process and one login. |
+| `driveLetter` | Windows only (the box appears nowhere else and the value is ignored there), optional, D to Z: `net use X: \\host\<collection> /TCPPORT:<port>` while the mount runs; Open opens the letter. Needs a user and password where Windows blocks guest logons. |
 | `guest` | `true` for guest access (no password; Windows refuses it unless `EnableInsecureGuestLogons` is on). |
 | `user` | The login (default `user`) when `guest` is false. |
 | `password` | Secret: lives in `state/secrets.json`, never here. Required unless `guest`. |

@@ -21,7 +21,6 @@ public sealed partial class MainViewModel : ObservableObject
         AllSources = new AllSourcesViewModel(engine, dialogs, Operations);
         Stats = new StatsViewModel(engine, dialogs, Operations);
         Title = $"AnyFS {AnyFsEngine.Version}";
-        SettingsLocation = engine.Paths.Settings;
     }
 
     public Operations Operations { get; }
@@ -33,8 +32,6 @@ public sealed partial class MainViewModel : ObservableObject
     public StatsViewModel Stats { get; }
 
     public string Title { get; }
-
-    public string SettingsLocation { get; }
 
     [ObservableProperty]
     public partial StatusColour OverallColour { get; set; } = StatusColour.Grey;
