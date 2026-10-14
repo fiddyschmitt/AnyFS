@@ -168,6 +168,17 @@ public class SmbMountTests
             Assert.IsFalse(mount.AccessPaths.Any(p => p.Value.Contains("password")), "the password never appears in an access path");
             Assert.IsNotNull(mount.OpenAction);
 
+            if (OperatingSystem.IsWindows())
+            {
+                // no drive letter here, so Open is the device-less net use; it must drop a stale connection first so a
+                // changed password reconnects instead of failing with "incorrect password" (the reported bug)
+                var command = mount.OpenAction as MountOpenAction.Command;
+                Assert.IsNotNull(command, $"{mount.OpenAction!.GetType().Name}");
+                Assert.IsNotNull(command.Reset);
+                CollectionAssert.AreEqual(new[] { "use", command.ThenOpen, "/delete" }, command.Reset.ToList());
+                CollectionAssert.DoesNotContain(command.Reset.ToList(), "/y", "/delete without /y declines rather than forcing a user's open files shut");
+            }
+
             var dialect = await NegotiateAsync(port);
             Assert.IsTrue(dialect is 0x0202 or 0x0210 or 0x0300 or 0x0302, $"dialect 0x{dialect:X4}");
 

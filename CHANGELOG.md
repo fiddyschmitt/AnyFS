@@ -33,6 +33,11 @@
 - "Count files on start" for a source without its own count (the host's folder-by-folder walk) no
   longer pauses between folders. The status while counting is just "Counting files": the number is
   the count shown under it.
+- SMB on Windows: "Open containing folder" now drops any cached connection to the server first, so a
+  mount whose password you changed opens with the new password instead of failing with "the user
+  name or password is incorrect" (Windows had kept the old credentials; a reconnect over them fails
+  with error 1219). `MountOpenAction.Command` gained an optional best-effort `Reset` step for this,
+  and the opener closes the command's stdin so a `net use /delete` never waits on a prompt.
 - WinFsp: `winfsp.net` is pinned to the bundled driver's major.minor and the build fails when they
   drift (NuGet's newest, 2.2.x, is the WinFsp 2026 beta; it refuses the 2.1 driver at load with
   "incorrect dll version"). A driver older than the build needs shows the reason and an **Upgrade

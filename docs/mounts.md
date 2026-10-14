@@ -71,8 +71,12 @@ per-launch token.
 - **Windows 11 24H2+**: a port other than 445 needs the device-less
   `net use \\<host>\<collection> /TCPPORT:1445 /USER:<user>` once per session (no drive
   letter: it just registers the port for that server); afterwards `\\<host>\<collection>` is a
-  plain UNC path everywhere. Open runs exactly that, with the password, then opens the path.
-  `net use \\<host>\<collection> /delete` forgets it. Give the mount a **Drive letter** instead
+  plain UNC path everywhere. Open runs `net use \\<host>\<collection> /delete` first (Windows caches
+  the server's credentials, so after you change the password the old ones would be reused and the
+  open would fail with "the user name or password is incorrect"), then the connect with the current
+  password, then opens the path. The delete omits `/y`, so if you are browsing the share with files
+  open it is declined rather than forcing them shut, and the reconnect is then a harmless no-op.
+  Give the mount a **Drive letter** instead
   and anyfs maps it while the mount runs (`net use X: \\<host>\<collection> /TCPPORT:1445 ...`),
   Open opens the letter (which Explorer shows at once, unlike a new UNC server name), and the
   mapping is removed when the mount stops. A letter already in use by something else leaves the

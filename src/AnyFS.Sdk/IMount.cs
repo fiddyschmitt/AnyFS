@@ -95,8 +95,11 @@ public abstract record MountOpenAction
     /// <summary>
     /// Run a command first (a device-less net use), then open <see cref="ThenOpen"/>. <paramref name="Elevated"/>
     /// asks for administrator rights (an elevation prompt on Windows) because the command needs them (starting a service).
+    /// <paramref name="Reset"/> is an optional first run of <see cref="FileName"/> whose failure is ignored, used to
+    /// clear stale state before the real command: for SMB a <c>net use \\host\share /delete</c>, because Windows caches
+    /// the server's credentials and after a password change the reconnect would otherwise fail (net error 1219).
     /// </summary>
-    public sealed record Command(string FileName, IReadOnlyList<string> Arguments, string? ThenOpen, bool Elevated = false) : MountOpenAction;
+    public sealed record Command(string FileName, IReadOnlyList<string> Arguments, string? ThenOpen, bool Elevated = false, IReadOnlyList<string>? Reset = null) : MountOpenAction;
 
     /// <summary>Show text with a copy button (a mount command the user must run as root).</summary>
     public sealed record ShowText(string Title, string Text) : MountOpenAction;

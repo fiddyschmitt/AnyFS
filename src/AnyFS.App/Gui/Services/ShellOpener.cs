@@ -24,6 +24,14 @@ public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? show
                     Launch(AppendUrl(browser.Url, subPath));
                     break;
                 case MountOpenAction.Command command:
+                    if (command.Reset is { } reset)
+                    {
+                        // best-effort: drop a cached connection to the same server so the real command reconnects with the
+                        // current credentials (after a password change Windows keeps the old ones). Its failure is expected
+                        // when there is nothing to drop, and a plain /delete declines rather than forcing open files shut.
+                        RunCommand(command.FileName, reset, command.Elevated);
+                    }
+
                     if (!RunCommand(command.FileName, command.Arguments, command.Elevated))
                     {
                         logger.LogWarning("the command before opening {Target} did not succeed: {Command}", command.ThenOpen, command.FileName);
@@ -90,8 +98,9 @@ public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? show
     /// <summary>Runs the command and waits for it (up to 15 s); elevated commands go through the shell's "run as administrator" on Windows (a UAC prompt).</summary>
     private static bool RunCommand(string fileName, IReadOnlyList<string> arguments, bool elevated)
     {
-        var info = new ProcessStartInfo(fileName) { UseShellExecute = elevated && OperatingSystem.IsWindows(), CreateNoWindow = true };
-        if (info.UseShellExecute)
+        var shell = elevated && OperatingSystem.IsWindows();
+        var info = new ProcessStartInfo(fileName) { UseShellExecute = shell, CreateNoWindow = true, RedirectStandardInput = !shell };
+        if (shell)
         {
             info.Verb = "runas";
             info.WindowStyle = ProcessWindowStyle.Hidden;
@@ -106,6 +115,19 @@ public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? show
         if (process is null)
         {
             return false;
+        }
+
+        // close stdin so a command that would prompt (net use /delete on a share with open files) reads end-of-file and
+        // declines, instead of inheriting the console and hanging
+        if (!shell)
+        {
+            try
+            {
+                process.StandardInput.Close();
+            }
+            catch (IOException)
+            {
+            }
         }
 
         return process.WaitForExit(15_000) && process.ExitCode == 0;

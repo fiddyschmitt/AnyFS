@@ -190,7 +190,10 @@ internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collec
             var withPassword = new SmbCredentialsView(credentials.User, credentials.Password, credentials.Guest);
             paths.Add(new AccessPath("UNC path", unc));
             paths.Add(new AccessPath("Connect command", "net " + string.Join(' ', SmbMountProvider.WindowsConnectArguments(unc, settings.Port, view, letter).Select(a => a.Contains(' ') ? '"' + a + '"' : a)).TrimEnd()));
-            OpenAction = new MountOpenAction.Command("net", SmbMountProvider.WindowsConnectArguments(unc, settings.Port, withPassword), unc);
+            // /delete first (ShellOpener runs it best-effort): Windows caches the server's credentials, so after the
+            // password changes the reconnect would reuse the old ones and the open would fail with "the user name or
+            // password is incorrect" (and a second net use would hit error 1219)
+            OpenAction = new MountOpenAction.Command("net", SmbMountProvider.WindowsConnectArguments(unc, settings.Port, withPassword), unc, Reset: ["use", unc, "/delete"]);
             if (letter is not null)
             {
                 // the letter is mapped now, while the mount runs, and removed in StopAsync; a letter that can't be had
