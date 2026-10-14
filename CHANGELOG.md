@@ -23,6 +23,13 @@
   (Core) reads and writes the shared file; `ImportSourcesAsync`/`ExportSources` on the engine.
 - `tests/fixtures/sshfs-fixture.sh` makes the tree the live SSHFS tests expect; they run when
   `ANYFS_TEST_SSH_HOST` (and friends) point at a server and are inconclusive otherwise.
+- SSHFS against a Windows OpenSSH server: the drives it lists at `/` as `C:`, `D:` (names no
+  Windows mount can show) appear as folders `c`, `d`, and `C:\Users` is accepted as a root.
+- SSHFS "Count files on start" is the source's own parallel walk (four folders per connection at
+  once, links counted but not followed) instead of the host's one-at-a-time walk; symbolic links in
+  one listing are resolved several at a time.
+- Counts and stats use tabular figures (Inter's `tnum`), so a changing number no longer shifts the
+  text around it.
 
 ## Unreleased (fixes after milestone 3)
 

@@ -159,6 +159,104 @@ public class SshfsLiveTests
     }
 
     [TestMethod]
+    public async Task CountingListsFoldersInParallelAndDoesNotFollowLinks()
+    {
+        SshTestServer.Require();
+        await using var source = await StartAsync(SshTestServer.Settings());
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await source.CountFilesAsync(None);
+        Console.WriteLine($"counted {source.Counters.FilesKnown} files in {source.Counters.DirectoriesKnown} folders in {sw.ElapsedMilliseconds} ms");
+
+        // readme.txt, medium.bin, .hidden, docs/a.txt, plus the two links counted as entries and not followed
+        Assert.AreEqual(6, source.Counters.FilesKnown);
+        Assert.AreEqual(3, source.Counters.DirectoriesKnown, "docs, emptydir, scratch (contract leftovers aside)");
+
+        var root = SshTestServer.Root;
+        if (Environment.GetEnvironmentVariable("ANYFS_TEST_SSH_BIG_ROOT") is { Length: > 0 } big)
+        {
+            // an optional bigger tree (tests/fixtures/sshfs-fixture.sh makes none): the parallel count against the
+            // host's old one-folder-at-a-time walk (10 ms throttle between folders, as SourceRunner.WalkAsync does)
+            await using var bigSource = await StartAsync(SshTestServer.Settings(big));
+            sw.Restart();
+            await bigSource.CountFilesAsync(None);
+            var parallelMs = sw.ElapsedMilliseconds;
+            Assert.IsTrue(bigSource.Counters.FilesKnown > 0);
+
+            sw.Restart();
+            long files = 0, folders = 0;
+            var queue = new Queue<string>();
+            queue.Enqueue("");
+            while (queue.Count > 0)
+            {
+                var dir = queue.Dequeue();
+                await foreach (var entry in bigSource.ListAsync(dir, None))
+                {
+                    if (entry.IsDirectory)
+                    {
+                        folders++;
+                        queue.Enqueue(VfsPath.Join(dir, entry.Name));
+                    }
+                    else
+                    {
+                        files++;
+                    }
+                }
+
+                await Task.Delay(10, None);
+            }
+
+            var timing = $"big tree {big}: parallel count {bigSource.Counters.FilesKnown} files / {bigSource.Counters.DirectoriesKnown} folders in {parallelMs} ms; sequential walk {files} files / {folders} folders in {sw.ElapsedMilliseconds} ms";
+            Console.WriteLine(timing);
+            if (Environment.GetEnvironmentVariable("ANYFS_TEST_SSH_TIMING_FILE") is { Length: > 0 } timingFile)
+            {
+                File.AppendAllText(timingFile, timing + Environment.NewLine);
+            }
+
+            Assert.AreEqual(files, bigSource.Counters.FilesKnown, "both ways agree on the files");
+        }
+    }
+
+    /// <summary>A Windows OpenSSH server shows its drives at "/" (ANYFS_TEST_SSH_WIN_HOST, _WIN_USER, _WIN_PASSWORD).</summary>
+    [TestMethod]
+    public async Task AWindowsServerShowsItsDrivesAsLetterFolders()
+    {
+        var host = Environment.GetEnvironmentVariable("ANYFS_TEST_SSH_WIN_HOST");
+        var user = Environment.GetEnvironmentVariable("ANYFS_TEST_SSH_WIN_USER");
+        var password = Environment.GetEnvironmentVariable("ANYFS_TEST_SSH_WIN_PASSWORD");
+        if (string.IsNullOrEmpty(host) || string.IsNullOrEmpty(user) || string.IsNullOrEmpty(password))
+        {
+            Assert.Inconclusive("set ANYFS_TEST_SSH_WIN_HOST, _WIN_USER and _WIN_PASSWORD to a Windows OpenSSH server");
+            return;
+        }
+
+        await using var source = await StartAsync(new SshfsSettings { Host = host, Username = user, Password = password, Root = "/" });
+        StringAssert.StartsWith(source.RemoteRoot, "/");
+        var top = new List<VfsEntry>();
+        await foreach (var entry in source.ListAsync("", None))
+        {
+            top.Add(entry);
+        }
+
+        Assert.IsTrue(top.Count > 0, "the drives are listed");
+        Assert.IsTrue(top.All(e => e.IsDirectory && e.Name.Length == 1 && char.IsAsciiLetterLower(e.Name[0])), string.Join(", ", top.Select(e => e.Name)));
+        var drive = top[0].Name;
+        Assert.IsNotNull(await source.StatAsync(drive, None));
+        var users = new List<string>();
+        await foreach (var entry in source.ListAsync(drive + "/Users", None))
+        {
+            users.Add(entry.Name);
+        }
+
+        Assert.IsTrue(users.Count > 0, "a folder under the drive lists");
+        Assert.IsNull(await source.StatAsync("q", None), "a drive that isn't there is simply absent");
+
+        // the Windows spelling of a root works too
+        await using var spelled = await StartAsync(new SshfsSettings { Host = host, Username = user, Password = password, Root = drive.ToUpperInvariant() + @":\Users" });
+        Assert.AreEqual("/" + drive.ToUpperInvariant() + ":/Users", spelled.RemoteRoot);
+        Assert.IsTrue(await spelled.ListAsync("", None).AnyAsync());
+    }
+
+    [TestMethod]
     public async Task AMissingRootFailsPermanentlyWithTheReason()
     {
         SshTestServer.Require();
@@ -247,6 +345,22 @@ public class SshfsUnitTests
         StringAssert.Contains(reason, "absolute");
         Assert.IsFalse(RemotePath.TryParseRoot("/a/../b", out _, out reason));
         StringAssert.Contains(reason, "..");
+
+        Assert.AreEqual("/C:/Users", Root(@"C:\Users"), "a Windows server's own spelling");
+        Assert.AreEqual("/D:", Root("d:/"));
+        Assert.AreEqual("/C:/Users", Root("/C:/Users"));
+
+        Assert.IsTrue(RemotePath.IsDriveHome("/C:/Users/Gabrielle"), "Windows OpenSSH home");
+        Assert.IsFalse(RemotePath.IsDriveHome("/home/smith"));
+        Assert.IsFalse(RemotePath.IsDriveHome("/"));
+        Assert.AreEqual("c", RemotePath.DriveEntryName("C:"));
+        Assert.IsNull(RemotePath.DriveEntryName("Users"));
+        Assert.IsNull(RemotePath.DriveEntryName("C:x"));
+        Assert.AreEqual("/", RemotePath.JoinDriveRoot(""));
+        Assert.AreEqual("/C:", RemotePath.JoinDriveRoot("c"));
+        Assert.AreEqual("/C:/Users/x", RemotePath.JoinDriveRoot("c/Users/x"));
+        Assert.AreEqual("/D:/a", RemotePath.JoinDriveRoot("D/a"));
+        Assert.AreEqual("/odd/name", RemotePath.JoinDriveRoot("odd/name"), "not a drive: the server says no such file");
 
         Assert.AreEqual("/", RemotePath.Join("/", ""));
         Assert.AreEqual("/a/b", RemotePath.Join("/", "a/b"));

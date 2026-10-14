@@ -38,6 +38,8 @@
     </Style>
     <Style Selector="TextBlock.num">
       <Setter Property="HorizontalAlignment" Value="Right" />
+      <!-- tabular figures: Inter's digits share one width, so a changing number doesn't shift -->
+      <Setter Property="FontFeatures" Value="+tnum" />
     </Style>
   </UserControl.Styles>
   <ScrollViewer Margin="4">
@@ -47,13 +49,13 @@
         <TextBlock Grid.Column="1" Classes="muted" Text="Total" />
         <TextBlock Grid.Column="2" Classes="muted" Text="Session" />
         <TextBlock Grid.Row="1" Text="Files served" Margin="0,6,0,0" />
-        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding FilesServedTotal}" Margin="0,6,0,0" />
-        <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding FilesServedSession}" Margin="0,6,0,0" />
+        <TextBlock Grid.Row="1" Grid.Column="1" Text="{Binding FilesServedTotal}" Margin="0,6,0,0" FontFeatures="+tnum" />
+        <TextBlock Grid.Row="1" Grid.Column="2" Text="{Binding FilesServedSession}" Margin="0,6,0,0" FontFeatures="+tnum" />
         <TextBlock Grid.Row="2" Text="Bytes served" Margin="0,6,0,0" />
-        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding BytesServedTotal}" Margin="0,6,0,0" />
-        <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding BytesServedSession}" Margin="0,6,0,0" />
+        <TextBlock Grid.Row="2" Grid.Column="1" Text="{Binding BytesServedTotal}" Margin="0,6,0,0" FontFeatures="+tnum" />
+        <TextBlock Grid.Row="2" Grid.Column="2" Text="{Binding BytesServedSession}" Margin="0,6,0,0" FontFeatures="+tnum" />
         <TextBlock Grid.Row="3" Text="Active connections" Margin="0,6,0,0" />
-        <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding ActiveConnections}" Margin="0,6,0,0" />
+        <TextBlock Grid.Row="3" Grid.Column="2" Text="{Binding ActiveConnections}" Margin="0,6,0,0" FontFeatures="+tnum" />
       </Grid>
       <StackPanel Orientation="Horizontal" Spacing="16" Margin="0,0,0,20">
         <TextBlock Classes="muted" Text="{Binding TotalsSince, StringFormat='Totals {0}'}" VerticalAlignment="Center" />

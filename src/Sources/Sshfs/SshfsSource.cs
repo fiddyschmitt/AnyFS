@@ -1,5 +1,6 @@
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 using Renci.SshNet;
@@ -13,13 +14,18 @@ namespace AnyFS.Sources.Sshfs;
 /// <see cref="ListingCache"/> and stats are answered from it; a symbolic link shows as what it points at (a
 /// dangling one as an empty file); names starting with a dot are hidden; an entry nobody may write is read-only.
 /// A dropped connection is retried once on a fresh one, and the source turns Degraded until something succeeds.
+/// "Count files on start" lists many folders at once over the pool instead of the host's one-at-a-time walk.
 /// </summary>
-public sealed class SshfsSource : SourceBase
+public sealed class SshfsSource : SourceBase, ICountable
 {
+    /// <summary>How many symbolic links in one listing are resolved at the same time.</summary>
+    private const int LinkResolveParallelism = 8;
+
     private readonly SshfsSettings _settings;
     private SftpPool? _pool;
     private ListingCache? _listings;
     private string _root = "/";
+    private bool _driveRoot;
     private bool _degraded;
 
     public SshfsSource(SshfsSettings settings)
@@ -49,6 +55,7 @@ public sealed class SshfsSource : SourceBase
         Context.ReportProgress($"Connecting to {_settings.Host}:{_settings.Port}");
         var client = await pool.ConnectFirstAsync(ct).ConfigureAwait(false);
         _root = RemotePath.Resolve(root, pool.Home);
+        _driveRoot = _root == "/" && RemotePath.IsDriveHome(pool.Home);
 
         Context.ReportProgress("Checking the remote root");
         try
@@ -100,7 +107,7 @@ public sealed class SshfsSource : SourceBase
             throw VfsException.IsADirectory(path);
         }
 
-        var remote = RemotePath.Join(_root, path);
+        var remote = Remote(path);
         var (fileMode, access) = mode switch
         {
             VfsOpenMode.Read => (FileMode.Open, FileAccess.Read),
@@ -155,7 +162,7 @@ public sealed class SshfsSource : SourceBase
     public override async Task CreateDirectoryAsync(string path, CancellationToken ct)
     {
         path = VfsPath.Normalize(path);
-        var remote = RemotePath.Join(_root, path);
+        var remote = Remote(path);
         await RunAsync(path, async client =>
         {
             if (await client.ExistsAsync(remote, ct).ConfigureAwait(false))
@@ -185,7 +192,7 @@ public sealed class SshfsSource : SourceBase
             throw VfsException.AccessDenied(path);
         }
 
-        var remote = RemotePath.Join(_root, path);
+        var remote = Remote(path);
         var wasDirectory = await RunAsync(path, async client =>
         {
             var attributes = await client.GetAttributesAsync(remote, ct).ConfigureAwait(false);
@@ -223,8 +230,8 @@ public sealed class SshfsSource : SourceBase
             throw VfsException.AccessDenied(fromPath.Length == 0 ? fromPath : toPath);
         }
 
-        var fromRemote = RemotePath.Join(_root, fromPath);
-        var toRemote = RemotePath.Join(_root, toPath);
+        var fromRemote = Remote(fromPath);
+        var toRemote = Remote(toPath);
         var movedDirectory = await RunAsync(fromPath, async client =>
         {
             var from = await client.GetAttributesAsync(fromRemote, ct).ConfigureAwait(false);
@@ -273,7 +280,7 @@ public sealed class SshfsSource : SourceBase
             return;
         }
 
-        var remote = RemotePath.Join(_root, path);
+        var remote = Remote(path);
         await RunAsync(path, async client =>
         {
             await Task.Run(() => client.SetLastWriteTimeUtc(remote, modified.Value.UtcDateTime), ct).ConfigureAwait(false);
@@ -282,13 +289,78 @@ public sealed class SshfsSource : SourceBase
         Listings.InvalidateParentOf(path);
     }
 
+    /// <summary>
+    /// "Count files on start": folders are listed several at a time (four per connection, so 16 with the default
+    /// pool; SFTP multiplexes them), with <see cref="SourceBase.Counters"/> updated per folder. Symbolic links are
+    /// counted as entries but not followed (a link to a parent would never end); a folder that can't be listed
+    /// contributes nothing.
+    /// </summary>
+    public async Task CountFilesAsync(CancellationToken ct)
+    {
+        Counters.Set(0, 0, EnumerationState.InProgress);
+        var parallel = Math.Clamp(_settings.Connections * 4, 4, 32);
+        var pending = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = false, SingleWriter = false });
+        var outstanding = 1;
+        pending.Writer.TryWrite("");
+
+        async Task WorkerAsync()
+        {
+            await foreach (var dir in pending.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            {
+                try
+                {
+                    var (files, folders) = await RunAsync(dir, async client =>
+                    {
+                        long files = 0, folders = 0;
+                        var remote = Remote(dir);
+                        await foreach (var item in client.ListDirectoryAsync(remote, ct).ConfigureAwait(false))
+                        {
+                            if (item.Name is "." or "..")
+                            {
+                                continue;
+                            }
+
+                            if (item.IsDirectory && !item.IsSymbolicLink)
+                            {
+                                folders++;
+                                Interlocked.Increment(ref outstanding);
+                                pending.Writer.TryWrite(VfsPath.Join(dir, item.Name));
+                            }
+                            else
+                            {
+                                files++;
+                            }
+                        }
+
+                        return (files, folders);
+                    }, ct).ConfigureAwait(false);
+                    Counters.Add(files, folders);
+                }
+                catch (VfsException ex)
+                {
+                    Logger.LogDebug("sshfs: count skipped '{Dir}': {Error}", dir, ex.Message);
+                }
+                finally
+                {
+                    if (Interlocked.Decrement(ref outstanding) == 0)
+                    {
+                        pending.Writer.TryComplete();
+                    }
+                }
+            }
+        }
+
+        var workers = Enumerable.Range(0, parallel).Select(_ => Task.Run(WorkerAsync, ct)).ToList();
+        await Task.WhenAll(workers).ConfigureAwait(false);
+    }
+
     public override async Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct)
     {
         try
         {
             return await RunAsync(path, async client =>
             {
-                var status = await client.GetStatusAsync(RemotePath.Join(_root, VfsPath.Normalize(path)), ct).ConfigureAwait(false);
+                var status = await client.GetStatusAsync(Remote(VfsPath.Normalize(path)), ct).ConfigureAwait(false);
                 var block = status.FileSystemBlockSize != 0 ? status.FileSystemBlockSize : status.BlockSize;
                 return block == 0 ? null : new VfsSpace((long)Math.Min(status.TotalBlocks * block, long.MaxValue), (long)Math.Min(status.AvailableBlocks * block, long.MaxValue));
             }, ct).ConfigureAwait(false);
@@ -328,11 +400,14 @@ public sealed class SshfsSource : SourceBase
         return new VfsEntry(name, isDirectory, isDirectory ? 0 : length, null, modified, attributes);
     }
 
+    /// <summary>The server path of a source path: under the root, or the drive mapping on a Windows server served from "/".</summary>
+    private string Remote(string path) => _driveRoot ? RemotePath.JoinDriveRoot(path) : RemotePath.Join(_root, path);
+
     private ListingCache Listings => _listings ?? throw VfsException.Unavailable($"{_settings.Host} is not connected yet");
 
     private async IAsyncEnumerable<VfsEntry> ListRemoteAsync(string path, [EnumeratorCancellation] CancellationToken ct)
     {
-        var remote = RemotePath.Join(_root, path);
+        var remote = Remote(path);
         var entries = await RunAsync(path, async client =>
         {
             List<ISftpFile> items;
@@ -362,13 +437,28 @@ public sealed class SshfsSource : SourceBase
                 throw attributes is { IsDirectory: false } ? VfsException.NotADirectory(path) : VfsException.NotFound(path);
             }
 
-            var result = new List<VfsEntry>(items.Count);
-            foreach (var item in items)
+            // links need a stat each; several at once, the rest is immediate
+            using var gate = new SemaphoreSlim(LinkResolveParallelism, LinkResolveParallelism);
+            var result = await Task.WhenAll(items.Select(async item =>
             {
-                result.Add(await ToEntryAsync(client, item, ct).ConfigureAwait(false));
-            }
+                if (!item.IsSymbolicLink)
+                {
+                    var name = _driveRoot && path.Length == 0 ? RemotePath.DriveEntryName(item.Name) ?? item.Name : item.Name;
+                    return ToEntry(name, item.IsDirectory, item.Length, item.LastWriteTimeUtc, item.OwnerCanWrite || item.GroupCanWrite || item.OthersCanWrite);
+                }
 
-            return result;
+                await gate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    return await ToEntryAsync(client, item, ct).ConfigureAwait(false);
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            })).ConfigureAwait(false);
+
+            return (IReadOnlyList<VfsEntry>)result;
         }, ct).ConfigureAwait(false);
 
         foreach (var entry in entries)

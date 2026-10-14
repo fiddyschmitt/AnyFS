@@ -73,7 +73,7 @@ secret properties never enter it.
 | `host` | The server's name or address (no `user@`). |
 | `port` | Default 22. |
 | `username` | Who to log in as. |
-| `root` | `/` (everything, the default), `~` or `~/sub` (the home folder), or an absolute path. The source's tree starts there. |
+| `root` | `/` (everything, the default), `~` or `~/sub` (the home folder), or an absolute path. The source's tree starts there. A Windows OpenSSH server puts its drives at `/`, so with the root there the source shows them as folders `c`, `d`... (a colon can't be in a Windows file name); `C:\Users` or `/C:/Users` work as a root too. |
 | `password` | Secret: in `state/secrets.json`, never here. Optional: without it the key is used, or the server's own prompt reaches you. |
 | `keyFile` | A private key file on this machine (OpenSSH, PEM or PuTTY). Optional. |
 | `passphrase` | Secret, optional: the key's passphrase; left empty, you are asked when the key needs one. |
@@ -87,6 +87,8 @@ waits for a Retry. The server's host key is trusted on first use and pinned per 
 `state/sources/<id>/hostkeys.txt`; a changed key fails the source naming both fingerprints, and
 deleting the line lets you accept the new one. Listings are cached for two seconds; a symbolic
 link shows as what it points at; dot names are hidden; a file nobody may write is read-only.
+"Count files on start" lists folders several at a time over the pool (four per connection) and
+counts links as entries without following them.
 
 ### Sharing sources: Export... and Import...
 

@@ -145,8 +145,51 @@ public static class RemotePath
             return true;
         }
 
-        reason = "The remote root is an absolute path (/srv/data), / for everything, or ~ for the home folder.";
+        // a Windows server's own spelling: C:\Users or C:/Users is /C:/Users to its SFTP
+        if (t.Length >= 2 && char.IsAsciiLetter(t[0]) && t[1] == ':' && (t.Length == 2 || t[2] == '/'))
+        {
+            if (!TryClean(t.Length > 3 ? t[3..] : "", out var rest, out reason))
+            {
+                return false;
+            }
+
+            root = "/" + char.ToUpperInvariant(t[0]) + ":" + (rest.Length == 0 ? "" : "/" + rest);
+            return true;
+        }
+
+        reason = "The remote root is an absolute path (/srv/data, or C:\\Users on a Windows server), / for everything, or ~ for the home folder.";
         return false;
+    }
+
+    /// <summary>
+    /// Windows OpenSSH puts the drives at "/" as entries named "C:", "D:"; its home is "/C:/Users/name". A colon
+    /// can't be in a file name on Windows, so with the root at "/" the source shows the drives as "c", "d" (the
+    /// way Mirror shows drive roots) and maps them back.
+    /// </summary>
+    public static bool IsDriveHome(string home) => home.Length >= 3 && home[0] == '/' && char.IsAsciiLetter(home[1]) && home[2] == ':';
+
+    /// <summary>The server's name for a drive entry ("C:") as the source shows it ("c"); null for anything else.</summary>
+    public static string? DriveEntryName(string serverName)
+        => serverName.Length == 2 && char.IsAsciiLetter(serverName[0]) && serverName[1] == ':' ? char.ToLowerInvariant(serverName[0]).ToString() : null;
+
+    /// <summary>A source path under a drive-root: "" is "/", "c" is "/C:", "c/Users/x" is "/C:/Users/x"; a first segment that isn't a letter is left for the server to refuse.</summary>
+    public static string JoinDriveRoot(string path)
+    {
+        if (path.Length == 0)
+        {
+            return "/";
+        }
+
+        var slash = path.IndexOf('/');
+        var first = slash < 0 ? path : path[..slash];
+        var rest = slash < 0 ? "" : path[(slash + 1)..];
+        if (first.Length == 1 && char.IsAsciiLetter(first[0]))
+        {
+            var drive = "/" + char.ToUpperInvariant(first[0]) + ":";
+            return rest.Length == 0 ? drive : drive + "/" + rest;
+        }
+
+        return "/" + path;
     }
 
     /// <summary>The absolute root once the server has said where home is (SFTP's working directory after login).</summary>

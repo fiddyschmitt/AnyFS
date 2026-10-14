@@ -22,7 +22,7 @@
           <Ellipse Classes="status" Fill="{Binding OverallColour, Converter={x:Static g:Converters.StatusBrush}}" />
           <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
           <TextBlock Text="·" Classes="muted" VerticalAlignment="Center" />
-          <TextBlock Text="{Binding FilesServedText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+          <TextBlock Text="{Binding FilesServedText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" FontFeatures="+tnum" />
         </StackPanel>
       </DockPanel>
     </Border>

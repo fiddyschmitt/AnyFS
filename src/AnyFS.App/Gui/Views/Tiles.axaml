@@ -18,7 +18,7 @@
         <DockPanel Grid.Row="2" Grid.ColumnSpan="2" Margin="0,8,0,0">
           <views:OpenButton DockPanel.Dock="Right" />
           <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" ClipToBounds="True" Margin="0,0,8,0">
-            <TextBlock Text="{Binding FilesText}" VerticalAlignment="Center" />
+            <TextBlock Text="{Binding FilesText}" VerticalAlignment="Center" FontFeatures="+tnum" />
             <ProgressBar IsIndeterminate="True" Width="44" Height="4" MinWidth="44" IsVisible="{Binding Counting}" VerticalAlignment="Center" />
           </StackPanel>
         </DockPanel>
@@ -67,7 +67,7 @@
         <DockPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,8,0,0">
           <views:OpenButton DockPanel.Dock="Right" IsVisible="{Binding ShowPath}" />
           <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" ClipToBounds="True" Margin="0,0,8,0">
-            <TextBlock Text="{Binding FilesText}" VerticalAlignment="Center" />
+            <TextBlock Text="{Binding FilesText}" VerticalAlignment="Center" FontFeatures="+tnum" />
             <ProgressBar IsIndeterminate="True" Width="44" Height="4" MinWidth="44" IsVisible="{Binding Counting}" VerticalAlignment="Center" />
             <ProgressBar Minimum="0" Maximum="1" Value="{Binding Progress, Mode=OneWay, FallbackValue=0}" Width="44" Height="4" MinWidth="44" IsVisible="{Binding HasProgress}" VerticalAlignment="Center" />
           </StackPanel>
