@@ -175,7 +175,7 @@ public class SshfsLiveTests
         if (Environment.GetEnvironmentVariable("ANYFS_TEST_SSH_BIG_ROOT") is { Length: > 0 } big)
         {
             // an optional bigger tree (tests/fixtures/sshfs-fixture.sh makes none): the parallel count against the
-            // host's old one-folder-at-a-time walk (10 ms throttle between folders, as SourceRunner.WalkAsync does)
+            // host's generic one-folder-at-a-time walk (what SourceRunner.WalkAsync does)
             await using var bigSource = await StartAsync(SshTestServer.Settings(big));
             sw.Restart();
             await bigSource.CountFilesAsync(None);
@@ -201,8 +201,6 @@ public class SshfsLiveTests
                         files++;
                     }
                 }
-
-                await Task.Delay(10, None);
             }
 
             var timing = $"big tree {big}: parallel count {bigSource.Counters.FilesKnown} files / {bigSource.Counters.DirectoriesKnown} folders in {parallelMs} ms; sequential walk {files} files / {folders} folders in {sw.ElapsedMilliseconds} ms";

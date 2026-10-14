@@ -30,6 +30,18 @@
   one listing are resolved several at a time.
 - Counts and stats use tabular figures (Inter's `tnum`), so a changing number no longer shifts the
   text around it.
+- "Count files on start" for a source without its own count (the host's folder-by-folder walk) no
+  longer pauses between folders.
+- WinFsp: `winfsp.net` is pinned to the bundled driver's major.minor and the build fails when they
+  drift (NuGet's newest, 2.2.x, is the WinFsp 2026 beta; it refuses the 2.1 driver at load with
+  "incorrect dll version"). A driver older than the build needs shows the reason and an **Upgrade
+  WinFsp driver** button (the same silent install); a failure to load the .NET layer is reported in
+  words instead of a reflection stack. ARM64 Windows is detected (`winfsp-a64.dll`).
+- The published single-file `anyfs.exe` could not mount WinFsp at all: the .NET layer reads its own
+  file version through `Assembly.Location`, which is empty inside a bundle. The bundle now leaves
+  `winfsp-msil` out and the WinFsp plugin hands the runtime its own copy, written once per user
+  under `%LOCALAPPDATA%\AnyFS\winfsp`; `scripts/smoke.ps1` mounts WinFsp on Windows so this stays
+  covered.
 
 ## Unreleased (fixes after milestone 3)
 

@@ -91,6 +91,7 @@ internal static class WinFspInstaller
         1618 => "Another installation is in progress; try again when it has finished.",
         1619 or 1620 => "The installer package could not be opened.",
         1625 => "A system policy blocks this installation.",
+        1638 => "A different WinFsp is already installed and the installer will not replace it; uninstall that one first.",
         _ => $"msiexec exited with code {exitCode}.",
     };
 

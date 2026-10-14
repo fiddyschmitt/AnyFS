@@ -40,7 +40,6 @@ public class SourceRunnerTests
         return new SourceRunner(definition, plugin ?? new MemoryPlugin(), settings, null, handle, _paths, null, prompts ?? NoPromptHandler.Instance, NullLogger.Instance)
         {
             RetryDelay = _ => TimeSpan.FromMilliseconds(20),
-            CountThrottle = TimeSpan.Zero,
         };
     }
 

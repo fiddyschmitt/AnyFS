@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
   Smoke-tests a published anyfs: version, status, a third-party plugin loading in the trimmed build, and a
-  headless serve of a Mirror source over HTTP with a ranged read. Runs on Windows, Linux and macOS (pwsh).
+  headless serve of a Mirror source over HTTP with a ranged read, plus WebDAV, FTP, SMB and, on Windows with the
+  driver installed, WinFsp (\\anyfs\smoke). Runs on Windows, Linux and macOS (pwsh).
 
 .PARAMETER Exe
   The published anyfs executable (publish/<rid>/anyfs or anyfs.exe).
@@ -56,6 +57,16 @@ $bytes = New-Object byte[] 300000
 $mirrorId = '11111111-1111-1111-1111-111111111111'
 $sampleId = '22222222-2222-2222-2222-222222222222'
 $treeJson = $tree -replace '\\', '/'
+# WinFsp when this is Windows with the driver installed (the published single-file exe once could not load WinFsp's .NET layer)
+$winfsp = $false
+if ($env:OS -eq 'Windows_NT') {
+    $winfsp = (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'WinFsp\bin\winfsp-x64.dll')) -or (Test-Path (Join-Path ${env:ProgramFiles(x86)} 'WinFsp\bin\winfsp-a64.dll'))
+}
+$winfspJson = ''
+if ($winfsp) {
+    $winfspJson = ',
+              { "id": "88888888-8888-8888-8888-888888888888", "name": "WinFsp", "provider": "winfsp", "enabled": true, "readOnly": false, "settings": { } }'
+}
 @"
 { "version": 1, "sources": [
   { "id": "$mirrorId", "name": "tree", "type": "mirror", "enabled": true, "settings": { "paths": "$treeJson" } },
@@ -68,7 +79,7 @@ $treeJson = $tree -replace '\\', '/'
   "mounts": [ { "id": "44444444-4444-4444-4444-444444444444", "name": "HTTP", "provider": "http", "enabled": true, "readOnly": false, "settings": { "bindAddress": "127.0.0.1", "port": $Port } },
               { "id": "55555555-5555-5555-5555-555555555555", "name": "WebDAV", "provider": "webdav", "enabled": true, "readOnly": false, "settings": { "bindAddress": "127.0.0.1", "port": $($Port + 1) } },
               { "id": "66666666-6666-6666-6666-666666666666", "name": "FTP", "provider": "ftp", "enabled": true, "readOnly": false, "settings": { "bindAddress": "127.0.0.1", "port": $($Port + 2), "allowAnonymous": true } },
-              { "id": "77777777-7777-7777-7777-777777777777", "name": "SMB", "provider": "smb", "enabled": true, "readOnly": false, "settings": { "bindAddress": "127.0.0.1", "port": $($Port + 3), "guest": true } } ] } ] }
+              { "id": "77777777-7777-7777-7777-777777777777", "name": "SMB", "provider": "smb", "enabled": true, "readOnly": false, "settings": { "bindAddress": "127.0.0.1", "port": $($Port + 3), "guest": true } }$winfspJson ] } ] }
 "@ | Set-Content -Path (Join-Path $settings 'collections.json') -Encoding utf8
 
 $serveOut = Join-Path $work 'serve.out'
@@ -138,6 +149,17 @@ try {
         $smbUp = $false
         try { $tcp = New-Object System.Net.Sockets.TcpClient; $tcp.Connect('127.0.0.1', $Port + 3); $smbUp = $tcp.Connected; $tcp.Dispose() } catch { }
         Check $smbUp "SMB server (bundled portable-smb-server) listening on port $($Port + 3)"
+
+        if ($winfsp) {
+            Write-Host "== WinFsp mount at \\anyfs\smoke (the first open waits for Windows to look the name up; docs/mounts.md)"
+            $uncText = $null
+            for ($i = 0; $i -lt 40 -and -not $uncText; $i++) {
+                try { $uncText = [System.IO.File]::ReadAllText('\\anyfs\smoke\sample\hello.txt') } catch { Start-Sleep -Milliseconds 500 }
+            }
+            Check ($uncText -and $uncText.Trim() -eq 'smoke says hi') "WinFsp: a file read through \\anyfs\smoke"
+            $uncNames = @(Get-ChildItem '\\anyfs\smoke' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name)
+            Check ($uncNames -contains 'sample') "WinFsp: the listing of \\anyfs\smoke shows the sample folder"
+        }
 
         # status.json is refreshed every two seconds, so give the counters a moment to land
         $status = ''

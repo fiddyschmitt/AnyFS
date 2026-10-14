@@ -6,9 +6,16 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
-    <!-- 2.1.25156 is the current stable WinFsp .NET layer (2.2 is a beta); the driver is installed separately (spec 8.1).
-         The App roots this assembly whole at publish: the prefix-only mount reaches its internals by reflection. -->
-    <PackageReference Include="winfsp.net" />
+    <!-- 2.1.25156 is the current stable WinFsp .NET layer (the 2.2.x packages are the 2026 betas); the driver is installed
+         separately (spec 8.1) and must share the package's major.minor (Directory.Packages.props, scripts/winfsp.json;
+         AnyFS.App checks the two agree). The App roots this assembly whole at publish: the prefix-only mount reaches
+         its internals by reflection. -->
+    <PackageReference Include="winfsp.net" GeneratePathProperty="true" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The same DLL once more, as a resource: WinFspInterop hands it to the runtime as a file when the single-file
+         bundle can't (the layer's version check reads Assembly.Location, empty inside a bundle). -->
+    <EmbeddedResource Include="$(Pkgwinfsp_net)/lib/netstandard2.0/winfsp-msil.dll" LogicalName="winfsp-msil.dll" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />

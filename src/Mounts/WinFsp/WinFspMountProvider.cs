@@ -27,6 +27,9 @@ public sealed class WinFspMountProvider : IMountProviderPlugin, IValidatable, II
 {
     public const string WingetId = "WinFsp.WinFsp";
 
+    /// <summary>Before any mount touches winfsp-msil: a single-file host has to be handed it as a file (<see cref="WinFspInterop"/>).</summary>
+    static WinFspMountProvider() => WinFspInterop.Register();
+
     public string TypeId => "winfsp";
 
     public string DisplayName => "WinFsp";
@@ -37,16 +40,15 @@ public sealed class WinFspMountProvider : IMountProviderPlugin, IValidatable, II
 
     public IReadOnlyList<OSPlatform> SupportedPlatforms { get; } = [OSPlatform.Windows];
 
-    public string? UnavailableReason => !OperatingSystem.IsWindows() ? "WinFsp is a Windows driver"
-        : WinFspRuntime.IsInstalled() ? null
-        : "The WinFsp driver is not installed.";
+    /// <summary>No driver, or one this build's WinFsp layer refuses (an older minor or another major): the tile shows it with the Install/Upgrade button.</summary>
+    public string? UnavailableReason => !OperatingSystem.IsWindows() ? "WinFsp is a Windows driver" : WinFspRuntime.Problem();
 
     public PerformanceTier Tier => PerformanceTier.Native;
 
     public bool SupportsWrites => true;
 
-    /// <summary>The driver install is the one step that needs an administrator; the mount itself doesn't.</summary>
-    public bool NeedsAdministrator => OperatingSystem.IsWindows() && !WinFspRuntime.IsInstalled();
+    /// <summary>The driver install (or upgrade) is the one step that needs an administrator; the mount itself doesn't.</summary>
+    public bool NeedsAdministrator => OperatingSystem.IsWindows() && WinFspRuntime.Problem() is not null;
 
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public Type SettingsType => typeof(WinFspMountSettings);
@@ -64,7 +66,7 @@ public sealed class WinFspMountProvider : IMountProviderPlugin, IValidatable, II
         }
     }
 
-    public string InstallText => "Install WinFsp driver";
+    public string InstallText => OperatingSystem.IsWindows() && WinFspRuntime.IsInstalled() ? "Upgrade WinFsp driver" : "Install WinFsp driver";
 
     public string InstallDetail => WinFspInstaller.HasEmbedded()
         ? $"Installs the bundled WinFsp {WinFspInstaller.Version} driver with no installer windows (an administrator prompt appears; no reboot)"
@@ -148,7 +150,15 @@ internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo 
                 throw new InvalidOperationException("WinFsp is a Windows driver");
             }
 
-            Mount(fs, context);
+            try
+            {
+                Mount(fs, context);
+            }
+            catch (Exception ex) when (ex is FileNotFoundException or FileLoadException or BadImageFormatException)
+            {
+                // the .NET layer itself (winfsp-msil) did not load: Mount is the first method that needs it
+                throw new InvalidOperationException(WinFspRuntime.Explain(ex), ex);
+            }
         }, ct);
     }
 
@@ -180,10 +190,12 @@ internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo 
         {
             result = letter is null ? PrefixOnlyMount.Mount(host) : host.Mount(letter + ":", null, false, 0);
         }
-        catch (Exception ex) when (ex is DllNotFoundException or TypeInitializationException or EntryPointNotFoundException)
+        catch (Exception ex) when (ex is DllNotFoundException or TypeInitializationException or EntryPointNotFoundException or TargetInvocationException)
         {
+            // the layer's static initialiser failed (no driver, a driver it refuses, no file path for its version check);
+            // reflection in PrefixOnlyMount wraps that in a TargetInvocationException
             host.Dispose();
-            throw new InvalidOperationException("WinFsp is not installed (its DLL could not be loaded): " + ex.GetBaseException().Message, ex);
+            throw new InvalidOperationException(WinFspRuntime.Explain(ex), ex);
         }
         catch
         {
@@ -231,26 +243,108 @@ internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo 
     public ValueTask DisposeAsync() => new(StopAsync(CancellationToken.None));
 }
 
-/// <summary>Where the WinFsp runtime is, and the tool that installs it.</summary>
+/// <summary>Where the WinFsp runtime is, which version this build needs, and the tool that installs it.</summary>
 internal static class WinFspRuntime
 {
+    /// <summary>
+    /// The driver this build's WinFsp .NET layer accepts: the same major and at least this minor (WinFsp's own rule in
+    /// Fsp.Interop.Api.CheckVersion), so a newer 2.x driver is fine and an older one fails to load with "incorrect dll
+    /// version". <see cref="WinFspInstaller.Version"/> follows the winfsp.net package (a test holds them together) and
+    /// AnyFS.App checks the bundled installer against the package at build.
+    /// </summary>
+    public static readonly Version Required = Version.Parse(WinFspInstaller.Version);
+
+    public static bool Accepts(Version installed, Version required) => installed.Major == required.Major && installed.Minor >= required.Minor;
+
     [SupportedOSPlatform("windows")]
-    public static bool IsInstalled()
+    public static bool IsInstalled() => FindDll() is not null;
+
+    /// <summary>The installed driver's version from its DLL (major.minor.build), or null when it isn't there.</summary>
+    [SupportedOSPlatform("windows")]
+    public static Version? InstalledVersion()
     {
+        var dll = FindDll();
+        if (dll is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var info = FileVersionInfo.GetVersionInfo(dll);
+            return new Version(info.FileMajorPart, info.FileMinorPart, info.FileBuildPart);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new Version(0, 0, 0);
+        }
+    }
+
+    /// <summary>Null when the driver is there and new enough; otherwise why the mount can't start, as the tile and the Add mount dialog show it.</summary>
+    [SupportedOSPlatform("windows")]
+    public static string? Problem()
+    {
+        var installed = InstalledVersion();
+        if (installed is null)
+        {
+            return "The WinFsp driver is not installed.";
+        }
+
+        return Accepts(installed, Required) ? null : $"WinFsp {installed} is installed; this build needs {Required.Major}.{Required.Minor} or a later {Required.Major}.x.";
+    }
+
+    /// <summary>A failure to load WinFsp's .NET layer, in words, for the mount's status.</summary>
+    public static string Explain(Exception ex)
+    {
+        var root = ex.GetBaseException();
+        var message = root.Message;
+        if (root is DllNotFoundException)
+        {
+            return "WinFsp is not installed (its DLL could not be loaded): " + message;
+        }
+
+        if (root is TypeLoadException && message.Contains("incorrect dll version", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"The installed WinFsp driver is a version this build does not accept ({message}); upgrade it to WinFsp {Required.Major}.{Required.Minor} or a later {Required.Major}.x.";
+        }
+
+        if (root is FileNotFoundException or FileLoadException or BadImageFormatException)
+        {
+            return $"WinFsp's .NET layer ({WinFspInterop.AssemblyName}) could not be loaded: {message}";
+        }
+
+        if (root is ArgumentException && ex is not ArgumentException)
+        {
+            return $"WinFsp's .NET layer could not read its own file version (a host that runs it from memory instead of a file): {message}";
+        }
+
+        return $"WinFsp's .NET layer could not start ({root.GetType().Name}: {message})";
+    }
+
+    /// <summary>The driver DLL for this process's architecture: where the installer registered it, or the default folder.</summary>
+    [SupportedOSPlatform("windows")]
+    private static string? FindDll()
+    {
+        var name = RuntimeInformation.ProcessArchitecture switch
+        {
+            Architecture.Arm64 => "winfsp-a64.dll",
+            Architecture.X86 => "winfsp-x86.dll",
+            _ => "winfsp-x64.dll",
+        };
         try
         {
             using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WOW6432Node\WinFsp") ?? Registry.LocalMachine.OpenSubKey(@"SOFTWARE\WinFsp");
-            if (key?.GetValue("InstallDir") is string dir && File.Exists(Path.Combine(dir, "bin", "winfsp-x64.dll")))
+            if (key?.GetValue("InstallDir") is string dir && File.Exists(Path.Combine(dir, "bin", name)))
             {
-                return true;
+                return Path.Combine(dir, "bin", name);
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
         }
 
-        var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-        return File.Exists(Path.Combine(programFiles, "WinFsp", "bin", "winfsp-x64.dll"));
+        var fallback = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "WinFsp", "bin", name);
+        return File.Exists(fallback) ? fallback : null;
     }
 
     public static string? FindWinget()

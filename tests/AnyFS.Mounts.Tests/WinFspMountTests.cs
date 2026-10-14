@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using AnyFS.Mounts.WinFsp;
 using AnyFS.Sdk;
@@ -157,13 +159,60 @@ public class WinFspMountTests
         var provider = new WinFspMountProvider();
         Assert.AreEqual(0, provider.Validate(new WinFspMountSettings()).Count());
         Assert.IsTrue(provider.Validate(new WinFspMountSettings { DriveLetter = "1" }).Any(m => m.IsError));
-        Assert.AreEqual("Install WinFsp driver", provider.InstallText);
+        Assert.AreEqual(OperatingSystem.IsWindows() && WinFspRuntime.IsInstalled() ? "Upgrade WinFsp driver" : "Install WinFsp driver", provider.InstallText);
         Assert.IsTrue(provider.InstallDetail.Contains("winget install") || provider.InstallDetail.Contains("bundled"), provider.InstallDetail);
         CollectionAssert.AreEqual(new[] { "/i", @"C:\t\winfsp.msi", "/qn", "/norestart", "/l*v", @"C:\t\winfsp.log" }, WinFspInstaller.Arguments(@"C:\t\winfsp.msi", @"C:\t\winfsp.log").ToList());
         StringAssert.Contains(WinFspInstaller.Describe(1602, installed: false), "cancelled");
         StringAssert.Contains(WinFspInstaller.Describe(1618, installed: false), "in progress");
+        StringAssert.Contains(WinFspInstaller.Describe(1638, installed: true), "already installed");
         StringAssert.Contains(WinFspInstaller.Describe(0, installed: false), "still not found");
         StringAssert.Contains(WinFspInstaller.Describe(1234, installed: false), "1234");
+    }
+
+    /// <summary>Fsp.Interop.Api.CheckVersion's rule: the driver's major equals the layer's, its minor is at least the layer's.</summary>
+    [TestMethod]
+    public void DriverVersionRuleIsWinFspsOwn()
+    {
+        var required = new Version(2, 1, 25156);
+        Assert.AreEqual(required, WinFspRuntime.Required);
+        Assert.IsTrue(WinFspRuntime.Accepts(new Version(2, 1, 25156), required));
+        Assert.IsTrue(WinFspRuntime.Accepts(new Version(2, 2, 26286), required), "a newer 2.x driver serves an older layer");
+        Assert.IsFalse(WinFspRuntime.Accepts(new Version(2, 0, 23075), required), "an older minor is 'incorrect dll version'");
+        Assert.IsFalse(WinFspRuntime.Accepts(new Version(1, 12, 22339), required));
+        Assert.IsFalse(WinFspRuntime.Accepts(new Version(3, 0, 1), required));
+        StringAssert.Contains(WinFspRuntime.Explain(new TypeLoadException("incorrect dll version (need 2.2, have 2.1)")), "need 2.2, have 2.1");
+        StringAssert.Contains(WinFspRuntime.Explain(new TypeInitializationException("Fsp.Interop.Api", new DllNotFoundException("cannot load winfsp-x64.dll"))), "not installed");
+        StringAssert.Contains(WinFspRuntime.Explain(new TargetInvocationException(new TypeInitializationException("Fsp.Interop.Api", new ArgumentException("The path is empty.", "path")))), "file version");
+        StringAssert.Contains(WinFspRuntime.Explain(new FileNotFoundException("Could not load file or assembly 'winfsp-msil'")), "winfsp-msil");
+        if (OperatingSystem.IsWindows() && WinFspRuntime.InstalledVersion() is { } installed)
+        {
+            Console.WriteLine($"installed WinFsp {installed}; problem: {WinFspRuntime.Problem() ?? "none"}");
+            Assert.AreEqual(WinFspRuntime.Accepts(installed, required), WinFspRuntime.Problem() is null);
+        }
+    }
+
+    /// <summary>The copy the plugin carries for single-file hosts is the layer this build links, and the installer constant follows it.</summary>
+    [TestMethod]
+    public void InteropCopyIsTheLayerThisBuildLinks()
+    {
+        Assert.IsTrue(WinFspInterop.HasEmbedded(), "AnyFS.Mounts.WinFsp embeds winfsp-msil.dll");
+        var dir = Path.Combine(Path.GetTempPath(), "anyfs-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var path = WinFspInterop.Extract(dir);
+            Assert.AreEqual(path, WinFspInterop.Extract(dir), "the same content lands in the same file");
+            Assert.AreEqual(WinFspInterop.AssemblyName, AssemblyName.GetAssemblyName(path).Name);
+            var copy = FileVersionInfo.GetVersionInfo(path);
+            var copyVersion = new Version(copy.FileMajorPart, copy.FileMinorPart, copy.FileBuildPart);
+            Assert.AreEqual(Version.Parse(WinFspInstaller.Version), copyVersion, "WinFspInstaller.Version follows the winfsp.net package in Directory.Packages.props");
+            var linked = typeof(Fsp.FileSystemHost).Assembly.GetCustomAttribute<AssemblyFileVersionAttribute>()?.Version;
+            Assert.IsNotNull(linked);
+            Assert.AreEqual(Version.Parse(linked), copyVersion, "the embedded copy is the package the tests link");
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
     }
 
     /// <summary>The provider's log lines into the test output.</summary>

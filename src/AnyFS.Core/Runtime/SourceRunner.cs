@@ -78,9 +78,6 @@ public sealed class SourceRunner : IAsyncDisposable
     /// <summary>Overridable for tests.</summary>
     public Func<int, TimeSpan> RetryDelay { get; set; } = RetryPolicy.Delay;
 
-    /// <summary>Pause between directories of the count-on-start walk.</summary>
-    public TimeSpan CountThrottle { get; set; } = TimeSpan.FromMilliseconds(10);
-
     public bool IsRunning
     {
         get
@@ -256,7 +253,7 @@ public sealed class SourceRunner : IAsyncDisposable
 
     /// <summary>
     /// The opt-in "Count files on start" walk (spec 6.8), with the spinner on: the source's own
-    /// <see cref="ICountable.CountFilesAsync"/> when it has one, else a throttled directory-by-directory walk.
+    /// <see cref="ICountable.CountFilesAsync"/> when it has one, else a directory-by-directory walk with no pause between folders.
     /// </summary>
     private async Task CountAsync(ISource source, CancellationToken ct)
     {
@@ -333,10 +330,6 @@ public sealed class SourceRunner : IAsyncDisposable
 
             source.Counters.Set(files, directories, EnumerationState.InProgress);
             Handle.Status = new ComponentStatus(ComponentState.Enumerating, $"Counting files ({files:N0} so far)");
-            if (CountThrottle > TimeSpan.Zero)
-            {
-                await Task.Delay(CountThrottle, _time, ct).ConfigureAwait(false);
-            }
         }
 
         source.Counters.Set(files, directories, EnumerationState.Complete);

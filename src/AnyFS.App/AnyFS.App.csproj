@@ -67,6 +67,35 @@
     <Message Importance="high" Text="WinFsp: embedding @(WinFspMsi)" Condition="'@(WinFspMsi)' != ''" />
     <Message Importance="high" Text="WinFsp: no installer under $(WinFspMsiDir); run scripts/fetch-winfsp.ps1 first or the Install button will fall back to winget" Condition="'$(BundleIsWindows)' == 'true' and '@(WinFspMsi)' == ''" />
     <Error Text="WinFsp: more than one installer under $(WinFspMsiDir) (@(WinFspMsi)); keep the one scripts/winfsp.json pins" Condition="'@(WinFspMsi->Count())' &gt; '1'" />
+    <!-- The .NET layer (winfsp.net) and the bundled driver must share a major.minor: Fsp.Interop.Api.CheckVersion refuses
+         a driver of another major or an older minor at load ("incorrect dll version"). NuGet's newest winfsp.net is a
+         2.2 beta, so an "update all" trips this on purpose. -->
+    <PropertyGroup>
+      <_WinFspPackageVersion>@(PackageVersion->WithMetadataValue('Identity', 'winfsp.net')->'%(Version)')</_WinFspPackageVersion>
+      <_WinFspMsiVersion>@(WinFspMsi->'%(Filename)'->Replace('winfsp-', ''))</_WinFspMsiVersion>
+      <_WinFspPackageMajorMinor Condition="$(_WinFspPackageVersion.Contains('.'))">$(_WinFspPackageVersion.Substring(0, $(_WinFspPackageVersion.LastIndexOf('.'))))</_WinFspPackageMajorMinor>
+      <_WinFspMsiMajorMinor Condition="$(_WinFspMsiVersion.Contains('.'))">$(_WinFspMsiVersion.Substring(0, $(_WinFspMsiVersion.LastIndexOf('.'))))</_WinFspMsiMajorMinor>
+    </PropertyGroup>
+    <Message Importance="high" Text="WinFsp: .NET layer winfsp.net $(_WinFspPackageVersion), bundled driver $(_WinFspMsiVersion)" Condition="'$(_WinFspMsiVersion)' != ''" />
+    <Error Text="WinFsp: winfsp.net $(_WinFspPackageVersion) (Directory.Packages.props) and the bundled driver $(_WinFspMsiVersion) (scripts/winfsp.json) must share a major.minor, or the .NET layer refuses the driver it installs. Pin the package back, or bump scripts/winfsp.json and run scripts/fetch-winfsp.ps1." Condition="'$(_WinFspPackageMajorMinor)' != '' and '$(_WinFspMsiMajorMinor)' != '' and '$(_WinFspPackageMajorMinor)' != '$(_WinFspMsiMajorMinor)'" />
+  </Target>
+
+  <!-- winfsp-msil (WinFsp's .NET layer) must load from a real file: its version check reads Assembly.Location, which is
+       empty inside a single-file bundle. ILLink still sees it (rooted whole below), so what it needs is kept; the bundle
+       then leaves it out and AnyFS.Mounts.WinFsp hands the runtime its own copy (WinFspInterop). It leaves the deps file's
+       inputs too, the way ILLink drops the assemblies it removes, or the host would refuse to start without it. -->
+  <Target Name="KeepWinFspInteropOutOfBundle" AfterTargets="ILLink" Condition="'$(PublishSingleFile)' == 'true'">
+    <ItemGroup>
+      <_WinFspInterop Include="@(ResolvedFileToPublish)" Condition="'%(Filename)%(Extension)' == 'winfsp-msil.dll'" />
+      <ResolvedFileToPublish Remove="@(_WinFspInterop)" />
+      <_WinFspInteropDepsInput Include="@(ResolvedCompileFileDefinitions);@(RuntimeCopyLocalItems);@(RuntimeTargetsCopyLocalItems);@(UserRuntimeAssembly);@(RuntimePackAsset)" Condition="'%(Filename)%(Extension)' == 'winfsp-msil.dll'" />
+      <ResolvedCompileFileDefinitions Remove="@(_WinFspInteropDepsInput)" />
+      <RuntimeCopyLocalItems Remove="@(_WinFspInteropDepsInput)" />
+      <RuntimeTargetsCopyLocalItems Remove="@(_WinFspInteropDepsInput)" />
+      <UserRuntimeAssembly Remove="@(_WinFspInteropDepsInput)" />
+      <RuntimePackAsset Remove="@(_WinFspInteropDepsInput)" />
+    </ItemGroup>
+    <Message Importance="high" Text="WinFsp: winfsp-msil kept out of the single-file bundle (@(_WinFspInterop->Count()) file); AnyFS.Mounts.WinFsp supplies it at run time" />
   </Target>
 
   <!-- The guaranteed set (spec 14.1): kept whole so third-party plugins can rely on it. Spike 7 showed that

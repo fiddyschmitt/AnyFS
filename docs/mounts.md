@@ -46,6 +46,14 @@ dialog offers the same. A build without the installer inside it falls back to
 `winget install WinFsp.WinFsp`. WinFsp is GPLv3 with a FLOSS exception; the installer is conveyed
 unmodified and its source is at <https://github.com/winfsp/winfsp>.
 
+The driver and the .NET layer anyfs links (the `winfsp.net` package) must agree: WinFsp refuses a
+driver of another major version or an older minor ("incorrect dll version (need 2.1, have 2.0)"),
+while a newer 2.x driver is fine. An older driver shows that on the tile with **Upgrade WinFsp
+driver**, which runs the same silent install; the build itself fails if the package and the bundled
+installer drift apart. The published single-file exe keeps the .NET layer out of its bundle (the
+layer reads its version from its own file, and a bundled assembly has none) and writes a copy
+under `%LOCALAPPDATA%\AnyFS\winfsp` the first time a WinFsp mount starts.
+
 The read-only layers show as the read-only file attribute, and writes they refuse get "access
 denied" (or "write protected" when the whole mount is read-only). Names are case-insensitive and
 preserving. Reparse points, streams and security descriptors are not exposed; everyone gets full

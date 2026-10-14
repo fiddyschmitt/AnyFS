@@ -149,4 +149,6 @@ AnyFS is MIT licensed. It embeds two unmodified third-party binaries:
   runtime, extracted into the state folder on first use.
 - The [WinFsp](https://github.com/winfsp/winfsp) installer `winfsp-2.1.25156.msi` (GPLv3 with the
   FLOSS exception), in Windows builds, for the Install button. Its corresponding source is that
-  repository at tag `v2.1`.
+  repository at tag `v2.1`. WinFsp's .NET layer (`winfsp-msil`, the `winfsp.net` package, same
+  licence) is linked as usual and also carried as a resource of the WinFsp plugin, so the
+  single-file exe can hand it to the runtime as a file.
