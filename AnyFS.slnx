@@ -28,6 +28,9 @@
   <Folder Name="/src/Sources/Mirror/">
     <Project Path="src/Sources/Mirror/AnyFS.Sources.Mirror.csproj" />
   </Folder>
+  <Folder Name="/src/Sources/Sshfs/">
+    <Project Path="src/Sources/Sshfs/AnyFS.Sources.Sshfs.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/AnyFS.App.Tests/AnyFS.App.Tests.csproj" />
     <Project Path="tests/AnyFS.Core.Tests/AnyFS.Core.Tests.csproj" />

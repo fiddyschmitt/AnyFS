@@ -23,7 +23,12 @@ public interface IDialogs
 
     Task<bool> ShowAsync(MountDialogViewModel dialog);
 
+    Task<bool> ShowAsync(ExportSourcesDialogViewModel dialog);
+
     Task<ConfirmAnswer> ConfirmAsync(ConfirmDialogViewModel dialog);
+
+    /// <summary>One of several options (an import conflict: replace, keep, copy); null when dismissed.</summary>
+    Task<int?> ChooseAsync(string title, string message, IReadOnlyList<string> options);
 
     Task ShowMessageAsync(string title, string message);
 
@@ -33,6 +38,9 @@ public interface IDialogs
     Task<string?> PickFileAsync(string? current);
 
     Task<string?> PickFolderAsync(string? current);
+
+    /// <summary>Where to write a new file (Export...); null when cancelled.</summary>
+    Task<string?> PickSaveFileAsync(string suggestedName);
 }
 
 /// <summary>The Open containing folder button and the Open log button (spec 8.9, 11).</summary>

@@ -396,6 +396,79 @@ public class ViewModelTests
     }
 
     [TestMethod]
+    public async Task ExportWritesTheChosenSourcesAndImportMergesById()
+    {
+        await AddCollectionAsync("work");
+        await AddSourceAsync("alpha", "a.txt=A", path: "");
+        var beta = await AddSourceAsync("beta", "b.txt=B", path: "beta");
+        var all = _vm.AllSources;
+        all.Refresh();
+        Assert.IsTrue(all.ExportSourcesCommand.CanExecute(null));
+
+        // export beta alone
+        var file = Path.Combine(_root, "export.json");
+        _dialogs.SaveFileToPick = file;
+        _dialogs.OnExport = d =>
+        {
+            foreach (var item in d.Items)
+            {
+                item.IsChecked = item.Name == "beta";
+            }
+
+            return Task.FromResult(true);
+        };
+        await all.ExportSourcesCommand.ExecuteAsync(null);
+        var exported = SourceTransfer.Read(file);
+        Assert.AreEqual(1, exported.Count);
+        Assert.AreEqual("beta", exported[0].Name);
+        Assert.AreEqual(beta.Id, exported[0].Id);
+        Assert.IsNotNull(exported[0].Settings);
+
+        // the same id again, imported as a copy: a new id and a distinct name
+        _dialogs.FileToPick = file;
+        _dialogs.OnChoose = (_, _, options) => options.ToList().FindIndex(o => o.Contains("copy"));
+        await all.ImportSourcesCommand.ExecuteAsync(null);
+        _vm.Refresh();
+        Assert.AreEqual(1, _dialogs.Choices.Count, "one clash was asked about");
+        var copy = _engine.Settings.Sources.Single(s => s.Name == "beta (2)");
+        Assert.AreNotEqual(beta.Id, copy.Id);
+        StringAssert.Contains(_dialogs.Messages.Last().Message, "1 imported as cop");
+
+        // keep mine: nothing changes
+        var count = _engine.Settings.Sources.Count;
+        _dialogs.OnChoose = (_, _, options) => options.ToList().FindIndex(o => o.Contains("Keep"));
+        await all.ImportSourcesCommand.ExecuteAsync(null);
+        Assert.AreEqual(count, _engine.Settings.Sources.Count);
+        StringAssert.Contains(_dialogs.Messages.Last().Message, "1 kept");
+
+        // replace mine: the file's name takes over the id, and the source restarts
+        var edited = SourceTransfer.Read(file).Single();
+        edited.Name = "beta-renamed";
+        SourceTransfer.Write(file, [edited]);
+        _dialogs.OnChoose = (_, _, options) => options.ToList().FindIndex(o => o.Contains("Replace"));
+        await all.ImportSourcesCommand.ExecuteAsync(null);
+        _vm.Refresh();
+        Assert.AreEqual("beta-renamed", _engine.Settings.FindSource(beta.Id)!.Name);
+        Assert.IsTrue(all.Sources.Any(s => s.Name == "beta-renamed"));
+        await Wait.UntilAsync(() => _engine.FindSourceRunner(beta.Id)?.Handle.IsUsable == true, what: "beta-renamed running again");
+
+        // a new id is simply added and started
+        var fresh = SourceTransfer.Read(file).Single();
+        fresh.Id = Guid.NewGuid();
+        fresh.Name = "gamma";
+        SourceTransfer.Write(file, [fresh]);
+        await all.ImportSourcesCommand.ExecuteAsync(null);
+        Assert.IsNotNull(_engine.Settings.FindSource(fresh.Id));
+        StringAssert.Contains(_dialogs.Messages.Last().Message, "1 added");
+        await Wait.UntilAsync(() => _engine.FindSourceRunner(fresh.Id)?.Handle.IsUsable == true, what: "gamma started");
+
+        // a file that isn't a sources file says so
+        File.WriteAllText(file, "not json at all");
+        await all.ImportSourcesCommand.ExecuteAsync(null);
+        StringAssert.Contains(_dialogs.Messages.Last().Message, "not a sources file");
+    }
+
+    [TestMethod]
     public void SettingsFormLeavesOutFieldsForOtherOperatingSystems()
     {
         var form = new SettingsFormViewModel(typeof(PlatformSettings), new PlatformSettings(), null, null, null, _dialogs);

@@ -1,13 +1,14 @@
 using System.Collections.ObjectModel;
 using AnyFS.App.Gui.Services;
 using AnyFS.Core.Runtime;
+using AnyFS.Core.Settings;
 using AnyFS.Core.Status;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
 namespace AnyFS.App.Gui.ViewModels;
 
-/// <summary>The All sources tab (spec 11.2): every source, with the collections using it. Import/Export arrive with milestone 4.</summary>
+/// <summary>The All sources tab (spec 11.2): every source, with the collections using it; Import... and Export... (spec 9.5).</summary>
 public sealed partial class AllSourcesViewModel : ObservableObject
 {
     private readonly AnyFsEngine _engine;
@@ -22,6 +23,82 @@ public sealed partial class AllSourcesViewModel : ObservableObject
     }
 
     public ObservableCollection<SourceTileViewModel> Sources { get; } = [];
+
+    public bool HasSources => Sources.Count > 0;
+
+    /// <summary>Export... : tick sources, pick a file, write it (never with secrets).</summary>
+    [RelayCommand(CanExecute = nameof(HasSources))]
+    private async Task ExportSourcesAsync()
+    {
+        var dialog = new ExportSourcesDialogViewModel(_engine.Settings.Sources
+            .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(s => (s.Id, s.Name, TypeNameOf(s.Type))));
+        dialog.OnAccept = async () =>
+        {
+            if (!dialog.Validate())
+            {
+                return false;
+            }
+
+            var path = await _dialogs.PickSaveFileAsync("sources.json");
+            if (path is null)
+            {
+                return false;
+            }
+
+            _engine.ExportSources(dialog.ChosenIds, path);
+            return true;
+        };
+        await _dialogs.ShowAsync(dialog);
+    }
+
+    /// <summary>Import... : a sources file, merged by id; a clash asks replace, keep or copy.</summary>
+    [RelayCommand]
+    private async Task ImportSourcesAsync()
+    {
+        var path = await _dialogs.PickFileAsync(null);
+        if (path is null)
+        {
+            return;
+        }
+
+        await _ops.Run("Import sources", async () =>
+        {
+            var incoming = SourceTransfer.Read(path);
+            if (incoming.Count == 0)
+            {
+                await _dialogs.ShowMessageAsync("Import sources", "There are no sources in that file.");
+                return;
+            }
+
+            var summary = await _engine.ImportSourcesAsync(incoming, async (existing, imported) =>
+            {
+                var choice = await _dialogs.ChooseAsync(
+                    $"'{imported.Name}' is already here",
+                    $"A source with the same id exists: '{existing.Name}' ({TypeNameOf(existing.Type)}). The file has '{imported.Name}' ({TypeNameOf(imported.Type)}).",
+                    ["Replace mine with the file's", "Keep mine", "Import the file's as a copy"]);
+                return choice switch
+                {
+                    0 => ImportConflict.Replace,
+                    2 => ImportConflict.Copy,
+                    _ => ImportConflict.Keep,
+                };
+            });
+
+            var needsSecrets = incoming
+                .Select(s => _engine.Registry.FindSource(s.Type))
+                .Any(plugin => plugin is not null && PluginSettingsBinder.Describe(plugin.SettingsType).Any(p => p.IsSecret));
+            var message = $"{summary.Describe()}.";
+            if (needsSecrets && summary.Added + summary.Replaced + summary.Copied > 0)
+            {
+                message += "\n\nPasswords and keys are never in a sources file: edit an imported source to add them, or answer its prompt when it starts.";
+            }
+
+            await _dialogs.ShowMessageAsync("Import sources", message);
+        });
+    }
+
+    private string TypeNameOf(string typeId) => _engine.Registry.FindSource(typeId)?.DisplayName ?? typeId;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasSelectedSource))]
@@ -72,6 +149,8 @@ public sealed partial class AllSourcesViewModel : ObservableObject
         }
 
         OnPropertyChanged(nameof(IsEmpty));
+        OnPropertyChanged(nameof(HasSources));
+        ExportSourcesCommand.NotifyCanExecuteChanged();
     }
 
     [RelayCommand]

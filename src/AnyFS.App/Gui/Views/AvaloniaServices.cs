@@ -1,5 +1,6 @@
 using AnyFS.App.Gui.Services;
 using AnyFS.App.Gui.ViewModels;
+using AnyFS.Sdk;
 using Avalonia.Controls;
 using Avalonia.Input.Platform;
 using Avalonia.Platform.Storage;
@@ -17,10 +18,33 @@ public sealed class AvaloniaDialogs(Window owner, ITextClipboard clipboard) : ID
 
     public Task<bool> ShowAsync(MountDialogViewModel dialog) => ShowAsync(new MountDialog(dialog));
 
+    public Task<bool> ShowAsync(ExportSourcesDialogViewModel dialog) => ShowAsync(new ExportSourcesDialog(dialog));
+
     public async Task<ConfirmAnswer> ConfirmAsync(ConfirmDialogViewModel dialog)
     {
         var button = await new ConfirmDialog(dialog).ShowDialog<ConfirmButton?>(owner) ?? ConfirmButton.Cancel;
         return new ConfirmAnswer(button, dialog.Checked);
+    }
+
+    public async Task<int?> ChooseAsync(string title, string message, IReadOnlyList<string> options)
+    {
+        // the plugin prompt dialog already knows how to offer a choice
+        var prompt = new PromptDialogViewModel(title, new PromptRequest(PromptKind.Choice, title, message, options));
+        var result = await new PromptDialog(prompt).ShowDialog<PromptResult?>(owner);
+        return result is { Answered: true } ? result.ChoiceIndex : null;
+    }
+
+    public async Task<string?> PickSaveFileAsync(string suggestedName)
+    {
+        var file = await owner.StorageProvider.SaveFilePickerAsync(new FilePickerSaveOptions
+        {
+            Title = "Save as",
+            SuggestedFileName = suggestedName,
+            DefaultExtension = "json",
+            ShowOverwritePrompt = true,
+            FileTypeChoices = [new FilePickerFileType("JSON") { Patterns = ["*.json"] }],
+        });
+        return file?.TryGetLocalPath();
     }
 
     public Task ShowMessageAsync(string title, string message)

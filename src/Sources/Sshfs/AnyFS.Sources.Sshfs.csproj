@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sources.Sshfs</AssemblyName>
+    <RootNamespace>AnyFS.Sources.Sshfs</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- SSH.NET 2026.0.0 (MIT, spec 7.2, 15): SFTP with async listing, open, delete, rename and statvfs -->
+    <PackageReference Include="SSH.NET" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
+  </ItemGroup>
+</Project>

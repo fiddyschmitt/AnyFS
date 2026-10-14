@@ -549,6 +549,162 @@ public sealed class AnyFsEngine : IAsyncDisposable
         }
     }
 
+    // ----- import and export (spec 9.5) -----
+
+    /// <summary>Writes the chosen sources as a sources file for someone else to import; secrets are never in it.</summary>
+    public void ExportSources(IEnumerable<Guid> ids, string path)
+    {
+        var wanted = ids.ToHashSet();
+        var sources = Settings.Sources.Where(s => wanted.Contains(s.Id)).ToList();
+        SourceTransfer.Write(path, sources);
+        _logger.LogInformation("exported {Count} source(s) to {Path}", sources.Count, path);
+    }
+
+    /// <summary>
+    /// Merges sources from a file by id: a new id is added as it is, a known one goes to <paramref name="resolve"/>
+    /// (replace mine, keep mine, or import as a copy under a new id). Names are kept unique with a suffix.
+    /// Secret settings are never in a file, so an imported source keeps the secrets its id already had here, and a
+    /// new one has none until it is edited (its plugin asks for what it needs, or fails saying so).
+    /// </summary>
+    public async Task<ImportSummary> ImportSourcesAsync(IReadOnlyList<SourceDefinition> incoming, Func<SourceDefinition, SourceDefinition, Task<ImportConflict>> resolve)
+    {
+        int added = 0, replaced = 0, kept = 0, copied = 0;
+        foreach (var source in incoming)
+        {
+            var existing = Settings.FindSource(source.Id);
+            if (existing is null)
+            {
+                await ImportNewAsync(source, keepId: true).ConfigureAwait(false);
+                added++;
+                continue;
+            }
+
+            // the question is asked outside the mutation lock: it waits for the user
+            switch (await resolve(existing, source).ConfigureAwait(false))
+            {
+                case ImportConflict.Replace:
+                    await ReplaceImportedAsync(existing.Id, source).ConfigureAwait(false);
+                    replaced++;
+                    break;
+                case ImportConflict.Copy:
+                    await ImportNewAsync(source, keepId: false).ConfigureAwait(false);
+                    copied++;
+                    break;
+                default:
+                    kept++;
+                    break;
+            }
+        }
+
+        _logger.LogInformation("import: {Added} added, {Replaced} replaced, {Kept} kept, {Copied} copied", added, replaced, kept, copied);
+        return new ImportSummary(added, replaced, kept, copied);
+    }
+
+    private async Task ImportNewAsync(SourceDefinition source, bool keepId)
+    {
+        await _mutations.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            ThrowIfStopped();
+            var definition = SourceTransfer.Copy(source);
+            if (!keepId || definition.Id == Guid.Empty || Settings.FindSource(definition.Id) is not null)
+            {
+                definition.Id = Guid.NewGuid();
+            }
+
+            definition.Name = UniqueSourceName(RequireName(definition.Name, "A source"), null);
+            definition.Settings = RehomeSecrets(definition);
+            Settings.Sources.Add(definition);
+            Settings.SaveSources();
+            if (_started)
+            {
+                var runner = CreateSourceRunner(definition);
+                Volatile.Write(ref _sources, [.. Sources, runner]);
+                StartIfNeeded(runner);
+            }
+
+            _logger.LogInformation("source {Source} ({Type}) imported", definition.Name, definition.Type);
+            OnChanged();
+        }
+        finally
+        {
+            _mutations.Release();
+        }
+    }
+
+    private async Task ReplaceImportedAsync(Guid id, SourceDefinition source)
+    {
+        await _mutations.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            ThrowIfStopped();
+            var definition = Settings.FindSource(id) ?? throw new ArgumentException("That source no longer exists.");
+            var incoming = SourceTransfer.Copy(source);
+            incoming.Id = id;
+            definition.Name = UniqueSourceName(RequireName(incoming.Name, "A source"), id);
+            definition.Type = incoming.Type;
+            definition.Enabled = incoming.Enabled;
+            definition.CountFilesOnStart = incoming.CountFilesOnStart;
+            definition.Settings = RehomeSecrets(incoming);
+            Settings.SaveSources();
+
+            if (_started && FindSourceRunner(id) is { } runner)
+            {
+                runner.Handle.Name = definition.Name;
+                await runner.StopAsync().ConfigureAwait(false);
+                var replacement = CreateSourceRunner(definition);
+                Volatile.Write(ref _sources, Sources.Select(s => ReferenceEquals(s, runner) ? replacement : s).ToArray());
+                StartIfNeeded(replacement);
+                RefreshCollectionsUsing(id);
+            }
+
+            _logger.LogInformation("source {Source} replaced from an import", definition.Name);
+            OnChanged();
+        }
+        finally
+        {
+            _mutations.Release();
+        }
+    }
+
+    /// <summary>A sources file normally carries no secrets; one that does (hand-written) has them moved to the secret store here.</summary>
+    private JsonObject? RehomeSecrets(SourceDefinition definition)
+    {
+        var plugin = Registry.FindSource(definition.Type);
+        if (plugin is null || definition.Settings is null)
+        {
+            return definition.Settings;
+        }
+
+        try
+        {
+            var settings = PluginSettingsBinder.Materialise(plugin.SettingsType, definition.Settings);
+            return PluginSettingsBinder.Serialise(plugin.SettingsType, settings, (property, value) =>
+            {
+                if (!string.IsNullOrEmpty(value))
+                {
+                    Secrets.Set(definition.Id, property, value);
+                }
+            });
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
+        {
+            // unreadable settings start the source with the runner's "Settings could not be read" instead
+            return definition.Settings;
+        }
+    }
+
+    private string UniqueSourceName(string name, Guid? except)
+    {
+        var candidate = name;
+        for (var n = 2; Settings.Sources.Any(s => s.Id != except && s.Name.Equals(candidate, StringComparison.OrdinalIgnoreCase)); n++)
+        {
+            candidate = $"{name} ({n})";
+        }
+
+        return candidate;
+    }
+
     // ----- collections -----
 
     public async Task<CollectionDefinition> AddCollectionAsync(string name)

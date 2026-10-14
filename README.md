@@ -13,7 +13,7 @@ can write their own.
 
 ## Status
 
-Milestones 1 to 3 are done:
+Milestones 1 to 4 are done:
 
 - `AnyFS.Sdk`: the plugin contract (sources, mount providers, settings attributes, prompts),
   `SourceBase`, and helpers for caching (`ListingCache`, `SpoolCache`, `RandomAccessOverStream`).
@@ -23,7 +23,11 @@ Milestones 1 to 3 are done:
 - The window (Avalonia): Collections, All sources and Stats tabs with tile lists, Add/Edit/Delete
   dialogs, a settings form generated from each plugin's `[Setting]` attributes, prompts, and a
   status bar. It follows the OS light/dark theme.
-- Built-in **Mirror** source (local folders, drives and, on Windows, UNC shares).
+- Built-in **Mirror** source (local folders, drives and, on Windows, UNC shares) and **SSHFS**
+  source (a folder on any SSH server over SFTP: keys or passwords, two-factor prompts through the
+  window or the console, host keys pinned on first use, ranged reads on pooled connections).
+- Sources can be exported to a file and imported elsewhere (All sources › Export... / Import...),
+  never with secrets.
 - Built-in mounts: **WinFsp** (`\\anyfs\<collection>` on Windows, no drive letter, with an Install
   button when the driver is missing), **SMB** (the bundled portable-smb-server, for Windows, Linux
   and macOS clients), **FUSE** (Linux), **WebDAV** (our own server, with the Windows UNC form),
@@ -32,7 +36,7 @@ Milestones 1 to 3 are done:
 - `anyfs serve` and `anyfs status` for headless use.
 - Unit and GUI tests, a trimmed single-file publish, CI.
 
-Coming next: SSHFS and Import/Export (M4), the end-to-end lab (M5), a macOS `.app` (M6), NFS (M7).
+Coming next: the end-to-end lab and release workflow (M5), a macOS `.app` (M6), NFS (M7).
 
 ## Try it
 
@@ -123,6 +127,7 @@ src/AnyFS.Sdk.Testing    contract tests and fakes for plugin authors (and our ow
 src/AnyFS.Core           model, plugin host, router, read-only layers, status, settings, secrets, stats, logging
 src/AnyFS.App            anyfs: the window (Gui/) and the command line (Cli/)
 src/Sources/Mirror       the Mirror source
+src/Sources/Sshfs        the SSHFS source over SSH.NET
 src/Mounts/WinFsp        the WinFsp mount (Windows)
 src/Mounts/Smb           the SMB mount: the VFS endpoint and the portable-smb-server process
 src/Mounts/Fuse          the FUSE mount (Linux)

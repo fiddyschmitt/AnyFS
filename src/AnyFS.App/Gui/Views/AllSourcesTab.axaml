@@ -3,7 +3,7 @@
              xmlns:vm="using:AnyFS.App.Gui.ViewModels"
              x:Class="AnyFS.App.Gui.Views.AllSourcesTab"
              x:DataType="vm:AllSourcesViewModel">
-  <!-- spec 11.2: every source, with the collections using it; Import/Export arrive in milestone 4 -->
+  <!-- spec 11.2: every source, with the collections using it; Import... and Export... share definitions (spec 9.5) -->
   <DockPanel Margin="4">
     <TextBlock DockPanel.Dock="Top" Classes="header" Text="All sources" />
     <TextBlock DockPanel.Dock="Top" Classes="hint" Margin="0,0,0,8" Text="A source is defined once and can sit in any number of collections, each with its own path and read-only flag. Enabled here applies everywhere." />
@@ -26,6 +26,8 @@
           <TextBlock Text="Delete" />
         </StackPanel>
       </Button>
+      <Button Content="Import..." Command="{Binding ImportSourcesCommand}" Margin="16,0,0,0" ToolTip.Tip="Add sources from a sources file someone exported" />
+      <Button Content="Export..." Command="{Binding ExportSourcesCommand}" ToolTip.Tip="Write chosen sources to a file to share (never with passwords or keys)" />
     </StackPanel>
     <!-- the tiles take up to 560 px and shrink with the window; the second column only soaks up the rest so they stay left -->
     <Grid>

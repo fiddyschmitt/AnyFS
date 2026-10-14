@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased (milestone 4: SSHFS, prompts, Import/Export)
+
+- **SSHFS** source (type `sshfs`, folder `sshfs`) over SSH.NET 2026.0.0: a remote root (`/`, `~`
+  or any absolute path) served through SFTP with up to 16 pooled connections (open files spread
+  across them), ranged reads, listings cached for two seconds, writes (create, delete, rename
+  with replace through `posix-rename@openssh.com`, truncate, modified time), `statvfs` for free
+  space. Symbolic links show as what they point at (dangling ones as empty files), dot names are
+  hidden, files nobody may write are read-only. A dropped connection is retried once on a fresh
+  one and the source is Degraded until something succeeds.
+- **Logins and prompts**: key file (asking for the passphrase when the key is encrypted and none
+  is stored), password, then keyboard-interactive, whose prompts are answered with the saved
+  password once and otherwise reach the user through the existing prompt dialog or the console
+  (two-factor codes, PINs); declined or headless without a console, the source fails with "Needs
+  input" and waits for Retry. Host keys are trusted on first use and pinned per algorithm in the
+  source's state; a changed key fails the source naming both fingerprints.
+- **Import... and Export...** on the All sources tab: Export writes the ticked sources to a
+  `sources.json`-shaped file without secrets; Import merges by id (a clash asks replace, keep or
+  import as a copy), keeps names unique, moves any secrets a hand-written file carries into the
+  secret store, and starts what it added.
+- SDK/App: `IDialogs` gained a save-file picker and a multi-option question; `SourceTransfer`
+  (Core) reads and writes the shared file; `ImportSourcesAsync`/`ExportSources` on the engine.
+- `tests/fixtures/sshfs-fixture.sh` makes the tree the live SSHFS tests expect; they run when
+  `ANYFS_TEST_SSH_HOST` (and friends) point at a server and are inconclusive otherwise.
+
 ## Unreleased (fixes after milestone 3)
 
 - Add source: a filter box above the source types matches the name, the description and the type

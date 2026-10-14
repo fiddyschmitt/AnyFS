@@ -1,0 +1,38 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+        x:Class="AnyFS.App.Gui.Views.ExportSourcesDialog"
+        x:DataType="vm:ExportSourcesDialogViewModel"
+        Title="Export sources"
+        Width="480" SizeToContent="Height" MaxHeight="640" CanResize="False"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+  <DockPanel Margin="16">
+    <TextBlock DockPanel.Dock="Top" Classes="hint" TextWrapping="Wrap" Margin="0,0,0,10"
+               Text="The file holds the ticked sources' names and settings, never their passwords or keys. Another AnyFS imports it from its All sources tab." />
+    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+      <Button Content="All" Command="{Binding SelectAllCommand}" />
+      <Button Content="None" Command="{Binding SelectNoneCommand}" />
+    </StackPanel>
+    <StackPanel DockPanel.Dock="Bottom">
+      <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" />
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
+        <Button Content="Export..." IsDefault="True" Click="Ok_Click" IsEnabled="{Binding !Busy}" MinWidth="90" />
+        <Button Content="Cancel" IsCancel="True" Click="Cancel_Click" MinWidth="80" />
+      </StackPanel>
+    </StackPanel>
+    <ScrollViewer MaxHeight="360">
+      <ItemsControl ItemsSource="{Binding Items}">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="vm:ExportSourceItemViewModel">
+            <CheckBox IsChecked="{Binding IsChecked}" Margin="0,2">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBlock Text="{Binding Name}" />
+                <TextBlock Classes="muted" Text="{Binding TypeName}" VerticalAlignment="Center" />
+              </StackPanel>
+            </CheckBox>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+    </ScrollViewer>
+  </DockPanel>
+</Window>

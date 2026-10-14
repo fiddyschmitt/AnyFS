@@ -108,6 +108,7 @@
     <ProjectReference Include="..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
     <ProjectReference Include="..\AnyFS.Core\AnyFS.Core.csproj" />
     <ProjectReference Include="..\Sources\Mirror\AnyFS.Sources.Mirror.csproj" />
+    <ProjectReference Include="..\Sources\Sshfs\AnyFS.Sources.Sshfs.csproj" />
     <ProjectReference Include="..\Mounts\Http\AnyFS.Mounts.Http.csproj" />
     <ProjectReference Include="..\Mounts\WebDav\AnyFS.Mounts.WebDav.csproj" />
     <ProjectReference Include="..\Mounts\Ftp\AnyFS.Mounts.Ftp.csproj" />

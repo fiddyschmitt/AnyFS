@@ -17,6 +17,15 @@ public sealed class FakeDialogs : IDialogs
 
     public Func<ConfirmDialogViewModel, ConfirmAnswer>? OnConfirm { get; set; }
 
+    public Func<ExportSourcesDialogViewModel, Task<bool>>? OnExport { get; set; }
+
+    /// <summary>Answers ChooseAsync with an option index (null dismisses); the questions are recorded in Choices.</summary>
+    public Func<string, string, IReadOnlyList<string>, int?>? OnChoose { get; set; }
+
+    public List<(string Title, string Message, IReadOnlyList<string> Options)> Choices { get; } = [];
+
+    public string? SaveFileToPick { get; set; }
+
     public List<(string Title, string Message)> Messages { get; } = [];
 
     public List<(string Title, string Text)> Texts { get; } = [];
@@ -35,11 +44,21 @@ public sealed class FakeDialogs : IDialogs
 
     public Task<bool> ShowAsync(MountDialogViewModel dialog) => RunAsync(dialog, OnMount);
 
+    public Task<bool> ShowAsync(ExportSourcesDialogViewModel dialog) => RunAsync(dialog, OnExport);
+
     public Task<ConfirmAnswer> ConfirmAsync(ConfirmDialogViewModel dialog)
     {
         Confirms.Add(dialog);
         return Task.FromResult(OnConfirm?.Invoke(dialog) ?? new ConfirmAnswer(ConfirmButton.Cancel, false));
     }
+
+    public Task<int?> ChooseAsync(string title, string message, IReadOnlyList<string> options)
+    {
+        Choices.Add((title, message, options));
+        return Task.FromResult(OnChoose?.Invoke(title, message, options));
+    }
+
+    public Task<string?> PickSaveFileAsync(string suggestedName) => Task.FromResult(SaveFileToPick);
 
     public Task ShowMessageAsync(string title, string message)
     {

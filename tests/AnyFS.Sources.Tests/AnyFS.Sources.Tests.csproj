@@ -16,6 +16,7 @@
     <ProjectReference Include="..\..\src\AnyFS.Sdk\AnyFS.Sdk.csproj" />
     <ProjectReference Include="..\..\src\AnyFS.Sdk.Testing\AnyFS.Sdk.Testing.csproj" />
     <ProjectReference Include="..\..\src\Sources\Mirror\AnyFS.Sources.Mirror.csproj" />
+    <ProjectReference Include="..\..\src\Sources\Sshfs\AnyFS.Sources.Sshfs.csproj" />
     <ProjectReference Include="..\fixtures\MakeTree\MakeTree.csproj" />
   </ItemGroup>
 </Project>

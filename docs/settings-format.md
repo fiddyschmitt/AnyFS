@@ -66,6 +66,36 @@ secret properties never enter it.
 | `paths` | One path per line: UNC paths and drive paths on Windows (`\\server\share`, `C:\`, `D:\Photos`), any folder on Linux/macOS (`/mnt/nas`). Forward slashes are fine. Each path appears under its own chain: `\\h\s\x` as `h/s/x`, `C:\a` as `c/a`, `/mnt/nas` as `mnt/nas`. |
 | `checkIntervalSeconds` | How often unreachable paths are retried (default 60). |
 
+### SSHFS (`sshfs`)
+
+| Property | Meaning |
+|---|---|
+| `host` | The server's name or address (no `user@`). |
+| `port` | Default 22. |
+| `username` | Who to log in as. |
+| `root` | `/` (everything, the default), `~` or `~/sub` (the home folder), or an absolute path. The source's tree starts there. |
+| `password` | Secret: in `state/secrets.json`, never here. Optional: without it the key is used, or the server's own prompt reaches you. |
+| `keyFile` | A private key file on this machine (OpenSSH, PEM or PuTTY). Optional. |
+| `passphrase` | Secret, optional: the key's passphrase; left empty, you are asked when the key needs one. |
+| `connections` | Advanced, default 4: SFTP throughput is per connection, open files are spread across them. |
+| `connectTimeoutSeconds` | Advanced, default 20. |
+
+Logging in tries the key, then the password, then keyboard-interactive, whose prompts are
+answered with the saved password once and otherwise put to you (a two-factor code, a PIN, a
+password that isn't stored); headless without a console that is "Needs input" and the source
+waits for a Retry. The server's host key is trusted on first use and pinned per algorithm in
+`state/sources/<id>/hostkeys.txt`; a changed key fails the source naming both fingerprints, and
+deleting the line lets you accept the new one. Listings are cached for two seconds; a symbolic
+link shows as what it points at; dot names are hidden; a file nobody may write is read-only.
+
+### Sharing sources: Export... and Import...
+
+The All sources tab's **Export...** writes the ticked sources to a file of exactly this shape
+(`sources.json`), without secrets. **Import...** reads one back and merges by `id`: a new id is
+added, a known id asks whether to replace yours, keep yours or import the file's as a copy
+under a new id; names are kept unique with a `(2)` suffix. Imported sources have no secrets
+until you edit them (or answer their prompt when they start).
+
 ## settings/collections.json
 
 ```json

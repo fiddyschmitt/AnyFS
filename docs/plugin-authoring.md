@@ -90,6 +90,17 @@ Test button. When a hint or placeholder depends on the machine (an example path 
 implement `ISettingTextProvider` on the plugin: `HintFor(propertyName)` and
 `PlaceholderFor(propertyName)` are asked for each property and null keeps the attribute's text.
 
+## Prompts
+
+When a source needs something only the user has (a PIN, a one-time code, a passphrase that
+isn't stored), call `Context.PromptAsync(new PromptRequest(PromptKind.Password, title, message))`
+from `InitialiseAsync`; `Text`, `YesNo` and `Choice` are the other kinds. The window shows a modal
+dialog naming the source, `anyfs serve` asks on the console, and headless without a console the
+call throws `SourceFailedException("Needs input: ...", permanent: true)`, so the source shows that
+and waits for a Retry rather than looping. Prompts are serialised: two sources never ask at once.
+A library that asks through a synchronous callback (SSH.NET's keyboard-interactive event) can
+block on the prompt inside the callback, as `src/Sources/Sshfs/SftpPool.cs` does.
+
 ## Mount providers
 
 A mount provider implements `IMountProviderPlugin` and returns an `IMount` per collection; the
