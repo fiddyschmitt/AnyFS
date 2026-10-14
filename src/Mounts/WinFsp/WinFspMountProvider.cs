@@ -44,6 +44,9 @@ public sealed class WinFspMountProvider : IMountProviderPlugin, IValidatable, II
 
     public bool SupportsWrites => true;
 
+    /// <summary>The driver install is the one step that needs an administrator; the mount itself doesn't.</summary>
+    public bool NeedsAdministrator => OperatingSystem.IsWindows() && !WinFspRuntime.IsInstalled();
+
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public Type SettingsType => typeof(WinFspMountSettings);
 

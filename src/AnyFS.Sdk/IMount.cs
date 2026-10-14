@@ -43,6 +43,12 @@ public interface IMountProviderPlugin
     /// <summary>False for protocols that are read-only by nature (plain HTTP).</summary>
     bool SupportsWrites { get; }
 
+    /// <summary>
+    /// True while something must be installed with administrator rights before this provider works on this
+    /// machine (the WinFsp driver, the fuse3 package). Running the mount itself never needs them. Optional: false.
+    /// </summary>
+    bool NeedsAdministrator => false;
+
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     Type SettingsType { get; }
 

@@ -30,7 +30,10 @@
       <ListBox Classes="tiles" Name="CollectionsList" ItemsSource="{Binding Collections}" SelectedItem="{Binding SelectedCollection}" ItemTemplate="{StaticResource CollectionTile}" SelectionMode="Single" />
     </DockPanel>
 
-    <Border Grid.Column="2" Classes="group">
+    <!-- the box starts level with the first collection tile, under an invisible twin of the "Collections" header -->
+    <DockPanel Grid.Column="2">
+      <TextBlock DockPanel.Dock="Top" Classes="header" Text="Collections" Opacity="0" IsHitTestVisible="False" />
+      <Border Classes="group">
       <DockPanel>
         <Grid ColumnDefinitions="*,12,*">
           <!-- Sources of the selected collection -->
@@ -100,6 +103,7 @@
           </DockPanel>
         </Grid>
       </DockPanel>
-    </Border>
+      </Border>
+    </DockPanel>
   </Grid>
 </UserControl>

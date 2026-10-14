@@ -193,6 +193,36 @@ public sealed class StatsCollector
         return snapshot;
     }
 
+    /// <summary>A deleted collection leaves the per-collection table (the overall totals keep what it served).</summary>
+    public void RemoveCollection(string collection) => _collections.TryRemove(collection, out _);
+
+    /// <summary>A renamed collection keeps its counters under the new name.</summary>
+    public void RenameCollection(string from, string to)
+    {
+        if (from == to || !_collections.TryRemove(from, out var counters))
+        {
+            return;
+        }
+
+        _collections.AddOrUpdate(to, counters, (_, existing) =>
+        {
+            existing.LifetimeFiles += counters.LifetimeFiles + counters.SessionFiles;
+            existing.LifetimeRead += counters.LifetimeRead + counters.SessionRead;
+            existing.LifetimeWritten += counters.LifetimeWritten + counters.SessionWritten;
+            return existing;
+        });
+    }
+
+    /// <summary>Drops the rows of collections that no longer exist (deleted while anyfs wasn't running, or before this was tracked).</summary>
+    public void KeepOnly(IEnumerable<string> collections)
+    {
+        var keep = new HashSet<string>(collections, StringComparer.Ordinal);
+        foreach (var name in _collections.Keys.Where(k => !keep.Contains(k)).ToList())
+        {
+            _collections.TryRemove(name, out _);
+        }
+    }
+
     private Counters For(string collection) => _collections.GetOrAdd(collection, _ => new Counters());
 
     private sealed class Counters

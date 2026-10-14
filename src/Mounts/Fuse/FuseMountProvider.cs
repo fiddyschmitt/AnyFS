@@ -42,6 +42,9 @@ public sealed class FuseMountProvider : IMountProviderPlugin, IValidatable
 
     public bool SupportsWrites => true;
 
+    /// <summary>Installing the fuse3 package needs an administrator; mounting as a user doesn't.</summary>
+    public bool NeedsAdministrator => OperatingSystem.IsLinux() && !FuseRuntime.LibraryAvailable();
+
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public Type SettingsType => typeof(FuseMountSettings);
 

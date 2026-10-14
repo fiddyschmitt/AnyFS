@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased (fixes after milestone 3)
+
+- Add source: a filter box above the source types matches the name, the description and the type
+  id, for when there are hundreds of them.
+- Add mount: the same filter box plus two pills. **High performance** keeps the native and
+  network-tier providers (WinFsp, FUSE, SMB); **No admin** hides providers that need something
+  installed as administrator first (WinFsp without the driver, FUSE without libfuse3), through the
+  new optional `IMountProviderPlugin.NeedsAdministrator`.
+- Counting files is nominal: a source that is enumerating shows green, and the collection's status
+  says "counting files".
+- Collections tab: the Sources and Mounts box starts level with the first collection tile, so it
+  reads as part of the selected collection.
+- All sources: the tiles are up to 560 px wide.
+- Stats: the per-collection table drops a collection when it is deleted (and, at start, any that
+  was deleted while anyfs was not running); a rename keeps its counters under the new name; the
+  "A file is served when a handle..." line is gone.
+
 ## Unreleased (milestone 3: mount providers)
 
 - **WinFsp** (Windows): one WinFsp network file system per collection at `\\anyfs\<collection>`,

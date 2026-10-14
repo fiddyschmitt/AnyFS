@@ -27,9 +27,14 @@
         </StackPanel>
       </Button>
     </StackPanel>
-    <Panel>
+    <!-- the tiles take up to 560 px and shrink with the window; the second column only soaks up the rest so they stay left -->
+    <Grid>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*" MaxWidth="560" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
       <TextBlock Classes="muted" Text="No sources yet. Add one here, or from a collection's Sources list." IsVisible="{Binding IsEmpty}" Margin="0,8,0,0" />
-      <ListBox Classes="tiles" Name="AllSourcesList" ItemsSource="{Binding Sources}" SelectedItem="{Binding SelectedSource}" ItemTemplate="{StaticResource SourceTile}" SelectionMode="Single" MaxWidth="760" HorizontalAlignment="Left" />
-    </Panel>
+      <ListBox Classes="tiles" Name="AllSourcesList" ItemsSource="{Binding Sources}" SelectedItem="{Binding SelectedSource}" ItemTemplate="{StaticResource SourceTile}" SelectionMode="Single" />
+    </Grid>
   </DockPanel>
 </UserControl>

@@ -525,6 +525,45 @@ public class ViewModelTests
         Assert.AreEqual(1, _installable.Installs);
     }
 
+    [TestMethod]
+    public void SourceDialogFiltersTheTypesByText()
+    {
+        var dialog = new SourceDialogViewModel(_engine, _dialogs, null, null, askPath: true);
+        CollectionAssert.AreEqual(new[] { "memory", "quick" }, dialog.VisiblePlugins.Select(p => p.TypeId).ToList());
+        dialog.Filter = "QUICK";
+        CollectionAssert.AreEqual(new[] { "quick" }, dialog.VisiblePlugins.Select(p => p.TypeId).ToList(), "name, case-insensitively");
+        Assert.AreEqual("quick", dialog.SelectedPlugin!.TypeId, "a filtered-out selection moves to the first visible type");
+        dialog.Filter = "in-memory";
+        CollectionAssert.AreEqual(new[] { "memory" }, dialog.VisiblePlugins.Select(p => p.TypeId).ToList(), "description");
+        var form = dialog.Form;
+        dialog.Filter = "";
+        Assert.AreEqual(2, dialog.VisiblePlugins.Count);
+        Assert.AreSame(form, dialog.Form, "clearing the filter keeps the form of the selected type");
+        dialog.Filter = "nothing like this";
+        Assert.AreEqual(0, dialog.VisiblePlugins.Count);
+        Assert.IsNull(dialog.SelectedPlugin);
+        Assert.IsFalse(dialog.Validate());
+    }
+
+    [TestMethod]
+    public void MountDialogFiltersByTextAndPills()
+    {
+        var runner = _engine.Collections.Single();
+        var dialog = new MountDialogViewModel(_engine, _dialogs, runner, null);
+        CollectionAssert.AreEquivalent(new[] { "fake", "needy" }, dialog.VisibleProviders.Select(p => p.TypeId).ToList());
+        dialog.HighPerformanceOnly = true;
+        CollectionAssert.AreEqual(new[] { "needy" }, dialog.VisibleProviders.Select(p => p.TypeId).ToList(), "Needy is Native, Fake is Protocol");
+        dialog.NoAdminOnly = true;
+        Assert.AreEqual(1, dialog.VisibleProviders.Count, "Needy says it needs no administrator");
+        dialog.HighPerformanceOnly = false;
+        dialog.Filter = "records";
+        CollectionAssert.AreEqual(new[] { "fake" }, dialog.VisibleProviders.Select(p => p.TypeId).ToList(), "description text");
+        Assert.AreEqual("fake", dialog.SelectedProvider!.TypeId);
+        dialog.Filter = "";
+        dialog.NoAdminOnly = false;
+        Assert.AreEqual(2, dialog.VisibleProviders.Count);
+    }
+
     /// <summary>A Fake mount provider that is "not installed" until its Install runs (the WinFsp shape, N6).</summary>
     private sealed class InstallableProvider : IMountProviderPlugin, IInstallableProvider
     {

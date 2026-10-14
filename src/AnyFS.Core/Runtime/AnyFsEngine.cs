@@ -93,6 +93,9 @@ public sealed class AnyFsEngine : IAsyncDisposable
             _logger.LogWarning(ex, "stats.json could not be read; lifetime totals start again");
             Stats.LoadLifetime(null);
         }
+
+        // rows of collections deleted while anyfs wasn't running (or before deletes pruned them) go
+        Stats.KeepOnly(Settings.Collections.Select(c => c.Name));
     }
 
     /// <summary>Starts sources, then collections (whose mounts wait for a usable source). <paramref name="collectionNames"/> null means every enabled collection.</summary>
@@ -592,6 +595,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
             var old = definition.Name;
             definition.Name = name;
             Settings.SaveCollections();
+            Stats.RenameCollection(old, name);
             if (FindCollectionRunner(id) is { } runner)
             {
                 runner.Rename(name);
@@ -665,6 +669,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
             Settings.Collections.Remove(definition);
             Settings.SaveCollections();
+            Stats.RemoveCollection(definition.Name);
             foreach (var mount in definition.Mounts)
             {
                 if (_secrets is not null || File.Exists(Paths.SecretsFile))

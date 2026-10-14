@@ -34,6 +34,8 @@ public sealed record ComponentStatus(ComponentState State, string Text = "", dou
     {
         ComponentState.Disabled => StatusColour.Grey,
         ComponentState.Ready => StatusColour.Green,
+        // counting files is housekeeping on a working source, not a degradation: the spinner says it is busy
+        ComponentState.Enumerating => StatusColour.Green,
         ComponentState.Failed => StatusColour.Red,
         _ => StatusColour.Yellow,
     };
@@ -72,7 +74,7 @@ public static class StatusRollup
             var word = group.Key switch
             {
                 ComponentState.Starting => "starting",
-                ComponentState.Enumerating => "enumerating",
+                ComponentState.Enumerating => "counting files",
                 ComponentState.Ready => "ready",
                 ComponentState.Degraded => "degraded",
                 ComponentState.Failed => "failed",

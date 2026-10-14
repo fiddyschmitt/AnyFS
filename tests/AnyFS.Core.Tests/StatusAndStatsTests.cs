@@ -9,7 +9,7 @@ public class StatusRollupTests
     [TestMethod]
     [DataRow(ComponentState.Disabled, StatusColour.Grey)]
     [DataRow(ComponentState.Starting, StatusColour.Yellow)]
-    [DataRow(ComponentState.Enumerating, StatusColour.Yellow)]
+    [DataRow(ComponentState.Enumerating, StatusColour.Green)]
     [DataRow(ComponentState.Ready, StatusColour.Green)]
     [DataRow(ComponentState.Degraded, StatusColour.Yellow)]
     [DataRow(ComponentState.Failed, StatusColour.Red)]
@@ -136,5 +136,31 @@ public class StatsCollectorTests
         var s = stats.Snapshot();
         Assert.AreEqual(stats.SessionStarted, s.TotalsSince);
         Assert.AreEqual(0, s.Total.FilesServed);
+    }
+
+    [TestMethod]
+    public void DeletedRenamedAndVanishedCollectionsLeaveTheTable()
+    {
+        var stats = new StatsCollector();
+        stats.LoadLifetime(new StatsFile
+        {
+            FilesServed = 30,
+            Collections = { ["work"] = new CollectionCounters { FilesServed = 10 }, ["gone"] = new CollectionCounters { FilesServed = 20 } },
+        });
+        stats.FileServed("work");
+
+        stats.KeepOnly(["work"]);
+        Assert.IsFalse(stats.Snapshot().Collections.ContainsKey("gone"), "a collection that no longer exists is pruned at load");
+        Assert.AreEqual(31, stats.Snapshot().Total.FilesServed, "the overall totals keep what it served");
+
+        stats.RenameCollection("work", "renamed");
+        var s = stats.Snapshot();
+        Assert.IsFalse(s.Collections.ContainsKey("work"));
+        Assert.AreEqual(11, s.Collections["renamed"].Total.FilesServed, "a rename keeps the counters");
+        Assert.AreEqual(1, s.Collections["renamed"].Session.FilesServed);
+
+        stats.RemoveCollection("renamed");
+        Assert.AreEqual(0, stats.Snapshot().Collections.Count, "a deleted collection leaves the table");
+        Assert.AreEqual(0, stats.ToFile().Collections.Count, "and the file");
     }
 }

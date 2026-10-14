@@ -21,7 +21,9 @@
         <!-- (1) the plugin -->
         <DockPanel Grid.Column="0" IsVisible="{Binding IsNew}">
           <TextBlock DockPanel.Dock="Top" Classes="caption" Text="Source type" />
-          <ListBox ItemsSource="{Binding PluginChoices}" SelectedItem="{Binding SelectedPlugin}" MinHeight="200">
+          <!-- with hundreds of source types the list needs a filter: name, description or type id -->
+          <TextBox DockPanel.Dock="Top" Text="{Binding Filter}" PlaceholderText="Filter source types" Margin="0,0,0,6" AutomationProperties.Name="Filter source types" />
+          <ListBox ItemsSource="{Binding VisiblePlugins}" SelectedItem="{Binding SelectedPlugin}" MinHeight="200">
             <ListBox.ItemTemplate>
               <DataTemplate x:DataType="vm:PluginChoiceViewModel">
                 <Grid ColumnDefinitions="Auto,*" Margin="0,2">

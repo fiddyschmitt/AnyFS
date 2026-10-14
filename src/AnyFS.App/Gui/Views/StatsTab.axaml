@@ -24,8 +24,6 @@
         <TextBlock Classes="muted" Text="{Binding SessionSince, StringFormat='Session {0}'}" VerticalAlignment="Center" />
         <Button Content="Reset totals" Command="{Binding ResetTotalsCommand}" />
       </StackPanel>
-      <TextBlock Classes="hint" Margin="0,0,0,12" Text="A file is served when a handle opened for reading has delivered its first byte. Bytes served are bytes returned by reads plus bytes accepted by writes. Active connections are what each mount provider reports (connections, sessions, or open handles)." />
-
       <TextBlock Classes="subheader" Text="Per collection" />
       <TextBlock Classes="muted" Text="Nothing served yet." IsVisible="{Binding !HasRows}" />
       <Grid ColumnDefinitions="2*,*,*,*,*,*,*,*" IsVisible="{Binding HasRows}" Margin="0,0,0,4">

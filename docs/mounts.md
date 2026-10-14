@@ -27,6 +27,17 @@ DNS and no drive letter. `\\anyfs` itself is not browsable (error 53); the tile'
 the way in, or type the path. A drive letter is an opt-in setting (Advanced) for programs that
 cannot take UNC paths.
 
+The first **Open containing folder** after a start takes a few seconds (about five on the
+development PC, and two to three for the first `\\anyfs\...` from any other new program); after
+that the folder is instant for the life of that program. The file system answers in milliseconds.
+The time goes on Windows looking the name `anyfs` up on the network (DNS, LLMNR, mDNS and NetBIOS
+all time out, since no such machine exists) before the Multiple Provider Router settles on WinFsp,
+and on Explorer probing a server it has not met. A `127.0.0.1 anyfs` line in
+`C:\Windows\System32\drivers\etc\hosts` cuts `net use \\anyfs\<collection>` from 5 s to 0.2 s, but
+Explorer's first open still takes two to four seconds. The drive letter setting avoids it
+entirely: the letter opens in about 0.1 s from a fresh program, because a letter resolves without
+the network providers.
+
 The WinFsp driver is installed separately and needs no reboot. Without it the tile is red and
 shows **Install WinFsp**, which runs `winget install WinFsp.WinFsp` (an administrator prompt
 appears) and then starts the mount; the Add mount dialog offers the same.

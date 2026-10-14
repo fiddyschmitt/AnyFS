@@ -20,7 +20,13 @@
       <Grid ColumnDefinitions="260,16,*">
         <DockPanel Grid.Column="0" IsVisible="{Binding IsNew}">
           <TextBlock DockPanel.Dock="Top" Classes="caption" Text="Mount provider" />
-          <ListBox ItemsSource="{Binding Providers}" SelectedItem="{Binding SelectedProvider}" MinHeight="200">
+          <TextBox DockPanel.Dock="Top" Text="{Binding Filter}" PlaceholderText="Filter providers" Margin="0,0,0,6" AutomationProperties.Name="Filter providers" />
+          <!-- pill filters: kernel file systems and shares; nothing to install as an administrator -->
+          <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="6" Margin="0,0,0,8">
+            <ToggleButton Classes="pill" Content="High performance" IsChecked="{Binding HighPerformanceOnly}" ToolTip.Tip="Kernel file systems and shares: WinFsp, FUSE, SMB" />
+            <ToggleButton Classes="pill" Content="No admin" IsChecked="{Binding NoAdminOnly}" ToolTip.Tip="Hide providers that need an administrator to install something first" />
+          </StackPanel>
+          <ListBox ItemsSource="{Binding VisibleProviders}" SelectedItem="{Binding SelectedProvider}" MinHeight="200">
             <ListBox.ItemContainerTheme>
               <ControlTheme TargetType="ListBoxItem" BasedOn="{StaticResource {x:Type ListBoxItem}}" x:DataType="vm:ProviderChoiceViewModel">
                 <Setter Property="IsEnabled" Value="{Binding OnThisOs}" />

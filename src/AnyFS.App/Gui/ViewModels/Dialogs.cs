@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using AnyFS.App.Gui.Services;
 using AnyFS.Core.Model;
@@ -62,6 +63,44 @@ public sealed class PluginChoiceViewModel(ISourcePlugin plugin)
     public string Description => Plugin.Description;
 
     public string Initial => Plugin.DisplayName.Length > 0 ? Plugin.DisplayName[..1].ToUpperInvariant() : "?";
+
+    /// <summary>The free-text filter of the Add source dialog: name, description or type id.</summary>
+    public bool Matches(string filter)
+        => filter.Length == 0 || DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase) || Description.Contains(filter, StringComparison.OrdinalIgnoreCase) || TypeId.Contains(filter, StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>Keeps a visible list in step with a filtered one without clearing it, so a selection that survives the filter is kept.</summary>
+internal static class VisibleList
+{
+    public static void Sync<T>(ObservableCollection<T> target, IReadOnlyList<T> wanted)
+        where T : class
+    {
+        for (var i = target.Count - 1; i >= 0; i--)
+        {
+            if (!wanted.Contains(target[i]))
+            {
+                target.RemoveAt(i);
+            }
+        }
+
+        for (var i = 0; i < wanted.Count; i++)
+        {
+            if (i < target.Count && ReferenceEquals(target[i], wanted[i]))
+            {
+                continue;
+            }
+
+            var existing = target.IndexOf(wanted[i]);
+            if (existing >= 0)
+            {
+                target.Move(existing, i);
+            }
+            else
+            {
+                target.Insert(i, wanted[i]);
+            }
+        }
+    }
 }
 
 /// <summary>The Add source / Edit source dialog (spec 11.1): plugin, name, path and read-only (in a collection), then the plugin's form.</summary>
@@ -77,6 +116,7 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
     private bool _settingPath;
     private bool _countFollowsPlugin;
     private bool _settingCount;
+    private ISourcePlugin? _formPlugin;
 
     public SourceDialogViewModel(AnyFsEngine engine, IDialogs dialogs, SourceDefinition? existing, SourceMembership? membership, bool askPath, bool readOnlyLocked = false)
     {
@@ -115,6 +155,8 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
                 ReadOnly = membership.ReadOnly || readOnlyLocked;
             }
         }
+
+        ApplyFilter();
     }
 
     public string Title { get; }
@@ -125,6 +167,13 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
     public bool AskPath { get; }
 
     public IReadOnlyList<PluginChoiceViewModel> PluginChoices { get; }
+
+    /// <summary>Free text over name, description and type id; with hundreds of source types the list needs it.</summary>
+    [ObservableProperty]
+    public partial string Filter { get; set; } = "";
+
+    /// <summary>The source types the filter lets through, in the same order.</summary>
+    public ObservableCollection<PluginChoiceViewModel> VisiblePlugins { get; } = [];
 
     [ObservableProperty]
     public partial PluginChoiceViewModel? SelectedPlugin { get; set; }
@@ -189,9 +238,11 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
 
     partial void OnSelectedPluginChanged(PluginChoiceViewModel? value)
     {
-        if (IsNew && value is not null)
+        // only a different plugin gets a fresh form: the list box clears and restores the selection while filtering
+        if (IsNew && value is not null && !ReferenceEquals(_formPlugin, value.Plugin))
         {
             Form = BuildForm(value.Plugin, value.Plugin.CreateDefaultSettings());
+            _formPlugin = value.Plugin;
         }
 
         OnPropertyChanged(nameof(DefaultPath));
@@ -220,6 +271,19 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
         if (!_settingCount)
         {
             _countFollowsPlugin = false;
+        }
+    }
+
+    partial void OnFilterChanged(string value) => ApplyFilter();
+
+    private void ApplyFilter()
+    {
+        var text = Filter.Trim();
+        var wanted = PluginChoices.Where(p => p.Matches(text)).ToList();
+        VisibleList.Sync(VisiblePlugins, wanted);
+        if (IsNew && (SelectedPlugin is null || !wanted.Contains(SelectedPlugin)))
+        {
+            SelectedPlugin = wanted.FirstOrDefault();
         }
     }
 
@@ -313,6 +377,16 @@ public sealed class ProviderChoiceViewModel(IMountProviderPlugin provider)
 
     public string Initial => Provider.DisplayName.Length > 0 ? Provider.DisplayName[..1].ToUpperInvariant() : "?";
 
+    /// <summary>Kernel file systems and shares (WinFsp, FUSE, SMB, NFS): the "High performance" pill.</summary>
+    public bool IsHighPerformance => Provider.Tier is PerformanceTier.Native or PerformanceTier.Network;
+
+    /// <summary>Something must be installed with administrator rights first: hidden by the "No admin" pill.</summary>
+    public bool NeedsAdmin => Provider.NeedsAdministrator;
+
+    /// <summary>The free-text filter: name, description or type id.</summary>
+    public bool Matches(string filter)
+        => filter.Length == 0 || DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase) || Description.Contains(filter, StringComparison.OrdinalIgnoreCase) || TypeId.Contains(filter, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>The provider is missing something it can install here (N6).</summary>
     public bool CanInstall => OnThisOs && Provider is IInstallableProvider { CanInstall: true } && Provider.UnavailableReason is not null;
 
@@ -363,6 +437,8 @@ public sealed partial class MountDialogViewModel : DialogViewModelBase
 
             ReadOnly = existing.ReadOnly || ReadOnlyLocked;
         }
+
+        ApplyFilters();
     }
 
     public string Title { get; }
@@ -370,6 +446,21 @@ public sealed partial class MountDialogViewModel : DialogViewModelBase
     public bool IsNew { get; }
 
     public IReadOnlyList<ProviderChoiceViewModel> Providers { get; }
+
+    /// <summary>Free text over name, description and type id.</summary>
+    [ObservableProperty]
+    public partial string Filter { get; set; } = "";
+
+    /// <summary>The "High performance" pill: kernel file systems and shares only.</summary>
+    [ObservableProperty]
+    public partial bool HighPerformanceOnly { get; set; }
+
+    /// <summary>The "No admin" pill: hides providers that need an administrator to install something first.</summary>
+    [ObservableProperty]
+    public partial bool NoAdminOnly { get; set; }
+
+    /// <summary>The providers the filter and pills let through, available ones first.</summary>
+    public ObservableCollection<ProviderChoiceViewModel> VisibleProviders { get; } = [];
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ReadOnlyLocked))]
@@ -496,6 +587,23 @@ public sealed partial class MountDialogViewModel : DialogViewModelBase
         if (!_settingName && value != SelectedProvider?.DisplayName)
         {
             _nameFollowsProvider = false;
+        }
+    }
+
+    partial void OnFilterChanged(string value) => ApplyFilters();
+
+    partial void OnHighPerformanceOnlyChanged(bool value) => ApplyFilters();
+
+    partial void OnNoAdminOnlyChanged(bool value) => ApplyFilters();
+
+    private void ApplyFilters()
+    {
+        var text = Filter.Trim();
+        var wanted = Providers.Where(p => p.Matches(text) && (!HighPerformanceOnly || p.IsHighPerformance) && (!NoAdminOnly || !p.NeedsAdmin)).ToList();
+        VisibleList.Sync(VisibleProviders, wanted);
+        if (IsNew && (SelectedProvider is null || !wanted.Contains(SelectedProvider)))
+        {
+            SelectedProvider = wanted.FirstOrDefault(p => p.IsAvailable) ?? wanted.FirstOrDefault();
         }
     }
 

@@ -142,6 +142,21 @@
     <Setter Property="Padding" Value="6" />
     <Setter Property="MinWidth" Value="0" />
   </Style>
+  <!-- pill filters in the Add mount dialog: rounded toggles that fill when pressed -->
+  <Style Selector="ToggleButton.pill">
+    <Setter Property="CornerRadius" Value="14" />
+    <Setter Property="Padding" Value="12,4" />
+    <Setter Property="MinHeight" Value="28" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseMediumLowBrush}" />
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="ToggleButton.pill:checked /template/ ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource SystemControlHighlightAccentBrush}" />
+    <Setter Property="Foreground" Value="White" />
+    <Setter Property="BorderBrush" Value="{DynamicResource SystemControlHighlightAccentBrush}" />
+  </Style>
   <Style Selector="PathIcon.small">
     <Setter Property="Width" Value="14" />
     <Setter Property="Height" Value="14" />
