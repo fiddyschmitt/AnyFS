@@ -285,17 +285,10 @@ public sealed class SourceRunner : IAsyncDisposable
         }
     }
 
-    private async Task CountViaSourceAsync(ISource source, ICountable countable, CancellationToken ct)
+    /// <summary>The status stays "Counting files" throughout: the number itself is the source's counters, which the lists show under it.</summary>
+    private static async Task CountViaSourceAsync(ISource source, ICountable countable, CancellationToken ct)
     {
-        var counting = countable.CountFilesAsync(ct);
-        while (!counting.IsCompleted)
-        {
-            await Task.WhenAny(counting, Task.Delay(250, ct)).ConfigureAwait(false);
-            ct.ThrowIfCancellationRequested();
-            Handle.Status = new ComponentStatus(ComponentState.Enumerating, $"Counting files ({source.Counters.FilesKnown:N0} so far)");
-        }
-
-        await counting.ConfigureAwait(false);
+        await countable.CountFilesAsync(ct).ConfigureAwait(false);
         source.Counters.SetState(EnumerationState.Complete);
     }
 
@@ -329,7 +322,6 @@ public sealed class SourceRunner : IAsyncDisposable
             }
 
             source.Counters.Set(files, directories, EnumerationState.InProgress);
-            Handle.Status = new ComponentStatus(ComponentState.Enumerating, $"Counting files ({files:N0} so far)");
         }
 
         source.Counters.Set(files, directories, EnumerationState.Complete);

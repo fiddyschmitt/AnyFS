@@ -31,7 +31,8 @@
 - Counts and stats use tabular figures (Inter's `tnum`), so a changing number no longer shifts the
   text around it.
 - "Count files on start" for a source without its own count (the host's folder-by-folder walk) no
-  longer pauses between folders.
+  longer pauses between folders. The status while counting is just "Counting files": the number is
+  the count shown under it.
 - WinFsp: `winfsp.net` is pinned to the bundled driver's major.minor and the build fails when they
   drift (NuGet's newest, 2.2.x, is the WinFsp 2026 beta; it refuses the 2.1 driver at load with
   "incorrect dll version"). A driver older than the build needs shows the reason and an **Upgrade
