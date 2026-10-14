@@ -1,0 +1,97 @@
+---
+# The upstream machine: what anyfs serves from. The tests generate the fixture tree in
+# linux.fixture_dir (tests/fixtures/MakeTree, the same tree on every machine); sshd serves it to
+# the SSHFS source, Samba shares it as [fixture] for the Mirror UNC source on the Windows host.
+
+- name: Samba
+  ansible.builtin.apt:
+    name: samba
+    state: present
+
+- name: The fixture directory, the test account's
+  ansible.builtin.file:
+    path: "{{ linux.fixture_dir }}"
+    state: directory
+    owner: "{{ lab_user }}"
+    group: "{{ lab_user }}"
+    mode: "0755"
+
+# ---- Samba: \\<ip>\fixture, the test account's login ---------------------------------------------
+
+# Windows 11 24H2 and later refuse a server that doesn't sign ("...your computer is configured to
+# require SMB signing"). Debian's stock smb.conf leaves signing off; `auto` is the documented setting
+# for serving modern Windows clients.
+- name: Samba signs when the client asks
+  ansible.builtin.lineinfile:
+    path: /etc/samba/smb.conf
+    regexp: '^\s*server signing\s*='
+    line: "   server signing = auto"
+    insertafter: '^\[global\]'
+    validate: testparm -s %s
+  notify: Restart smbd
+
+- name: The fixture share
+  ansible.builtin.blockinfile:
+    path: /etc/samba/smb.conf
+    marker: "# {mark} AnyFS lab share"
+    block: |
+      [fixture]
+         path = {{ linux.fixture_dir }}
+         read only = no
+         writable = yes
+         valid users = {{ lab_user }}
+         force user = {{ lab_user }}
+    validate: testparm -s %s
+  notify: Restart smbd
+
+- name: Is the test account a Samba user?
+  ansible.builtin.command: pdbedit -L -u {{ lab_user }}
+  register: samba_user
+  changed_when: false
+  failed_when: false
+
+- name: The test account is a Samba user
+  ansible.builtin.shell: printf '%s\n%s\n' "$PW" "$PW" | smbpasswd -a -s "{{ lab_user }}"
+  environment:
+    PW: "{{ accounts.linux.password }}"
+  when: samba_user.rc != 0
+
+- name: Samba running
+  ansible.builtin.service:
+    name: smbd
+    state: started
+    enabled: true
+
+# ---- The SSHFS source's key -----------------------------------------------------------------------
+# Headless anyfs can't answer a password prompt, so the E2E rows log the SSHFS source in with a key
+# the upstream makes here and authorises for the test account. The tests fetch the private half (as
+# the test account, with the lab key) and put it beside anyfs on each host. Lab-only.
+
+- name: The SSHFS key pair
+  ansible.builtin.command: ssh-keygen -q -t ed25519 -N "" -C "anyfs lab sshfs source" -f {{ linux.sshfs_key }}
+  args:
+    creates: "{{ linux.sshfs_key }}"
+
+- name: The test account can read it
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    owner: "{{ lab_user }}"
+    group: "{{ lab_user }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "{{ linux.sshfs_key }}", mode: "0600" }
+    - { path: "{{ linux.sshfs_key }}.pub", mode: "0644" }
+
+- name: Its public half
+  ansible.builtin.slurp:
+    src: "{{ linux.sshfs_key }}.pub"
+  register: sshfs_pubkey
+
+- name: The SSHFS key opens the test account
+  ansible.builtin.lineinfile:
+    path: "/home/{{ lab_user }}/.ssh/authorized_keys"
+    line: "{{ sshfs_pubkey.content | b64decode | trim }}"
+    owner: "{{ lab_user }}"
+    group: "{{ lab_user }}"
+    mode: "0600"
+    create: true

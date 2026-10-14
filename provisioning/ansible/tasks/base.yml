@@ -1,0 +1,149 @@
+---
+# Every Linux machine: Debian up to date, the test account, the lab key, the client tools.
+
+# bento's box doesn't record which disk GRUB is installed on, and a GRUB upgrade stops to ask.
+# It's the VM's only disk.
+- name: GRUB's install disk is recorded
+  ansible.builtin.debconf:
+    name: grub-pc
+    question: grub-pc/install_devices
+    value: /dev/sda
+    vtype: multiselect
+
+# The kernel's cifs, nfs and fuse clients are among what anyfs is tested with, so the machines run
+# the kernel Debian users run today, not the one bento's box was built with. The Vagrantfile reboots
+# into the newest one when the running one is older.
+- name: Debian up to date, the kernel included
+  ansible.builtin.apt:
+    upgrade: dist
+    update_cache: true
+    cache_valid_time: 86400
+
+- name: Newest installed kernel
+  ansible.builtin.shell: ls /lib/modules | sort -V | tail -n 1
+  register: newest_kernel
+  changed_when: false
+
+- name: The kernel the VM should be running (the Vagrantfile reboots into it when it isn't)
+  ansible.builtin.copy:
+    dest: /etc/anyfs-lab-kernel
+    content: "{{ newest_kernel.stdout }}\n"
+    mode: "0644"
+
+# The box's VirtualBox Guest Additions built kernel modules for the box's kernel only. On another
+# kernel their boot script ("vboxadd start") tries a rebuild, fails, and swaps the kernel's own
+# vboxguest and vboxsf out and back in, which unmounts the shared folders Vagrant mounts from
+# /etc/fstab. The kernel's own drivers work with the Guest Additions programs, so for a kernel
+# without modules of its own the script just loads those (as in the ft, rclone and SimpleKVM labs).
+- name: Guest Additions modules of their own for that kernel?  (they install into misc/)
+  ansible.builtin.shell: compgen -G '/lib/modules/{{ newest_kernel.stdout }}/misc/vboxguest.ko*'
+  args:
+    executable: /bin/bash
+  register: ga_modules
+  changed_when: false
+  failed_when: false
+
+- name: Drop-in directory for the Guest Additions boot service
+  ansible.builtin.file:
+    path: /etc/systemd/system/vboxadd.service.d
+    state: directory
+    mode: "0755"
+  when: ga_modules.rc != 0
+
+- name: Without modules of their own, the Guest Additions boot script loads the kernel's drivers
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/vboxadd.service.d/anyfs-lab-kernel-drivers.conf
+    content: |
+      # Written by the AnyFS lab's playbook. The Guest Additions have no kernel modules for this
+      # kernel, and the kernel's own vboxguest and vboxsf work with their programs. Load those rather
+      # than let "vboxadd start" try a rebuild and a driver swap, which unmounts the shared folders.
+      [Service]
+      ExecStart=
+      ExecStart=-/usr/sbin/modprobe vboxguest
+      ExecStart=-/usr/sbin/modprobe vboxsf
+    mode: "0644"
+  when: ga_modules.rc != 0
+  notify: systemctl daemon-reload
+
+- name: With modules of their own, the Guest Additions boot script runs as shipped
+  ansible.builtin.file:
+    path: /etc/systemd/system/vboxadd.service.d/anyfs-lab-kernel-drivers.conf
+    state: absent
+  when: ga_modules.rc == 0
+  notify: systemctl daemon-reload
+
+# Both roles are also clients of the mounts anyfs serves: SMB (cifs-utils), WebDAV (davfs2), NFS
+# (nfs-common, for milestone 7), FTP (lftp, curl), HTTP (curl, wget).
+- name: Packages every machine needs
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+      - wget
+      - rsync
+      - jq
+      - python3-passlib   # the password_hash filter below (Python 3.13 has no crypt module)
+      - cifs-utils
+      - davfs2
+      - nfs-common
+      - lftp
+      - smbclient
+    state: present
+
+- name: The test account ({{ lab_user }})
+  ansible.builtin.user:
+    name: "{{ lab_user }}"
+    # A fixed salt keeps the hash stable, so a re-run doesn't rewrite it.
+    password: "{{ accounts.linux.password | password_hash('sha512', 'anyfslab') }}"
+    shell: /bin/bash
+    groups: [sudo]
+    append: true
+
+- name: The test account runs sudo without a password (mounting needs root)
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/anyfs-lab
+    content: "{{ lab_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    mode: "0440"
+    validate: visudo -cf %s
+
+# The SSHFS source's prompt rows log in with a password or answer a keyboard-interactive prompt, so
+# sshd takes both (the spike VM needed the same).
+- name: SSH accepts passwords and keyboard-interactive logins
+  ansible.builtin.copy:
+    dest: /etc/ssh/sshd_config.d/anyfs-lab.conf
+    content: |
+      # Written by the AnyFS lab's playbook: the SSHFS source's tests log in with a password or a prompt.
+      PasswordAuthentication yes
+      KbdInteractiveAuthentication yes
+    mode: "0644"
+  notify: Restart ssh
+
+- name: The test account's .ssh is its own
+  ansible.builtin.file:
+    path: "/home/{{ lab_user }}/.ssh"
+    state: directory
+    owner: "{{ lab_user }}"
+    group: "{{ lab_user }}"
+    mode: "0700"
+
+- name: The lab's SSH key opens the test account and the vagrant account
+  ansible.builtin.lineinfile:
+    path: "/home/{{ item }}/.ssh/authorized_keys"
+    line: "{{ lab_pubkey }}"
+    owner: "{{ item }}"
+    group: "{{ item }}"
+    mode: "0600"
+    create: true
+  loop: ["{{ lab_user }}", vagrant]
+
+- name: /opt/anyfs (the lab's own scripts)
+  ansible.builtin.file:
+    path: /opt/anyfs
+    state: directory
+    mode: "0755"
+
+- name: The smoke test
+  ansible.builtin.template:
+    src: smoke-test.sh.j2
+    dest: /opt/anyfs/smoke-test.sh
+    mode: "0755"

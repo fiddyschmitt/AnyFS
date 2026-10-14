@@ -1,0 +1,128 @@
+name: release
+
+# A tag v<version> publishes anyfs for every runtime (self-contained, single file, trimmed), smoke-tests
+# the one each runner can run, packs the SDK, and makes the GitHub release with the zips, their
+# SHA-256 sums and the NuGet packages. The packages go to NuGet.org as well when the NUGET_API_KEY
+# secret is set (spec 14).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    name: ${{ matrix.rid }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, rid: win-x64,     exe: anyfs.exe, smoke: true }
+          - { os: ubuntu-latest,  rid: linux-x64,   exe: anyfs,     smoke: true }
+          - { os: ubuntu-latest,  rid: linux-arm64, exe: anyfs,     smoke: false }
+          - { os: macos-latest,   rid: osx-arm64,   exe: anyfs,     smoke: true }
+          - { os: macos-latest,   rid: osx-x64,     exe: anyfs,     smoke: false }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      # the tools the executable embeds: the SMB server per runtime, and on Windows the WinFsp installer
+      - name: Fetch the bundled tools
+        shell: pwsh
+        run: |
+          ./scripts/fetch-go-servers.ps1
+          if ($IsWindows) { ./scripts/fetch-winfsp.ps1 }
+
+      - name: Version from the tag
+        id: version
+        shell: pwsh
+        run: |
+          $v = '${{ github.ref_name }}'.TrimStart('v')
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Publish ${{ matrix.rid }}
+        shell: pwsh
+        run: ./scripts/publish.ps1 -Rid ${{ matrix.rid }} -Clean -Version ${{ steps.version.outputs.version }}
+
+      - name: Build the sample plugin (the smoke test loads it)
+        if: matrix.smoke
+        run: dotnet build tests/fixtures/SamplePlugin/SamplePlugin.csproj -c Release -nologo
+
+      - name: Smoke test the published executable
+        if: matrix.smoke
+        shell: pwsh
+        run: ./scripts/smoke.ps1 -Exe publish/${{ matrix.rid }}/${{ matrix.exe }} -SamplePluginDll tests/fixtures/SamplePlugin/bin/Release/net10.0/AnyFS.SamplePlugin.dll
+
+      # a zip on Windows; a tar.gz elsewhere, which keeps the executable bit
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "anyfs-${{ steps.version.outputs.version }}-${{ matrix.rid }}"
+          New-Item -ItemType Directory -Force dist, stage | Out-Null
+          Copy-Item publish/${{ matrix.rid }}/${{ matrix.exe }}, LICENSE, README.md stage/
+          Copy-Item docs stage/docs -Recurse
+          if ($IsWindows) {
+            Compress-Archive -Path stage/* -DestinationPath "dist/$name.zip"
+          } else {
+            chmod +x stage/anyfs
+            tar -czf "dist/$name.tar.gz" -C stage .
+          }
+          Get-ChildItem dist | Format-List Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.rid }}
+          path: dist/*
+          if-no-files-found: error
+
+  nuget:
+    name: SDK packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+      - name: Version from the tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Pack
+        shell: pwsh
+        run: ./scripts/pack.ps1 -Version ${{ steps.version.outputs.version }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuget
+          path: publish/nuget/*
+          if-no-files-found: error
+
+  release:
+    name: GitHub release
+    needs: [publish, nuget]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect and checksum
+        run: |
+          mkdir -p dist
+          find artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name '*.nupkg' -o -name '*.snupkg' \) -exec cp {} dist/ \;
+          cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "AnyFS $GITHUB_REF_NAME" --generate-notes
+      - name: Push the SDK to NuGet.org
+        if: ${{ env.NUGET_API_KEY != '' }}
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          for pkg in dist/*.nupkg; do
+            dotnet nuget push "$pkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          done

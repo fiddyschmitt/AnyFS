@@ -1,0 +1,43 @@
+#!/bin/bash
+# Written by the AnyFS lab's playbook: checks what the tests rely on, on {{ machine.name }}.
+# The Vagrantfile runs it after every up/reload/provision; run it any time with
+# `sudo /opt/anyfs/smoke-test.sh`. FAIL lines are this machine's own problems; WARN lines are about
+# something it depends on (the PC's share not mounted yet, say).
+fail=0
+pass() { echo "PASS  $*"; }
+warn() { echo "WARN  $*"; }
+bad()  { echo "FAIL  $*"; fail=1; }
+check() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then pass "$what"; else bad "$what"; fi; }
+
+echo "{{ machine.name }} ({{ machine.role }}, {{ machine.ip }}): Debian $(cat /etc/debian_version), kernel $(uname -r)"
+check "the lab's address {{ machine.ip }} is up" bash -c 'ip -4 -o addr show | grep -q " {{ machine.ip }}/"'
+check "the newest kernel is the one running" bash -c '[ "$(uname -r)" = "$(cat /etc/anyfs-lab-kernel)" ]'
+check "service ssh" systemctl is-active --quiet ssh
+check "sshd takes passwords and keyboard-interactive" bash -c 'sshd -T | grep -qi "^passwordauthentication yes" && sshd -T | grep -qi "^kbdinteractiveauthentication yes"'
+check "the test account {{ accounts.linux.user }} with passwordless sudo" sudo -n -u {{ accounts.linux.user }} sudo -n true
+check "the lab key opens {{ accounts.linux.user }}" grep -q "anyfs test lab" /home/{{ accounts.linux.user }}/.ssh/authorized_keys
+for tool in mount.cifs mount.davfs curl wget lftp smbclient jq; do
+    check "client tool $tool" bash -c "command -v $tool || test -x /sbin/$tool"
+done
+if mountpoint -q "/media/vboxsf/{{ dev_box.ip }}/publish"; then
+    pass "the PC's publish folder at /media/vboxsf/{{ dev_box.ip }}/publish"
+else
+    warn "the PC's publish folder is not mounted at /media/vboxsf/{{ dev_box.ip }}/publish (vagrant reload mounts it)"
+fi
+{% if machine.role == 'upstream' %}
+
+check "service smbd" systemctl is-active --quiet smbd
+check "Samba share [fixture]" bash -c 'testparm -s 2>/dev/null | grep -q "^\[fixture\]"'
+check "Samba signs on request (smb.conf)" grep -qi "server signing = auto" /etc/samba/smb.conf
+check "{{ accounts.linux.user }} is a Samba user" pdbedit -L -u {{ accounts.linux.user }}
+check "the fixture directory {{ linux.fixture_dir }} is {{ accounts.linux.user }}'s" bash -c '[ "$(stat -c %U {{ linux.fixture_dir }})" = "{{ accounts.linux.user }}" ]'
+check "the SSHFS key {{ linux.sshfs_key }} and its authorisation" bash -c 'test -s {{ linux.sshfs_key }} && grep -qF "$(cut -d" " -f1-2 {{ linux.sshfs_key }}.pub)" /home/{{ accounts.linux.user }}/.ssh/authorized_keys'
+check "the SSHFS key logs in" sudo -n -u {{ accounts.linux.user }} ssh -i {{ linux.sshfs_key }} -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null {{ accounts.linux.user }}@127.0.0.1 true
+{% endif %}
+{% if machine.role == 'host' %}
+
+check "fuse3 (fusermount3 and libfuse3.so.3 or .so.4; the provider resolves either)" bash -c 'command -v fusermount3 && ldconfig -p | grep -qE "libfuse3[.]so[.][34]"'
+check "user_allow_other in /etc/fuse.conf" grep -qx user_allow_other /etc/fuse.conf
+check "/dev/fuse" test -c /dev/fuse
+{% endif %}
+exit $fail

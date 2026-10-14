@@ -1,5 +1,55 @@
 # Changelog
 
+## Unreleased (milestone 5: the lab, the E2E matrix, release workflow, `plugin check`, the SDK package)
+
+- **The test lab** (`provisioning/`, spec 16.2): `settings.yml`, a Vagrantfile for the VirtualBox
+  VMs (`anyfs-debian-2` the upstream at 192.168.0.96, `anyfs-debian-1` the Linux host at .95,
+  `anyfs-win11-1` the Windows host at .97), `ansible_local` for the Linux machines (Debian kept
+  current, the test account, the lab key, cifs/davfs2/curl/lftp clients; the upstream's sshd with
+  passwords and keyboard-interactive, a Samba share of the fixture and a key pair for the SSHFS
+  source; fuse3 on the host), a PowerShell provisioner for Windows (OpenSSH, the pinned WinFsp
+  installer checked against `scripts/winfsp.json`, the WebClient service with its file-size cap
+  lifted, RunRemote, autologon), and the macOS VM on the Mac mini through `mac.ps1`/`macos/` (tart,
+  a pinned MAC address, TCP segmentation offload off). Each machine runs a smoke test after every
+  up/provision; `check.ps1` runs them all over the LAN; `publish.ps1` builds anyfs per runtime,
+  `MakeTree` and the sample plugin into the shared `publish\` folder.
+- **The E2E suite** (`tests/AnyFS.E2E`, MSTest over SSH.NET, reading `settings.yml`): per host OS,
+  anyfs is deployed once with a collection per source (the local Mirror, the SSHFS source on the
+  upstream, on Windows the Mirror of the upstream's Samba share) and its read-only twin, every
+  mount provider of the OS on each; a row is (collection × mount × client) and checks the listing
+  against the fixture (names, unicode, spaces, a 204-character name, nesting, an empty folder, the
+  5,000-file folder), the 1 KiB / 1 MiB / 200 MiB hashes with a throughput floor, three ranged
+  reads, the write round trip (refused on the read-only twin), eight concurrent readers and, over
+  HTTP, `curl -C -` and `wget -c` resumes. Also: counts reach the fixture, a prompt-needing source
+  fails cleanly headless, the sample plugin loads in the trimmed build, an upstream outage degrades
+  then recovers, and the log has no errors. An unreachable machine makes its rows Inconclusive.
+- Two things the lab's first runs caught: FTP names are UTF-8 for every client (the server's default
+  was ASCII until a client sent `OPTS UTF8 ON`, which curl, wget and lftp never do, so a name like
+  `ünïcödé ✓ 日本語.txt` listed as question marks); and a folder could not be created at the root of a
+  collection whose source sits at an empty path over FUSE or WebDAV (the write check refused the
+  root as a layout folder while the create path accepted it, so SMB, which asks nothing first,
+  worked and the others got "permission denied").
+- **Secrets in the settings files**: a secret property found in `sources.json` or
+  `collections.json` at load moves into the secret store and the file is rewritten without it (as
+  Import already did), so scripts can hand anyfs a password.
+- **`anyfs plugin check <dll>`** (spec 14.1): the SDK version against the host's, every framework
+  assembly the DLL references against the guaranteed set the trimmed host keeps (one outside it
+  fails: the host doesn't carry it and a plugin can't ship one), other references against the files
+  beside the DLL, then the DLL loaded as the host loads it, its plugin types, and each settings
+  class described, defaulted, round-tripped through JSON and validated. PASS/WARN/FAIL lines, exit
+  1 on a FAIL. The guaranteed set now lives in `GuaranteedFramework` with a test holding it to the
+  App project's roots and the docs.
+- **SDK packages**: `AnyFS.Sdk` and `AnyFS.Sdk.Testing` pack with a README, tags, SourceLink and
+  symbol packages (`scripts/pack.ps1`); `docs/plugin-authoring.md` gained "Getting the SDK" and
+  "Checking a plugin".
+- **Release workflow** (`.github/workflows/release.yml`): a `v*` tag publishes the five runtimes
+  (trimmed, smoke-tested where the runner can run them), packs the SDK, and creates the GitHub
+  release with `anyfs-<version>-<rid>.zip` (Windows) or `.tar.gz` (Linux, macOS: the executable
+  bit survives), the packages and `SHA256SUMS.txt`; the packages go to
+  NuGet.org when `NUGET_API_KEY` is set. `build.yml` now fetches the bundled tools before
+  publishing, and `scripts/publish.ps1` takes `-Version`. The smoke script runs `plugin check` on
+  the sample plugin.
+
 ## Unreleased (milestone 4: SSHFS, prompts, Import/Export)
 
 - **SSHFS** source (type `sshfs`, folder `sshfs`) over SSH.NET 2026.0.0: a remote root (`/`, `~`

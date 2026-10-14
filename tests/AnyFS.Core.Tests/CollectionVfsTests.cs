@@ -242,12 +242,34 @@ public class CollectionVfsTests
         var rw = await Handles.ReadyAsync("rw", new MemorySource());
         var ro = await Handles.ReadyAsync("ro", new MemorySource(canWrite: false));
         var vfs = Handles.Vfs("work", new CollectionMember(rw, "files/rw", false), new CollectionMember(ro, "files/ro", false), new CollectionMember(rw, "locked", true));
-        Assert.IsFalse(vfs.CanWrite(""));
+        Assert.IsFalse(vfs.CanWrite(""), "the root is a folder of the layout here");
+        Assert.IsTrue((await vfs.StatAsync("files", CancellationToken.None))!.Attributes.HasFlag(VfsAttributes.ReadOnly), "a layout folder's entry is read-only");
         Assert.IsFalse(vfs.CanWrite("files"));
+        Assert.IsTrue(vfs.CanWrite("files/rw"), "a source's root takes new entries (a mount asks before creating a child)");
         Assert.IsTrue(vfs.CanWrite("files/rw/anything/new.txt"));
+        Assert.IsFalse(vfs.CanWrite("files/ro"));
         Assert.IsFalse(vfs.CanWrite("files/ro/x"));
+        Assert.IsFalse(vfs.CanWrite("locked"));
         Assert.IsFalse(vfs.CanWrite("locked/x"));
         Assert.IsFalse(vfs.CanWrite("../x"));
         Assert.IsFalse(vfs.ForMount(true).CanWrite("files/rw/x"));
+    }
+
+    /// <summary>A source at an empty path is the collection root: the root takes new entries, and only the root's own deletion is refused.</summary>
+    [TestMethod]
+    public async Task ASourceAtTheRootMakesTheRootWritable()
+    {
+        var rw = await Handles.ReadyAsync("rw", new MemorySource());
+        var vfs = Handles.Vfs("work", new CollectionMember(rw, "", false));
+        Assert.IsTrue(vfs.CanWrite(""), "the lab's FUSE and WebDAV rows could not mkdir at the root of such a collection");
+        Assert.IsTrue(vfs.CanWrite("new.txt"));
+        Assert.IsFalse((await vfs.StatAsync("", CancellationToken.None))!.Attributes.HasFlag(VfsAttributes.ReadOnly), "the root's entry says it is writable (FUSE derives the mode from it)");
+        await vfs.CreateDirectoryAsync("made", CancellationToken.None);
+        Assert.IsTrue((await vfs.StatAsync("made", CancellationToken.None))!.IsDirectory);
+        await Assert.ThrowsExactlyAsync<VfsException>(() => vfs.DeleteAsync("", CancellationToken.None));
+
+        var ro = Handles.Vfs("work", new CollectionMember(rw, "", true));
+        Assert.IsFalse(ro.CanWrite(""), "a read-only membership at the root refuses");
+        Assert.IsFalse(ro.CanWrite("x"));
     }
 }

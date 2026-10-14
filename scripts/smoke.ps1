@@ -48,6 +48,10 @@ Write-Host "== third-party plugin in the trimmed build"
 Copy-Item $SamplePluginDll (Join-Path $plugins 'AnyFS.SamplePlugin.dll')
 $status = & $Exe status --settings-dir $settings 2>&1 | Out-String
 Check ($status -match 'sample') "sample plugin loaded from plugins/"
+$check = & $Exe plugin check $SamplePluginDll 2>&1 | Out-String
+Check ($LASTEXITCODE -eq 0 -and $check -match "source plugin 'sample'" -and $check -notmatch 'FAIL') "anyfs plugin check passes the sample plugin"
+$check = & $Exe plugin check (Join-Path $work 'does-not-exist.dll') 2>&1 | Out-String
+Check ($LASTEXITCODE -eq 1 -and $check -match 'FAIL') "anyfs plugin check fails a missing DLL with exit code 1"
 
 Write-Host "== serve: Mirror of a generated tree + sample source over HTTP on port $Port"
 $bytes = New-Object byte[] 300000

@@ -5,6 +5,38 @@ A plugin is a .NET class library that references `AnyFS.Sdk` and contains a clas
 into the `plugins` folder beside `settings` and AnyFS loads it at start. Nothing in the SDK
 references a UI framework.
 
+## Getting the SDK
+
+```
+dotnet new classlib -n MyPlugin -f net10.0
+cd MyPlugin
+dotnet add package AnyFS.Sdk
+dotnet add package AnyFS.Sdk.Testing      # for the tests project: contract tests and fakes
+```
+
+Add `<EnableDynamicLoading>true</EnableDynamicLoading>` to the project so a build copies the
+plugin's own dependencies next to it, and reference the SDK with `<PrivateAssets>all</PrivateAssets>`
+and `<ExcludeAssets>runtime</ExcludeAssets>` so your build output carries no `AnyFS.Sdk.dll`: the
+host's copy is the one that must load, or your plugin's interface types are not the host's. The
+packages are built from this repository by `scripts/pack.ps1` (the release workflow publishes
+them with each tag); until a release is on NuGet.org, a project reference to `src/AnyFS.Sdk`
+with the same two settings does the same, which is how
+[tests/fixtures/SamplePlugin](../tests/fixtures/SamplePlugin) is built.
+
+## Checking a plugin: `anyfs plugin check`
+
+```
+anyfs plugin check bin/Release/net10.0/MyPlugin.dll
+```
+
+prints one PASS, WARN or FAIL line per thing it looked at and exits 1 on any FAIL: the
+`AnyFS.Sdk` version against the host's; every framework assembly the DLL references against the
+set below (one outside it is not in the trimmed host, and a plugin cannot ship a framework
+assembly); every other referenced assembly against the files beside the DLL; then the DLL is
+loaded the way the host loads it, its plugin types are listed, and each one's settings class is
+described, defaulted, round-tripped through JSON and run through `Validate`. Run it on the
+`anyfs` you ship for, since the set is that build's.
+
 ## A source in 60 lines
 
 [tests/fixtures/SamplePlugin](../tests/fixtures/SamplePlugin) is the complete example. The
@@ -144,10 +176,13 @@ are kept intact and may be used freely:
 `System.Diagnostics.Process`, `System.ComponentModel.Primitives`,
 `Microsoft.Extensions.Logging.Abstractions`.
 
-Anything else (other framework assemblies, your NuGet packages) ships beside your DLL: the host
+Other framework assemblies are not there: the trimmed host does not carry them and a plugin
+cannot ship one (a call into `System.Xml.Linq`, say, fails with `FileNotFoundException`; `anyfs
+plugin check` points such references out). Your own NuGet packages ship beside your DLL: the host
 loads each plugin in its own `AssemblyLoadContext` with `AnyFS.Sdk` resolved to the host's copy,
 and resolves the rest from your `.deps.json`. Set `<EnableDynamicLoading>true</EnableDynamicLoading>`
-in your project so the dependencies are copied next to it.
+in your project so the dependencies are copied next to it. Build for `net10.0`, not .NET Standard:
+a `netstandard` facade keeps only the type forwards something in the host uses.
 
 The host refuses a plugin built against a newer SDK than its own; the version is
 `SdkInfo.SdkVersion`.

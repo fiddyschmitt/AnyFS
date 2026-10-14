@@ -18,7 +18,8 @@ param(
     [string]$Configuration = 'Release',
     [string]$OutDir = (Join-Path (Join-Path $PSScriptRoot '..') 'publish'),
     [switch]$NoTrim,
-    [switch]$Clean
+    [switch]$Clean,
+    [string]$Version
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,6 +35,7 @@ foreach ($r in $Rid) {
     Write-Host "== publishing $r -> $out" -ForegroundColor Cyan
     $dotnetArgs = @('publish', $project, '-c', $Configuration, '-r', $r, '-o', $out, '-nologo', '-v', 'minimal')
     if ($NoTrim) { $dotnetArgs += '-p:NoTrim=true' }
+    if ($Version) { $dotnetArgs += "-p:Version=$Version" }   # a release stamps the tag's version (the workflow passes it)
     & dotnet @dotnetArgs
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed for $r" }
 

@@ -79,6 +79,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
     public void Load()
     {
         Settings.Load();
+        RehomeSecretsAtLoad();
         if (Settings.EnsureDefaultCollection(Registry))
         {
             _logger.LogInformation("first start: created 'Collection 1' with a {Provider} mount in {Dir}", SettingsStore.NativeProviderForThisOs(), Paths.Settings);
@@ -664,6 +665,73 @@ public sealed class AnyFsEngine : IAsyncDisposable
         finally
         {
             _mutations.Release();
+        }
+    }
+
+    /// <summary>
+    /// A secret written into sources.json or collections.json by hand, or by a script (the E2E lab's settings), moves
+    /// to the secret store on the next load and the file is rewritten without it (spec 9.3): the files stay
+    /// shareable, and the value still reaches the plugin. The same as Import does for a sources file.
+    /// </summary>
+    private void RehomeSecretsAtLoad()
+    {
+        var sourcesChanged = 0;
+        foreach (var source in Settings.Sources)
+        {
+            if (Registry.FindSource(source.Type) is { } plugin && HasSecretsInJson(plugin.SettingsType, source.Settings))
+            {
+                source.Settings = RehomeSecrets(source);
+                sourcesChanged++;
+            }
+        }
+
+        var mountsChanged = 0;
+        foreach (var mount in Settings.Collections.SelectMany(c => c.Mounts))
+        {
+            if (Registry.FindMountProvider(mount.Provider) is { } provider && HasSecretsInJson(provider.SettingsType, mount.Settings))
+            {
+                mount.Settings = RehomeMountSecrets(provider, mount);
+                mountsChanged++;
+            }
+        }
+
+        if (sourcesChanged > 0)
+        {
+            Settings.SaveSources();
+            _logger.LogInformation("secrets found in sources.json for {Count} source(s) were moved to the secret store and removed from the file", sourcesChanged);
+        }
+
+        if (mountsChanged > 0)
+        {
+            Settings.SaveCollections();
+            _logger.LogInformation("secrets found in collections.json for {Count} mount(s) were moved to the secret store and removed from the file", mountsChanged);
+        }
+    }
+
+    private static bool HasSecretsInJson([System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties)] Type settingsType, JsonObject? settings)
+        => settings is not null && PluginSettingsBinder.Describe(settingsType).Any(p => p.IsSecret && (settings.ContainsKey(p.JsonName) || settings.ContainsKey(p.Name)));
+
+    private JsonObject? RehomeMountSecrets(IMountProviderPlugin provider, MountDefinition mount)
+    {
+        if (mount.Settings is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var settings = PluginSettingsBinder.Materialise(provider.SettingsType, mount.Settings);
+            return PluginSettingsBinder.Serialise(provider.SettingsType, settings, (property, value) =>
+            {
+                if (!string.IsNullOrEmpty(value))
+                {
+                    Secrets.Set(mount.Id, property, value);
+                }
+            });
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
+        {
+            return mount.Settings;
         }
     }
 

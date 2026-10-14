@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>AnyFS.E2E</RootNamespace>
+    <!-- the rows drive real machines over SSH; one host at a time keeps the ports and mounts to themselves -->
+    <NoWarn>$(NoWarn);CA1861</NoWarn>
+    <!-- the rows compare names in NFC (macOS's SMB client returns them decomposed); string.Normalize is a no-op
+         in invariant mode, and these tests only ever run on this PC -->
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="MSTest" />
+    <PackageReference Include="SSH.NET" />
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <ProjectReference Include="..\..\src\AnyFS.Core\AnyFS.Core.csproj" />
+    <!-- the expected tree: the same generator the machines run -->
+    <ProjectReference Include="..\fixtures\MakeTree\MakeTree.csproj" />
+  </ItemGroup>
+</Project>

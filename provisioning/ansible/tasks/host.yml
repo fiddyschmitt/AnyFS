@@ -1,0 +1,24 @@
+---
+# A machine that runs anyfs: the FUSE mount needs libfuse3, and `user_allow_other` for the mount to
+# be visible to other users (the provider's allow_other option, on by default).
+
+- name: fuse3
+  ansible.builtin.apt:
+    name: fuse3
+    state: present
+
+- name: user_allow_other in /etc/fuse.conf
+  ansible.builtin.lineinfile:
+    path: /etc/fuse.conf
+    regexp: '^#?\s*user_allow_other'
+    line: user_allow_other
+    create: true
+    mode: "0644"
+
+- name: The test account's mount folder
+  ansible.builtin.file:
+    path: "/home/{{ lab_user }}/anyfs"
+    state: directory
+    owner: "{{ lab_user }}"
+    group: "{{ lab_user }}"
+    mode: "0755"

@@ -10,6 +10,8 @@
     <PackageVersion Include="System.CommandLine" Version="2.0.13" />
     <!-- the SSHFS source (spec 7.2, 15) -->
     <PackageVersion Include="SSH.NET" Version="2026.0.0" />
+    <!-- the E2E tests read provisioning/settings.yml -->
+    <PackageVersion Include="YamlDotNet" Version="18.1.0" />
     <!-- mount providers (spec 8, 15) -->
     <!-- winfsp.net must stay on the major.minor of the driver scripts/winfsp.json bundles: its interop refuses any other
          driver version at load ("incorrect dll version"). The 2.2.x packages are the WinFsp 2026 betas; AnyFS.App checks

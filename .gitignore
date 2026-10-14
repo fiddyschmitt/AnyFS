@@ -496,3 +496,11 @@ anyfs.*.log
 /tools/go-servers/
 # the WinFsp installer scripts/fetch-winfsp.ps1 downloads (embedded in Windows builds for the Install button)
 /tools/winfsp/
+
+# AnyFS lab
+provisioning/publish/
+provisioning/.vagrant/
+provisioning/macos/tart-*.log
+
+# the Visual Studio template above ignores *.e2e, which would swallow the end-to-end test project
+!tests/AnyFS.E2E/

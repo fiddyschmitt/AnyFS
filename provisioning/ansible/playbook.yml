@@ -1,0 +1,54 @@
+---
+# AnyFS test lab: a Linux machine. Vagrant runs this inside each Linux VM (ansible_local) when it
+# first creates the VM, and again on every `vagrant provision`.
+#
+# What a machine gets depends on its entry in settings.yml:
+#   every machine      base.yml       Debian up to date, the test account, the lab key, the client tools
+#   role: upstream     upstream.yml   sshd for the SSHFS source, the Samba share of the fixture tree
+#   role: host         host.yml       fuse3 for the FUSE mount
+#
+# Inputs:
+#   settings.yml (vars_files)   the lab: machines, accounts, paths
+#   machine (extra_vars)        this machine's own entry from settings.yml
+#   lab_pubkey (extra_vars)     the lab's SSH public key
+#
+# Each task declares a state, so re-running `vagrant provision` changes nothing unless something
+# drifted. The machine's smoke test (/opt/anyfs/smoke-test.sh, from templates/) isn't run here: the
+# Vagrantfile runs it once a new kernel, if any, has booted.
+
+- name: Configure an AnyFS lab Linux machine
+  hosts: all
+  become: true
+  vars_files:
+    - ../settings.yml
+
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    lab_user: "{{ accounts.linux.user }}"
+
+  tasks:
+    - name: Every machine
+      ansible.builtin.import_tasks: tasks/base.yml
+
+    - name: The upstream machine
+      ansible.builtin.import_tasks: tasks/upstream.yml
+      when: machine.role == 'upstream'
+
+    - name: A machine that runs anyfs
+      ansible.builtin.import_tasks: tasks/host.yml
+      when: machine.role == 'host'
+
+  handlers:
+    - name: systemctl daemon-reload
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+
+    - name: Restart ssh
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+
+    - name: Restart smbd
+      ansible.builtin.service:
+        name: smbd
+        state: restarted

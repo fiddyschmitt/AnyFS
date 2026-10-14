@@ -47,6 +47,12 @@ internal static class Commands
         status.SetAction(parseResult => Status(parseResult.GetValue(settingsDir)));
         root.Subcommands.Add(status);
 
+        var dllArgument = new Argument<string>("dll") { Description = "The plugin DLL to check." };
+        var check = new Command("check", "Check a plugin DLL before a user does: its AnyFS.Sdk version, the framework assemblies it uses against the set the trimmed host keeps, the dependencies beside it, and whether it loads and its settings round-trip. Exit code 0 when nothing failed.") { dllArgument };
+        check.SetAction(parseResult => PluginCheck(parseResult.GetValue(dllArgument)!));
+        var plugin = new Command("plugin", "Plugin tools.") { check };
+        root.Subcommands.Add(plugin);
+
         settingsDirOption = settingsDir;
         logLevelOption = logLevel;
         return root;
@@ -86,6 +92,22 @@ internal static class Commands
 
         logger.LogInformation("stopped");
         return 0;
+    }
+
+    /// <summary><c>anyfs plugin check &lt;dll&gt;</c>: PASS/WARN/FAIL lines, exit 1 on any FAIL (spec 14.1).</summary>
+    public static int PluginCheck(string dll)
+    {
+        var report = AnyFS.Core.Plugins.PluginChecker.Check(dll);
+        foreach (var line in report.Lines)
+        {
+            Console.Out.WriteLine(line.ToString());
+        }
+
+        Console.Out.WriteLine();
+        Console.Out.WriteLine(report.Passed
+            ? $"ok: {report.Lines.Count} check(s), {report.Warnings} warning(s). Drop the DLL (with any files beside it) into the plugins folder next to the settings folder."
+            : $"{report.Failures} check(s) failed, {report.Warnings} warning(s).");
+        return report.Passed ? 0 : 1;
     }
 
     public static int Status(string? settingsDir)

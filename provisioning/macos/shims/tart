@@ -1,0 +1,13 @@
+#!/bin/sh
+# A pass-through to tart, first on the PATH that mac.ps1 runs Vagrant with (AnyFS lab).
+#
+# vagrant-tart starts the VM with `nohup tart run ... &`, leaving tart writing
+# into Vagrant's output pipes. Those close when Vagrant exits, and the first
+# thing tart wrote after that would kill it (SIGPIPE), and the VM with it. So
+# `tart run` gets a log file here instead; every other command passes through.
+here=$(cd "$(dirname "$0")" && pwd)
+PATH=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -vxF "$here" | paste -sd: -)
+if [ "$1" = run ]; then
+  exec tart "$@" </dev/null >>"$here/../tart-$2.log" 2>&1
+fi
+exec tart "$@"

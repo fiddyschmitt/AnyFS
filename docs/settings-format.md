@@ -57,7 +57,9 @@ secret properties never enter it.
 - `type`: the plugin's type id (`mirror`, `sshfs`, or a third-party id).
 - `settings`: the plugin's settings object (property names camelCase). Properties the plugin
   marks `Secret` are stored protected in `state/secrets.json` under `<id>/<PropertyName>` and
-  filled back in at load; leave them out here.
+  filled back in at load, so anyfs never writes them here. A secret you (or a script) do write
+  here is moved into the secret store on the next start and the file is rewritten without it; the
+  same goes for a mount's secrets in `collections.json`.
 
 ### Mirror (`mirror`)
 

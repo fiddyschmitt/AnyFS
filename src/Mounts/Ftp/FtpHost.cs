@@ -53,6 +53,10 @@ internal sealed class FtpHost : IAsyncDisposable
             options.PasvMaxPort = passive.MaxPort;
             options.PublicAddress = passive.PublicAddress;
         });
+        // RFC 2640: names travel as UTF-8. The library's default is ASCII until a client sends OPTS UTF8 ON, which
+        // curl, wget and lftp don't, and then a name like "ünïcödé ✓ 日本語.txt" comes back as question marks (the lab
+        // caught this). The E2E clients and every modern one speak UTF-8 from the first byte.
+        services.Configure<FtpConnectionOptions>(options => options.DefaultEncoding = System.Text.Encoding.UTF8);
         services.AddFtpServer(builder =>
         {
             builder.Services.AddSingleton<IFileSystemClassFactory>(new Factory(this));
@@ -242,12 +246,41 @@ internal sealed class FtpHost : IAsyncDisposable
         public Task<ICatalog> LoadAsync(CultureInfo language, CancellationToken cancellationToken) => Task.FromResult(DefaultCatalog);
     }
 
+    /// <summary>
+    /// The library's log into ours. Two things it reports as "Failed to process message" errors are routine and go
+    /// to debug instead: a command the file system refused (a <see cref="VfsException"/>, which the client gets as a
+    /// 5xx reply) and a client dropping its data connection (curl -r stops reading once it has its range).
+    /// </summary>
     private sealed class ForwardingLoggerProvider(ILogger target) : ILoggerProvider
     {
-        public ILogger CreateLogger(string categoryName) => target;
+        public ILogger CreateLogger(string categoryName) => new ForwardingLogger(target);
 
         public void Dispose()
         {
+        }
+
+        private sealed class ForwardingLogger(ILogger target) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull
+                => target.BeginScope(state);
+
+            public bool IsEnabled(LogLevel logLevel) => target.IsEnabled(logLevel) || logLevel >= LogLevel.Warning;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                if (logLevel >= LogLevel.Warning && exception is not null && IsRoutine(exception))
+                {
+                    var message = exception.GetBaseException().Message;
+                    target.Log(LogLevel.Debug, eventId, state, null, (s, _) => formatter(s, null) + ": " + message);
+                    return;
+                }
+
+                target.Log(logLevel, eventId, state, exception, formatter);
+            }
+
+            private static bool IsRoutine(Exception exception)
+                => exception is VfsException || exception.GetBaseException() is IOException or System.Net.Sockets.SocketException or OperationCanceledException;
         }
     }
 }

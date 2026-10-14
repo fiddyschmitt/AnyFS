@@ -29,6 +29,13 @@ jobs:
         with:
           global-json-file: global.json
 
+      # the tools the executable embeds: the SMB server per runtime, and on Windows the WinFsp installer
+      - name: Fetch the bundled tools
+        shell: pwsh
+        run: |
+          ./scripts/fetch-go-servers.ps1
+          if ($IsWindows) { ./scripts/fetch-winfsp.ps1 }
+
       - name: Restore
         run: dotnet restore AnyFS.slnx
 

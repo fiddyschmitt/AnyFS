@@ -56,11 +56,15 @@ public sealed class CollectionVfs : IVirtualFileSystem
 
         var segments = VfsPath.Split(normalized);
         var (node, depth) = _tree.Resolve(segments);
-        if (depth == segments.Length)
+        if (depth == segments.Length && node.Attachments.Count == 0)
         {
+            // a folder of the collection layout itself: nothing can be created in it, and Delete/Rename refuse it
             return false;
         }
 
+        // inside an attachment, or exactly at a source's root (the collection root when the source's path is empty):
+        // a writable source there takes new entries, which is what the mounts ask before a create (the lab's FUSE
+        // and WebDAV rows found the root refused while SMB, which asks nothing first, wrote fine)
         return node.Attachments.Any(a => a.Source.IsUsable && WriteRefusal(a) is null);
     }
 
@@ -511,7 +515,10 @@ public sealed class CollectionVfs : IVirtualFileSystem
             }
         }
 
-        return new VfsEntry(node.Name, true, 0, null, newest, VfsAttributes.ReadOnly);
+        // a folder of the layout is read-only; a node with a writable source attached (the collection root when the
+        // source's path is empty) takes new entries, and says so, or FUSE shows it as 0555 and the kernel refuses a mkdir
+        var writable = node.Attachments.Any(a => a.Source.IsUsable && WriteRefusal(a) is null);
+        return new VfsEntry(node.Name, true, 0, null, newest, writable ? VfsAttributes.None : VfsAttributes.ReadOnly);
     }
 
     private static string Describe(IReadOnlyList<SyntheticTree.Attachment> attachments)

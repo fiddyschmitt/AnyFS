@@ -1,0 +1,121 @@
+# =============================================================================
+# AnyFS test lab: the one file you edit.
+#
+# Read by:
+#   * Vagrantfile            -> `network:`, `dev_box:`, `accounts:`, `machines:`, `windows:`
+#   * ansible/playbook.yml   -> what runs inside the Linux VMs (`linux:`, `accounts:`)
+#   * windows/provision.ps1  -> what runs inside the Windows VM (the Vagrantfile passes it its part)
+#   * mac.ps1, macos/        -> `mac:` (the macOS VM, which runs on the Mac mini)
+#   * tests/AnyFS.E2E        -> every machine's role, address and login (Lab.cs)
+#
+# After changing a value:
+#   memory_mb / cpus / ip    ->  vagrant reload --provision <name>
+#   box / box_version        ->  vagrant destroy -f <name>; vagrant up <name>
+#   mac:                     ->  .\mac.ps1 reload --provision   (image or mac_address: destroy -f, then up)
+#   anything else            ->  vagrant provision <name>
+# =============================================================================
+
+# The SSH key every machine accepts; the tests log in with it, and so can you:
+#   ssh -i ~/.ssh/anyfs_lab_ed25519 user@192.168.0.95       (Linux)
+#   ssh -i ~/.ssh/anyfs_lab_ed25519 vagrant@192.168.0.97    (Windows; PowerShell is the shell)
+#   ssh -i ~/.ssh/anyfs_lab_ed25519 admin@192.168.0.98      (the macOS VM)
+# Made on first use (by the Vagrantfile or mac.ps1). It lives outside this folder, so it is never
+# shared into a VM or committed.
+ssh_key: "~/.ssh/anyfs_lab_ed25519"
+
+network:
+  # The PC's network adapter the VMs are bridged onto. It's specific to this PC:
+  # after a reinstall, `VBoxManage list bridgedifs` shows which one is Up.
+  bridge_adapter: "Intel(R) I211 Gigabit Network Connection"
+
+# This PC: it runs the tests and shares two folders into the VirtualBox VMs:
+#   publish  provisioning/publish, which .\publish.ps1 fills with the trimmed anyfs per runtime, the
+#            fixture generator and the sample plugin: \\vboxsvr\publish (Windows),
+#            /media/vboxsf/<ip>/publish (Linux). The tests copy the binaries out of it; the Mac VM
+#            gets them over SCP.
+#   winfsp   tools/winfsp, the pinned WinFsp installer (scripts/fetch-winfsp.ps1), which the Windows
+#            provisioner installs after checking its hash against scripts/winfsp.json.
+dev_box:
+  ip: 192.168.0.31
+  shared_folders:
+    publish: "./publish"
+    winfsp: "../tools/winfsp"
+
+# The logins the tests use: throwaway values for this lab only.
+accounts:
+  linux: { user: user, password: anyfs-lab }      # every Linux VM: SSH, sudo, Samba, and sshd for the SSHFS source
+  windows: { user: vagrant, password: vagrant }   # the Windows box's own account: SSH, SMB
+
+# The VirtualBox VMs. `role` is how the tests find them:
+#   upstream   what anyfs serves from: sshd + the fixture tree (the SSHFS source), a Samba share of
+#              the same tree (the Mirror UNC source, from the Windows host); also the remote client
+#   host       runs anyfs: every mount provider the OS has; also a local client
+# `vagrant up` creates and boots them in this order. Each has a fixed address on the LAN (keep these
+# out of the router's DHCP pool). The boxes are pinned so every build is identical: bump them on purpose.
+machines:
+  - name: anyfs-debian-2
+    os: linux
+    role: upstream
+    ip: 192.168.0.96
+    box: bento/debian-13             # Debian 13 "trixie" + VirtualBox Guest Additions
+    box_version: "202510.26.0"
+    memory_mb: 2048
+    cpus: 2
+
+  - name: anyfs-debian-1
+    os: linux
+    role: host
+    ip: 192.168.0.95
+    box: bento/debian-13
+    box_version: "202510.26.0"
+    memory_mb: 3072
+    cpus: 2
+
+  - name: anyfs-win11-1              # a Windows computer name: 15 characters at most
+    os: windows
+    role: host
+    ip: 192.168.0.97
+    box: gusztavvargadr/windows-11   # Windows 11 25H2 Enterprise (evaluation), OpenSSH included
+    box_version: "2607.1.0"
+    memory_mb: 6144
+    cpus: 2
+
+linux:
+  # On the upstream machine: the fixture tree the tests generate there (tests/fixtures/MakeTree), which
+  # Samba shares as [fixture] and the SSHFS source serves over sshd.
+  fixture_dir: /srv/anyfs/fixture
+  # A key pair the provisioning makes on the upstream machine for the SSHFS source to log in with
+  # (headless anyfs can't answer a password prompt). The tests copy it to each host.
+  sshfs_key: /srv/anyfs/sshfs_key
+
+windows:
+  # The RunRemote server (C:\Users\Smith\Desktop\dev\cs\RunRemote): the tests start anyfs through it,
+  # inside the logged-on session, where WinFsp's \\anyfs\... and stored SMB credentials live. A
+  # self-contained build of the server, shared into the VM; and the client the tests run here.
+  runremote_dir: "C:/Users/Smith/Desktop/dev/cs/RunRemote/server/bin/Release/net8.0-windows/win-x64/publish"
+  runremote_client: "C:/Users/Smith/Desktop/dev/cs/RunRemote/runremote/bin/Debug/net8.0/runremote.exe"
+
+# The Mac mini runs the macOS test VM (tart, on Apple's Virtualization framework); only a Mac can.
+# Vagrant runs there for it, with the vagrant-tart provider. mac.ps1 drives it from this PC: it copies
+# this file and macos/ to the Mac, then runs `vagrant` there over SSH.
+mac:
+  name: mac-mini-m4
+  host: 192.168.0.33
+  user: smith
+  project_dir: anyfs-lab             # under the user's home on the Mac
+  vagrant_tart_version: "1.0.0"      # the Vagrant provider for tart; pinned
+
+  machines:
+    - name: anyfs-macos-1
+      ip: 192.168.0.98               # the router reserves this address for mac_address
+      # tart gives every new VM a random MAC address, and so a new DHCP address. macos/Vagrantfile
+      # pins this one instead, so the VM keeps 192.168.0.98 (the rclone lab's VM is ...:24 -> .34).
+      mac_address: "96:e4:f4:b3:84:25"
+      # macOS 15 Sequoia, pinned by digest (":latest" moves).
+      image: "ghcr.io/cirruslabs/macos-sequoia-base@sha256:4947ac5ab1b2fdc46ab856132d2ba958f8e45b5f85192c66370dafc028c514dd"
+      user: admin                    # the image's own account
+      password: admin
+      memory_mb: 6144                # the Mac has 16 GB; the rclone lab's VM must not run at the same time
+      cpus: 4
+      disk_gb: 50                    # the image's own size: tart can grow a disk, never shrink it
+      bridge_interface: en0          # the Mac's LAN interface

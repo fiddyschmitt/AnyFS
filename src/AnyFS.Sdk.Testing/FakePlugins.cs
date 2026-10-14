@@ -98,6 +98,9 @@ public sealed class FakeMountSettings
 
     [Setting("Port")]
     public int Port { get; set; } = 1;
+
+    [Setting("Token", Secret = true)]
+    public string? Token { get; set; }
 }
 
 /// <summary>A mount provider that records what it was given and shares a "listener" per port.</summary>

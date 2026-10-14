@@ -33,10 +33,14 @@ Milestones 1 to 4 are done:
   and macOS clients), **FUSE** (Linux), **WebDAV** (our own server, with the Windows UNC form),
   **FTP** and **HTTP** (directory pages, JSON, resumable downloads). [docs/mounts.md](docs/mounts.md)
   says how to reach each one without mapping anything.
-- `anyfs serve` and `anyfs status` for headless use.
-- Unit and GUI tests, a trimmed single-file publish, CI.
+- `anyfs serve` and `anyfs status` for headless use; `anyfs plugin check <dll>` for plugin authors.
+- Unit and GUI tests, a trimmed single-file publish, CI, and a release workflow that publishes
+  every runtime with checksums and the SDK packages on a tag.
+- An end-to-end lab ([provisioning/](provisioning/README.md)): Debian, Windows and macOS VMs
+  defined as code, and `tests/AnyFS.E2E`, which deploys the published anyfs to each and exercises
+  every mount provider from the host itself and from another machine against a generated fixture.
 
-Coming next: the end-to-end lab and release workflow (M5), a macOS `.app` (M6), NFS (M7).
+Coming next: a macOS `.app` (M6), NFS (M7).
 
 ## Try it
 
@@ -112,12 +116,30 @@ Debug run has them too) from `tools/go-servers/` and `tools/winfsp/`; run the tw
 once before building, or the SMB provider says its server is missing and the Install button falls
 back to winget.
 
+## Release
+
+A tag `v<version>` runs [release.yml](.github/workflows/release.yml): the five runtimes are
+published (trimmed; smoke-tested where the runner can run them), packaged as
+`anyfs-<version>-<rid>.zip` (Windows) or `.tar.gz` (Linux and macOS, which keeps the executable
+bit) with `SHA256SUMS.txt`, the SDK packages are packed
+(`scripts/pack.ps1`), and a GitHub release is created with all of it. The packages also go to
+NuGet.org when the `NUGET_API_KEY` secret is set.
+
+## Test lab
+
+[provisioning/](provisioning/README.md) defines the end-to-end lab as code: `vagrant up` for the
+Debian upstream, the Debian host and the Windows host, `.\mac.ps1 up` for the macOS VM on the Mac
+mini, `.\publish.ps1` to build what the tests run, `.\check.ps1` to see it is all ready, then
+`dotnet test tests/AnyFS.E2E` from this PC.
+
 ## Plugins
 
 Drop a DLL into the `plugins` folder beside `settings`. A plugin references `AnyFS.Sdk` and
 implements `ISourcePlugin` or `IMountProviderPlugin`; its settings are a POCO with `[Setting]`
 attributes and the host builds the form, the JSON and the secret handling.
-[tests/fixtures/SamplePlugin](tests/fixtures/SamplePlugin) is the 60-line example.
+[tests/fixtures/SamplePlugin](tests/fixtures/SamplePlugin) is the 60-line example, and
+`anyfs plugin check <dll>` tells you before a user does whether a DLL loads in the trimmed host
+and uses only what it carries. [docs/plugin-authoring.md](docs/plugin-authoring.md) has the rest.
 
 ## Layout
 

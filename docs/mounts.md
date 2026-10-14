@@ -123,7 +123,9 @@ Each collection is a folder under the server root. Explorer, Finder (read-only) 
 open `ftp://<host>:<port>/<collection>/`; `curl`, `lftp` and friends resume with `REST`. Passive
 mode uses any free port unless a range is set (Advanced), with a public address for servers
 behind NAT. Anonymous logins see the collections that allow them; a named login sees the
-collections configured with that user name.
+collections configured with that user name. Names are UTF-8 from the first byte, whether or not
+a client sends `OPTS UTF8 ON` (curl, wget and lftp don't); listings include `.` and `..`, as many
+servers' do.
 
 ## HTTP (all OSes)
 

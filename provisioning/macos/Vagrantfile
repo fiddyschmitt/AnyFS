@@ -1,0 +1,72 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+#
+# AnyFS test lab: the macOS test VM, run by tart on the Mac mini. This file runs ON the Mac, under
+# Vagrant with the vagrant-tart provider; mac.ps1 copies it there beside settings.yml and runs Vagrant
+# for it from the PC. It defines the MACHINE; provision.sh configures what runs INSIDE it. Tunables
+# live in settings.yml (`mac:`).
+#
+#   .\mac.ps1 up                    create, boot and (first time) provision the VM
+#   .\mac.ps1 provision             re-apply provision.sh (safe to repeat)
+#   .\mac.ps1 reload --provision    apply a memory/cpus change from settings.yml
+#   .\mac.ps1 ssh anyfs-macos-1     shell into it
+#   .\mac.ps1 halt | destroy -f     stop | delete it
+
+require "json"
+require "yaml"
+
+settings = YAML.load_file(File.join(__dir__, "..", "settings.yml"))
+
+# The lab's public key, which mac.ps1 puts beside settings.yml.
+lab_pubkey = File.read(File.join(__dir__, "..", "lab_key.pub")).strip
+
+Vagrant.configure("2") do |config|
+  settings.fetch("mac").fetch("machines").each do |m|
+    name = m.fetch("name")
+
+    config.vm.define name do |node|
+      # Logs in with the image's own account; on the first boot Vagrant swaps the password for a key
+      # of its own. The VM is bridged onto the LAN at the address the router reserves for its MAC, so
+      # that's where Vagrant finds it.
+      node.ssh.username = m.fetch("user")
+      node.ssh.password = m.fetch("password")
+      node.ssh.host     = m.fetch("ip")
+      node.vm.boot_timeout = 600
+
+      # Nothing to share: the provisioner uploads its script itself. (And a macOS guest couldn't make
+      # /vagrant: its system volume is read-only.)
+      node.vm.synced_folder ".", "/vagrant", disabled: true
+
+      node.vm.provider "tart" do |tart|
+        tart.image  = m.fetch("image")
+        tart.name   = name
+        tart.cpus   = m.fetch("cpus")
+        tart.memory = m.fetch("memory_mb")
+        tart.disk   = m.fetch("disk_gb")
+        # On the LAN as a machine of its own, like the VirtualBox VMs.
+        tart.extra_run_args = ["--net-bridged=#{m.fetch("bridge_interface")}"]
+      end
+
+      # tart gives every new VM a random MAC address, so the router would give it a new address. So
+      # the VM is cloned here, before vagrant-tart would, and given the MAC the router reserves its
+      # address for. (vagrant-tart doesn't clone a VM that exists, and then it doesn't record it as
+      # created either, so that's done here too.)
+      node.trigger.before :up do |t|
+        t.name = "#{name} has MAC address #{m.fetch("mac_address")}"
+        t.ruby do |_env, machine|
+          if JSON.parse(`tart list --format json`).none? { |vm| vm["Name"] == name }
+            system("tart", "clone", m.fetch("image"), name) or raise "tart clone #{name} failed"
+            config_json = File.join(Dir.home, ".tart", "vms", name, "config.json")
+            vm_config = JSON.parse(File.read(config_json))
+            vm_config["macAddress"] = m.fetch("mac_address")
+            File.write(config_json, JSON.pretty_generate(vm_config))
+          end
+          machine.id = name unless machine.id == name
+        end
+      end
+
+      node.vm.provision "shell", path: "provision.sh",
+                                 env: { "LAB_PUBKEY" => lab_pubkey, "VM_NAME" => name, "VM_USER" => m.fetch("user") }
+    end
+  end
+end

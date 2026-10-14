@@ -103,6 +103,19 @@ public class FtpMountTests
         Assert.IsTrue((await client.RetrieveReplyAsync("/work/nope.txt")).Code >= 500, "a missing file is a 5xx");
     }
 
+    /// <summary>curl, wget and lftp never send OPTS UTF8 ON; the lab found the unicode name coming back as question marks.</summary>
+    [TestMethod]
+    [Timeout(60000)]
+    public async Task NamesAreUtf8ForAClientThatNeverAsks()
+    {
+        var (_, _, port) = await StartAsync(Tree());
+        var client = await FtpClient.ConnectAsync(port, optsUtf8: false);
+        Assert.AreEqual(230, (await client.LoginAsync("anonymous", "anyfs@test")).Code);
+        var names = (await client.ListAsync("/work/unicode")).Select(l => l.Name).ToList();
+        CollectionAssert.AreEqual(new[] { "ünïcödé ✓ 日本語.txt" }, names);
+        Assert.AreEqual("unicode names", Encoding.UTF8.GetString(await client.RetrieveAsync("/work/unicode/ünïcödé ✓ 日本語.txt")));
+    }
+
     [TestMethod]
     [Timeout(60000)]
     public async Task WritesLandUpstreamAndRefusedWhenReadOnly()
@@ -203,14 +216,19 @@ public class FtpMountTests
 
         public sealed record Line(string Name, bool IsDirectory, long Size, string Permissions);
 
-        public static async Task<FtpClient> ConnectAsync(int port)
+        /// <param name="optsUtf8">False for a client like curl, which never sends OPTS UTF8 ON and expects UTF-8 regardless.</param>
+        public static async Task<FtpClient> ConnectAsync(int port, bool optsUtf8 = true)
         {
             var control = new TcpClient();
             await control.ConnectAsync(IPAddress.Loopback, port);
             var client = new FtpClient(control);
             var banner = await client.ReadReplyAsync();
             Assert.AreEqual(220, banner.Code, banner.Text);
-            await client.CommandAsync("OPTS UTF8 ON");
+            if (optsUtf8)
+            {
+                await client.CommandAsync("OPTS UTF8 ON");
+            }
+
             return client;
         }
 

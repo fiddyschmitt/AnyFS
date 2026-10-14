@@ -2,11 +2,23 @@
   <PropertyGroup>
     <AssemblyName>AnyFS.Sdk.Testing</AssemblyName>
     <RootNamespace>AnyFS.Sdk.Testing</RootNamespace>
+    <IsTrimmable>false</IsTrimmable>
     <IsPackable>true</IsPackable>
     <PackageId>AnyFS.Sdk.Testing</PackageId>
-    <Description>Contract tests and fakes for AnyFS plugin authors: point SourceContractTests at your ISource.</Description>
-    <IsTrimmable>false</IsTrimmable>
+    <Title>AnyFS plugin SDK: contract tests and fakes</Title>
+    <Description>Contract tests and fakes for AnyFS plugin authors: point SourceContractTests at your ISource, test a mount provider against MemorySource, stand the host in with TestSourceContext and TestMountContext.</Description>
+    <PackageTags>anyfs;filesystem;plugin;sdk;testing;mstest</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/fiddyschmitt/AnyFS</PackageProjectUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
+  <ItemGroup>
+    <None Include="..\AnyFS.Sdk\README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
     <PackageReference Include="MSTest.TestFramework" />

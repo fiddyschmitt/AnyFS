@@ -34,6 +34,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/AnyFS.App.Tests/AnyFS.App.Tests.csproj" />
     <Project Path="tests/AnyFS.Core.Tests/AnyFS.Core.Tests.csproj" />
+    <Project Path="tests/AnyFS.E2E/AnyFS.E2E.csproj" />
     <Project Path="tests/AnyFS.Mounts.Tests/AnyFS.Mounts.Tests.csproj" />
     <Project Path="tests/AnyFS.Sdk.Tests/AnyFS.Sdk.Tests.csproj" />
     <Project Path="tests/AnyFS.Sources.Tests/AnyFS.Sources.Tests.csproj" />
