@@ -3,11 +3,11 @@
     "repo": "fiddyschmitt/portable-smb-server",
     "version": "v0.3.0",
     "assets": {
-      "win-x64": { "name": "portable-smb-server-win-x64.exe", "sha256": "" },
-      "linux-x64": { "name": "portable-smb-server-linux-x64", "sha256": "" },
-      "linux-arm64": { "name": "portable-smb-server-linux-arm64", "sha256": "" },
-      "osx-x64": { "name": "portable-smb-server-osx-x64", "sha256": "" },
-      "osx-arm64": { "name": "portable-smb-server-osx-arm64", "sha256": "" }
+      "win-x64": { "name": "portable-smb-server-win-x64.exe", "sha256": "bcb52d2dcde56cf5a9f58286fd3a745f2a490ed4232b487f213036b65cbe5f2b" },
+      "linux-x64": { "name": "portable-smb-server-linux-x64", "sha256": "76611f58876e3618a6132e24d46ddd62648c796434c48b2b0615f68c5a18e54a" },
+      "linux-arm64": { "name": "portable-smb-server-linux-arm64", "sha256": "932fddfa770cf3d5b244534174c785c53aafa1e615c8155ff3af370cb0cc64af" },
+      "osx-x64": { "name": "portable-smb-server-osx-x64", "sha256": "a8cf4872ac3d2d7b00fcdde85c544ac8718724fc7d04559f7e1071f96df63b28" },
+      "osx-arm64": { "name": "portable-smb-server-osx-arm64", "sha256": "361ecf78e7c1c396fb5a3756266cd122254ee68846d54f72dc9638921ecd29a6" }
     }
   }
 }

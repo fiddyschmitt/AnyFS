@@ -16,6 +16,8 @@
 - Stats: the per-collection table drops a collection when it is deleted (and, at start, any that
   was deleted while anyfs was not running); a rename keeps its counters under the new name; the
   "A file is served when a handle..." line is gone.
+- `scripts/go-servers.json` carries the SHA-256s of the portable-smb-server v0.3.0 release, so
+  `scripts/fetch-go-servers.ps1` now verifies every binary it downloads.
 
 ## Unreleased (milestone 3: mount providers)
 
