@@ -2,8 +2,9 @@
 
 The machines the end-to-end tests in `tests/AnyFS.E2E` run anyfs on and reach its mounts from. One
 machine per OS runs anyfs with every mount provider that OS has; a second Linux machine is the
-upstream anyfs serves from (the SSHFS source's sshd, a Samba share for the Mirror UNC source) and the
-remote client.
+upstream anyfs serves from (the SSHFS source's sshd, a Samba share for the Mirror UNC source). Every
+machine is also a client of every host: the host itself, the upstream, and the other two OSes'
+machines reach each host's mounts, so each OS is tested as a client of each other OS.
 
 | Machine | Role | OS | Address | Runs on | Configured by |
 |---|---|---|---|---|---|
@@ -87,8 +88,9 @@ Mirror, the SSHFS source on the upstream, and on Windows the Mirror of the upstr
 each with every mount provider the OS has, starts `anyfs serve` (Linux and macOS: `nohup` over
 SSH; Windows: through RunRemote, inside the logged-on session, where WinFsp's `\\anyfs\...` and
 stored SMB credentials live), waits for `anyfs status` to go green, then exercises each mount from
-the host itself and from the upstream machine over SSH and compares against the fixture. A machine
-that can't be reached marks its rows Inconclusive.
+the host itself, from the upstream machine and from the other OSes' machines over SSH and compares
+against the fixture. A machine that can't be reached marks its rows Inconclusive: the host's rows
+when it is the host, its own rows when it is a client.
 
 ## Design notes
 

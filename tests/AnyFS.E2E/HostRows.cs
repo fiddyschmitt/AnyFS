@@ -2,18 +2,25 @@ using System.Diagnostics;
 
 namespace AnyFS.E2E;
 
-/// <summary>One host machine's anyfs, deployed once per test class, and the two clients that reach it.</summary>
+/// <summary>One host machine's anyfs, deployed once per test class, and the clients that reach it.</summary>
 public sealed class Deployment : IDisposable
 {
     public Machine? Host { get; set; }
 
     public Machine? Upstream { get; set; }
 
+    /// <summary>The other OSes' host machines, connected as clients of this one.</summary>
+    public List<Machine> Others { get; } = [];
+
     public AnyFsHost? AnyFs { get; set; }
 
-    public Client? Local { get; set; }
+    /// <summary>The clients by name: <c>local</c> is the host itself, <c>upstream</c> the Linux upstream, <c>windows</c> and <c>macos</c> the hosts of the other OSes.</summary>
+    public Dictionary<string, Client> Clients { get; } = [];
 
-    public Client? Remote { get; set; }
+    /// <summary>Why a client's rows are Inconclusive: its machine can't be reached.</summary>
+    public Dictionary<string, string> ClientUnavailable { get; } = [];
+
+    public Client? Local => Clients.GetValueOrDefault("local");
 
     /// <summary>Why the rows are Inconclusive: a machine that can't be reached.</summary>
     public string? Unavailable { get; set; }
@@ -26,13 +33,18 @@ public sealed class Deployment : IDisposable
         AnyFs?.Dispose();
         Host?.Dispose();
         Upstream?.Dispose();
+        foreach (var other in Others)
+        {
+            other.Dispose();
+        }
     }
 }
 
 /// <summary>
 /// The E2E matrix of spec 16.2 for one anyfs host: (collection × mount × client) rows against one running
 /// anyfs, where the collections are each source and its read-only twin, the mounts every provider the host's
-/// OS has, and the clients the host itself and the upstream machine. A row lists the tree and compares it with
+/// OS has, and the clients every machine in the lab: the host itself, the Linux upstream, and the hosts of the
+/// other two OSes (so each OS is also exercised as a client of each other OS). A row lists the tree and compares it with
 /// the fixture (names, unicode, spaces, a 204-character name, nesting, an empty folder, the 5,000-file folder),
 /// hashes the 1 KiB, 1 MiB and 200 MiB files (the last one timed, for the throughput floor), reads three ranges,
 /// does the write round trip (or has it refused on the read-only twin, and skips it over HTTP), reads with eight
@@ -55,16 +67,23 @@ public abstract class HostRows
     public static IReadOnlyList<string> CollectionsOf(string os)
         => os == "windows" ? ["mirror", "mirror-ro", "sshfs", "sshfs-ro", "unc", "unc-ro"] : ["mirror", "mirror-ro", "sshfs", "sshfs-ro"];
 
-    /// <summary>The rows: every collection × mount × client, minus the native mounts from the other machine.</summary>
+    /// <summary>
+    /// The clients of a host: itself, the Linux upstream, and the hosts of the other OSes; every machine in the lab but
+    /// the one under test, so Windows and macOS are clients of the other hosts too, not only Linux.
+    /// </summary>
+    public static IReadOnlyList<string> ClientsOf(string os)
+        => new[] { "local", "upstream" }.Concat(new[] { "windows", "macos" }.Where(o => o != os)).ToList();
+
+    /// <summary>The rows: every collection × mount × client, minus the native mounts from the other machines.</summary>
     public static IEnumerable<object[]> RowsFor(string os)
     {
         foreach (var collection in CollectionsOf(os))
         {
             foreach (var mount in MountsOf(os))
             {
-                foreach (var client in new[] { "local", "remote" })
+                foreach (var client in ClientsOf(os))
                 {
-                    if (client == "remote" && mount is MountKind.Fuse or MountKind.WinFsp)
+                    if (client != "local" && mount is MountKind.Fuse or MountKind.WinFsp)
                     {
                         continue;
                     }
@@ -109,9 +128,28 @@ public abstract class HostRows
                 d.AnyFs.Deploy();
                 d.AnyFs.Start();
                 var status = d.AnyFs.WaitReady(d.AnyFs.FullCollections.Select(c => c.Collection));
-                d.Local = Client.For(d.Host);
-                d.Remote = Client.For(d.Upstream);
+                d.Clients["local"] = Client.For(d.Host);
+                d.Clients["upstream"] = Client.For(d.Upstream);
                 Trace.WriteLine($"{hostInfo.Name}: anyfs {status.Version} up with {status.Collections.Count} collections in {sw.Elapsed.TotalSeconds:N0} s");
+
+                // the other OSes' hosts as clients of this one; a machine that is down makes its rows Inconclusive
+                foreach (var other in ClientsOf(os).Where(c => c is not ("local" or "upstream")))
+                {
+                    var info = Lab.Host(other);
+                    if (info is null)
+                    {
+                        d.ClientUnavailable[other] = $"settings.yml has no {other} machine with role host";
+                    }
+                    else if (Machine.TryConnect(info, Lab.SshKey) is { } machine)
+                    {
+                        d.Others.Add(machine);
+                        d.Clients[other] = Client.For(machine);
+                    }
+                    else
+                    {
+                        d.ClientUnavailable[other] = $"{info.Name} ({info.Ip}) is not reachable over SSH with the lab key, so its rows as a client of {hostInfo.Name} did not run";
+                    }
+                }
             }
             catch (Exception ex) when (ex is TimeoutException or InvalidOperationException or IOException or Renci.SshNet.Common.SshException)
             {
@@ -158,7 +196,12 @@ public abstract class HostRows
     {
         var d = Current();
         var anyfs = d.AnyFs!;
-        var client = clientName == "local" ? d.Local! : d.Remote!;
+        if (!d.Clients.TryGetValue(clientName, out var client))
+        {
+            Assert.Inconclusive(d.ClientUnavailable.GetValueOrDefault(clientName) ?? $"no client named {clientName}");
+            return;
+        }
+
         var spec = anyfs.Sources.Single(s => s.Collection == collection || s.ReadOnlyCollection == collection);
         var readOnly = collection.EndsWith("-ro", StringComparison.Ordinal);
         var prefix = spec.TreePrefix;

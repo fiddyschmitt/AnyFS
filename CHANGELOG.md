@@ -58,6 +58,16 @@
   PowerShell slips (`$msi:` in a string, a DWORD compared with the Int32 `0xFFFFFFFF`), and the E2E
   Windows client escapes its commands for Win32-OpenSSH, writes UTF-8, stores the Samba credential
   through RunRemote and treats a late RunRemote acknowledgement as what it is.
+- **Every lab machine is a client of every host**: the E2E rows reach each host's mounts from the
+  host itself, from the Linux upstream, and now from the Windows and macOS machines too (Windows
+  `net use /TCPPORT` and WebClient against the Linux and Mac hosts, `mount_smbfs` and
+  `mount_webdav` against the Linux and Windows hosts, curl from all); a machine that is down makes
+  its rows Inconclusive. 194 rows in all (Linux 68, Windows 78, macOS 48) instead of 122.
+- The FTP library's own debug log (each command, connection and data channel event) now reaches
+  `anyfs.log` at debug level; it was cut off at warning. The lab's concurrent-reader rows from the
+  Windows machine saw sporadic control-connection resets under eight simultaneous downloads, once
+  with a `NullReferenceException` inside the library's RETR handler, and those lines are what a
+  diagnosis needs.
 - **FTP downloads read the source 1 MiB at a time**: the Windows rows' Mirror of the upstream's
   Samba share served 3.5 MiB/s over FTP against 23 over HTTP, because the FTP library copies a file
   to the data connection a few KB at a time and each piece was a round trip to the share. The

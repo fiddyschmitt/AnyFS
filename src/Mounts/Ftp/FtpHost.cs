@@ -39,7 +39,9 @@ internal sealed class FtpHost : IAsyncDisposable
         services.AddLogging(logging =>
         {
             logging.ClearProviders();
-            logging.SetMinimumLevel(LogLevel.Warning);
+            // the library's own debug lines (each command, connection and data channel event) reach anyfs.log at the
+            // app's level; the forwarding logger below keeps its routine warnings down to debug
+            logging.SetMinimumLevel(LogLevel.Trace);
             logging.AddProvider(new ForwardingLoggerProvider(logger));
         });
         services.Configure<FtpServerOptions>(options =>

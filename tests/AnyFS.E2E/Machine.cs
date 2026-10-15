@@ -9,7 +9,7 @@ namespace AnyFS.E2E;
 /// covers execution only, not the channel open that a tired machine can hang on, as the ft lab found), file
 /// upload and download. Windows machines run PowerShell; the others a POSIX shell.
 /// </summary>
-public sealed partial class Machine : IDisposable
+public sealed class Machine : IDisposable
 {
     private readonly ConnectionInfo _connection;
     private readonly SshClient _ssh;
@@ -60,11 +60,12 @@ public sealed partial class Machine : IDisposable
     {
         if (IsWindows)
         {
-            // Win32-OpenSSH hands the command to powershell.exe on its command line, where the Windows argument rules
-            // strip a plain double quote: escape each one (and double any backslashes right before it) so PowerShell
-            // sees the command as written. And PowerShell writes to sshd's pipe in the OEM code page unless told
-            // otherwise; the rows compare unicode names.
-            command = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + WindowsCommandLineQuotes().Replace(command, "$1$1\\\"");
+            // Win32-OpenSSH runs `powershell.exe -c "<command>"`, and Windows PowerShell takes the text after -c as it
+            // is, double quotes and newlines included (checked by sending commands through SSH.NET and reading the
+            // process's own command line; a probe through ssh.exe misleads, because PowerShell re-quotes the arguments
+            // it hands a native program). PowerShell writes to sshd's pipe in the OEM code page unless told otherwise,
+            // and the rows compare unicode names.
+            command = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + command;
         }
 
         var budget = TimeSpan.FromSeconds(timeoutSeconds);
@@ -166,8 +167,4 @@ public sealed partial class Machine : IDisposable
     }
 
     private static string Truncate(string command) => command.Length <= 160 ? command : command[..160] + "...";
-
-    /// <summary>A double quote and the backslashes right before it (CommandLineToArgvW's rule).</summary>
-    [System.Text.RegularExpressions.GeneratedRegex("(\\\\*)\"")]
-    private static partial System.Text.RegularExpressions.Regex WindowsCommandLineQuotes();
 }

@@ -391,13 +391,34 @@ public sealed class WindowsClient(Machine machine) : Client(machine)
         return ok;
     }
 
+    /// <summary>
+    /// The readers run as N curl processes (URLs) or N runspace threads in the one PowerShell (paths): a PowerShell
+    /// job per reader was eight PowerShell hosts starting at once on the VM's two vCPUs, which stalled the whole machine
+    /// for seconds and is the likeliest trigger of the FTP library's null-reference under that load. A failed download
+    /// reports curl's exit code and error line in place of its hash (an empty file's hash says nothing).
+    /// </summary>
     public override IReadOnlyList<string> ConcurrentSha256(Access access, string relFile, int readers)
     {
-        var block = access.IsUrl
-            ? $"param($u) $t = [IO.Path]::GetTempFileName(); curl.exe -sf -o $t $u; $h = (Get-FileHash -LiteralPath $t -Algorithm SHA256).Hash.ToLower(); Remove-Item $t; $h"
-            : $"param($p) {HashInto("$p")}; $h";
-        var arg = access.IsUrl ? UrlOf(access, relFile) : PathOf(access, relFile);
-        return Lines(M.Sh($"$jobs = 1..{readers} | ForEach-Object {{ Start-Job -ScriptBlock {{ {block} }} -ArgumentList {Q(arg)} }}; $jobs | Wait-Job -Timeout 500 | Out-Null; $jobs | Receive-Job; $jobs | Remove-Job -Force", 600));
+        if (access.IsUrl)
+        {
+            var url = Q(UrlOf(access, relFile));
+            return Lines(M.Sh($$"""
+                $d = Join-Path $env:TEMP ('e2e-cc-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $d | Out-Null
+                $procs = 1..{{readers}} | ForEach-Object { $p = Start-Process -FilePath curl.exe -ArgumentList '-sfS', '-o', (Join-Path $d "$_.bin"), {{url}} -PassThru -WindowStyle Hidden -RedirectStandardError (Join-Path $d "$_.err"); $null = $p.Handle; $p }
+                foreach ($p in $procs) { $null = $p.WaitForExit(500000) }
+                for ($i = 1; $i -le {{readers}}; $i++) { if ($procs[$i - 1].ExitCode -ne 0) { "curl exit $($procs[$i - 1].ExitCode): $((Get-Content (Join-Path $d "$i.err") -ErrorAction SilentlyContinue) -join ' ')" } else { (Get-FileHash -LiteralPath (Join-Path $d "$i.bin") -Algorithm SHA256).Hash.ToLower() } }
+                Remove-Item -Recurse -Force $d
+                """, 600));
+        }
+
+        var path = Q(PathOf(access, relFile));
+        return Lines(M.Sh($$"""
+            $pool = [runspacefactory]::CreateRunspacePool(1, {{readers}}); $pool.Open()
+            $script = ({ param($p) {{HashInto("$p")}}; $h }).ToString()
+            $jobs = 1..{{readers}} | ForEach-Object { $ps = [powershell]::Create(); $ps.RunspacePool = $pool; $null = $ps.AddScript($script).AddArgument({{path}}); @{ Ps = $ps; Handle = $ps.BeginInvoke() } }
+            foreach ($j in $jobs) { $j.Ps.EndInvoke($j.Handle); $j.Ps.Dispose() }
+            $pool.Close()
+            """, 600));
     }
 
     public override (string Hash, double Seconds) TimedSha256(Access access, string relFile)
