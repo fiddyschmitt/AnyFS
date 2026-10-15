@@ -154,7 +154,7 @@ src/Mounts/WinFsp        the WinFsp mount (Windows)
 src/Mounts/Smb           the SMB mount: the VFS endpoint and the portable-smb-server process
 src/Mounts/Fuse          the FUSE mount (Linux)
 src/Mounts/WebDav        the WebDAV server and mount
-src/Mounts/Ftp           the FTP mount over FubarDev.FtpServer
+src/Mounts/Ftp           the FTP mount: AnyFS's own FTP server
 src/Mounts/Http          the HTTP mount
 tests/                   unit tests per assembly, GUI tests (headless Avalonia), fixtures/MakeTree, fixtures/SamplePlugin
 scripts/                 publish.ps1, smoke.ps1, fetch-go-servers.ps1 (+ go-servers.json), fetch-winfsp.ps1 (+ winfsp.json)

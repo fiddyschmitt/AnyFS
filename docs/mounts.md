@@ -141,10 +141,7 @@ The server is AnyFS's own: RFC 959 with what today's clients use on top (`FEAT`,
 transfer), one listener per bind address and port shared by the collections mounted there, and
 every transfer straight through the collection's tree, 1 MiB reads and 256 KiB writes at a time,
 so the read-only layers and the stats apply. `TYPE A` is accepted and transfers bytes as they are
-(every client of note asks for `TYPE I` before a file). There is no TLS. The **Server** setting
-(Advanced) can pick the FubarDev.FtpServer library instead, the server before 0.5, kept for
-comparison; it lists `.` and `..`, writes `modify` facts with milliseconds, and connects an active
-data connection to whatever address `PORT` names. Mounts sharing a port must agree on the server.
+(every client of note asks for `TYPE I` before a file). There is no TLS.
 
 ## HTTP (all OSes)
 

@@ -6,10 +6,10 @@ using System.Text;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 
-namespace AnyFS.Mounts.Ftp.Builtin;
+namespace AnyFS.Mounts.Ftp;
 
 /// <summary>
-/// One control connection of <see cref="BuiltinFtpServer"/>: the command loop, the login, the current
+/// One control connection of <see cref="FtpServer"/>: the command loop, the login, the current
 /// directory in the virtual tree (the root lists the login's collections, each collection its tree), the
 /// data connection (passive: a listener per transfer from the configured range; active: a connection back
 /// to the client's own address only), and the transfers themselves, which read and write the collection's
@@ -25,7 +25,7 @@ internal sealed class FtpSession
     private static readonly TimeSpan DataTimeout = TimeSpan.FromSeconds(30);
     private static readonly UTF8Encoding Utf8 = new(false);
 
-    private readonly BuiltinFtpServer _server;
+    private readonly FtpServer _server;
     private readonly TcpClient _client;
     private readonly NetworkStream _stream;
     private readonly ILogger _logger;
@@ -48,7 +48,7 @@ internal sealed class FtpSession
     private bool _epsvAll;
     private bool _quit;
 
-    public FtpSession(BuiltinFtpServer server, TcpClient client)
+    public FtpSession(FtpServer server, TcpClient client)
     {
         _server = server;
         _client = client;

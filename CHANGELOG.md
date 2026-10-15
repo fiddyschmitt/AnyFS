@@ -58,15 +58,16 @@
   PowerShell slips (`$msi:` in a string, a DWORD compared with the Int32 `0xFFFFFFFF`), and the E2E
   Windows client escapes its commands for Win32-OpenSSH, writes UTF-8, stores the Samba credential
   through RunRemote and treats a late RunRemote acknowledgement as what it is.
-- **AnyFS's own FTP server** is the FTP mount's default (`src/Mounts/Ftp/Builtin`): RFC 959 with
-  UTF-8 names, REST, SIZE, MDTM, MLSD/MLST, STAT, EPSV/EPRT and PORT (to the client's own address
-  only), APPE, ABOR during a transfer, a passive port range handed out round robin, 1 MiB reads
-  and 256 KiB writes against the collection's tree, the same logins and the same root of
-  collections as before. The FubarDev library stays as the mount's `Server` choice (Advanced) for
-  comparison; the unit tests run every FTP test against both, plus active mode, MLSD facts, eight
-  concurrent readers, APPE and REST before STOR, and ABOR. The library dropped connections under
-  concurrent downloads on the lab's slow Windows VM with a null reference inside its RETR handler
-  and has had no release since 2021.
+- **The FTP mount is AnyFS's own server now** (`src/Mounts/Ftp/FtpServer.cs`, `FtpSession.cs`); the
+  FubarDev.FtpServer library is gone, with its package, its trimming roots and the Newtonsoft.Json
+  pin it dragged in. RFC 959 with UTF-8 names, FEAT, REST, SIZE, MDTM, MLSD/MLST, STAT, EPSV/EPRT and
+  PORT (to the client's own address only), APPE, ABOR during a transfer, a passive port range
+  handed out round robin, 1 MiB reads and 256 KiB writes against the collection's tree, the same
+  settings, logins and root of collections as before; listings no longer carry `.` and `..`. New
+  unit tests: active mode with MLSD facts and MDTM, eight concurrent readers, APPE and REST before
+  STOR, ABOR mid-transfer. The library dropped connections under concurrent downloads on the lab's
+  slow Windows VM with a null reference inside its RETR handler, copied files to the data
+  connection a few KB at a time, and has had no release since 2021.
 - **portable-smb-server 0.4.0** (`scripts/go-servers.json`): a lookup by name is one stat instead
   of a listing of the whole folder, and Apple's SMB2 extensions are answered (the `AAPL` create
   context, ReadDirAttr entries), so macOS, which resolves every entry of a folder by name, lists

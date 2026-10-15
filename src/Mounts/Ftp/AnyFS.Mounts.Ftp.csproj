@@ -4,11 +4,6 @@
     <RootNamespace>AnyFS.Mounts.Ftp</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
-    <!-- FubarDev.FtpServer 3.1.2 (MIT): netstandard2.0, DI-based; the App roots its assemblies whole at publish
-         because its command handlers are discovered by assembly scanning (Scrutor), which trimming would defeat -->
-    <PackageReference Include="FubarDev.FtpServer" />
-    <PackageReference Include="Newtonsoft.Json" />
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
   </ItemGroup>
   <ItemGroup>

@@ -211,7 +211,7 @@ public abstract class HostRows
         Console.WriteLine($"{collection} over {kind} from {client.M.Name}: {access.Path ?? access.Url}");
 
         // the tree. Names are compared in NFC: macOS's SMB client hands them back decomposed. An FTP NLST may
-        // list "." and ".." (FubarDev does, like ProFTPD with -a), and davfs2 shows a lost+found of its own at
+        // list "." and ".." (some servers do, like ProFTPD with -a), and davfs2 shows a lost+found of its own at
         // the mount root; neither is an entry of the tree. Nor is an e2e-* folder another row's failed write
         // round trip left behind (that row reported the failure; the sources share the upstream's tree).
         List<string> Names(string rel) => client.ListNames(access, rel)

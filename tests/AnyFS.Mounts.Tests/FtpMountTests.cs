@@ -44,10 +44,7 @@ public class FtpMountTests
         public Guid Id { get; } = Guid.NewGuid();
     }
 
-    /// <summary>Every test runs against both servers: AnyFS's own and the FubarDev library.</summary>
-    public static IEnumerable<object[]> Servers() => [[FtpMountSettings.ServerBuiltin], [FtpMountSettings.ServerLibrary]];
-
-    private async Task<(IMount Mount, TestMountContext Context, int Port)> StartAsync(ISource source, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool readOnly = false, string? user = null, string? password = null, bool anonymous = true, string server = FtpMountSettings.ServerBuiltin)
+    private async Task<(IMount Mount, TestMountContext Context, int Port)> StartAsync(ISource source, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool readOnly = false, string? user = null, string? password = null, bool anonymous = true)
     {
         await source.InitialiseAsync(new TestSourceContext(collection), CancellationToken.None);
         var p = port ?? FreePort();
@@ -57,7 +54,6 @@ public class FtpMountTests
         settings.User = user;
         settings.Password = password;
         settings.AllowAnonymous = anonymous;
-        settings.Server = server;
         var mount = provider.CreateMount(settings, new Collection(collection));
         var context = new TestMountContext(collection, "ftp", logger: new ConsoleLogger(), shareWith: shareWith);
         Console.WriteLine($"[test] starting ftp mount '{collection}' on {p}");
@@ -81,11 +77,10 @@ public class FtpMountTests
     }
 
     [TestMethod]
-    [DynamicData(nameof(Servers))]
     [Timeout(60000)]
-    public async Task AnonymousLoginListsAndReadsWithResume(string server)
+    public async Task AnonymousLoginListsAndReadsWithResume()
     {
-        var (_, _, port) = await StartAsync(Tree(), server: server);
+        var (_, _, port) = await StartAsync(Tree());
         var client = await ConnectAsync(port);
         Console.WriteLine("[test] LIST /");
         var root = await client.ListAsync("/");
@@ -110,11 +105,10 @@ public class FtpMountTests
 
     /// <summary>curl, wget and lftp never send OPTS UTF8 ON; the lab found the unicode name coming back as question marks.</summary>
     [TestMethod]
-    [DynamicData(nameof(Servers))]
     [Timeout(60000)]
-    public async Task NamesAreUtf8ForAClientThatNeverAsks(string server)
+    public async Task NamesAreUtf8ForAClientThatNeverAsks()
     {
-        var (_, _, port) = await StartAsync(Tree(), server: server);
+        var (_, _, port) = await StartAsync(Tree());
         var client = await FtpClient.ConnectAsync(port, optsUtf8: false);
         Assert.AreEqual(230, (await client.LoginAsync("anonymous", "anyfs@test")).Code);
         var names = (await client.ListAsync("/work/unicode")).Select(l => l.Name).ToList();
@@ -123,12 +117,11 @@ public class FtpMountTests
     }
 
     [TestMethod]
-    [DynamicData(nameof(Servers))]
     [Timeout(60000)]
-    public async Task WritesLandUpstreamAndRefusedWhenReadOnly(string server)
+    public async Task WritesLandUpstreamAndRefusedWhenReadOnly()
     {
         var source = Tree();
-        var (_, _, port) = await StartAsync(source, server: server);
+        var (_, _, port) = await StartAsync(source);
         var client = await ConnectAsync(port);
 
         Assert.AreEqual(226, (await client.StoreAsync("/work/new.txt", Encoding.UTF8.GetBytes("stored"))).Code);
@@ -145,7 +138,7 @@ public class FtpMountTests
         Assert.IsTrue((await client.CommandAsync("RMD /work/docs")).Code >= 500, "a non-empty folder stays");
         Assert.IsTrue((await client.CommandAsync("MKD /elsewhere")).Code >= 500, "the server root takes no writes");
 
-        var (_, _, roPort) = await StartAsync(Tree(), "ro", readOnly: true, server: server);
+        var (_, _, roPort) = await StartAsync(Tree(), "ro", readOnly: true);
         var roClient = await ConnectAsync(roPort);
         Assert.IsTrue((await roClient.StoreAsync("/ro/new.txt", Encoding.UTF8.GetBytes("x"))).Code >= 500, "read-only mount refuses STOR");
         Assert.IsTrue((await roClient.CommandAsync("MKD /ro/d")).Code >= 500);
@@ -156,13 +149,12 @@ public class FtpMountTests
     }
 
     [TestMethod]
-    [DynamicData(nameof(Servers))]
     [Timeout(60000)]
-    public async Task NamedUsersSeeTheirCollectionsAndAnonymousTheOpenOnes(string server)
+    public async Task NamedUsersSeeTheirCollectionsAndAnonymousTheOpenOnes()
     {
         var port = FreePort();
-        var (_, context, _) = await StartAsync(Tree(), "private", port, user: "alice", password: "s3cret", anonymous: false, server: server);
-        var (_, _, _) = await StartAsync(new MemorySource().AddFile("b.txt", "b"), "open", port, shareWith: context, server: server);
+        var (_, context, _) = await StartAsync(Tree(), "private", port, user: "alice", password: "s3cret", anonymous: false);
+        var (_, _, _) = await StartAsync(new MemorySource().AddFile("b.txt", "b"), "open", port, shareWith: context);
         Assert.AreEqual(1, context.SharedCount, "one FTP server for both");
 
         var alice = await ConnectAsync(port, "alice", "s3cret");
@@ -181,11 +173,10 @@ public class FtpMountTests
 
     /// <summary>Active mode (PORT: the server connects back to the client), MLSD facts, MDTM, and the modern-client dance of FEAT and OPTS.</summary>
     [TestMethod]
-    [DynamicData(nameof(Servers))]
     [Timeout(60000)]
-    public async Task ActiveModeMlsdAndFacts(string server)
+    public async Task ActiveModeMlsdAndFacts()
     {
-        var (_, _, port) = await StartAsync(Tree(), server: server);
+        var (_, _, port) = await StartAsync(Tree());
         var client = await ConnectAsync(port);
         var feat = await client.CommandAsync("FEAT");
         Assert.AreEqual(211, feat.Code, feat.Text);
@@ -197,9 +188,9 @@ public class FtpMountTests
         var medium = facts.Single(f => f.EndsWith(" medium.bin", StringComparison.Ordinal));
         StringAssert.Contains(medium, "type=file;");
         StringAssert.Contains(medium, "size=100000;");
-        StringAssert.Contains(medium, "modify=20261001120000"); // the library adds .000
+        StringAssert.Contains(medium, "modify=20261001120000;");
         Assert.IsTrue(facts.Any(f => f.Contains("type=dir;", StringComparison.Ordinal) && f.EndsWith(" docs", StringComparison.Ordinal)), string.Join(" | ", facts));
-        StringAssert.StartsWith((await client.CommandAsync("MDTM /work/medium.bin")).Text.Trim(), "20261001120000"); // the library adds .000
+        Assert.AreEqual("20261001120000", (await client.CommandAsync("MDTM /work/medium.bin")).Text.Trim());
 
         // active mode: our own listener, PORT, then LIST and RETR arrive on it
         using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -211,23 +202,19 @@ public class FtpMountTests
         Assert.AreEqual(200, (await client.CommandAsync($"PORT 127,0,0,1,{activePort / 256},{activePort % 256}")).Code);
         CollectionAssert.AreEqual(Medium, await client.RetrieveActiveAsync("/work/medium.bin", listener));
 
-        // a data address that is not the client's own is refused (no bounce attacks); the library connects wherever PORT says
-        if (server == FtpMountSettings.ServerBuiltin)
-        {
-            var bounce = await client.CommandAsync("PORT 10,1,2,3,200,10");
-            Assert.IsTrue(bounce.Code >= 500, $"{bounce.Code} {bounce.Text}");
-        }
+        // a data address that is not the client's own is refused (no bounce attacks)
+        var bounce = await client.CommandAsync("PORT 10,1,2,3,200,10");
+        Assert.IsTrue(bounce.Code >= 500, $"{bounce.Code} {bounce.Text}");
     }
 
     /// <summary>Eight sessions reading the same file at once all get it whole.</summary>
     [TestMethod]
-    [DynamicData(nameof(Servers))]
     [Timeout(120000)]
-    public async Task ConcurrentReadersGetTheWholeFile(string server)
+    public async Task ConcurrentReadersGetTheWholeFile()
     {
         var big = new byte[4 << 20];
         new Random(5).NextBytes(big);
-        var (_, _, port) = await StartAsync(new MemorySource().AddFile("big.bin", big), server: server);
+        var (_, _, port) = await StartAsync(new MemorySource().AddFile("big.bin", big));
         var reads = Enumerable.Range(0, 8).Select(async _ =>
         {
             var client = await FtpClient.ConnectAsync(port);
@@ -288,7 +275,6 @@ public class FtpMountTests
     {
         var provider = new FtpMountProvider();
         Assert.AreEqual(0, provider.Validate(new FtpMountSettings()).Count());
-        Assert.IsTrue(provider.Validate(new FtpMountSettings { Server = "Other" }).Any(m => m.IsError && m.Property == nameof(FtpMountSettings.Server)));
         Assert.IsTrue(provider.Validate(new FtpMountSettings { AllowAnonymous = false }).Any(m => m.IsError), "nobody could log in");
         Assert.IsTrue(provider.Validate(new FtpMountSettings { User = "u" }).Any(m => m.IsError && m.Property == nameof(FtpMountSettings.Password)));
         Assert.IsTrue(provider.Validate(new FtpMountSettings { PassivePortFrom = 50000 }).Any(m => m.IsError), "half a range");

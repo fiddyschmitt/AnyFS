@@ -28,10 +28,6 @@
          POCOs makes ILLink report two framework-internal IL2026s (C++/CLI loader, ASP.NET's JsonOptions
          default resolver) and the ClassInterface/ProgId IL2045s that spike 7 saw; they are expected. -->
     <NoWarn>$(NoWarn);IL2026;IL2045</NoWarn>
-    <!-- FubarDev.FtpServer, Scrutor and Newtonsoft.Json (M3) activate command handlers and decorators by reflection;
-         they are rooted whole above, so nothing they reach for is trimmed, and ILLink's analysis of their own code
-         (IL2046/IL2055/IL2067/IL2070/IL2072) is noise here. Our libraries keep the trim analyzer at build time. -->
-    <NoWarn>$(NoWarn);IL2046;IL2055;IL2067;IL2070;IL2072</NoWarn>
     <!-- AVLN3001: views are constructed in code with their view models, never by the runtime XAML loader -->
     <NoWarn>$(NoWarn);AVLN3001</NoWarn>
     <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
@@ -122,15 +118,10 @@
     <TrimmerRootAssembly Include="Microsoft.Extensions.Logging.Abstractions" />
   </ItemGroup>
 
-  <!-- Mount-provider libraries kept whole (spec 14.1): winfsp.net because the prefix-only mount reaches its internals
-       by reflection; FubarDev.FtpServer because its command handlers are found by assembly scanning (Scrutor). -->
+  <!-- Mount-provider libraries kept whole (spec 14.1): winfsp.net, because the prefix-only mount reaches its internals
+       by reflection. (The FTP server is our own code now; the library that needed rooting is gone.) -->
   <ItemGroup Condition="'$(PublishTrimmed)' == 'true'">
     <TrimmerRootAssembly Include="winfsp-msil" />
-    <TrimmerRootAssembly Include="FubarDev.FtpServer" />
-    <TrimmerRootAssembly Include="FubarDev.FtpServer.Abstractions" />
-    <TrimmerRootAssembly Include="FubarDev.FtpServer.Commands" />
-    <TrimmerRootAssembly Include="Scrutor" />
-    <TrimmerRootAssembly Include="NGettext" />
   </ItemGroup>
 
   <ItemGroup>

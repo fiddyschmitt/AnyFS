@@ -30,21 +30,13 @@ public sealed class FtpMountSettings
 
     [Setting("Public address", Advanced = true, Order = 12, Hint = "The address clients should connect back to in passive mode, when the server is behind NAT (empty: the address they connected to).")]
     public string? PublicAddress { get; set; }
-
-    [Setting("Server", Advanced = true, Order = 20, Choices = [ServerBuiltin, ServerLibrary], Hint = "AnyFS's own FTP server, or the FubarDev.FtpServer library (the server before 0.5, kept for comparison). Mounts on one address and port must agree.")]
-    public string Server { get; set; } = ServerBuiltin;
-
-    public const string ServerBuiltin = "AnyFS";
-
-    public const string ServerLibrary = "FubarDev";
 }
 
 /// <summary>
-/// FTP (type <c>ftp</c>, spec 8.5): one server per bind address and port, every collection a folder under its root,
-/// resume (REST), passive mode with an optional port range, active mode, anonymous or user/password. The server is
-/// AnyFS's own (<see cref="Builtin.BuiltinFtpServer"/>) unless the mount's <c>Server</c> setting picks the
-/// FubarDev.FtpServer library (<see cref="FtpHost"/>), which was the only one before 0.5. Explorer, Finder
-/// (read-only) and xdg-open all open ftp:// URLs, so nothing is mapped (spec 8.9).
+/// FTP (type <c>ftp</c>, spec 8.5) through AnyFS's own server (<see cref="FtpServer"/>): one server per bind address
+/// and port, every collection a folder under its root, resume (REST), passive mode with an optional port range,
+/// active mode, anonymous or user/password. Explorer, Finder (read-only) and xdg-open all open ftp:// URLs, so
+/// nothing is mapped (spec 8.9).
 /// </summary>
 public sealed class FtpMountProvider : IMountProviderPlugin, IValidatable
 {
@@ -110,24 +102,13 @@ public sealed class FtpMountProvider : IMountProviderPlugin, IValidatable
         {
             yield return new ValidationMessage("The public address must be an IP address.", nameof(FtpMountSettings.PublicAddress));
         }
-
-        if (s.Server is not (FtpMountSettings.ServerBuiltin or FtpMountSettings.ServerLibrary))
-        {
-            yield return new ValidationMessage($"The server is {FtpMountSettings.ServerBuiltin} or {FtpMountSettings.ServerLibrary}.", nameof(FtpMountSettings.Server));
-        }
     }
 }
 
 internal sealed class FtpMount(FtpMountSettings settings, ICollectionInfo collection) : IMount
 {
-    private ISharedLease<IFtpCollectionServer>? _lease;
+    private ISharedLease<FtpServer>? _lease;
     private string? _registeredName;
-
-    /// <summary>The server a mount asks for: the library when the setting says so, AnyFS's own otherwise.</summary>
-    private static async Task<IFtpCollectionServer> StartServerAsync(string server, IPAddress address, int port, FtpPassiveOptions passive, Microsoft.Extensions.Logging.ILogger logger, CancellationToken ct)
-        => server == FtpMountSettings.ServerLibrary
-            ? await FtpHost.StartAsync(address, port, passive, logger, ct).ConfigureAwait(false)
-            : await Builtin.BuiltinFtpServer.StartAsync(address, port, passive, logger, ct).ConfigureAwait(false);
 
     public IReadOnlyList<AccessPath> AccessPaths { get; private set; } = [];
 
@@ -152,11 +133,8 @@ internal sealed class FtpMount(FtpMountSettings settings, ICollectionInfo collec
         }
 
         var passive = new FtpPassiveOptions(settings.PassivePortFrom, settings.PassivePortTo, IPAddress.TryParse(settings.PublicAddress?.Trim(), out var publicAddress) ? publicAddress : null);
-        var server = settings.Server == FtpMountSettings.ServerLibrary ? FtpMountSettings.ServerLibrary : FtpMountSettings.ServerBuiltin;
-        // the key carries the server: two mounts asking for different servers on one port get two leases, and the
-        // second fails to bind with a clear message instead of silently joining the other
-        var key = $"ftp:{server}:{address}:{settings.Port}";
-        _lease = await context.AcquireSharedAsync(key, token => StartServerAsync(server, address, settings.Port, passive, context.Logger, token), ct).ConfigureAwait(false);
+        var key = $"ftp:{address}:{settings.Port}";
+        _lease = await context.AcquireSharedAsync(key, token => FtpServer.StartAsync(address, settings.Port, passive, context.Logger, token), ct).ConfigureAwait(false);
         try
         {
             _lease.Value.Register(new FtpCollection(collection.Name, fs, context.Stats, user, settings.Password, settings.AllowAnonymous));

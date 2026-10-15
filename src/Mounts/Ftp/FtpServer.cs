@@ -1,20 +1,28 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
+using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 
-namespace AnyFS.Mounts.Ftp.Builtin;
+namespace AnyFS.Mounts.Ftp;
+
+/// <summary>One collection served by an FTP server, with the login that may see it.</summary>
+internal sealed record FtpCollection(string Name, IVirtualFileSystem Fs, IMountStatsSink Stats, string? User, string? Password, bool AllowAnonymous);
+
+/// <summary>Passive mode: the port range (both ends, or neither) and the address advertised to clients behind NAT.</summary>
+internal sealed record FtpPassiveOptions(int? MinPort, int? MaxPort, IPAddress? PublicAddress);
 
 /// <summary>
 /// AnyFS's own FTP server (spec 8.5): RFC 959 with what today's clients use on top of it (UTF-8 names,
 /// REST, SIZE, MDTM, MLSD/MLST, EPSV/EPRT), one process-wide listener per bind address and port shared by
 /// every collection mounted there, a login seeing the collections it is entitled to (a named user those
 /// configured with it, anonymous those that allow it), every transfer straight through the collection's
-/// <see cref="Sdk.IVirtualFileSystem"/> so the read-only layers and the stats apply. It exists because the
-/// library it replaces as the default (<see cref="FtpHost"/>) dropped connections under concurrent downloads
-/// on a slow machine with a null reference inside its RETR handler, and has had no release since 2021.
+/// <see cref="IVirtualFileSystem"/> so the read-only layers and the stats apply. It replaced the FubarDev.FtpServer
+/// library on 15-Oct-2026: that library dropped connections under concurrent downloads on a slow machine with a null
+/// reference inside its RETR handler, copied files to the data connection a few KB at a time, and has had no release
+/// since 2021.
 /// </summary>
-internal sealed class BuiltinFtpServer : IFtpCollectionServer
+internal sealed class FtpServer : IAsyncDisposable
 {
     private readonly TcpListener _listener;
     private readonly ILogger _logger;
@@ -23,7 +31,7 @@ internal sealed class BuiltinFtpServer : IFtpCollectionServer
     private readonly CancellationTokenSource _stopping = new();
     private Task? _accepting;
 
-    private BuiltinFtpServer(IPAddress address, int port, FtpPassiveOptions passive, ILogger logger)
+    private FtpServer(IPAddress address, int port, FtpPassiveOptions passive, ILogger logger)
     {
         Address = address;
         Port = port;
@@ -47,10 +55,10 @@ internal sealed class BuiltinFtpServer : IFtpCollectionServer
 
     public int SessionCount => _sessions.Count;
 
-    public static Task<BuiltinFtpServer> StartAsync(IPAddress address, int port, FtpPassiveOptions passive, ILogger logger, CancellationToken ct)
+    public static Task<FtpServer> StartAsync(IPAddress address, int port, FtpPassiveOptions passive, ILogger logger, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        var server = new BuiltinFtpServer(address, port, passive, logger);
+        var server = new FtpServer(address, port, passive, logger);
         try
         {
             server._listener.Start(64);
