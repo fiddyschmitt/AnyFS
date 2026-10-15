@@ -130,11 +130,21 @@ Our own RFC 4918 server with class 2 locks (held in memory, so a restart forgets
 
 Each collection is a folder under the server root. Explorer, Finder (read-only) and file managers
 open `ftp://<host>:<port>/<collection>/`; `curl`, `lftp` and friends resume with `REST`. Passive
-mode uses any free port unless a range is set (Advanced), with a public address for servers
-behind NAT. Anonymous logins see the collections that allow them; a named login sees the
-collections configured with that user name. Names are UTF-8 from the first byte, whether or not
-a client sends `OPTS UTF8 ON` (curl, wget and lftp don't); listings include `.` and `..`, as many
-servers' do.
+mode uses any free port unless a range is set (Advanced), handed out round robin, with a public
+address for servers behind NAT; active mode (`PORT`, `EPRT`) connects back to the client's own
+address only, on a port of 1024 or above. Anonymous logins see the collections that allow them; a
+named login sees the collections configured with that user name. Names are UTF-8 from the first
+byte, whether or not a client sends `OPTS UTF8 ON` (curl, wget and lftp don't).
+
+The server is AnyFS's own: RFC 959 with what today's clients use on top (`FEAT`, `OPTS UTF8`,
+`REST STREAM`, `SIZE`, `MDTM`, `MLSD`/`MLST`, `STAT`, `EPSV`/`EPRT`, `APPE`, `ABOR` during a
+transfer), one listener per bind address and port shared by the collections mounted there, and
+every transfer straight through the collection's tree, 1 MiB reads and 256 KiB writes at a time,
+so the read-only layers and the stats apply. `TYPE A` is accepted and transfers bytes as they are
+(every client of note asks for `TYPE I` before a file). There is no TLS. The **Server** setting
+(Advanced) can pick the FubarDev.FtpServer library instead, the server before 0.5, kept for
+comparison; it lists `.` and `..`, writes `modify` facts with milliseconds, and connects an active
+data connection to whatever address `PORT` names. Mounts sharing a port must agree on the server.
 
 ## HTTP (all OSes)
 

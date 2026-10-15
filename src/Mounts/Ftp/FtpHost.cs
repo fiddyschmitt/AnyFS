@@ -20,7 +20,7 @@ internal sealed record FtpPassiveOptions(int? MinPort, int? MaxPort, IPAddress? 
 /// One FubarDev FTP server per bind address and port (spec 8.5), shared by every collection mounted there. A login
 /// sees the collections it is entitled to: a named user those configured with that user, anonymous those that allow it.
 /// </summary>
-internal sealed class FtpHost : IAsyncDisposable
+internal sealed class FtpHost : IFtpCollectionServer
 {
     private readonly ServiceProvider _services;
     private readonly IFtpServerHost _host;

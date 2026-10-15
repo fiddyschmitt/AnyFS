@@ -58,6 +58,21 @@
   PowerShell slips (`$msi:` in a string, a DWORD compared with the Int32 `0xFFFFFFFF`), and the E2E
   Windows client escapes its commands for Win32-OpenSSH, writes UTF-8, stores the Samba credential
   through RunRemote and treats a late RunRemote acknowledgement as what it is.
+- **AnyFS's own FTP server** is the FTP mount's default (`src/Mounts/Ftp/Builtin`): RFC 959 with
+  UTF-8 names, REST, SIZE, MDTM, MLSD/MLST, STAT, EPSV/EPRT and PORT (to the client's own address
+  only), APPE, ABOR during a transfer, a passive port range handed out round robin, 1 MiB reads
+  and 256 KiB writes against the collection's tree, the same logins and the same root of
+  collections as before. The FubarDev library stays as the mount's `Server` choice (Advanced) for
+  comparison; the unit tests run every FTP test against both, plus active mode, MLSD facts, eight
+  concurrent readers, APPE and REST before STOR, and ABOR. The library dropped connections under
+  concurrent downloads on the lab's slow Windows VM with a null reference inside its RETR handler
+  and has had no release since 2021.
+- **portable-smb-server 0.4.0** (`scripts/go-servers.json`): a lookup by name is one stat instead
+  of a listing of the whole folder, and Apple's SMB2 extensions are answered (the `AAPL` create
+  context, ReadDirAttr entries), so macOS, which resolves every entry of a folder by name, lists
+  the lab's 5,000-file folder from a remote anyfs in about 8 s with or without attributes where
+  it never finished within two minutes before (Samba without `vfs_fruit`: 10 s and 48 s from the
+  same Mac). The ten Mac-over-SMB rows that failed by timeout pass.
 - **Every lab machine is a client of every host**: the E2E rows reach each host's mounts from the
   host itself, from the Linux upstream, and now from the Windows and macOS machines too (Windows
   `net use /TCPPORT` and WebClient against the Linux and Mac hosts, `mount_smbfs` and
