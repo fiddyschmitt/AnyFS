@@ -66,12 +66,11 @@ Set-NetFirewallProfile -All -Enabled False
 # The same MSI anyfs.exe carries for its Install button; its hash is checked against scripts/winfsp.json
 # first. WinFsp needs no restart.
 $msi = "\\vboxsvr\winfsp\$env:WINFSP_MSI"
-if (-not (Test-Path $msi)) { throw "No WinFsp installer at $msi: run scripts\fetch-winfsp.ps1 on the PC first" }
+if (-not (Test-Path $msi)) { throw "No WinFsp installer at ${msi}: run scripts\fetch-winfsp.ps1 on the PC first" }
 $hash = (Get-FileHash $msi -Algorithm SHA256).Hash
 if ($hash -ne $env:WINFSP_SHA256) { throw "$msi has SHA-256 $hash, scripts/winfsp.json says $env:WINFSP_SHA256" }
 $wantVersion = if ($env:WINFSP_MSI -match '(\d+\.\d+\.\d+)') { $matches[1] } else { throw "no version in $env:WINFSP_MSI" }
 $winfspDll = Join-Path ${env:ProgramFiles(x86)} 'WinFsp\bin\winfsp-x64.dll'
-$haveVersion = if (Test-Path $winfspDll) { (Get-Item $winfspDll).VersionInfo.FileVersion -replace '\..*?$', '' } else { '' }
 $haveVersion = if (Test-Path $winfspDll) { ((Get-Item $winfspDll).VersionInfo.FileVersion -split '\.')[0..2] -join '.' } else { '' }
 if ($haveVersion -ne $wantVersion) {
     $log = 'C:\anyfs-lab\winfsp-install.log'
@@ -83,7 +82,9 @@ if ($haveVersion -ne $wantVersion) {
 # Windows' WebDAV redirector is off by default and caps files at 50 MB; the WebDAV rows need both.
 Set-Service WebClient -StartupType Automatic
 $webclient = 'HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters'
-if ((Get-ItemProperty $webclient -Name FileSizeLimitInBytes -ErrorAction SilentlyContinue).FileSizeLimitInBytes -ne 0xFFFFFFFF) {
+# (the DWORD reads back as 4294967295 or -1, and the literal 0xFFFFFFFF is the Int32 -1)
+$cap = (Get-ItemProperty $webclient -Name FileSizeLimitInBytes -ErrorAction SilentlyContinue).FileSizeLimitInBytes
+if ($cap -ne 4294967295 -and $cap -ne -1) {
     Set-ItemProperty $webclient -Name FileSizeLimitInBytes -Type DWord -Value 0xFFFFFFFF
     Restart-Service WebClient -ErrorAction SilentlyContinue
 }

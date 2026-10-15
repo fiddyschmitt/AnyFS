@@ -169,9 +169,10 @@ public abstract class HostRows
 
         // the tree. Names are compared in NFC: macOS's SMB client hands them back decomposed. An FTP NLST may
         // list "." and ".." (FubarDev does, like ProFTPD with -a), and davfs2 shows a lost+found of its own at
-        // the mount root; neither is an entry of the tree.
+        // the mount root; neither is an entry of the tree. Nor is an e2e-* folder another row's failed write
+        // round trip left behind (that row reported the failure; the sources share the upstream's tree).
         List<string> Names(string rel) => client.ListNames(access, rel)
-            .Where(n => n is not "." and not ".." and not "lost+found")
+            .Where(n => n is not "." and not ".." and not "lost+found" && !n.StartsWith("e2e-", StringComparison.Ordinal))
             .Select(n => n.Normalize(System.Text.NormalizationForm.FormC))
             .ToList();
         var root = Names(prefix);
@@ -180,7 +181,9 @@ public abstract class HostRows
         var unicode = Names(Rel("unicode"));
         CollectionAssert.AreEquivalent(new[] { "ünïcödé ✓ 日本語.txt" }, unicode, $"unicode name; the client saw: {string.Join(", ", unicode.Select(n => n + " [" + string.Join(" ", n.Select(c => ((int)c).ToString("x4"))) + "]"))}");
         CollectionAssert.AreEquivalent(new[] { "a b c.txt" }, Names(Rel("spaces")), "a name with spaces");
-        Assert.AreEqual(new string('n', 200) + ".txt", Names(Rel("long")).Single(), "a 204-character name");
+        var longNames = Names(Rel("long"));
+        Assert.AreEqual(1, longNames.Count, "the long/ folder holds one name; the client saw: " + string.Join(" | ", longNames));
+        Assert.AreEqual(new string('n', 200) + ".txt", longNames[0], "a 204-character name");
         Assert.AreEqual("deep.txt", Names(Rel("nested/a/b/c")).Single(), "nesting");
         Assert.AreEqual(0, Names(Rel("emptydir")).Count, "an empty folder");
 

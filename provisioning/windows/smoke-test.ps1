@@ -26,8 +26,9 @@ Check "WinFsp installed ($(if (Test-Path $winfspDll) { (Get-Item $winfspDll).Ver
     (Test-Path $winfspDll) -and (Get-Service WinFsp.Launcher -ErrorAction SilentlyContinue).Status -eq 'Running'
 }
 Check 'WebClient running, file size cap lifted' {
-    (Get-Service WebClient).Status -eq 'Running' -and
-    (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters').FileSizeLimitInBytes -eq 0xFFFFFFFF
+    # the DWORD 0xFFFFFFFF reads back as 4294967295 (or -1), and the literal 0xFFFFFFFF is the Int32 -1
+    $cap = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters').FileSizeLimitInBytes
+    (Get-Service WebClient).Status -eq 'Running' -and ($cap -eq 4294967295 -or $cap -eq -1)
 }
 Check 'the SMB client can use a port other than 445 (Windows 11 24H2+, net use /TCPPORT)' { $os.BuildNumber -ge 26100 }
 Check "the PC's publish folder at \\vboxsvr\publish" { Test-Path '\\vboxsvr\publish' }

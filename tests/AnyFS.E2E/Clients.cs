@@ -110,10 +110,12 @@ public abstract class PosixClient(Machine machine) : Client(machine)
     {
         var name = "e2e-" + Guid.NewGuid().ToString("N")[..8];
         (int Code, string Output) result;
+        string cleanup;
         if (!access.IsUrl)
         {
             var d = PathOf(access, relDir) + "/" + name;
             result = M.Run($"set -e; mkdir {Q(d)}; printf hello > {Q(d + "/a.txt")}; mv {Q(d + "/a.txt")} {Q(d + "/b.txt")}; [ \"$(cat {Q(d + "/b.txt")})\" = hello ]; rm {Q(d + "/b.txt")}; rmdir {Q(d)}; echo ok");
+            cleanup = $"rm -rf {Q(d)}";
         }
         else if (access.Url!.StartsWith("ftp://", StringComparison.Ordinal))
         {
@@ -121,6 +123,8 @@ public abstract class PosixClient(Machine machine) : Client(machine)
             var dir = UrlOf(access, relDir).TrimEnd('/') + "/";
             var abs = FtpAbsolutePath(access, relDir) + "/" + name;
             result = M.Run($"printf hello > /tmp/{name} && curl -sfS -Q {Q("MKD " + abs)} {Q(dir)} >/dev/null && curl -sfS -T /tmp/{name} {Q(dir + name + "/a.txt")} && curl -sfS -Q {Q("RNFR " + abs + "/a.txt")} -Q {Q("RNTO " + abs + "/b.txt")} {Q(dir)} >/dev/null && [ \"$(curl -sfS {Q(dir + name + "/b.txt")})\" = hello ] && curl -sfS -Q {Q("DELE " + abs + "/b.txt")} {Q(dir)} >/dev/null && curl -sfS -Q {Q("RMD " + abs)} {Q(dir)} >/dev/null && rm -f /tmp/{name} && echo ok");
+            // a * prefix makes curl carry on past a quote command that fails (the file may be a.txt, b.txt or neither)
+            cleanup = $"curl -s -Q {Q("*DELE " + abs + "/a.txt")} -Q {Q("*DELE " + abs + "/b.txt")} -Q {Q("*RMD " + abs)} {Q(dir)} >/dev/null 2>&1; rm -f /tmp/{name}";
         }
         else
         {
@@ -129,7 +133,14 @@ public abstract class PosixClient(Machine machine) : Client(machine)
         }
 
         detail = result.Output;
-        return result.Code == 0 && result.Output.Contains("ok");
+        var ok = result.Code == 0 && result.Output.Contains("ok");
+        if (!ok)
+        {
+            // best effort, so a failed step leaves nothing behind for the rows after this one (the sources share trees)
+            M.Run(cleanup);
+        }
+
+        return ok;
     }
 
     public override IReadOnlyList<string> ConcurrentSha256(Access access, string relFile, int readers)
@@ -289,20 +300,53 @@ public sealed class WindowsClient(Machine machine) : Client(machine)
 
         var url = UrlOf(access, relDir) + "/";
         return url.StartsWith("ftp://", StringComparison.Ordinal)
-            ? Lines(M.Sh($"curl.exe -sf --list-only {Q(url)}"))
-            : JsonNames(M.Sh($"curl.exe -sf {Q(url + "?format=json")}"));
+            ? Lines(CurlWithOneRetry($"--list-only {Q(url)}"))
+            : JsonNames(CurlWithOneRetry(Q(url + "?format=json")));
     }
+
+    /// <summary>
+    /// curl.exe with the given arguments, its output returned. A failure is thrown with curl's exit code and error line
+    /// (PowerShell's own exit code says nothing more than "failed"); before that, the command gets one more try a second
+    /// later, with the first failure written to the test output. The FTP rows run from the Windows machine itself have
+    /// seen a transient failure about once in several hundred data connections; a repeat is recorded, not fatal.
+    /// </summary>
+    private string CurlWithOneRetry(string arguments, string before = "", string after = "", int timeoutSeconds = 120)
+    {
+        // stderr is kept apart from the output: with 2>&1 PowerShell would hand a stray warning line of curl's back as
+        // part of a listing
+        var command = $"{before}$e = @(); $o = @(curl.exe -sfS {arguments} 2>&1 | ForEach-Object {{ if ($_ -is [Management.Automation.ErrorRecord]) {{ $e += $_.ToString() }} else {{ $_ }} }}); if ($LASTEXITCODE -ne 0) {{ throw \"curl exit ${{LASTEXITCODE}}: $($e -join ' / ')\" }}; {(after.Length == 0 ? "$o" : after)}";
+        var (code, output) = M.Run(command, timeoutSeconds);
+        if (code == 0)
+        {
+            return output;
+        }
+
+        Console.WriteLine($"curl retry after: {output.Trim()}");
+        Thread.Sleep(1000);
+        return M.Sh(command, timeoutSeconds);
+    }
+
+    /// <summary>
+    /// PowerShell that leaves the SHA-256 of the file at <paramref name="pathLiteral"/> (a quoted path or a variable) in
+    /// <c>$h</c>, reading 64 KiB at a time like sha256sum and shasum do. Get-FileHash reads 4 KB at a time, which is a
+    /// benchmark of the client's round trips rather than of the mount (and the WinFsp read-ahead exists for that case).
+    /// </summary>
+    private static string HashInto(string pathLiteral)
+        => $"$fs = New-Object IO.FileStream({pathLiteral}, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite, 65536); try {{ $h = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($fs)) -replace '-', '').ToLower() }} finally {{ $fs.Close() }}";
+
+    private const string ToTempFile = "$t = [IO.Path]::GetTempFileName(); ";
+    private const string HashTempFile = "(Get-FileHash -LiteralPath $t -Algorithm SHA256).Hash.ToLower(); Remove-Item $t";
 
     public override string Sha256(Access access, string relFile)
         => access.IsUrl
-            ? M.Sh($"$t = [IO.Path]::GetTempFileName(); curl.exe -sf -o $t {Q(UrlOf(access, relFile))}; if ($LASTEXITCODE -ne 0) {{ throw 'curl failed' }}; (Get-FileHash -LiteralPath $t -Algorithm SHA256).Hash.ToLower(); Remove-Item $t", 600).Trim()
-            : M.Sh($"(Get-FileHash -LiteralPath {Q(PathOf(access, relFile))} -Algorithm SHA256).Hash.ToLower()", 600).Trim();
+            ? CurlWithOneRetry($"-o $t {Q(UrlOf(access, relFile))}", ToTempFile, HashTempFile, 600).Trim()
+            : M.Sh($"{HashInto(Q(PathOf(access, relFile)))}; $h", 600).Trim();
 
     public override string Sha256Range(Access access, string relFile, long offset, int length)
     {
         if (access.IsUrl)
         {
-            return M.Sh($"$t = [IO.Path]::GetTempFileName(); curl.exe -sf -r {offset}-{offset + length - 1} -o $t {Q(UrlOf(access, relFile))}; if ($LASTEXITCODE -ne 0) {{ throw 'curl failed' }}; (Get-FileHash -LiteralPath $t -Algorithm SHA256).Hash.ToLower(); Remove-Item $t").Trim();
+            return CurlWithOneRetry($"-r {offset}-{offset + length - 1} -o $t {Q(UrlOf(access, relFile))}", ToTempFile, HashTempFile).Trim();
         }
 
         return M.Sh($"$fs = [IO.File]::OpenRead({Q(PathOf(access, relFile))}); $fs.Position = {offset}; $b = New-Object byte[] {length}; $n = 0; while ($n -lt {length}) {{ $r = $fs.Read($b, $n, {length} - $n); if ($r -le 0) {{ break }}; $n += $r }}; $fs.Close(); ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($b, 0, $n)) -replace '-', '').ToLower()").Trim();
@@ -312,17 +356,23 @@ public sealed class WindowsClient(Machine machine) : Client(machine)
     {
         var name = "e2e-" + Guid.NewGuid().ToString("N")[..8];
         (int Code, string Output) result;
+        string cleanup;
         if (!access.IsUrl)
         {
             var d = PathOf(access, relDir) + "\\" + name;
-            result = M.Run($"$ErrorActionPreference = 'Stop'; New-Item -ItemType Directory -LiteralPath {Q(d)} | Out-Null; [IO.File]::WriteAllText({Q(d + "\\a.txt")}, 'hello'); Rename-Item -LiteralPath {Q(d + "\\a.txt")} 'b.txt'; if ([IO.File]::ReadAllText({Q(d + "\\b.txt")}) -ne 'hello') {{ throw 'read back differs' }}; Remove-Item -LiteralPath {Q(d + "\\b.txt")}; Remove-Item -LiteralPath {Q(d)}; 'ok'");
+            // (Windows PowerShell's New-Item has no -LiteralPath; the names here carry no wildcard characters)
+            result = M.Run($"$ErrorActionPreference = 'Stop'; New-Item -ItemType Directory -Path {Q(d)} | Out-Null; [IO.File]::WriteAllText({Q(d + "\\a.txt")}, 'hello'); Rename-Item -LiteralPath {Q(d + "\\a.txt")} 'b.txt'; if ([IO.File]::ReadAllText({Q(d + "\\b.txt")}) -ne 'hello') {{ throw 'read back differs' }}; Remove-Item -LiteralPath {Q(d + "\\b.txt")}; Remove-Item -LiteralPath {Q(d)}; 'ok'");
+            cleanup = $"Remove-Item -LiteralPath {Q(d)} -Recurse -Force -ErrorAction SilentlyContinue";
         }
         else if (access.Url!.StartsWith("ftp://", StringComparison.Ordinal))
         {
-            // curl runs -Q commands at the login directory, so they take absolute paths; -T uploads to the URL's folder
+            // curl runs -Q commands at the login directory, so they take absolute paths; -T uploads to the URL's folder.
+            // -S keeps curl's own error line, and the exit code says which step failed (curl's manual lists them).
             var dir = UrlOf(access, relDir).TrimEnd('/') + "/";
             var abs = FtpAbsolutePath(access, relDir) + "/" + name;
-            result = M.Run($"$ErrorActionPreference = 'Stop'; $t = [IO.Path]::GetTempFileName(); [IO.File]::WriteAllText($t, 'hello'); curl.exe -sf -Q {Q("MKD " + abs)} {Q(dir)} | Out-Null; if ($LASTEXITCODE -ne 0) {{ throw 'MKD failed' }}; curl.exe -sf -T $t {Q(dir + name + "/a.txt")}; if ($LASTEXITCODE -ne 0) {{ throw 'STOR failed' }}; curl.exe -sf -Q {Q("RNFR " + abs + "/a.txt")} -Q {Q("RNTO " + abs + "/b.txt")} {Q(dir)} | Out-Null; if ($LASTEXITCODE -ne 0) {{ throw 'RNTO failed' }}; $back = curl.exe -sf {Q(dir + name + "/b.txt")}; if ($back -ne 'hello') {{ throw \"read back: $back\" }}; curl.exe -sf -Q {Q("DELE " + abs + "/b.txt")} {Q(dir)} | Out-Null; curl.exe -sf -Q {Q("RMD " + abs)} {Q(dir)} | Out-Null; Remove-Item $t; 'ok'");
+            result = M.Run($"$ErrorActionPreference = 'Stop'; $t = [IO.Path]::GetTempFileName(); [IO.File]::WriteAllText($t, 'hello'); $o = curl.exe -sfS -Q {Q("MKD " + abs)} {Q(dir)} 2>&1; if ($LASTEXITCODE -ne 0) {{ throw \"MKD failed (curl exit $LASTEXITCODE): $o\" }}; $o = curl.exe -sfS -T $t {Q(dir + name + "/a.txt")} 2>&1; if ($LASTEXITCODE -ne 0) {{ throw \"STOR failed (curl exit $LASTEXITCODE): $o\" }}; $o = curl.exe -sfS -Q {Q("RNFR " + abs + "/a.txt")} -Q {Q("RNTO " + abs + "/b.txt")} {Q(dir)} 2>&1; if ($LASTEXITCODE -ne 0) {{ throw \"RNTO failed (curl exit $LASTEXITCODE): $o\" }}; $back = curl.exe -sf {Q(dir + name + "/b.txt")}; if ($back -ne 'hello') {{ throw \"read back: $back\" }}; curl.exe -sf -Q {Q("DELE " + abs + "/b.txt")} {Q(dir)} | Out-Null; curl.exe -sf -Q {Q("RMD " + abs)} {Q(dir)} | Out-Null; Remove-Item $t; 'ok'");
+            // a * prefix makes curl carry on past a quote command that fails (the file may be a.txt, b.txt or neither)
+            cleanup = $"curl.exe -s -Q {Q("*DELE " + abs + "/a.txt")} -Q {Q("*DELE " + abs + "/b.txt")} -Q {Q("*RMD " + abs)} {Q(dir)} 2>&1 | Out-Null";
         }
         else
         {
@@ -331,14 +381,21 @@ public sealed class WindowsClient(Machine machine) : Client(machine)
         }
 
         detail = result.Output;
-        return result.Code == 0 && result.Output.Contains("ok");
+        var ok = result.Code == 0 && result.Output.Contains("ok");
+        if (!ok)
+        {
+            // best effort, so a failed step leaves nothing behind for the rows after this one (the sources share trees)
+            M.Run(cleanup);
+        }
+
+        return ok;
     }
 
     public override IReadOnlyList<string> ConcurrentSha256(Access access, string relFile, int readers)
     {
         var block = access.IsUrl
             ? $"param($u) $t = [IO.Path]::GetTempFileName(); curl.exe -sf -o $t $u; $h = (Get-FileHash -LiteralPath $t -Algorithm SHA256).Hash.ToLower(); Remove-Item $t; $h"
-            : "param($p) (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()";
+            : $"param($p) {HashInto("$p")}; $h";
         var arg = access.IsUrl ? UrlOf(access, relFile) : PathOf(access, relFile);
         return Lines(M.Sh($"$jobs = 1..{readers} | ForEach-Object {{ Start-Job -ScriptBlock {{ {block} }} -ArgumentList {Q(arg)} }}; $jobs | Wait-Job -Timeout 500 | Out-Null; $jobs | Receive-Job; $jobs | Remove-Job -Force", 600));
     }
@@ -347,7 +404,7 @@ public sealed class WindowsClient(Machine machine) : Client(machine)
     {
         var one = access.IsUrl
             ? $"$t = [IO.Path]::GetTempFileName(); curl.exe -sf -o $t {Q(UrlOf(access, relFile))}; $h = (Get-FileHash -LiteralPath $t -Algorithm SHA256).Hash.ToLower(); Remove-Item $t"
-            : $"$h = (Get-FileHash -LiteralPath {Q(PathOf(access, relFile))} -Algorithm SHA256).Hash.ToLower()";
+            : HashInto(Q(PathOf(access, relFile)));
         var lines = Lines(M.Sh($"$sw = [Diagnostics.Stopwatch]::StartNew(); {one}; $sw.Stop(); $h; $sw.Elapsed.TotalSeconds.ToString([Globalization.CultureInfo]::InvariantCulture)", 600));
         return (lines[0], ParseSeconds(lines[1]));
     }

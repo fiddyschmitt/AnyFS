@@ -9,7 +9,7 @@ namespace AnyFS.E2E;
 /// covers execution only, not the channel open that a tired machine can hang on, as the ft lab found), file
 /// upload and download. Windows machines run PowerShell; the others a POSIX shell.
 /// </summary>
-public sealed class Machine : IDisposable
+public sealed partial class Machine : IDisposable
 {
     private readonly ConnectionInfo _connection;
     private readonly SshClient _ssh;
@@ -58,6 +58,15 @@ public sealed class Machine : IDisposable
     /// <summary>Runs a command and returns its exit code and output (stdout then stderr); -1 and a note when it overran the bound.</summary>
     public (int Code, string Output) Run(string command, int timeoutSeconds = 120)
     {
+        if (IsWindows)
+        {
+            // Win32-OpenSSH hands the command to powershell.exe on its command line, where the Windows argument rules
+            // strip a plain double quote: escape each one (and double any backslashes right before it) so PowerShell
+            // sees the command as written. And PowerShell writes to sshd's pipe in the OEM code page unless told
+            // otherwise; the rows compare unicode names.
+            command = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " + WindowsCommandLineQuotes().Replace(command, "$1$1\\\"");
+        }
+
         var budget = TimeSpan.FromSeconds(timeoutSeconds);
         var cmd = _ssh.CreateCommand(command);
         cmd.CommandTimeout = budget;
@@ -157,4 +166,8 @@ public sealed class Machine : IDisposable
     }
 
     private static string Truncate(string command) => command.Length <= 160 ? command : command[..160] + "...";
+
+    /// <summary>A double quote and the backslashes right before it (CommandLineToArgvW's rule).</summary>
+    [System.Text.RegularExpressions.GeneratedRegex("(\\\\*)\"")]
+    private static partial System.Text.RegularExpressions.Regex WindowsCommandLineQuotes();
 }

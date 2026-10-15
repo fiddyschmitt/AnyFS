@@ -4,7 +4,7 @@
 
 - **The test lab** (`provisioning/`, spec 16.2): `settings.yml`, a Vagrantfile for the VirtualBox
   VMs (`anyfs-debian-2` the upstream at 192.168.0.96, `anyfs-debian-1` the Linux host at .95,
-  `anyfs-win11-1` the Windows host at .97), `ansible_local` for the Linux machines (Debian kept
+  `anyfs-win11-1` the Windows host at .99), `ansible_local` for the Linux machines (Debian kept
   current, the test account, the lab key, cifs/davfs2/curl/lftp clients; the upstream's sshd with
   passwords and keyboard-interactive, a Samba share of the fixture and a key pair for the SSHFS
   source; fuse3 on the host), a PowerShell provisioner for Windows (OpenSSH, the pinned WinFsp
@@ -49,6 +49,19 @@
   NuGet.org when `NUGET_API_KEY` is set. `build.yml` now fetches the bundled tools before
   publishing, and `scripts/publish.ps1` takes `-Version`. The smoke script runs `plugin check` on
   the sample plugin.
+- **WinFsp read-ahead**: the Windows rows of the lab showed a 4 KB sequential reader (Get-FileHash)
+  getting 17 MiB/s through a WinFsp mount on the VM, one round trip to the source per read, because
+  WinFsp passes application reads through as they are (its full caching mode was tried and rejected:
+  it served a file's old contents after the source changed). A handle that reads on from where it
+  stopped now gets 1 MiB from the source at a time; nothing outlives the handle. The Windows lab
+  machine moved to 192.168.0.99 (`settings.yml`), the Windows provisioner and smoke test lost two
+  PowerShell slips (`$msi:` in a string, a DWORD compared with the Int32 `0xFFFFFFFF`), and the E2E
+  Windows client escapes its commands for Win32-OpenSSH, writes UTF-8, stores the Samba credential
+  through RunRemote and treats a late RunRemote acknowledgement as what it is.
+- **FTP downloads read the source 1 MiB at a time**: the Windows rows' Mirror of the upstream's
+  Samba share served 3.5 MiB/s over FTP against 23 over HTTP, because the FTP library copies a file
+  to the data connection a few KB at a time and each piece was a round trip to the share. The
+  stream handed to it is now buffered.
 
 ## Unreleased (milestone 4: SSHFS, prompts, Import/Export)
 

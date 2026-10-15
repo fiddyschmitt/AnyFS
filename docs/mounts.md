@@ -38,6 +38,15 @@ Explorer's first open still takes two to four seconds. The drive letter setting 
 entirely: the letter opens in about 0.1 s from a fresh program, because a letter resolves without
 the network providers.
 
+WinFsp hands each application read to anyfs as it is: the volume runs with a one-second file-info
+timeout rather than WinFsp's full caching mode, because that mode keeps serving a file's old
+contents and size after it changed on the source (a reopen must see the change). A program that
+reads sequentially with a small buffer (Get-FileHash and .NET's default FileStream read 4 KB at a
+time) would then pay one round trip per read, so each handle that reads on from where it stopped
+gets 1 MiB from the source at a time and is served from that until it runs out, seeks or writes.
+Nothing outlives the handle. On the development PC that takes 4 KB reads from about 60 MiB/s to
+the source's own speed; a program that reads 64 KB or more at a time was already there.
+
 The WinFsp driver is a separate install with no reboot. Without it the tile is red ("The WinFsp
 driver is not installed.") and shows **Install WinFsp driver**: the WinFsp 2.1.25156 installer
 that Windows builds of anyfs carry runs silently (`msiexec /i winfsp.msi /qn /norestart`, so the

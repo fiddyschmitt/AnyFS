@@ -13,6 +13,9 @@ namespace AnyFS.Mounts.Tests;
 public class WinFspMountTests
 {
     private static readonly byte[] Medium = Enumerable.Range(0, 100_000).Select(i => (byte)(i * 31 % 253)).ToArray();
+
+    // longer than two read-ahead fills (1 MiB each), with a tail that is not a whole fill
+    private static readonly byte[] Big = Enumerable.Range(0, 2_500_000).Select(i => (byte)((i * 7 + i / 1000) % 251)).ToArray();
     private readonly List<IAsyncDisposable> _cleanup = [];
 
     [TestCleanup]
@@ -30,6 +33,7 @@ public class WinFspMountTests
         .AddFile("docs/a.txt", "aaa")
         .AddFile("docs/sub/c.txt", "c")
         .AddFile("medium.bin", Medium, new DateTimeOffset(2026, 10, 1, 12, 0, 0, TimeSpan.Zero))
+        .AddFile("big.bin", Big)
         .AddFile("unicode/ünïcödé ✓ 日本語.txt", "unicode names")
         .AddDirectory("emptydir");
 
@@ -75,7 +79,7 @@ public class WinFspMountTests
         var (_, unc, source) = await MountAsync();
 
         var names = Directory.GetFileSystemEntries(unc).Select(Path.GetFileName).ToList();
-        CollectionAssert.AreEquivalent(new[] { "readme.txt", "docs", "medium.bin", "unicode", "emptydir" }, names);
+        CollectionAssert.AreEquivalent(new[] { "readme.txt", "docs", "medium.bin", "big.bin", "unicode", "emptydir" }, names);
         Assert.AreEqual("hello readme", File.ReadAllText(Path.Combine(unc, "readme.txt")));
         Assert.AreEqual("unicode names", File.ReadAllText(Path.Combine(unc, "unicode", "ünïcödé ✓ 日本語.txt")));
         Assert.AreEqual(100_000, new FileInfo(Path.Combine(unc, "medium.bin")).Length);
@@ -135,6 +139,78 @@ public class WinFspMountTests
 
         Assert.IsFalse(source.Exists("new.txt"));
         Assert.IsFalse(source.Exists("made"));
+    }
+
+    /// <summary>
+    /// Small sequential reads are served from a per-handle read-ahead (WinFsp hands each application read to user
+    /// mode as it is): the bytes must be right across the fills and at the tail, a seek must not be served from the
+    /// wrong place, and a write through another handle must show to a fresh reader.
+    /// </summary>
+    [TestMethod]
+    public async Task SmallSequentialReadsGoThroughTheReadAhead()
+    {
+        RequireWinFsp();
+        var (_, unc, _) = await MountAsync();
+        var path = Path.Combine(unc, "big.bin");
+
+        // 1000-byte reads straight to the file system (no FileStream buffer): across two 1 MiB fills and a short tail
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 1))
+        {
+            var all = new byte[Big.Length];
+            var chunk = new byte[1000];
+            var total = 0;
+            int n;
+            while ((n = stream.Read(chunk, 0, chunk.Length)) > 0)
+            {
+                Array.Copy(chunk, 0, all, total, n);
+                total += n;
+            }
+
+            Assert.AreEqual(Big.Length, total, "the whole file arrives");
+            CollectionAssert.AreEqual(Big, all, "sequential 1000-byte reads");
+        }
+
+        // seeks: back inside what was read ahead, far forward, back again, and across the end
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 1))
+        {
+            var window = new byte[4096];
+            stream.ReadExactly(window);
+            stream.ReadExactly(window); // the second sequential read fills the read-ahead from 4096
+            CollectionAssert.AreEqual(Big[4096..8192], window);
+            stream.Seek(2_000_000, SeekOrigin.Begin);
+            stream.ReadExactly(window);
+            CollectionAssert.AreEqual(Big[2_000_000..2_004_096], window, "a forward seek");
+            stream.Seek(5000, SeekOrigin.Begin);
+            stream.ReadExactly(window);
+            CollectionAssert.AreEqual(Big[5000..9096], window, "a seek back into the first fill");
+            stream.Seek(-100, SeekOrigin.End);
+            Assert.AreEqual(100, stream.Read(window, 0, window.Length), "a read across the end is short");
+            CollectionAssert.AreEqual(Big[^100..], window[..100]);
+            Assert.AreEqual(0, stream.Read(window, 0, window.Length), "and then the end");
+        }
+
+        // a write through one handle, then a fresh handle reads the region sequentially in small pieces
+        var patch = Enumerable.Range(0, 3000).Select(i => (byte)(255 - (i % 256))).ToArray();
+        using (var writer = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, bufferSize: 1))
+        {
+            writer.Seek(1_500_000, SeekOrigin.Begin);
+            writer.Write(patch);
+            writer.Flush();
+        }
+
+        using (var reader = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 1))
+        {
+            reader.Seek(1_499_000, SeekOrigin.Begin);
+            var got = new byte[5000];
+            for (var done = 0; done < got.Length; done += 500)
+            {
+                reader.ReadExactly(got, done, 500);
+            }
+
+            CollectionAssert.AreEqual(Big[1_499_000..1_500_000], got[..1000], "before the patch");
+            CollectionAssert.AreEqual(patch, got[1000..4000], "the patch");
+            CollectionAssert.AreEqual(Big[1_503_000..1_504_000], got[4000..], "after the patch");
+        }
     }
 
     [TestMethod]

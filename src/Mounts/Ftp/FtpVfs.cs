@@ -59,11 +59,20 @@ internal sealed class CompositeFtpFileSystem(IReadOnlyList<FtpCollection> collec
         return entry is null ? null : Wrap(dir.Collection, path, entry);
     }
 
+    /// <summary>What a download reads from the source at a time (FubarDev copies the stream to the data connection in small pieces).</summary>
+    private const int DownloadReadSize = 1 << 20;
+
+    /// <summary>
+    /// A download. FubarDev copies the stream to the data connection a few KB at a time, and a source with a round trip
+    /// per read (a share over the LAN behind Mirror, SFTP) would pay one per piece: 4 MiB/s on the lab's Windows host
+    /// where HTTP got 164 from the same collection. So the stream is buffered: the source sees 1 MiB reads. The REST
+    /// position is set before the buffer sees the stream.
+    /// </summary>
     public async Task<Stream> OpenReadAsync(IUnixFileEntry fileEntry, long startPosition, CancellationToken cancellationToken)
     {
         var file = (VfsFileEntry)fileEntry;
         var handle = await file.Collection.Fs.OpenAsync(file.Path, VfsOpenMode.Read, cancellationToken).ConfigureAwait(false);
-        return new VfsFileStream(handle, ownsFile: true) { Position = startPosition };
+        return new BufferedStream(new VfsFileStream(handle, ownsFile: true) { Position = startPosition }, DownloadReadSize);
     }
 
     public async Task<IBackgroundTransfer?> CreateAsync(IUnixDirectoryEntry targetDirectory, string fileName, Stream data, CancellationToken cancellationToken)

@@ -94,6 +94,9 @@ public sealed class AnyFsHost : IDisposable
 
     private string Join(params string[] parts) => Host.IsWindows ? LabDir + "\\" + string.Join("\\", parts) : LabDir + "/" + string.Join("/", parts);
 
+    /// <summary>A host path as its SFTP server takes it: Win32-OpenSSH wants <c>/C:/...</c>.</summary>
+    private string Sftp(string path) => Host.IsWindows ? "/" + path.Replace('\\', '/') : path;
+
     private static string Parent(string path) => path[..path.LastIndexOf('/')];
 
     // ---- deployment -----------------------------------------------------------------------------------------
@@ -106,7 +109,100 @@ public sealed class AnyFsHost : IDisposable
         EnsureFixture(Upstream, Lab.FixtureDir, $"/home/{Upstream.Info.User}/anyfs-lab/MakeTree");
         EnsureOutageTree();
         InstallSshfsKey();
+        StoreUpstreamShareCredential();
         WriteSettings();
+    }
+
+    /// <summary>
+    /// The Windows host's Mirror of <c>\\upstream\fixture</c> logs in to Samba with the lab's Linux account, which
+    /// Windows takes from the user's Credential Manager (spec 8.1: Mirror itself carries no credentials). The entry
+    /// is made in the logged-on session through RunRemote: a key-authenticated SSH session has no credentials of
+    /// its own, and cmdkey fails there with "A specified logon session does not exist".
+    /// </summary>
+    private void StoreUpstreamShareCredential()
+    {
+        if (!Host.IsWindows)
+        {
+            return;
+        }
+
+        RunRemote("cmdkey", $"/add:{Upstream.Ip}", $"/user:{Lab.LinuxLogin.User}", $"/pass:{Lab.LinuxLogin.Password}");
+    }
+
+    /// <summary>
+    /// Asks the Windows host's RunRemote server (UDP 8888, in the logged-on session) to start a program; the
+    /// client is this PC's runremote.exe (settings.yml windows.runremote_client). A liveness probe first, so a
+    /// machine whose account isn't logged on at the console says so instead of a silent non-start.
+    /// </summary>
+    private void RunRemote(string exe, params string[] args)
+    {
+        var ping = RunRemoteClient("PING");
+        if (ping.Code != 0)
+        {
+            throw new InvalidOperationException($"RunRemote on {Host.Name} ({Host.Ip}:8888) does not answer: is {Host.Info.User} logged on at the console? (provisioning/windows/smoke-test.ps1 checks)\n{ping.Output}");
+        }
+
+        // the client waits 1.2 s for the server's "OK <pid>"; a big exe can take longer to start, and the client then
+        // reports the request as sent (the server logs every launch). The callers check the effect instead.
+        var launch = RunRemoteClient([exe, .. args]);
+        if (launch.Code != 0)
+        {
+            throw new InvalidOperationException($"RunRemote on {Host.Name} did not start {exe} (exit {launch.Code}): {launch.Output}");
+        }
+
+        Trace.WriteLine($"runremote {Host.Ip}: {exe} {string.Join(' ', args)} -> {launch.Output}");
+    }
+
+    /// <summary>Windows: anyfs.exe from the lab folder is running (started through RunRemote) within <paramref name="seconds"/>.</summary>
+    private bool WaitForProcess(int seconds)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(seconds);
+        while (true)
+        {
+            var (code, output) = Host.Run($"@(Get-Process anyfs -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{Exe}' }}).Count", 30);
+            if (code == 0 && int.TryParse(output.Trim(), out var n) && n > 0)
+            {
+                return true;
+            }
+
+            if (DateTime.UtcNow > deadline)
+            {
+                return false;
+            }
+
+            Thread.Sleep(1000);
+        }
+    }
+
+    private (int Code, string Output) RunRemoteClient(params string[] args)
+    {
+        if (!File.Exists(Lab.RunRemoteClient))
+        {
+            throw new InvalidOperationException($"no RunRemote client at {Lab.RunRemoteClient} (settings.yml windows.runremote_client)");
+        }
+
+        var info = new ProcessStartInfo(Lab.RunRemoteClient)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        info.ArgumentList.Add($"{Host.Ip}:8888");
+        foreach (var a in args)
+        {
+            info.ArgumentList.Add(a);
+        }
+
+        using var p = Process.Start(info) ?? throw new InvalidOperationException("runremote did not start");
+        var output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
+        if (!p.WaitForExit(20_000))
+        {
+            p.Kill();
+            return (-1, "runremote client did not finish in 20 s");
+        }
+
+        return (p.ExitCode, output.Trim());
     }
 
     private void CopyBinaries()
@@ -183,13 +279,9 @@ public sealed class AnyFsHost : IDisposable
     private void InstallSshfsKey()
     {
         var key = Upstream.DownloadText(Lab.SshfsKeyPath) ?? throw new InvalidOperationException($"no SSHFS key at {Upstream.Name}:{Lab.SshfsKeyPath}; was the upstream provisioned?");
-        if (Host.IsWindows)
+        Host.UploadText(key, Sftp(SshfsKeyFile));
+        if (!Host.IsWindows)
         {
-            Host.UploadText(key, "/" + SshfsKeyFile.Replace('\\', '/'));
-        }
-        else
-        {
-            Host.UploadText(key, SshfsKeyFile);
             Host.Sh($"chmod 600 '{SshfsKeyFile}'");
         }
     }
@@ -255,22 +347,19 @@ public sealed class AnyFsHost : IDisposable
         var sourcesJson = new JsonObject { ["version"] = 1, ["sources"] = sources }.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
         var collectionsJson = new JsonObject { ["version"] = 1, ["collections"] = collections }.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
         var appJson = new JsonObject { ["version"] = 1, ["logLevel"] = "debug", ["bindAddress"] = "0.0.0.0", ["countFilesOnStart"] = true }.ToJsonString();
+        // fresh state and a fresh log, so the log check sees this run only
         if (Host.IsWindows)
         {
-            var settings = "/" + SettingsDir.Replace('\\', '/');
-            // fresh state and a fresh log, so the log check sees this run only
             Host.Sh($"Remove-Item -Recurse -Force '{Join("state")}', '{LogFile}' -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force '{SettingsDir}' | Out-Null");
-            Host.UploadText(sourcesJson, settings + "/sources.json");
-            Host.UploadText(collectionsJson, settings + "/collections.json");
-            Host.UploadText(appJson, settings + "/app.json");
         }
         else
         {
             Host.Sh($"rm -rf '{Join("state")}' '{LogFile}'; mkdir -p '{SettingsDir}'");
-            Host.UploadText(sourcesJson, SettingsDir + "/sources.json");
-            Host.UploadText(collectionsJson, SettingsDir + "/collections.json");
-            Host.UploadText(appJson, SettingsDir + "/app.json");
         }
+
+        Host.UploadText(sourcesJson, Sftp(Join("settings", "sources.json")));
+        Host.UploadText(collectionsJson, Sftp(Join("settings", "collections.json")));
+        Host.UploadText(appJson, Sftp(Join("settings", "app.json")));
     }
 
     private static JsonObject SourceJson(Guid id, string name, string type, JsonObject settings) => new()
@@ -300,7 +389,9 @@ public sealed class AnyFsHost : IDisposable
             MountKind.Fuse => ("fuse", new JsonObject { ["mountPoint"] = FuseMountPoint(collection), ["allowOther"] = true }),
             MountKind.Smb => ("smb", new JsonObject { ["bindAddress"] = "0.0.0.0", ["port"] = SmbPort, ["guest"] = false, ["user"] = SmbUser, ["password"] = SmbPassword }),
             MountKind.WebDav => ("webdav", new JsonObject { ["bindAddress"] = "0.0.0.0", ["port"] = WebDavPort }),
-            MountKind.Ftp => ("ftp", new JsonObject { ["bindAddress"] = "0.0.0.0", ["port"] = FtpPort, ["allowAnonymous"] = true, ["passivePortFrom"] = 21100, ["passivePortTo"] = 21120 }),
+            // a hundred passive ports: a row opens a data connection per listing, read and range, eight at once for the
+            // concurrent readers, and a port whose last connection is still closing is not free again at once
+            MountKind.Ftp => ("ftp", new JsonObject { ["bindAddress"] = "0.0.0.0", ["port"] = FtpPort, ["allowAnonymous"] = true, ["passivePortFrom"] = 21100, ["passivePortTo"] = 21199 }),
             MountKind.Http => ("http", new JsonObject { ["bindAddress"] = "0.0.0.0", ["port"] = HttpPort }),
             _ => throw new ArgumentOutOfRangeException(nameof(kind)),
         };
@@ -322,26 +413,11 @@ public sealed class AnyFsHost : IDisposable
         if (Host.IsWindows)
         {
             // through RunRemote, in the logged-on session (spec 16.2): WinFsp's \\anyfs\... and stored credentials live there
-            var info = new ProcessStartInfo(Lab.RunRemoteClient)
+            RunRemote(Exe, "serve", "--settings-dir", SettingsDir, "--log-level", "debug");
+            if (!WaitForProcess(30))
             {
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-            };
-            foreach (var a in new[] { $"{Host.Ip}:8888", Exe, "serve", "--settings-dir", SettingsDir, "--log-level", "debug" })
-            {
-                info.ArgumentList.Add(a);
+                throw new InvalidOperationException($"anyfs did not start on {Host.Name} through RunRemote (no {Exe} process after 30 s); RunRemote's own log on the machine says what it ran");
             }
-
-            using var p = Process.Start(info) ?? throw new InvalidOperationException("runremote did not start");
-            var output = p.StandardOutput.ReadToEnd() + p.StandardError.ReadToEnd();
-            if (!p.WaitForExit(20_000) || p.ExitCode != 0)
-            {
-                throw new InvalidOperationException($"runremote to {Host.Ip} failed (exit {p.ExitCode}): {output}");
-            }
-
-            Trace.WriteLine($"runremote {Host.Ip}: {output.Trim()}");
         }
         else
         {
@@ -374,7 +450,7 @@ public sealed class AnyFsHost : IDisposable
 
     public StatusSnapshot? Status()
     {
-        var json = Host.DownloadText(StatusFile);
+        var json = Host.DownloadText(Sftp(StatusFile));
         if (string.IsNullOrWhiteSpace(json))
         {
             return null;
@@ -392,12 +468,12 @@ public sealed class AnyFsHost : IDisposable
 
     public string LogTail(int lines)
     {
-        var log = Host.DownloadText(LogFile) ?? "";
+        var log = Log();
         var all = log.Split('\n');
         return string.Join("\n", all.Skip(Math.Max(0, all.Length - lines)));
     }
 
-    public string Log() => Host.DownloadText(LogFile) ?? "";
+    public string Log() => Host.DownloadText(Sftp(LogFile)) ?? "";
 
     public void Stop()
     {

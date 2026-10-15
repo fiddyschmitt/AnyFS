@@ -17,7 +17,7 @@
 
 # The SSH key every machine accepts; the tests log in with it, and so can you:
 #   ssh -i ~/.ssh/anyfs_lab_ed25519 user@192.168.0.95       (Linux)
-#   ssh -i ~/.ssh/anyfs_lab_ed25519 vagrant@192.168.0.97    (Windows; PowerShell is the shell)
+#   ssh -i ~/.ssh/anyfs_lab_ed25519 vagrant@192.168.0.99    (Windows; PowerShell is the shell)
 #   ssh -i ~/.ssh/anyfs_lab_ed25519 admin@192.168.0.98      (the macOS VM)
 # Made on first use (by the Vagrantfile or mac.ps1). It lives outside this folder, so it is never
 # shared into a VM or committed.
@@ -74,7 +74,7 @@ machines:
   - name: anyfs-win11-1              # a Windows computer name: 15 characters at most
     os: windows
     role: host
-    ip: 192.168.0.97
+    ip: 192.168.0.99
     box: gusztavvargadr/windows-11   # Windows 11 25H2 Enterprise (evaluation), OpenSSH included
     box_version: "2607.1.0"
     memory_mb: 6144
