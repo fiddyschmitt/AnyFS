@@ -58,20 +58,13 @@ jobs:
         shell: pwsh
         run: ./scripts/smoke.ps1 -Exe publish/${{ matrix.rid }}/${{ matrix.exe }} -SamplePluginDll tests/fixtures/SamplePlugin/bin/Release/net10.0/AnyFS.SamplePlugin.dll
 
-      # a zip on Windows; a tar.gz elsewhere, which keeps the executable bit
+      # the asset is the executable itself, named by runtime (anyfs-win-x64.exe, anyfs-linux-x64, ...): no archive
       - name: Package
         shell: pwsh
         run: |
-          $name = "anyfs-${{ steps.version.outputs.version }}-${{ matrix.rid }}"
-          New-Item -ItemType Directory -Force dist, stage | Out-Null
-          Copy-Item publish/${{ matrix.rid }}/${{ matrix.exe }}, LICENSE, README.md stage/
-          Copy-Item docs stage/docs -Recurse
-          if ($IsWindows) {
-            Compress-Archive -Path stage/* -DestinationPath "dist/$name.zip"
-          } else {
-            chmod +x stage/anyfs
-            tar -czf "dist/$name.tar.gz" -C stage .
-          }
+          $ext = if ($IsWindows) { '.exe' } else { '' }
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item publish/${{ matrix.rid }}/${{ matrix.exe }} "dist/anyfs-${{ matrix.rid }}$ext"
           Get-ChildItem dist | Format-List Name, Length
 
       - uses: actions/upload-artifact@v4
@@ -112,7 +105,7 @@ jobs:
       - name: Collect and checksum
         run: |
           mkdir -p dist
-          find artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name '*.nupkg' -o -name '*.snupkg' \) -exec cp {} dist/ \;
+          find artifacts -type f \( -name 'anyfs-*' -o -name '*.nupkg' -o -name '*.snupkg' \) -exec cp {} dist/ \;
           cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
       # the notes are docs/release-notes/<tag>.md when the tag has one, else GitHub's generated list of commits
       - name: Create the release

@@ -102,10 +102,11 @@ Windows, Linux and macOS: restore, build with warnings as errors, unit tests, th
 for that runner, the smoke test, and the executable as an artifact.
 
 A tag `v<version>` runs [release.yml](../.github/workflows/release.yml): the five runtimes are
-published (trimmed; smoke-tested where the runner can run them), packaged as
-`anyfs-<version>-<rid>.zip` (Windows) or `.tar.gz` (Linux and macOS, which keeps the executable
-bit) with `SHA256SUMS.txt`, the SDK packages are packed (`scripts/pack.ps1`), and a GitHub release
-is created with all of it. The packages also go to NuGet.org when the `NUGET_API_KEY` secret is
+published (trimmed; smoke-tested where the runner can run them) and attached to a GitHub release
+as bare executables named by runtime (`anyfs-win-x64.exe`, `anyfs-linux-x64`, `anyfs-linux-arm64`,
+`anyfs-osx-arm64`, `anyfs-osx-x64`; a download has no execute bit, so Linux and macOS users
+`chmod +x` it), with `SHA256SUMS.txt` and the SDK packages (`scripts/pack.ps1`). The notes come
+from `docs/release-notes/<tag>.md` when that file exists. The packages also go to NuGet.org when the `NUGET_API_KEY` secret is
 set. Nothing runs on commit: there are no git hooks.
 
 ## Test lab

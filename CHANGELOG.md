@@ -49,8 +49,8 @@ are in [docs/release-notes/v0.1.0.md](docs/release-notes/v0.1.0.md).
   "Checking a plugin".
 - **Release workflow** (`.github/workflows/release.yml`): a `v*` tag publishes the five runtimes
   (trimmed, smoke-tested where the runner can run them), packs the SDK, and creates the GitHub
-  release with `anyfs-<version>-<rid>.zip` (Windows) or `.tar.gz` (Linux, macOS: the executable
-  bit survives), the packages and `SHA256SUMS.txt`; the packages go to
+  release with one bare executable per runtime (`anyfs-win-x64.exe`, `anyfs-linux-x64`, ...; no
+  archive, so nothing to unpack), the packages and `SHA256SUMS.txt`; the packages go to
   NuGet.org when `NUGET_API_KEY` is set. `build.yml` now fetches the bundled tools before
   publishing, and `scripts/publish.ps1` takes `-Version`. The smoke script runs `plugin check` on
   the sample plugin.
