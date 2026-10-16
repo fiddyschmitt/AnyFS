@@ -105,6 +105,7 @@ jobs:
     needs: [publish, nuget]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -113,11 +114,17 @@ jobs:
           mkdir -p dist
           find artifacts -type f \( -name '*.zip' -o -name '*.tar.gz' -o -name '*.nupkg' -o -name '*.snupkg' \) -exec cp {} dist/ \;
           cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      # the notes are docs/release-notes/<tag>.md when the tag has one, else GitHub's generated list of commits
       - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "AnyFS $GITHUB_REF_NAME" --generate-notes
+          notes="docs/release-notes/$GITHUB_REF_NAME.md"
+          if [ -f "$notes" ]; then
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "AnyFS $GITHUB_REF_NAME" --notes-file "$notes"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "AnyFS $GITHUB_REF_NAME" --generate-notes
+          fi
       - name: Push the SDK to NuGet.org
         if: ${{ env.NUGET_API_KEY != '' }}
         env:

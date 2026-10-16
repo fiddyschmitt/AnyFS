@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased (milestone 5: the lab, the E2E matrix, release workflow, `plugin check`, the SDK package)
+## 0.1.0 (2026-10-16)
+
+The first release: everything below, from milestone 1 to the end of milestone 5. The release notes
+are in [docs/release-notes/v0.1.0.md](docs/release-notes/v0.1.0.md).
+
+### Milestone 5: the lab, the E2E matrix, release workflow, `plugin check`, the SDK package
 
 - **The test lab** (`provisioning/`, spec 16.2): `settings.yml`, a Vagrantfile for the VirtualBox
   VMs (`anyfs-debian-2` the upstream at 192.168.0.96, `anyfs-debian-1` the Linux host at .95,
@@ -88,8 +93,37 @@
   Samba share served 3.5 MiB/s over FTP against 23 over HTTP, because the FTP library copies a file
   to the data connection a few KB at a time and each piece was a round trip to the share. The
   stream handed to it is now buffered.
+- **One unpacked SMB server per version**: the bundled portable-smb-server is written to
+  `cache/mount-providers/smb/portable-smb-server-<hash>` and shared by every SMB mount (it used to
+  be one copy per mount under `state/mounts/<id>/bin/`, and nothing removed old versions); copies
+  of other versions, and the temporary file of a write that never finished, are deleted when a
+  new one lands, except a copy an older anyfs is still running, which goes next time. The SDK's
+  `IMountContext` gained `ProviderCacheDirectory` for files a provider's mounts can share;
+  `TestMountContext` shares it between contexts built with `shareWith`. The smoke test checks
+  that exactly one copy is there.
+- **The same for anyfs's own unpacked files**: the single-file host unpacks the native libraries
+  (Skia, HarfBuzz, ANGLE) into `%TEMP%\.net\anyfs\<build>\` (`~/.net/anyfs/` on Linux and macOS)
+  and never removes a previous build's folder, so every build a user ran left 18 MB behind. At
+  start-up anyfs now deletes the other builds' folders, except one a running anyfs has loaded and
+  one written in the last ten minutes (an anyfs still starting); the host puts a deleted folder
+  back the next time that build runs. The WinFsp plugin's copy of `winfsp-msil` under
+  `%LOCALAPPDATA%\AnyFS\winfsp` likewise loses the copies of other versions when a new one lands.
+  (Having the host unpack portable-smb-server beside those libraries was tried and rejected: the
+  folder is temp, which Storage Sense empties, carries no execute bit, and is reachable only
+  through an undocumented runtime property.)
+- **portable-smb-server 0.4.1** (`scripts/go-servers.json`): conformance fixes for the operating
+  systems' own clients, found by its new client rig: a signed compound request (the `-o sign`
+  Linux mount, Windows and macOS mounts) is verified as received instead of being refused; a
+  Windows truncate (`FileAllocationInformation`) is accepted; removing a non-empty folder from
+  Windows reports it non-empty instead of succeeding; a case-only rename is allowed; `QUERY_INFO`
+  honours the caller's buffer length (Windows' `GetFileInformationByHandle` over the mount); and
+  `CLOSE` returns the attributes macOS asks for. Nothing changes in the VFS contract. The lab's 46
+  SMB rows and the 15 per-host checks pass on all three hosts, in the same times as with 0.4.0.
+- **E2E row selection**: `ANYFS_E2E_MOUNTS` and `ANYFS_E2E_CLIENTS` (comma-separated) narrow the
+  matrix to some mounts or clients, since a test-name filter cannot reach rows that are expanded
+  at run time; the SMB retest above took 35 minutes instead of two hours.
 
-## Unreleased (milestone 4: SSHFS, prompts, Import/Export)
+### Milestone 4: SSHFS, prompts, Import/Export
 
 - **SSHFS** source (type `sshfs`, folder `sshfs`) over SSH.NET 2026.0.0: a remote root (`/`, `~`
   or any absolute path) served through SFTP with up to 16 pooled connections (open files spread
@@ -138,7 +172,7 @@
   under `%LOCALAPPDATA%\AnyFS\winfsp`; `scripts/smoke.ps1` mounts WinFsp on Windows so this stays
   covered.
 
-## Unreleased (fixes after milestone 3)
+### Fixes after milestone 3
 
 - Add source: a filter box above the source types matches the name, the description and the type
   id, for when there are hundreds of them.
@@ -173,7 +207,7 @@
 - SDK: `SettingAttribute.Platforms` shows a field only on the named operating systems (the JSON
   keeps the value everywhere), and `DriveLetter` normalises and validates a letter setting.
 
-## Unreleased (milestone 3: mount providers)
+### Milestone 3: mount providers
 
 - **WinFsp** (Windows): one WinFsp network file system per collection at `\\anyfs\<collection>`,
   with no drive letter (a letter is an opt-in setting) through a prefix-only mount of winfsp.net
@@ -209,7 +243,7 @@
 - Trimming: winfsp.net, FubarDev.FtpServer, Scrutor and NGettext are rooted whole at publish;
   ILLink's analysis of those libraries' own reflection is suppressed with a justification.
 
-## Unreleased (fixes after milestone 2)
+### Fixes after milestone 2
 
 - Collections tab: the "Collection: name" header over the Sources and Mounts box is gone (the
   selected tile on the left says it), and so is the guidance line under Mounts.
@@ -236,7 +270,7 @@
   hints and placeholders).
 - The example collection in the docs is now `work`.
 
-## Unreleased (milestone 2: the window)
+### Milestone 2: the window
 
 - `anyfs` with no arguments opens the window (Avalonia 12, Fluent, follows the OS light/dark
   theme; `theme` in `app.json` overrides it). On Windows the executable is a GUI program that
@@ -270,7 +304,7 @@
 - Tests: `AnyFS.App.Tests` drives the view models over the real engine with scripted dialogs, and
   opens the window and every dialog on Avalonia's headless platform.
 
-## Milestone 1 (headless core)
+### Milestone 1: headless core
 
 - `AnyFS.Sdk`: `ISourcePlugin`/`ISource`, `IMountProviderPlugin`/`IMount`, `IVirtualFileSystem`,
   `IVfsFile` (positionless ranged reads), `VfsEntry`, `VfsException`, `[Setting]` attributes,
