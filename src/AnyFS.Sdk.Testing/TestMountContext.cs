@@ -5,12 +5,15 @@ namespace AnyFS.Sdk.Testing;
 
 /// <summary>
 /// An <see cref="IMountContext"/> for testing a mount provider without the AnyFS host: a temp state
-/// directory, a connection counter, recorded health reports, and a per-context shared-resource table
-/// (share one instance between mounts that should share a listener).
+/// directory, a temp provider cache, a connection counter, recorded health reports, and a per-context
+/// shared-resource table (share one instance between mounts that should share a listener; they share the
+/// provider cache too, as mounts of one provider do in the host).
 /// </summary>
 public sealed class TestMountContext : IMountContext, IMountStatsSink, IDisposable
 {
     private readonly string _root;
+    private readonly string _providerCache;
+    private readonly bool _ownsProviderCache;
     private readonly SharedTable _shared;
     private int _connections;
 
@@ -21,6 +24,8 @@ public sealed class TestMountContext : IMountContext, IMountStatsSink, IDisposab
         Logger = logger ?? NullLogger.Instance;
         _root = Path.Combine(Path.GetTempPath(), "anyfs-tests", Guid.NewGuid().ToString("N"));
         _shared = shareWith?._shared ?? new SharedTable();
+        _ownsProviderCache = shareWith is null;
+        _providerCache = shareWith?._providerCache ?? Path.Combine(Path.GetTempPath(), "anyfs-tests", Guid.NewGuid().ToString("N"));
     }
 
     public ILogger Logger { get; }
@@ -32,6 +37,8 @@ public sealed class TestMountContext : IMountContext, IMountStatsSink, IDisposab
     public ICollectionInfo Collection { get; }
 
     public string StateDirectory => Directory.CreateDirectory(_root).FullName;
+
+    public string ProviderCacheDirectory => Directory.CreateDirectory(_providerCache).FullName;
 
     public IMountStatsSink Stats => this;
 
@@ -53,11 +60,20 @@ public sealed class TestMountContext : IMountContext, IMountStatsSink, IDisposab
 
     public void Dispose()
     {
+        DeleteQuietly(_root);
+        if (_ownsProviderCache)
+        {
+            DeleteQuietly(_providerCache);
+        }
+    }
+
+    private static void DeleteQuietly(string directory)
+    {
         try
         {
-            if (Directory.Exists(_root))
+            if (Directory.Exists(directory))
             {
-                Directory.Delete(_root, recursive: true);
+                Directory.Delete(directory, recursive: true);
             }
         }
         catch (IOException)

@@ -61,7 +61,8 @@ while a newer 2.x driver is fine. An older driver shows that on the tile with **
 driver**, which runs the same silent install; the build itself fails if the package and the bundled
 installer drift apart. The published single-file exe keeps the .NET layer out of its bundle (the
 layer reads its version from its own file, and a bundled assembly has none) and writes a copy
-under `%LOCALAPPDATA%\AnyFS\winfsp` the first time a WinFsp mount starts.
+under `%LOCALAPPDATA%\AnyFS\winfsp` the first time a WinFsp mount starts: one per version, and
+the copies of other versions are deleted when a new one lands.
 
 The read-only layers show as the read-only file attribute, and writes they refuse get "access
 denied" (or "write protected" when the whole mount is read-only). Names are case-insensitive and
@@ -71,8 +72,10 @@ access as far as Windows is concerned, and the layers decide.
 ## SMB (all OSes)
 
 Served by the bundled [portable-smb-server](https://github.com/fiddyschmitt/portable-smb-server)
-(a single Go executable, SMB 2.0.2 to 3.0.2, NTLMv2 with signing or guest), extracted into the
-state folder on first use. One process runs per bind address and port for every collection
+(a single Go executable, SMB 2.0.2 to 3.0.2, NTLMv2 with signing or guest), unpacked into
+`cache/mount-providers/smb/` on first use: one copy per server version, shared by every SMB mount,
+and copies of other versions are deleted when a new one lands. One process runs per bind address
+and port for every collection
 mounted there, so every collection on a port shares one login (user and password, or guest); it
 talks to AnyFS over a loopback "bring your own VFS" endpoint that refuses anything without the
 per-launch token.

@@ -162,7 +162,7 @@ internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collec
         }
 
         _logger = context.Logger;
-        var binary = SmbServerBinary.Locate(context.StateDirectory);
+        var binary = SmbServerBinary.Locate(context.ProviderCacheDirectory);
         var key = $"smb:{address}:{settings.Port}";
         _lease = await context.AcquireSharedAsync(key, token => SmbServerProcess.StartAsync(address, settings.Port, binary, context.Logger, token), ct).ConfigureAwait(false);
         try

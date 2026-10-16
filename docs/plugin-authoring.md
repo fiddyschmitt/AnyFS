@@ -137,7 +137,8 @@ block on the prompt inside the callback, as `src/Sources/Sshfs/SftpPool.cs` does
 
 A mount provider implements `IMountProviderPlugin` and returns an `IMount` per collection; the
 mount gets an `IVirtualFileSystem` (the whole collection with the read-only layers applied, plus
-`CanWrite(path)`) and an `IMountContext` (logger, state folder, stats sink, health reports and
+`CanWrite(path)`) and an `IMountContext` (logger, a state folder per mount, a cache folder shared by
+the provider's mounts for files that can always be made again, stats sink, health reports and
 `AcquireSharedAsync` for one listener shared by every mount on the same port). Report where the
 mount can be reached in `AccessPaths` and what Open should do in `OpenAction` (a path for the
 file manager, a URL, a command to run first, or text to show). `BindAddress` parses the usual

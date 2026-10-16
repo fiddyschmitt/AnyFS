@@ -61,24 +61,46 @@ internal static class WinFspInterop
         var dir = directory ?? Directory;
         System.IO.Directory.CreateDirectory(dir);
         var path = Path.Combine(dir, $"{AssemblyName}-{hash}.dll");
-        if (File.Exists(path) && new FileInfo(path).Length == bytes.Length)
+        if (!File.Exists(path) || new FileInfo(path).Length != bytes.Length)
         {
-            return path;
+            var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            File.WriteAllBytes(temp, bytes);
+            try
+            {
+                File.Move(temp, path, overwrite: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && File.Exists(path))
+            {
+                // another anyfs wrote (and may have loaded) the same file meanwhile; same content, so use it
+                File.Delete(temp);
+            }
         }
 
-        var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        File.WriteAllBytes(temp, bytes);
-        try
-        {
-            File.Move(temp, path, overwrite: true);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && File.Exists(path))
-        {
-            // another anyfs wrote (and may have loaded) the same file meanwhile; same content, so use it
-            File.Delete(temp);
-        }
-
+        RemoveOtherCopies(dir, path);
         return path;
+    }
+
+    /// <summary>
+    /// One copy per version: every other <c>winfsp-msil-*</c> in the folder (an older build's layer, the temporary file
+    /// of a write that never finished) goes. A copy another anyfs has loaded cannot be deleted and is left for next time.
+    /// </summary>
+    private static void RemoveOtherCopies(string directory, string keep)
+    {
+        foreach (var file in System.IO.Directory.EnumerateFiles(directory, AssemblyName + "-*"))
+        {
+            if (string.Equals(Path.GetFileName(file), Path.GetFileName(keep), StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            try
+            {
+                File.Delete(file);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
     }
 
     private static Assembly? Resolve(AssemblyLoadContext context, System.Reflection.AssemblyName name)

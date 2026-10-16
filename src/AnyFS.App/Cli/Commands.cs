@@ -65,6 +65,7 @@ internal static class Commands
         using var loggerFactory = LoggingSetup.Create(level, paths.LogFile, console: true);
         var logger = loggerFactory.CreateLogger("AnyFS");
         logger.LogInformation("AnyFS {Version} starting; settings in {Dir} ({Mode}); log at {Log}", AnyFsEngine.Version, paths.Settings, paths.Portable ? "portable" : "per user", paths.LogFile);
+        BundleExtraction.CleanUpInBackground(logger);
 
         var registry = BuiltIns.CreateRegistry();
         var loaded = registry.LoadDirectory(paths.Plugins, logger);

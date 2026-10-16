@@ -198,6 +198,8 @@ public sealed class MountRunner
 
         public string StateDirectory => Directory.CreateDirectory(paths.MountState(definition.Id)).FullName;
 
+        public string ProviderCacheDirectory => Directory.CreateDirectory(paths.MountProviderCache(definition.Provider)).FullName;
+
         public IMountStatsSink Stats => this;
 
         public void ReportHealth(ComponentHealth health, string? detail = null) => runner.OnHealth(health, detail);

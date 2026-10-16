@@ -49,6 +49,7 @@ public sealed class GuiHost : IAsyncDisposable
         var loggerFactory = LoggingSetup.Create(level, paths.LogFile, console: false);
         var logger = loggerFactory.CreateLogger("AnyFS");
         logger.LogInformation("AnyFS {Version} window starting; settings in {Dir} ({Mode}); log at {Log}", AnyFsEngine.Version, paths.Settings, paths.Portable ? "portable" : "per user", paths.LogFile);
+        BundleExtraction.CleanUpInBackground(logger);
 
         registry ??= BuiltIns.CreateRegistry();
         var loaded = registry.LoadDirectory(paths.Plugins, logger);

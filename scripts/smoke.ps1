@@ -153,6 +153,8 @@ try {
         $smbUp = $false
         try { $tcp = New-Object System.Net.Sockets.TcpClient; $tcp.Connect('127.0.0.1', $Port + 3); $smbUp = $tcp.Connected; $tcp.Dispose() } catch { }
         Check $smbUp "SMB server (bundled portable-smb-server) listening on port $($Port + 3)"
+        $serverCopies = @(Get-ChildItem ([System.IO.Path]::Combine($work, 'cache', 'mount-providers', 'smb')) -Filter 'portable-smb-server-*' -File -ErrorAction SilentlyContinue)
+        Check ($serverCopies.Count -eq 1) "one unpacked server copy under cache/mount-providers/smb ($($serverCopies.Count))"
 
         if ($winfsp) {
             Write-Host "== WinFsp mount at \\anyfs\smoke (the first open waits for Windows to look the name up; docs/mounts.md)"

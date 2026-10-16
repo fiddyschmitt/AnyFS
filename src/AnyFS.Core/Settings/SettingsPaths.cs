@@ -51,6 +51,9 @@ public sealed record SettingsPaths(string Settings, string State, string Cache, 
 
     public string MountState(Guid mountId) => Path.Combine(State, "mounts", mountId.ToString("N"));
 
+    /// <summary>The cache folder every mount of one provider shares (the SMB provider's unpacked server).</summary>
+    public string MountProviderCache(string providerTypeId) => Path.Combine(Cache, "mount-providers", FolderName(providerTypeId));
+
     public string AppSettingsFile => Path.Combine(Settings, "app.json");
 
     public string SourcesFile => Path.Combine(Settings, "sources.json");
@@ -85,6 +88,14 @@ public sealed record SettingsPaths(string Settings, string State, string Cache, 
         return (
             Path.Combine(string.IsNullOrEmpty(xdgConfig) ? Path.Combine(home, ".config") : xdgConfig, "anyfs"),
             Path.Combine(string.IsNullOrEmpty(xdgCache) ? Path.Combine(home, ".cache") : xdgCache, "anyfs"));
+    }
+
+    /// <summary>A plugin's type id as one safe folder name (a third-party id could hold a separator or be dots only).</summary>
+    private static string FolderName(string typeId)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var name = new string(typeId.Select(c => c is '/' or '\\' || Array.IndexOf(invalid, c) >= 0 ? '_' : c).ToArray()).Trim().Trim('.');
+        return name.Length == 0 ? "_" : name;
     }
 
     private static bool IsWritable(string directory)

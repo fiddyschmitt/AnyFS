@@ -130,8 +130,14 @@ public interface IMountContext
 
     ICollectionInfo Collection { get; }
 
-    /// <summary>Per-mount state (extracted binaries, handle tables). Created on first use.</summary>
+    /// <summary>Per-mount state (handle tables, anything kept for this mount alone). Created on first use.</summary>
     string StateDirectory { get; }
+
+    /// <summary>
+    /// A cache folder shared by every mount of this provider, for files that can always be made again, such as a helper
+    /// program the plugin unpacks: one copy for all its mounts rather than one each. Created on first use.
+    /// </summary>
+    string ProviderCacheDirectory { get; }
 
     IMountStatsSink Stats { get; }
 

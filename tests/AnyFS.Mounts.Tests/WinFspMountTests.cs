@@ -291,6 +291,36 @@ public class WinFspMountTests
         }
     }
 
+    /// <summary>One copy per version: an older build's layer and a half-written temporary file go when the current one lands.</summary>
+    [TestMethod]
+    public void OtherInteropCopiesAreRemoved()
+    {
+        Assert.IsTrue(WinFspInterop.HasEmbedded(), "AnyFS.Mounts.WinFsp embeds winfsp-msil.dll");
+        var dir = Path.Combine(Path.GetTempPath(), "anyfs-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var stale = Path.Combine(dir, WinFspInterop.AssemblyName + "-000000000000.dll");
+            var leftover = Path.Combine(dir, WinFspInterop.AssemblyName + "-000000000000.dll.deadbeef.tmp");
+            var unrelated = Path.Combine(dir, "notes.txt");
+            File.WriteAllText(stale, "an older build's layer");
+            File.WriteAllText(leftover, "a write that never finished");
+            File.WriteAllText(unrelated, "not ours");
+
+            var path = WinFspInterop.Extract(dir);
+
+            Assert.IsTrue(File.Exists(path));
+            Assert.IsFalse(File.Exists(stale), "the older copy is removed");
+            Assert.IsFalse(File.Exists(leftover), "the temporary file is removed");
+            Assert.IsTrue(File.Exists(unrelated), "other files are not ours to delete");
+            CollectionAssert.AreEquivalent(new[] { Path.GetFileName(path), "notes.txt" }, Directory.GetFiles(dir).Select(Path.GetFileName).ToArray());
+        }
+        finally
+        {
+            Directory.Delete(dir, recursive: true);
+        }
+    }
+
     /// <summary>The provider's log lines into the test output.</summary>
     private sealed class ConsoleLogger : ILogger
     {

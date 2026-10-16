@@ -12,7 +12,7 @@ runs are picked up on the next start.
 |---|---|---|
 | settings | `<exe dir>/settings/` | `%APPDATA%\AnyFS\settings`, `~/.config/anyfs/settings`, `~/Library/Application Support/AnyFS/settings` |
 | state (stats, status, keys, secrets, per-source state) | `<exe dir>/state/` | sibling of settings |
-| cache (spool files) | `<exe dir>/cache/` | `%LOCALAPPDATA%\AnyFS\cache`, `~/.cache/anyfs`, `~/Library/Caches/AnyFS` |
+| cache (spool files, unpacked helper programs) | `<exe dir>/cache/` | `%LOCALAPPDATA%\AnyFS\cache`, `~/.cache/anyfs`, `~/Library/Caches/AnyFS` |
 | plugins | `<exe dir>/plugins/` | sibling of settings |
 | log | `<exe dir>/anyfs.log` | sibling of settings |
 
@@ -196,3 +196,12 @@ otherwise ignored.
   mounts, states, access paths, stats); `anyfs status` reads it and treats it as live when it is
   under 10 s old and the pid is alive. Removed on a clean stop.
 - `sources/<id>/`, `mounts/<id>/`: per-plugin state.
+
+## cache/
+
+- `sources/<id>/`: per-source scratch space (spool files).
+- `mount-providers/<provider>/`: files every mount of one provider shares. The SMB provider keeps
+  its unpacked `portable-smb-server-<hash>` here, one per server version; copies of other
+  versions are deleted when a new one lands.
+
+Everything under `cache/` can be deleted while anyfs is stopped; it is made again on demand.
