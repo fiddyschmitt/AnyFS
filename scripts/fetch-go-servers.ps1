@@ -27,6 +27,13 @@ $ErrorActionPreference = 'Stop'
 $manifest = Get-Content (Join-Path $PSScriptRoot 'go-servers.json') -Raw | ConvertFrom-Json
 $servers = @('portable-smb-server')
 
+# A bare download carries no mode bits. On Linux and macOS the server must be executable where it sits in tools/,
+# because the unit tests and unpublished builds start it from there (a published anyfs sets the bit on its own copy).
+function Set-Executable([string]$path) {
+    if ($PSVersionTable.PSVersion.Major -lt 6 -or $IsWindows -or $path.EndsWith('.exe')) { return }
+    & chmod +x $path
+}
+
 foreach ($server in $servers) {
     $entry = $manifest.$server
     foreach ($r in $Rid) {
@@ -41,6 +48,7 @@ foreach ($server in $servers) {
             $source = Join-Path $FromLocal $asset.name
             if (-not (Test-Path $source)) { throw "$source not found (build the Go repo first: .\build.ps1)" }
             Copy-Item $source $dest -Force
+            Set-Executable $dest
             Write-Host ("  {0,-12} {1}  <- {2}" -f $r, $server, $source)
             continue
         }
@@ -61,6 +69,7 @@ foreach ($server in $servers) {
             Write-Warning "$($asset.name): no SHA-256 in go-servers.json yet; downloaded $hash unverified. Fill it in after checking the release."
         }
         Move-Item $temp $dest -Force
+        Set-Executable $dest
     }
 }
 Write-Host "binaries in $OutDir"

@@ -465,12 +465,12 @@ internal static class SmbServerBinary
     {
         if (FromEnvironment() is { } env)
         {
-            return env;
+            return EnsureExecutable(env);
         }
 
         if (BesideExecutable() is { } beside)
         {
-            return beside;
+            return EnsureExecutable(beside);
         }
 
         using var resource = OpenEmbedded()
@@ -491,6 +491,30 @@ internal static class SmbServerBinary
             }
 
             File.Move(temp, path, overwrite: true);
+        }
+
+        return path;
+    }
+
+    /// <summary>
+    /// A copy that was downloaded or checked out on Linux/macOS may carry no execute bit (a bare download has no mode);
+    /// set it rather than fail to start. A location we cannot change is left alone and the start reports its own error.
+    /// </summary>
+    private static string EnsureExecutable(string path)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            try
+            {
+                var mode = File.GetUnixFileMode(path);
+                if ((mode & UnixFileMode.UserExecute) == 0)
+                {
+                    File.SetUnixFileMode(path, mode | UnixFileMode.UserExecute | UnixFileMode.GroupExecute | UnixFileMode.OtherExecute);
+                }
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+            }
         }
 
         return path;

@@ -192,3 +192,5 @@ if ($failures -gt 0) {
     throw "$failures smoke check(s) failed"
 }
 Write-Host "smoke: all checks passed" -ForegroundColor Green
+# pwsh -Command reports the last native command's exit code (anyfs status may legitimately exit 1 above), so say so explicitly
+exit 0
