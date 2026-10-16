@@ -1,6 +1,6 @@
 # AnyFS
 
-AnyFS presents anything as a file system. This means you can turn any source of information (a document store, database, and issue tracker) into a set of files that can be read normally by programs and AI tools.
+AnyFS presents anything as a file system. This means you can turn any source of information (a document store, database, or issue tracker) into a set of files that can be read normally by programs and AI tools.
 
 Anywhere there's information locked away, you can expose it in the only truly universal interface: a file.
 
@@ -10,7 +10,7 @@ Corporate repositories:
 * Sharepoint (TBC)
 
 Messaging apps:
-* Outlook (PST & OWS) (TBC)
+* Outlook (PST & EWS) (TBC)
 * Teams (TBC)
 * Mattermost (TBC)
 
@@ -27,12 +27,13 @@ You can also write a plugin for your own information sources.
 
 The files can be exposed in a number of ways:
 * WinFSP
+* FUSE
 * SMB
 * HTTP
 * FTP
 * WebDAV
 
-# Download
+## Download
 Single-file executables for Windows, Linux, macOS can be found in the releases page.
 
 ## Plugins
