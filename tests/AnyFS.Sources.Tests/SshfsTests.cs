@@ -348,7 +348,7 @@ public class SshfsUnitTests
         Assert.AreEqual("/D:", Root("d:/"));
         Assert.AreEqual("/C:/Users", Root("/C:/Users"));
 
-        Assert.IsTrue(RemotePath.IsDriveHome("/C:/Users/Gabrielle"), "Windows OpenSSH home");
+        Assert.IsTrue(RemotePath.IsDriveHome("/C:/Users/alice"), "Windows OpenSSH home");
         Assert.IsFalse(RemotePath.IsDriveHome("/home/smith"));
         Assert.IsFalse(RemotePath.IsDriveHome("/"));
         Assert.AreEqual("c", RemotePath.DriveEntryName("C:"));
