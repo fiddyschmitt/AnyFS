@@ -34,6 +34,11 @@ then, from the repo:
 
     dotnet test tests/AnyFS.E2E
 
+The whole matrix takes close to two hours. To retest one provider or one client, set
+`ANYFS_E2E_MOUNTS` or `ANYFS_E2E_CLIENTS` to a comma-separated list (`Smb`, `Smb,Ftp`, `local,macos`;
+case does not matter) before `dotnet test`: only those rows are generated. A test-name `--filter`
+cannot do this, because the rows are expanded when the run starts, not at discovery.
+
 The first `vagrant up` takes about an hour: the Windows VM's first boot 15 to 20 minutes (the box is
 14 GB, already here if the ft or rclone lab is), each Linux VM about 10 (most of it bringing Debian
 up to date). After that, `vagrant up` just boots them. The lab takes about 11 GB of memory on this

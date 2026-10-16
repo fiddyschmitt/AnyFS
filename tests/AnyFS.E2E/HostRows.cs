@@ -74,16 +74,36 @@ public abstract class HostRows
     public static IReadOnlyList<string> ClientsOf(string os)
         => new[] { "local", "upstream" }.Concat(new[] { "windows", "macos" }.Where(o => o != os)).ToList();
 
+    /// <summary>
+    /// Comma-separated, case-insensitive lists that narrow the rows to these mounts (<c>Smb,Ftp</c>) or clients
+    /// (<c>local,macos</c>), so a retest of one provider need not take the whole matrix's time. Unset means all.
+    /// </summary>
+    public const string MountsVariable = "ANYFS_E2E_MOUNTS";
+
+    public const string ClientsVariable = "ANYFS_E2E_CLIENTS";
+
     /// <summary>The rows: every collection × mount × client, minus the native mounts from the other machines.</summary>
     public static IEnumerable<object[]> RowsFor(string os)
     {
+        var mounts = Selection(MountsVariable);
+        var clients = Selection(ClientsVariable);
         foreach (var collection in CollectionsOf(os))
         {
             foreach (var mount in MountsOf(os))
             {
+                if (mounts is not null && !mounts.Contains(mount.ToString()))
+                {
+                    continue;
+                }
+
                 foreach (var client in ClientsOf(os))
                 {
                     if (client != "local" && mount is MountKind.Fuse or MountKind.WinFsp)
+                    {
+                        continue;
+                    }
+
+                    if (clients is not null && !clients.Contains(client))
                     {
                         continue;
                     }
@@ -92,6 +112,14 @@ public abstract class HostRows
                 }
             }
         }
+    }
+
+    private static HashSet<string>? Selection(string variable)
+    {
+        var value = Environment.GetEnvironmentVariable(variable);
+        return string.IsNullOrWhiteSpace(value)
+            ? null
+            : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>Connects to the host and the upstream, deploys anyfs with the full settings and waits for the collections to be green. Once per class.</summary>
