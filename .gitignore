@@ -486,9 +486,11 @@ $RECYCLE.BIN/
 /provisioning/publish/
 /artifacts/
 *.received.*
-settings/
-state/
-cache/
+# the folders anyfs writes beside its executable when run from the repo root; anchored, because unanchored
+# they also swallowed src/AnyFS.Core/Settings on Windows, where git matches ignore patterns case-insensitively
+/settings/
+/state/
+/cache/
 anyfs.log
 anyfs.*.log
 /scratch/
