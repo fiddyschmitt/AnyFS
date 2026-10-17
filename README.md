@@ -33,6 +33,16 @@ The files can be exposed in a number of ways:
 * FTP
 * WebDAV
 
+## Screenshots
+
+Two sources in one collection, shared over SMB:
+
+![The AnyFS window: a collection with two sources and an SMB mount](docs/screenshots/2026-10-17_1200_anyfs-window-vm-dark.png)
+
+The collection in Windows Explorer:
+
+![Windows Explorer showing the collection's files over SMB](docs/screenshots/2026-10-17_1200_anyfs-explorer-vm-dark-1650.png)
+
 ## Download
 Single-file executables for Windows, Linux, macOS can be found in the releases page.
 
