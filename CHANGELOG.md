@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.1 (2026-10-17)
+
+The release notes are in [docs/release-notes/v0.1.1.md](docs/release-notes/v0.1.1.md).
+
+- **portable-smb-server 0.4.2** bundled (`scripts/go-servers.json`): a performance release of the
+  SMB server (faster message signing, pipelined writes, one gathered write per response, zero-copy
+  reads); its SMB behaviour and the VFS contract are unchanged. Retested with the unit suite, the
+  trimmed smoke test and the E2E SMB rows on the Windows, Linux and macOS hosts from every client.
+
 ## 0.1.0 (2026-10-16)
 
 The first release: everything below, from milestone 1 to the end of milestone 5. The release notes
