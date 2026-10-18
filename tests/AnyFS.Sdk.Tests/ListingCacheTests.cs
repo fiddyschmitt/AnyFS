@@ -49,6 +49,30 @@ public class ListingCacheTests
     }
 
     [TestMethod]
+    public async Task UpdateChangesOneEntryWithoutAnotherListing()
+    {
+        var cache = new ListingCache(TimeSpan.FromSeconds(2), ListAsync, time: _time);
+        await cache.GetAsync("docs", CancellationToken.None);
+
+        cache.Update("docs/c.txt", VfsEntry.File("c.txt", 3));                       // added
+        cache.Update("docs/A.TXT", VfsEntry.File("a.txt", 11), StringComparison.OrdinalIgnoreCase);   // replaced, by name case-insensitively
+        cache.Update("docs/b.txt", null);                                            // removed
+        var listing = await cache.GetAsync("docs", CancellationToken.None);
+        CollectionAssert.AreEquivalent(new[] { "a.txt", "c.txt" }, listing.Select(e => e.Name).ToArray());
+        Assert.AreEqual(11, listing.Single(e => e.Name == "a.txt").Length);
+        Assert.AreEqual(3, (await cache.StatAsync("docs/c.txt", CancellationToken.None))!.Length);
+        Assert.AreEqual(1, _calls, "no listing call for the updates");
+
+        cache.Update("docs/sub/x.txt", VfsEntry.File("x.txt", 1));                   // not cached: nothing happens, no call either
+        Assert.AreEqual(1, _calls);
+
+        _time.Advance(TimeSpan.FromSeconds(3));                                      // the updated listing expires when the original would have
+        var fresh = await cache.GetAsync("docs", CancellationToken.None);
+        CollectionAssert.AreEquivalent(new[] { "a.txt", "b.txt" }, fresh.Select(e => e.Name).ToArray());
+        Assert.AreEqual(2, _calls);
+    }
+
+    [TestMethod]
     public async Task ConcurrentMissesShareOneUpstreamCall()
     {
         _gate = new TaskCompletionSource();

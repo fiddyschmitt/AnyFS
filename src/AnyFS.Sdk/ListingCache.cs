@@ -82,6 +82,37 @@ public sealed class ListingCache
         return null;
     }
 
+    /// <summary>
+    /// Puts <paramref name="entry"/> into the cached listing of its directory in place of any entry of that name,
+    /// or takes the name out when <paramref name="entry"/> is null: for a source that has just created, replaced,
+    /// renamed or deleted <paramref name="path"/> and knows what the listing should now say. Forgetting the whole
+    /// directory instead costs a listing call per file in a bulk copy, and against an upstream whose listings are
+    /// slow that is quadratic. Nothing happens when the directory is not cached, still being listed, or stale:
+    /// the next listing comes from the upstream anyway.
+    /// </summary>
+    public void Update(string path, VfsEntry? entry, StringComparison comparison = StringComparison.Ordinal)
+    {
+        var (parent, name) = VfsPath.SplitLast(path);
+        for (var attempt = 0; attempt < 8; attempt++)
+        {
+            if (!_entries.TryGetValue(parent, out var existing) || !existing.Task.IsCompletedSuccessfully || existing.IsExpired(_time, _ttl))
+            {
+                return;
+            }
+
+            var list = existing.Task.Result.Where(e => !string.Equals(e.Name, name, comparison)).ToList();
+            if (entry is not null)
+            {
+                list.Add(entry);
+            }
+
+            if (_entries.TryUpdate(parent, new Entry(existing.CreatedTimestamp, list), existing))
+            {
+                return;
+            }
+        }
+    }
+
     /// <summary>Forgets the listing of a directory.</summary>
     public void Invalidate(string directoryPath) => _entries.TryRemove(directoryPath, out _);
 
@@ -136,6 +167,13 @@ public sealed class ListingCache
         {
             CreatedTimestamp = createdTimestamp;
             Task = ListAsync(lister, path);
+        }
+
+        /// <summary>A listing already known (an <see cref="Update"/>), keeping the time the original was fetched so it expires with it.</summary>
+        public Entry(long createdTimestamp, IReadOnlyList<VfsEntry> entries)
+        {
+            CreatedTimestamp = createdTimestamp;
+            Task = System.Threading.Tasks.Task.FromResult(entries);
         }
 
         public long CreatedTimestamp { get; }
