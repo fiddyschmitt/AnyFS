@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Signs in to Microsoft 365 once, interactively, and keeps the sign-in where the SharePoint live tests
+       find it (tests/AnyFS.Sources.Tests/SharePointOnlineTests.cs): the tests themselves never open a browser. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SharePointSignIn</AssemblyName>
+    <RootNamespace>AnyFS.Fixtures</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTrimmable>false</IsTrimmable>
+    <RollForward>LatestMinor</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\Sources\SharePoint\AnyFS.Sources.SharePoint.csproj" />
+  </ItemGroup>
+</Project>

@@ -6,6 +6,7 @@ using AnyFS.Mounts.Smb;
 using AnyFS.Mounts.WebDav;
 using AnyFS.Mounts.WinFsp;
 using AnyFS.Sources.Mirror;
+using AnyFS.Sources.SharePoint;
 using AnyFS.Sources.Sshfs;
 
 namespace AnyFS.App;
@@ -18,6 +19,9 @@ public static class BuiltIns
         var registry = new PluginRegistry();
         registry.AddBuiltIn(new MirrorPlugin());
         registry.AddBuiltIn(new SshfsPlugin());
+        registry.AddBuiltIn(new SharePointOnlinePlugin());
+        registry.AddBuiltIn(new SharePointServerPlugin());
+        registry.AddBuiltIn(new SharePointEmbeddedPlugin());
         registry.AddBuiltIn(new WinFspMountProvider());
         registry.AddBuiltIn(new FuseMountProvider());
         registry.AddBuiltIn(new SmbMountProvider());

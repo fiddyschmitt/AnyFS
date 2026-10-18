@@ -28,6 +28,9 @@
   <Folder Name="/src/Sources/Mirror/">
     <Project Path="src/Sources/Mirror/AnyFS.Sources.Mirror.csproj" />
   </Folder>
+  <Folder Name="/src/Sources/SharePoint/">
+    <Project Path="src/Sources/SharePoint/AnyFS.Sources.SharePoint.csproj" />
+  </Folder>
   <Folder Name="/src/Sources/Sshfs/">
     <Project Path="src/Sources/Sshfs/AnyFS.Sources.Sshfs.csproj" />
   </Folder>
@@ -42,5 +45,6 @@
   <Folder Name="/tests/fixtures/">
     <Project Path="tests/fixtures/MakeTree/MakeTree.csproj" />
     <Project Path="tests/fixtures/SamplePlugin/SamplePlugin.csproj" />
+    <Project Path="tests/fixtures/SharePointSignIn/SharePointSignIn.csproj" />
   </Folder>
 </Solution>

@@ -10,8 +10,12 @@
     <PackageVersion Include="System.CommandLine" Version="2.0.13" />
     <!-- the SSHFS source (spec 7.2, 15) -->
     <PackageVersion Include="SSH.NET" Version="2026.0.0" />
+    <!-- the SharePoint sources (spec 7.3, 15): the Microsoft identity platform sign-in -->
+    <PackageVersion Include="Microsoft.Identity.Client" Version="4.91.0" />
     <!-- the E2E tests read provisioning/settings.yml -->
     <PackageVersion Include="YamlDotNet" Version="18.1.0" />
+    <!-- the SharePoint live tests keep a sign-in on disk, DPAPI-protected on Windows (tests/fixtures/SharePointSignIn) -->
+    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <!-- mount providers (spec 8, 15) -->
     <!-- winfsp.net must stay on the major.minor of the driver scripts/winfsp.json bundles: its interop refuses any other
          driver version at load ("incorrect dll version"). The 2.2.x packages are the WinFsp 2026 betas; AnyFS.App checks

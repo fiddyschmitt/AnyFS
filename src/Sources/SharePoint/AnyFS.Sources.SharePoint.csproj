@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sources.SharePoint</AssemblyName>
+    <RootNamespace>AnyFS.Sources.SharePoint</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- MSAL (MIT): the Microsoft identity platform sign-in for SharePoint Online and Embedded; trim-clean (spike 9).
+         Microsoft Graph and SharePoint's REST API are spoken with HttpClient and System.Text.Json directly: the
+         handful of calls a file system needs is not worth the Graph SDK's size under the trimmed single-file publish. -->
+    <PackageReference Include="Microsoft.Identity.Client" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
+    <InternalsVisibleTo Include="SharePointSignIn" />
+  </ItemGroup>
+</Project>
