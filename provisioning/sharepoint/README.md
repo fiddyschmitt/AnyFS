@@ -37,6 +37,16 @@ the app as unverified and an administrator there must consent once before their 
 A user whose organisation forbids third-party apps can paste their own registration's client id into
 the source's settings instead.
 
+The registration exists only in Microsoft's global cloud: app registrations do not cross clouds. A
+tenant in the US Government cloud (GCC High, sites under `.sharepoint.us`) registers its own, and the
+SharePoint Online and Embedded sources refuse to start there without it. In that tenant's Entra admin
+center: a new app registration; the Mobile and desktop applications platform with the redirect URI
+`http://localhost`; Allow public client flows on (for the device code); the delegated Microsoft Graph
+permissions `User.Read`, `Files.ReadWrite.All` and `Sites.ReadWrite.All` (`User.Read` and
+`FileStorageContainer.Selected` for Embedded, with the app registered on the container type); admin
+consent. Its Application (client) ID goes in the source's Client ID. `register-app.ps1` speaks to the
+global cloud only.
+
 ## SharePoint Online and Embedded: the Microsoft 365 developer sandbox
 
 | | |

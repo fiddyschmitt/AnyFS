@@ -18,6 +18,12 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   (`UpdateOverwriteVersion`), which SharePoint honours for site collection administrators.
 - **SharePoint Embedded** (`sharepoint-embedded`, spec 7.5): the containers of a container type,
   each a drive, with the same source over the Graph store; a container by name or by id.
+- **The US Government cloud** (GCC High): the Online and Embedded sources sign in at
+  `login.microsoftonline.us` and call `graph.microsoft.us` for a site under `.sharepoint.us` or a
+  tenant under `.onmicrosoft.us`, and a Cloud setting overrides; there the organisation's own app
+  registration is required, since AnyFS's exists only in the global cloud. Sign-in refusals say which
+  setting to fix and stop the source instead of retrying. The SharePoint Server source refuses a
+  Microsoft 365 address and names the right type.
 - **The lab farms** (`provisioning/sharepoint/`, `provisioning/windows/dc-*.ps1`, `sp-*.ps1`): a
   domain controller and two one-server farms on SQL Server 2022 Developer, SharePoint Server
   Subscription Edition on Windows Server 2022 (`anyfs-sp-1`) and SharePoint Server 2019 on Windows
