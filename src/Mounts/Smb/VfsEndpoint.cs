@@ -34,10 +34,12 @@ internal sealed class VfsEndpoint : IAsyncDisposable
     private readonly WebApplication _app;
     private readonly ILogger _logger;
     private readonly ConcurrentDictionary<string, Registration> _collections = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ReadHandles _reads;
 
     private VfsEndpoint(ILogger logger)
     {
         _logger = logger;
+        _reads = new ReadHandles(TimeSpan.FromSeconds(15), logger);
         Token = Convert.ToHexString(RandomNumberGenerator.GetBytes(24)).ToLowerInvariant();
         var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
         {
@@ -109,6 +111,7 @@ internal sealed class VfsEndpoint : IAsyncDisposable
         finally
         {
             await _app.DisposeAsync().ConfigureAwait(false);
+            await _reads.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -162,6 +165,8 @@ internal sealed class VfsEndpoint : IAsyncDisposable
                     return;
                 }
 
+                _reads.Invalidate(fs, from);
+                _reads.Invalidate(fs, to);
                 await fs.RenameAsync(from, to, request.Replace, ct).ConfigureAwait(false);
                 await OkAsync(ctx, ct).ConfigureAwait(false);
                 return;
@@ -210,11 +215,12 @@ internal sealed class VfsEndpoint : IAsyncDisposable
                     }
 
                     length = Math.Min(length, MaxChunk);
-                    await using var file = await fs.OpenAsync(path, VfsOpenMode.Read, ct).ConfigureAwait(false);
+                    // the handle outlives this request (ReadHandles): the server reads a file in many pieces
+                    using var lease = await _reads.LeaseAsync(fs, path, ct).ConfigureAwait(false);
                     var buffer = ArrayPool<byte>.Shared.Rent(length);
                     try
                     {
-                        var n = length == 0 ? 0 : await file.ReadFullyAsync(offset, buffer.AsMemory(0, length), ct).ConfigureAwait(false);
+                        var n = length == 0 ? 0 : await lease.File.ReadFullyAsync(offset, buffer.AsMemory(0, length), ct).ConfigureAwait(false);
                         ctx.Response.ContentType = "application/octet-stream";
                         ctx.Response.ContentLength = n;
                         if (n > 0)
@@ -233,6 +239,7 @@ internal sealed class VfsEndpoint : IAsyncDisposable
                 case ("create", "POST"):
                 {
                     var exclusive = ctx.Request.Query["exclusive"].ToString().Equals("true", StringComparison.OrdinalIgnoreCase);
+                    _reads.Invalidate(fs, path);
                     await using (await fs.OpenAsync(path, exclusive ? VfsOpenMode.CreateNew : VfsOpenMode.Create, ct).ConfigureAwait(false))
                     {
                     }
@@ -257,6 +264,7 @@ internal sealed class VfsEndpoint : IAsyncDisposable
                         return;
                     }
 
+                    _reads.Invalidate(fs, path);
                     await using (var file = await fs.OpenAsync(path, VfsOpenMode.ReadWrite, ct).ConfigureAwait(false))
                     {
                         await file.WriteAsync(offset, body.GetBuffer().AsMemory(0, (int)body.Length), ct).ConfigureAwait(false);
@@ -273,6 +281,7 @@ internal sealed class VfsEndpoint : IAsyncDisposable
                     return;
 
                 case ("remove", "DELETE"):
+                    _reads.Invalidate(fs, path);
                     await fs.DeleteAsync(path, ct).ConfigureAwait(false);
                     await OkAsync(ctx, ct).ConfigureAwait(false);
                     return;
@@ -285,6 +294,7 @@ internal sealed class VfsEndpoint : IAsyncDisposable
                         return;
                     }
 
+                    _reads.Invalidate(fs, path);
                     await using (var file = await fs.OpenAsync(path, VfsOpenMode.ReadWrite, ct).ConfigureAwait(false))
                     {
                         await file.SetLengthAsync(size, ct).ConfigureAwait(false);

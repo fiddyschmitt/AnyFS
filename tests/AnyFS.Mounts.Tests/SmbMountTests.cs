@@ -120,6 +120,29 @@ public class SmbMountTests
         Assert.AreEqual(HttpStatusCode.NotFound, (await client.GetAsync("nosuch?path=")).StatusCode);
     }
 
+    /// <summary>The endpoint keeps a read handle between /read requests (ReadHandles); a write, truncate, rename or delete through it must not leave a stale one.</summary>
+    [TestMethod]
+    public async Task ReadHandlesOutliveRequestsButNotWrites()
+    {
+        var (_, client, source) = await EndpointAsync();
+        Assert.AreEqual("hello", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=0&length=5")));
+        Assert.AreEqual(" readme", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=5&length=7")), "a second piece through the same handle");
+
+        Assert.AreEqual(HttpStatusCode.OK, (await client.PutAsync("write?path=readme.txt&offset=0", new ByteArrayContent("HELLO"u8.ToArray()))).StatusCode);
+        Assert.AreEqual("HELLO readme", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=0&length=12")), "a read after a write sees the write");
+
+        Assert.AreEqual(HttpStatusCode.OK, (await client.PostAsync("truncate?path=readme.txt&size=5", null)).StatusCode);
+        Assert.AreEqual("HELLO", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=0&length=12")), "a read after a truncate sees the new length");
+
+        var rename = await client.PostAsJsonAsync("rename", new { from = "docs/a.txt", to = "readme.txt", replace = true });
+        Assert.AreEqual(HttpStatusCode.OK, rename.StatusCode, await rename.Content.ReadAsStringAsync());
+        Assert.AreEqual("aaa", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=0&length=12")), "a read after a rename over the file sees the other file");
+
+        Assert.AreEqual(HttpStatusCode.OK, (await client.DeleteAsync("remove?path=readme.txt")).StatusCode);
+        Assert.AreEqual(HttpStatusCode.NotFound, (await client.GetAsync("read?path=readme.txt&offset=0&length=5")).StatusCode, "a read after a delete finds nothing");
+        Assert.IsFalse(source.Exists("readme.txt"));
+    }
+
     [TestMethod]
     public async Task EndpointReportsReadOnlyThroughCapabilitiesAndPerFile()
     {
