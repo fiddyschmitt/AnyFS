@@ -63,6 +63,19 @@ public class SourceRunnerTests
     }
 
     [TestMethod]
+    public async Task AStartedSourceShowsStartingAtOnce()
+    {
+        // a collection's circle and text leave Disabled sources out, so a source still showing its initial Disabled
+        // while its start waited for the thread pool let the collection look green one source short (the Windows CI
+        // runner, 18-Oct-2026: "1 source ready, 2 mounts ready" where the test expected two)
+        await using var runner = Runner(new MemoryPluginSettings());
+        Assert.AreEqual(ComponentState.Disabled, runner.Handle.Status.State, "before Start");
+        runner.Start();
+        Assert.AreEqual(ComponentState.Starting, runner.Handle.Status.State, "as soon as Start returns");
+        await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready");
+    }
+
+    [TestMethod]
     public async Task RetriesWithBackoffUntilItWorks()
     {
         await using var runner = Runner(new MemoryPluginSettings { FailTimes = 2 });

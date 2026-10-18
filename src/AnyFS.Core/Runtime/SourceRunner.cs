@@ -118,6 +118,9 @@ public sealed class SourceRunner : IAsyncDisposable
                 return;
             }
 
+            // Starting now, not when the loop gets a thread: until then the handle still said Disabled, which the
+            // collection's circle and text leave out, so a collection could look green one source short
+            Handle.Status = new ComponentStatus(ComponentState.Starting, "Starting");
             _cts = new CancellationTokenSource();
             _loop = Task.Run(() => RunAsync(_cts.Token));
         }
