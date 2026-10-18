@@ -42,10 +42,16 @@ then, from the repo:
 
     dotnet test tests/AnyFS.E2E
 
-The whole matrix takes close to two hours. To retest one provider or one client, set
-`ANYFS_E2E_MOUNTS` or `ANYFS_E2E_CLIENTS` to a comma-separated list (`Smb`, `Smb,Ftp`, `local,macos`;
-case does not matter) before `dotnet test`: only those rows are generated. A test-name `--filter`
-cannot do this, because the rows are expanded when the run starts, not at discovery.
+The whole matrix takes close to two hours. To retest one source, provider or client, set
+`ANYFS_E2E_COLLECTIONS`, `ANYFS_E2E_MOUNTS` or `ANYFS_E2E_CLIENTS` to a comma-separated list
+(`sharepoint,sharepoint-ro`, `Smb,Ftp`, `local,macos`; case does not matter) before `dotnet test`:
+only those rows are generated. A test-name `--filter` cannot do this, because the rows are expanded
+when the run starts, not at discovery.
+
+With the SharePoint farms in `settings.yml`, every host also gets their collections (`sharepoint` for
+Subscription Edition and `sharepoint2019`, each with a `-ro` twin), served by the SharePoint Server
+source from the farm's test site; a farm's rows are Inconclusive while it is down. The first run
+against a new farm seeds the fixture tree into it, which takes about 25 minutes.
 
 The first `vagrant up` takes about an hour: the Windows VM's first boot 15 to 20 minutes (the box is
 14 GB, already here if the ft or rclone lab is), each Linux VM about 10 (most of it bringing Debian

@@ -43,11 +43,12 @@ public sealed class AnyFsHost : IDisposable
 
     private readonly List<string> _started = [];
 
-    public AnyFsHost(Machine host, Machine upstream)
+    /// <param name="sharePoint">The SharePoint Server sources (<see cref="SharePointFixture.TryPrepare"/>), one per farm that is up.</param>
+    public AnyFsHost(Machine host, Machine upstream, IReadOnlyList<SourceSpec>? sharePoint = null)
     {
         Host = host;
         Upstream = upstream;
-        Sources = DefineSources();
+        Sources = DefineSources(sharePoint ?? []);
     }
 
     public Machine Host { get; }
@@ -286,7 +287,7 @@ public sealed class AnyFsHost : IDisposable
         }
     }
 
-    private IReadOnlyList<SourceSpec> DefineSources()
+    private IReadOnlyList<SourceSpec> DefineSources(IReadOnlyList<SourceSpec> sharePoint)
     {
         var list = new List<SourceSpec>
         {
@@ -306,6 +307,7 @@ public sealed class AnyFsHost : IDisposable
             list.Add(new("unc", "mirror", $"{Upstream.Ip}/fixture", new JsonObject { ["paths"] = $@"\\{Upstream.Ip}\fixture" }));
         }
 
+        list.AddRange(sharePoint);
         return list;
     }
 

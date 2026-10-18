@@ -18,6 +18,8 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\AnyFS.Sdk\AnyFS.Sdk.csproj" />
     <ProjectReference Include="..\..\src\AnyFS.Core\AnyFS.Core.csproj" />
+    <ProjectReference Include="..\..\src\AnyFS.Sdk.Testing\AnyFS.Sdk.Testing.csproj" />
+    <ProjectReference Include="..\..\src\Sources\SharePoint\AnyFS.Sources.SharePoint.csproj" />
     <!-- the expected tree: the same generator the machines run -->
     <ProjectReference Include="..\fixtures\MakeTree\MakeTree.csproj" />
   </ItemGroup>

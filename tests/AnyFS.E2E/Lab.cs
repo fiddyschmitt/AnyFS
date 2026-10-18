@@ -11,7 +11,10 @@ public sealed class Login
     public string Password { get; set; } = "";
 }
 
-/// <summary>A machine from settings.yml: `os` is linux, windows or macos; `role` is host (runs anyfs) or upstream.</summary>
+/// <summary>A SharePoint Server farm's test site, the account the rows use on it, its product (se, 2019) and its collection name in the matrix.</summary>
+public sealed record SharePointLab(string SiteUrl, string User, string Password, string MachineName, string Product, string Collection);
+
+/// <summary>A machine from settings.yml: `os` is linux, windows or macos; `role` is host (runs anyfs), upstream, dc or sharepoint.</summary>
 public sealed class LabMachine
 {
     public string Name { get; set; } = "";
@@ -87,6 +90,30 @@ public static class Lab
     /// <summary>The RunRemote client on this PC, which starts anyfs in the Windows host's logged-on session.</summary>
     public static string RunRemoteClient => Settings.Windows.RunremoteClient;
 
+    /// <summary>
+    /// The SharePoint Server farms (provisioning/sharepoint/README.md), one per machine with role sharepoint: each
+    /// test site by address, which is how machines outside the lab's domain reach it, the tester's account, and
+    /// the collection the farm shows as in the E2E matrix (<c>sharepoint</c> for Subscription Edition,
+    /// <c>sharepoint2019</c> for 2019). Empty when settings.yml has no such machine.
+    /// </summary>
+    public static IReadOnlyList<SharePointLab> SharePoints => sharePoints.Value;
+
+    private static readonly Lazy<IReadOnlyList<SharePointLab>> sharePoints = new(() =>
+    {
+        var sp = Settings.Sharepoint;
+        if (string.IsNullOrWhiteSpace(sp.Site) || string.IsNullOrWhiteSpace(sp.Accounts.Tester.User))
+        {
+            return [];
+        }
+
+        return Settings.Machines.Where(m => m.Role == "sharepoint").Select(m =>
+        {
+            var product = string.IsNullOrWhiteSpace(m.Product) ? "se" : m.Product.Trim().ToLowerInvariant();
+            var collection = product == "se" ? "sharepoint" : "sharepoint" + product;
+            return new SharePointLab($"http://{m.Ip}{sp.Site}", $"{sp.Netbios}\\{sp.Accounts.Tester.User}", sp.Accounts.Tester.Password, m.Name, product, collection);
+        }).ToList();
+    });
+
     public static string SettingsDir => Path.GetDirectoryName(FindSettings() ?? throw NoSettings())!;
 
     /// <summary>The path of the lab's settings.yml, or null when there's none to be found.</summary>
@@ -143,6 +170,22 @@ public static class Lab
         public WindowsYml Windows { get; set; } = new();
 
         public MacYml Mac { get; set; } = new();
+
+        public SharepointYml Sharepoint { get; set; } = new();
+    }
+
+    private sealed class SharepointYml
+    {
+        public string Netbios { get; set; } = "";
+
+        public string Site { get; set; } = "";
+
+        public SharepointAccountsYml Accounts { get; set; } = new();
+    }
+
+    private sealed class SharepointAccountsYml
+    {
+        public Login Tester { get; set; } = new();
     }
 
     private sealed class DevBoxYml
@@ -168,6 +211,9 @@ public static class Lab
         public string Role { get; set; } = "";
 
         public string Ip { get; set; } = "";
+
+        /// <summary>A sharepoint machine's product: se or 2019.</summary>
+        public string Product { get; set; } = "";
     }
 
     private sealed class LinuxYml

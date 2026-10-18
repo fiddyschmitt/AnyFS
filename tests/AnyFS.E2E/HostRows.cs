@@ -25,6 +25,9 @@ public sealed class Deployment : IDisposable
     /// <summary>Why the rows are Inconclusive: a machine that can't be reached.</summary>
     public string? Unavailable { get; set; }
 
+    /// <summary>Why a farm's rows are Inconclusive, by its collection name (sharepoint, sharepoint2019): the farm is not up.</summary>
+    public Dictionary<string, string> SharePointUnavailable { get; } = [];
+
     /// <summary>Why the rows fail: the deployment itself went wrong.</summary>
     public string? Failure { get; set; }
 
@@ -65,7 +68,21 @@ public abstract class HostRows
     };
 
     public static IReadOnlyList<string> CollectionsOf(string os)
-        => os == "windows" ? ["mirror", "mirror-ro", "sshfs", "sshfs-ro", "unc", "unc-ro"] : ["mirror", "mirror-ro", "sshfs", "sshfs-ro"];
+    {
+        var list = new List<string> { "mirror", "mirror-ro", "sshfs", "sshfs-ro" };
+        if (os == "windows")
+        {
+            list.AddRange(["unc", "unc-ro"]);
+        }
+
+        foreach (var farm in Lab.SharePoints)
+        {
+            // the lab's SharePoint Server farms, as settings.yml describes them (a farm's rows are Inconclusive while it is down)
+            list.AddRange([farm.Collection, farm.Collection + "-ro"]);
+        }
+
+        return list;
+    }
 
     /// <summary>
     /// The clients of a host: itself, the Linux upstream, and the hosts of the other OSes; every machine in the lab but
@@ -75,9 +92,12 @@ public abstract class HostRows
         => new[] { "local", "upstream" }.Concat(new[] { "windows", "macos" }.Where(o => o != os)).ToList();
 
     /// <summary>
-    /// Comma-separated, case-insensitive lists that narrow the rows to these mounts (<c>Smb,Ftp</c>) or clients
-    /// (<c>local,macos</c>), so a retest of one provider need not take the whole matrix's time. Unset means all.
+    /// Comma-separated, case-insensitive lists that narrow the rows to these collections (<c>sharepoint,sharepoint-ro</c>),
+    /// mounts (<c>Smb,Ftp</c>) or clients (<c>local,macos</c>), so a retest of one source or provider need not take the
+    /// whole matrix's time (a test filter cannot pick data rows apart). Unset means all.
     /// </summary>
+    public const string CollectionsVariable = "ANYFS_E2E_COLLECTIONS";
+
     public const string MountsVariable = "ANYFS_E2E_MOUNTS";
 
     public const string ClientsVariable = "ANYFS_E2E_CLIENTS";
@@ -85,10 +105,16 @@ public abstract class HostRows
     /// <summary>The rows: every collection × mount × client, minus the native mounts from the other machines.</summary>
     public static IEnumerable<object[]> RowsFor(string os)
     {
+        var collections = Selection(CollectionsVariable);
         var mounts = Selection(MountsVariable);
         var clients = Selection(ClientsVariable);
         foreach (var collection in CollectionsOf(os))
         {
+            if (collections is not null && !collections.Contains(collection))
+            {
+                continue;
+            }
+
             foreach (var mount in MountsOf(os))
             {
                 if (mounts is not null && !mounts.Contains(mount.ToString()))
@@ -152,7 +178,20 @@ public abstract class HostRows
             try
             {
                 var sw = Stopwatch.StartNew();
-                d.AnyFs = new AnyFsHost(d.Host, d.Upstream);
+                var sharePoint = new List<SourceSpec>();
+                foreach (var farm in Lab.SharePoints)
+                {
+                    if (SharePointFixture.TryPrepare(farm, out var why) is { } spec)
+                    {
+                        sharePoint.Add(spec);
+                    }
+                    else
+                    {
+                        d.SharePointUnavailable[farm.Collection] = why!;
+                    }
+                }
+
+                d.AnyFs = new AnyFsHost(d.Host, d.Upstream, sharePoint);
                 d.AnyFs.Deploy();
                 d.AnyFs.Start();
                 var status = d.AnyFs.WaitReady(d.AnyFs.FullCollections.Select(c => c.Collection));
@@ -227,6 +266,13 @@ public abstract class HostRows
         if (!d.Clients.TryGetValue(clientName, out var client))
         {
             Assert.Inconclusive(d.ClientUnavailable.GetValueOrDefault(clientName) ?? $"no client named {clientName}");
+            return;
+        }
+
+        var farmCollection = collection.EndsWith("-ro", StringComparison.Ordinal) ? collection[..^3] : collection;
+        if (d.SharePointUnavailable.TryGetValue(farmCollection, out var farmDown))
+        {
+            Assert.Inconclusive(farmDown);
             return;
         }
 
