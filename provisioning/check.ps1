@@ -42,7 +42,8 @@ foreach ($m in $settings.machines) {
     }
     Write-Host "$($m.name) ($($m.role), $($m.ip))" -ForegroundColor Cyan
     if ($m.os -eq 'windows') {
-        $out = & ssh @ssh "$($settings.accounts.windows.user)@$($m.ip)" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\anyfs-lab\smoke-test.ps1'
+        $user = if ($m.login_user) { $m.login_user } else { $settings.accounts.windows.user }
+        $out = & ssh @ssh "$user@$($m.ip)" 'powershell -NoProfile -ExecutionPolicy Bypass -File C:\anyfs-lab\smoke-test.ps1'
     } else {
         $out = & ssh @ssh "$($settings.accounts.linux.user)@$($m.ip)" 'sudo /opt/anyfs/smoke-test.sh'
     }

@@ -15,6 +15,7 @@
 
 require "fileutils"
 require "json"
+require "socket"
 require "yaml"
 
 settings = YAML.load_file(File.join(__dir__, "settings.yml"))
@@ -43,6 +44,13 @@ FileUtils.mkdir_p(winfsp_dir)
 # The WinFsp installer the Windows VM gets: the one scripts/winfsp.json pins (scripts/fetch-winfsp.ps1
 # puts it under tools/winfsp); the provisioner checks the hash before installing it.
 winfsp = JSON.parse(File.read(File.join(__dir__, "..", "scripts", "winfsp.json"))).fetch("winfsp")
+
+# The SharePoint Server farm (machines with role dc and sharepoint): its domain, accounts and media
+# (scripts/fetch-sharepoint.ps1 puts the installation images under tools/sharepoint).
+sharepoint = settings.fetch("sharepoint")
+sp_accounts = sharepoint.fetch("accounts")
+sharepoint_media_dir = File.expand_path(sharepoint.fetch("media"), __dir__)
+FileUtils.mkdir_p(sharepoint_media_dir)
 
 # Each machine's smoke test runs after every `vagrant up`, `reload` and `provision` (after any
 # restart the provisioning needed): its PASS/WARN/FAIL lines are shown, and a FAIL stops Vagrant there.
@@ -102,36 +110,160 @@ Vagrant.configure("2") do |config|
 
         node.vm.synced_folder ".", "/vagrant", disabled: true
 
-        # \\vboxsvr\publish is provisioning/publish (the builds under test), \\vboxsvr\winfsp the pinned
-        # installer, \\vboxsvr\runremote the RunRemote build the provisioner installs. Vagrant also links
-        # each one at the path given here, which nothing uses.
-        node.vm.synced_folder publish_dir, "C:/anyfs-lab/publish", id: "publish", SharedFoldersEnableSymlinksCreate: false
-        node.vm.synced_folder winfsp_dir, "C:/anyfs-lab/winfsp", id: "winfsp", SharedFoldersEnableSymlinksCreate: false
-        node.vm.synced_folder settings.fetch("windows").fetch("runremote_dir"), "C:/anyfs-lab/runremote",
-                              id: "runremote", SharedFoldersEnableSymlinksCreate: false
-
         account = settings.fetch("accounts").fetch("windows")
-        node.vm.provision "file", source: "windows/smoke-test.ps1", destination: "C:/anyfs-lab/smoke-test.ps1"
-        node.vm.provision "shell", path: "windows/provision.ps1",
-                                   env: { "LAB_PUBKEY" => lab_pubkey,
-                                          "LAB_USER" => account.fetch("user"),
-                                          "LAB_PASSWORD" => account.fetch("password"),
-                                          "UPSTREAM_IP" => upstream.fetch("ip"),
-                                          "WINFSP_MSI" => winfsp.fetch("asset"),
-                                          "WINFSP_SHA256" => winfsp.fetch("sha256") }
+        # The account Vagrant, the tests and `vagrant ssh` use: the box's own, unless the machine names
+        # another (the domain controller: promotion deletes every local account but Administrator).
+        login_user = m.fetch("login_user", account.fetch("user"))
+        if login_user != account.fetch("user")
+          node.winrm.username = login_user
+          node.winrm.password = account.fetch("password")
+          node.ssh.username = login_user
+        end
+        marker = 'C:\anyfs-lab\restart-required'
 
-        # The autologon change takes a restart to show: the provisioner leaves a marker when it changed
-        # something that needs one. Then the smoke test.
-        node.trigger.after [:up, :reload, :provision] do |t|
-          t.name = "#{name}: restart if the provisioner asked for one, then the smoke test"
-          t.ruby do |_env, machine|
-            marker = 'C:\anyfs-lab\restart-required'
-            if machine.communicate.test("if (Test-Path '#{marker}') { exit 0 } else { exit 1 }")
-              machine.communicate.execute("Remove-Item -Force '#{marker}'")
-              machine.guest.capability(:reboot)
+        case m.fetch("role")
+        when "host"
+          # \\vboxsvr\publish is provisioning/publish (the builds under test), \\vboxsvr\winfsp the pinned
+          # installer, \\vboxsvr\runremote the RunRemote build the provisioner installs. Vagrant also links
+          # each one at the path given here, which nothing uses.
+          node.vm.synced_folder publish_dir, "C:/anyfs-lab/publish", id: "publish", SharedFoldersEnableSymlinksCreate: false
+          node.vm.synced_folder winfsp_dir, "C:/anyfs-lab/winfsp", id: "winfsp", SharedFoldersEnableSymlinksCreate: false
+          node.vm.synced_folder settings.fetch("windows").fetch("runremote_dir"), "C:/anyfs-lab/runremote",
+                                id: "runremote", SharedFoldersEnableSymlinksCreate: false
+
+          node.vm.provision "file", source: "windows/smoke-test.ps1", destination: "C:/anyfs-lab/smoke-test.ps1"
+          node.vm.provision "shell", path: "windows/provision.ps1",
+                                     env: { "LAB_PUBKEY" => lab_pubkey,
+                                            "LAB_USER" => login_user,
+                                            "LAB_PASSWORD" => account.fetch("password"),
+                                            "UPSTREAM_IP" => upstream.fetch("ip"),
+                                            "WINFSP_MSI" => winfsp.fetch("asset"),
+                                            "WINFSP_SHA256" => winfsp.fetch("sha256") }
+
+          # The autologon change takes a restart to show: the provisioner leaves a marker when it changed
+          # something that needs one. Then the smoke test.
+          node.trigger.after [:up, :reload, :provision] do |t|
+            t.name = "#{name}: restart if the provisioner asked for one, then the smoke test"
+            t.ruby do |_env, machine|
+              if machine.communicate.test("if (Test-Path '#{marker}') { exit 0 } else { exit 1 }")
+                machine.communicate.execute("Remove-Item -Force '#{marker}'")
+                machine.guest.capability(:reboot)
+              end
+              smoke_test.call(machine, true)
             end
-            smoke_test.call(machine, true)
           end
+
+        when "dc", "sharepoint"
+          # The SharePoint farm's machines (provisioning/sharepoint/README.md). Their provisioners work in
+          # rounds: each does what is missing, and leaves the marker when the next step needs a restart
+          # (promotion to a domain controller, joining the domain, SQL Server, SharePoint's prerequisites).
+          # The trigger restarts the VM and runs the provisioners again until no restart is asked for, then
+          # runs the smoke test. The nested provisioning runs fire this trigger too; those skip it.
+          sp_env = { "LAB_PUBKEY" => lab_pubkey,
+                     "LAB_USER" => login_user,
+                     "LAB_PASSWORD" => account.fetch("password"),
+                     "SP_DOMAIN" => sharepoint.fetch("domain"),
+                     "SP_NETBIOS" => sharepoint.fetch("netbios"),
+                     "SP_SETUP_USER" => sp_accounts.fetch("setup").fetch("user"),
+                     "SP_SETUP_PASSWORD" => sp_accounts.fetch("setup").fetch("password"),
+                     "SP_FARM_USER" => sp_accounts.fetch("farm").fetch("user"),
+                     "SP_FARM_PASSWORD" => sp_accounts.fetch("farm").fetch("password"),
+                     "SP_TEST_USER" => sp_accounts.fetch("tester").fetch("user"),
+                     "SP_TEST_PASSWORD" => sp_accounts.fetch("tester").fetch("password") }
+          if m.fetch("role") == "dc"
+            sp_servers = settings.fetch("machines").select { |x| x.fetch("role") == "sharepoint" }
+            abort("#{name}: a dc needs a machine with role sharepoint in settings.yml") if sp_servers.empty?
+            # Short WinRM waits: its provisioner is quick, and a refused logon (see above) should surface in minutes.
+            node.winrm.timeout = 300
+            node.winrm.retry_limit = 2
+            node.winrm.retry_delay = 5
+            node.vm.provision "file", source: "windows/dc-smoke-test.ps1", destination: "C:/anyfs-lab/smoke-test.ps1"
+            node.vm.provision "shell", path: "windows/dc-provision.ps1",
+                                       env: sp_env.merge("SP_SAFE_MODE_PASSWORD" => sharepoint.fetch("safe_mode_password"),
+                                                         # name=ip;name=ip: an A record for each SharePoint machine
+                                                         "SP_SERVERS" => sp_servers.map { |x| "#{x.fetch("name")}=#{x.fetch("ip")}" }.join(";"))
+          else
+            dc = settings.fetch("machines").find { |x| x.fetch("role") == "dc" } or
+              abort("#{name}: a sharepoint machine needs a machine with role dc in settings.yml")
+            # the SQL Server this farm uses: another machine's (by its address, which needs no domain DNS), or its own
+            sql_server = m["sql_server"]
+            sql_server_ip = if sql_server
+                              other = settings.fetch("machines").find { |x| x.fetch("name") == sql_server } or
+                                abort("#{name}: sql_server #{sql_server} is not a machine in settings.yml")
+                              other.fetch("ip")
+                            else
+                              ""
+                            end
+            # \\vboxsvr\sharepoint is tools/sharepoint, the installation images (SQL Server and SharePoint).
+            node.vm.synced_folder sharepoint_media_dir, "C:/anyfs-lab/media", id: "sharepoint", SharedFoldersEnableSymlinksCreate: false
+            # A round can take most of an hour, but no single WinRM call does (the elevated provisioner streams);
+            # ten minutes bounds how long a call to a machine that is going down can hang.
+            node.winrm.timeout = 600
+            node.vm.provision "file", source: "windows/sp-smoke-test.ps1", destination: "C:/anyfs-lab/smoke-test.ps1"
+            node.vm.provision "file", source: "windows/sp-farm-configuration.ps1", destination: "C:/anyfs-lab/sp-farm-configuration.ps1"
+            node.vm.provision "file", source: "windows/sp-test-user.ps1", destination: "C:/anyfs-lab/sp-test-user.ps1"
+            node.vm.provision "shell", path: "windows/sp-provision.ps1",
+                                       env: sp_env.merge("DC_IP" => dc.fetch("ip"),
+                                                         "SP_LAN_IP" => m.fetch("ip"),
+                                                         "SP_PASSPHRASE" => sharepoint.fetch("passphrase"),
+                                                         "SP_PRODUCT" => m.fetch("product").to_s,
+                                                         "SP_IMAGE" => m.fetch("image"),
+                                                         "SP_PRODUCT_KEY" => m.fetch("product_key"),
+                                                         "SP_WEB_URL" => m.fetch("web_url"),
+                                                         "SP_DB_PREFIX" => m.fetch("db_prefix"),
+                                                         "SP_SQL_SERVER" => sql_server_ip,
+                                                         "SP_SITE" => sharepoint.fetch("site"),
+                                                         "SP_DSC_VERSION" => sharepoint.fetch("dsc_version"))
+          end
+
+          # The provisioner restarts the machine itself (shutdown /r, ten seconds after it exits) and leaves the
+          # marker holding the boot time it is leaving; the next round removes a marker from an earlier boot. So
+          # the trigger only waits until the machine answers with a different boot time (watching for it to go
+          # down first does not work: a quick restart hides inside one WinRM call, 18-Oct-2026). Nothing is sent
+          # over WinRM until port 5985 connects: a server that has just become a domain controller refuses WinRM
+          # logons until it has restarted, and a call sent while it goes down hangs for the whole WinRM timeout.
+          node.trigger.after [:up, :reload, :provision] do |t|
+            t.name = "#{name}: the restarts the provisioner asks for, then the smoke test"
+            t.ruby do |_env, machine|
+              next if ENV["ANYFS_LAB_REPROVISIONING"] == name
+              restarted = "if ((Test-Path '#{marker}') -and ((Get-Content '#{marker}' -Raw).Trim() -ne (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToString('o'))) { exit 0 } else { exit 1 }"
+              port_open = lambda do
+                Socket.tcp(m.fetch("ip"), 5985, connect_timeout: 3) { true }
+              rescue StandardError
+                false
+              end
+              back = lambda do
+                port_open.call && machine.communicate.test(restarted)
+              rescue StandardError
+                false
+              end
+              8.times do |round|
+                asked = begin
+                  machine.communicate.test("if (Test-Path '#{marker}') { exit 0 } else { exit 1 }")
+                rescue StandardError => e
+                  machine.ui.info("WinRM is not answering (#{e.class}): taking that as the restart the provisioner announced")
+                  true
+                end
+                break unless asked
+                machine.ui.info("Restart #{round + 1}: waiting for the machine to come back from it, then provisioning again")
+                deadline = Time.now + 1500
+                until back.call
+                  raise "#{name}: the machine did not come back within 25 minutes of the restart the provisioner asked for" if Time.now > deadline
+                  sleep 10
+                end
+                ENV["ANYFS_LAB_REPROVISIONING"] = name
+                begin
+                  machine.action(:provision)
+                ensure
+                  ENV.delete("ANYFS_LAB_REPROVISIONING")
+                end
+              end
+              smoke_test.call(machine, true)
+            end
+          end
+
+        else
+          abort("#{name}: a Windows machine's role is host, dc or sharepoint, not #{m.fetch("role")}")
         end
       else
         # The project folder, so the guest can see ansible/ and settings.yml. The guests never need to

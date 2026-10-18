@@ -80,6 +80,55 @@ machines:
     memory_mb: 6144
     cpus: 2
 
+  # The SharePoint Server farms: three more Windows VMs, off by default because they are heavy (16 GB
+  # each farm). `vagrant up anyfs-dc-1 anyfs-sp-1` builds the domain and the Subscription Edition farm,
+  # in that order, with the restarts the provisioning needs (well over an hour the first time);
+  # `vagrant up anyfs-sp-2` adds the SharePoint 2019 farm the same way, in the same domain. They are not
+  # mount hosts: they are what the SharePoint Server source reads from
+  # (provisioning/sharepoint/README.md). A sharepoint machine's own fields: `product` (se or 2019),
+  # `image` (its installation image in tools/sharepoint), `product_key`, `web_url`, `db_prefix` (its
+  # databases' names), and `sql_server` (the machine whose SQL Server it uses; absent: its own).
+  - name: anyfs-dc-1                 # Active Directory and DNS for the farm (SharePoint insists on domain accounts)
+    os: windows
+    role: dc
+    autostart: false
+    ip: 192.168.0.91
+    box: gusztavvargadr/windows-server-2022-standard-core   # Windows Server 2022 Standard, Server Core (evaluation)
+    box_version: "2607.0.0"
+    memory_mb: 2048
+    cpus: 2
+    login_user: Administrator        # promotion to a domain controller deletes every other local account
+
+  - name: anyfs-sp-1                 # SQL Server 2022 Developer + SharePoint Server Subscription Edition, one-server farm
+    os: windows
+    role: sharepoint
+    autostart: false
+    ip: 192.168.0.92
+    box: gusztavvargadr/windows-server-2022-standard        # with the desktop: easier to look at when something is wrong
+    box_version: "2607.0.0"
+    memory_mb: 16384                 # SharePoint's own minimum for one server; it works on 12288, slowly
+    cpus: 4
+    product: se
+    image: OfficeServer.iso
+    product_key: "VW2FM-FN9FT-H22J4-WV9GT-H8VKF"   # Microsoft's published Subscription Edition Enterprise trial key: 180 days
+    web_url: "http://anyfs-sp-1"     # the web application: port 80, Windows (NTLM) authentication; also at http://<its ip>
+    db_prefix: SP
+
+  - name: anyfs-sp-2                 # SQL Server 2022 Developer + SharePoint Server 2019, one-server farm
+    os: windows
+    role: sharepoint
+    autostart: false
+    ip: 192.168.0.90
+    box: gusztavvargadr/windows-server-2019-standard        # SharePoint 2019 runs on Windows Server 2016 or 2019 only
+    box_version: "1809.0.2407"
+    memory_mb: 16384                 # its own SQL Server, so either farm runs without the other (sql_server: anyfs-sp-1 would borrow the first one's)
+    cpus: 4
+    product: "2019"
+    image: OfficeServer2019.iso
+    product_key: "M692G-8N2JP-GG8B2-2W2P7-YY7J6"   # Microsoft's published SharePoint Server 2019 Enterprise trial key: 180 days
+    web_url: "http://anyfs-sp-2"
+    db_prefix: SP2019
+
 linux:
   # On the upstream machine: the fixture tree the tests generate there (tests/fixtures/MakeTree), which
   # Samba shares as [fixture] and the SSHFS source serves over sshd.
@@ -94,6 +143,22 @@ windows:
   # self-contained build of the server, shared into the VM; and the client the tests run here.
   runremote_dir: "C:/Users/Smith/Desktop/dev/cs/RunRemote/server/bin/Release/net8.0-windows/win-x64/publish"
   runremote_client: "C:/Users/Smith/Desktop/dev/cs/RunRemote/runremote/bin/Debug/net8.0/runremote.exe"
+
+# The SharePoint Server farms (the machines with role dc and sharepoint). SharePoint insists on domain
+# accounts, so the domain controller makes a forest and these accounts in it; both farms use them. Throwaway values for this
+# lab only; the passwords meet Active Directory's default complexity rule.
+sharepoint:
+  domain: anyfs.lab
+  netbios: ANYFS
+  safe_mode_password: "AnyFS-lab-dsrm-2026!"          # Directory Services Restore Mode; never used in the lab
+  accounts:
+    setup:  { user: sp_setup, password: "AnyFS-lab-setup-2026!" }   # installs and configures the farm; SQL sysadmin; site owner
+    farm:   { user: sp_farm,  password: "AnyFS-lab-farm-2026!" }    # the farm (timer service, databases) and the web application pool
+    tester: { user: sp_user,  password: "AnyFS-lab-user-2026!" }    # what the tests sign in as: a member of the test site and its secondary site collection administrator (SharePoint takes file times only from one)
+  passphrase: "AnyFS-lab-passphrase-2026!"            # the farms' passphrase (joining servers; unused after the build)
+  media: "../tools/sharepoint"                        # the SharePoint and SQL Server ISOs, which scripts/fetch-sharepoint.ps1 downloads; shared into the VMs
+  site: "/sites/anyfs"                                # the site collection the tests use, in each farm
+  dsc_version: "5.7.1"                                # SharePointDsc, the PowerShell Gallery module that builds the farm
 
 # The Mac mini runs the macOS test VM (tart, on Apple's Virtualization framework); only a Mac can.
 # Vagrant runs there for it, with the vagrant-tart provider. mac.ps1 drives it from this PC: it copies

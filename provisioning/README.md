@@ -12,7 +12,15 @@ machines reach each host's mounts, so each OS is tested as a client of each othe
 | `anyfs-debian-1` | runs anyfs (linux-x64): FUSE, SMB, WebDAV, FTP, HTTP; local client | Debian 13 | 192.168.0.95 | VirtualBox, this PC | `ansible/playbook.yml` |
 | `anyfs-win11-1` | runs anyfs (win-x64) with WinFsp: WinFsp, SMB, WebDAV, FTP, HTTP; local client (Explorer-style UNC paths, `net use /TCPPORT`, WebClient, curl) | Windows 11 25H2 Enterprise (evaluation) | 192.168.0.99 | VirtualBox, this PC | `windows/provision.ps1` |
 | `anyfs-macos-1` | runs anyfs (osx-arm64): SMB, WebDAV, FTP, HTTP; local client (`mount_smbfs`, `mount_webdav`, curl) | macOS 15 Sequoia | 192.168.0.98 | tart on the Mac mini (192.168.0.33) | `macos/provision.sh` |
+| `anyfs-dc-1` | the SharePoint farms' domain controller: Active Directory, DNS, the farms' accounts (off by default) | Windows Server 2022 Core (evaluation) | 192.168.0.91 | VirtualBox, this PC | `windows/dc-provision.ps1` |
+| `anyfs-sp-1` | SQL Server 2022 Developer + SharePoint Server Subscription Edition, a one-server farm the SharePoint Server source reads from (off by default) | Windows Server 2022 (evaluation) | 192.168.0.92 | VirtualBox, this PC | `windows/sp-provision.ps1`, `windows/sp-farm-configuration.ps1` |
+| `anyfs-sp-2` | SQL Server 2022 Developer + SharePoint Server 2019, a second one-server farm in the same domain, for the older on-premises API (off by default) | Windows Server 2019 (evaluation) | 192.168.0.90 | VirtualBox, this PC | `windows/sp-provision.ps1`, `windows/sp-farm-configuration.ps1` |
 | this PC | runs the tests; publishes the builds and shares them into the VMs | Windows 11 | 192.168.0.31 | | |
+
+The domain controller and the two farms are not mount hosts and `vagrant up` leaves them alone
+(`autostart: false`): the domain controller and one farm need 18 GB of memory between them, and a farm
+takes well over an hour to build the first time. `sharepoint/README.md` covers them and the
+Microsoft 365 side of the SharePoint tests.
 
 **Vagrant** builds and runs the VMs. **Ansible** (Linux), a PowerShell script (Windows) and a shell
 script (macOS) configure what's inside them. You edit one file, `settings.yml`, and can rebuild any
@@ -75,6 +83,9 @@ PASS/WARN/FAIL lines; a FAIL stops Vagrant there.
 | `ansible/templates/smoke-test.sh.j2` | A Linux VM's smoke test (`/opt/anyfs/smoke-test.sh`) |
 | `windows/provision.ps1` | The configuration inside the Windows VM (OpenSSH, WinFsp, WebClient, RunRemote, autologon) |
 | `windows/smoke-test.ps1` | The Windows VM's smoke test (`C:\anyfs-lab\smoke-test.ps1`) |
+| `windows/dc-provision.ps1`, `windows/dc-smoke-test.ps1` | The SharePoint farms' domain controller: the forest, DNS, the accounts; its smoke test |
+| `windows/sp-provision.ps1`, `windows/sp-farm-configuration.ps1`, `windows/sp-test-user.ps1`, `windows/sp-smoke-test.ps1` | A SharePoint farm: domain join, SQL Server, the farm as SharePointDsc describes it, the test account's rights in the test site; its smoke test |
+| `sharepoint/README.md`, `sharepoint/register-app.ps1`, `sharepoint/embedded-rig.ps1` | The SharePoint test rigs (Microsoft 365 and on-premises), the app registration AnyFS ships, and the SharePoint Embedded rig in the sandbox tenant |
 | `mac.ps1` | Runs Vagrant for the macOS VM on the Mac, from this PC, over SSH |
 | `macos/Vagrantfile`, `macos/provision.sh` | The macOS VM (tart, pinned MAC address) and what runs inside it |
 | `macos/setup-host.sh`, `macos/shims/tart` | The Mac's one-time setup, and a wrapper that keeps the VM alive after Vagrant exits |

@@ -1,0 +1,29 @@
+{
+  "sharepoint-server-subscription-edition": {
+    "description": "SharePoint Server Subscription Edition, 180-day trial media (Microsoft Download Center id 103599)",
+    "version": "16.0.14326.20450",
+    "published": "2024-07-15",
+    "url": "https://download.microsoft.com/download/3/f/5/3f5f8a7e-462b-41ff-a5b2-04bdf5821ceb/OfficeServer.iso",
+    "file": "OfficeServer.iso",
+    "bytes": 1476198400,
+    "sha256": "c576b847c573234b68fc602a0318f5794d7a61d8149eb6ae537af04470b7fc05"
+  },
+  "sharepoint-server-2019": {
+    "description": "SharePoint Server 2019, 180-day trial media (Evaluation Center; the page offers it as officeserver.img, a UDF image Mount-DiskImage takes once it is called .iso)",
+    "version": "16.0.10337.12109",
+    "published": "2025-02-14",
+    "url": "https://download.microsoft.com/download/C/B/A/CBA01793-1C8A-4671-BE0D-38C9E5BBD0E9/officeserver.img",
+    "file": "OfficeServer2019.iso",
+    "bytes": 3872045056,
+    "sha256": "4266d29adfe7e5b5f5c6298325721e495361961d5b4978e3a46ae6657e601c5a"
+  },
+  "sql-server-2022-developer": {
+    "description": "SQL Server 2022 Developer edition, the ISO behind the edition's bootstrapper (which refuses to run once it is a few months old)",
+    "version": "16.0.1000.6",
+    "published": "2025-01-29",
+    "url": "https://download.microsoft.com/download/3/8/d/38de7036-2433-4207-8eae-06e247e17b25/SQLServer2022-x64-ENU-Dev.iso",
+    "file": "SQLServer2022-x64-ENU-Dev.iso",
+    "bytes": 1163053056,
+    "sha256": "80d2cd75dd2b28098c0182f50ad86bd44f9b3a9f357c30ff617480a1497daffd"
+  }
+}

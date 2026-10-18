@@ -498,6 +498,7 @@ anyfs.*.log
 /tools/go-servers/
 # the WinFsp installer scripts/fetch-winfsp.ps1 downloads (embedded in Windows builds for the Install button)
 /tools/winfsp/
+/tools/sharepoint/
 
 # AnyFS lab
 provisioning/publish/

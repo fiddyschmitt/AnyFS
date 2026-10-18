@@ -40,7 +40,11 @@ Set-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Type String 
 # Whichever file sshd reads the account's keys from: Windows' stock sshd_config sends administrators
 # to ProgramData\ssh\administrators_authorized_keys, but this box's config doesn't, so there it's the
 # account's own .ssh\authorized_keys. (Vagrant runs this script as that account.)
-$conf = & "$env:SystemRoot\System32\OpenSSH\sshd.exe" -T -C "user=$user,host=localhost,addr=127.0.0.1"
+# sshd.exe is wherever the service says: System32\OpenSSH for the Windows capability, Program Files\OpenSSH-Win64
+# on a box that ships Win32-OpenSSH (gusztavvargadr's Windows Server 2019, where the capability is not present).
+$sshd = (Get-CimInstance Win32_Service -Filter "Name='sshd'").PathName.Trim('"')
+$sshd = $sshd.Substring(0, $sshd.IndexOf('.exe', [StringComparison]::OrdinalIgnoreCase) + 4)
+$conf = & $sshd -T -C "user=$user,host=localhost,addr=127.0.0.1"
 if ($LASTEXITCODE -ne 0) { throw 'sshd -T failed' }
 $keys = (($conf | Where-Object { $_ -like 'authorizedkeysfile *' }) -split ' ')[1]
 $keys = $keys -replace '__PROGRAMDATA__', $env:ProgramData -replace '/', '\'
