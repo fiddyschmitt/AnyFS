@@ -185,7 +185,10 @@ internal sealed class SmbServerProcess : IAsyncDisposable
         _stopping = false;
         _process = process;
 
-        var deadline = DateTime.UtcNow.AddSeconds(15);
+        // a minute, not fifteen seconds: on a Windows machine that has just booted, the first launch of the server
+        // executable takes ten seconds or more before it even prints its banner (the antivirus scans it), and the
+        // E2E lab's first collection failed on that twice on 18-Oct-2026 while the rest came up fine
+        var deadline = DateTime.UtcNow.AddSeconds(60);
         while (DateTime.UtcNow < deadline)
         {
             ct.ThrowIfCancellationRequested();
@@ -205,7 +208,7 @@ internal sealed class SmbServerProcess : IAsyncDisposable
         }
 
         StopProcess();
-        throw new InvalidOperationException($"the SMB server did not start listening on {_address}:{_port} within 15 s: {RecentOutput()}");
+        throw new InvalidOperationException($"the SMB server did not start listening on {_address}:{_port} within 60 s: {RecentOutput()}");
     }
 
     private IEnumerable<string> Arguments()
