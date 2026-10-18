@@ -7,7 +7,7 @@ Anywhere there's information locked away, you can expose it in the only truly un
 It comes with a number of sources out of the box:
 
 Corporate repositories:
-* Sharepoint (TBC)
+* SharePoint: Online (Microsoft 365), Server (on-premises) and Embedded
 
 Messaging apps:
 * Outlook (PST & EWS) (TBC)
