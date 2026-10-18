@@ -125,7 +125,7 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
             return opened;
         }
 
-        fileInfo.Context = file;
+        fileInfo.Context = new Handle(file!);
         return PosixResult.Success;
     }
 
@@ -148,14 +148,20 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
             return result;
         }
 
-        fileInfo.Context = file;
+        fileInfo.Context = new Handle(file!);
         return PosixResult.Success;
     }
 
+    /// <summary>
+    /// The kernel asks for a file in pieces (128 KiB with its default read-ahead) on several threads at once, and on a
+    /// source where each read is a round trip that is slow: 8 MiB/s from SharePoint on the lab's VM (18-Oct-2026). So
+    /// a handle's reads run one at a time through <see cref="SequentialReadAhead"/>, which fetches 1 MiB when a read
+    /// follows on from the last; the same read-ahead as the WinFsp mount's.
+    /// </summary>
     public PosixResult Read(ReadOnlyNativeMemory<byte> fileNamePtr, NativeMemory<byte> buffer, long position, out int readLength, ref FuseFileInfo fileInfo)
     {
         readLength = 0;
-        var file = fileInfo.Context as IVfsFile;
+        var handle = fileInfo.Context as Handle;
         var length = buffer.Length;
         var rented = ArrayPool<byte>.Shared.Rent(length);
         try
@@ -163,14 +169,17 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
             var n = 0;
             var result = Guard(() =>
             {
-                if (file is null)
+                if (handle is null)
                 {
                     using var temp = new Lease(Wait(fs.OpenAsync(PathOf(fileNamePtr), VfsOpenMode.Read, CancellationToken.None)));
                     n = Wait(temp.File.ReadFullyAsync(position, rented.AsMemory(0, length), CancellationToken.None).AsTask());
                 }
                 else
                 {
-                    n = Wait(file.ReadFullyAsync(position, rented.AsMemory(0, length), CancellationToken.None).AsTask());
+                    lock (handle.Gate)
+                    {
+                        n = Wait(handle.ReadAhead.ReadAsync(handle.File, position, rented.AsMemory(0, length), CancellationToken.None).AsTask());
+                    }
                 }
 
                 return PosixResult.Success;
@@ -193,11 +202,12 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
     public PosixResult Write(ReadOnlyNativeMemory<byte> fileNamePtr, ReadOnlyNativeMemory<byte> buffer, long position, out int writtenLength, ref FuseFileInfo fileInfo)
     {
         writtenLength = 0;
-        if (fileInfo.Context is not IVfsFile file)
+        if (fileInfo.Context is not Handle handle)
         {
             return PosixResult.EBADF;
         }
 
+        var file = handle.File;
         var length = buffer.Length;
         var append = (fileInfo.flags & PosixOpenFlags.Append) != 0;
         var rented = ArrayPool<byte>.Shared.Rent(length);
@@ -206,8 +216,19 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
             buffer.Span.CopyTo(rented);
             var result = Guard(() =>
             {
-                var at = append ? file.Length : position;
-                Wait(file.WriteAsync(at, rented.AsMemory(0, length), CancellationToken.None).AsTask());
+                lock (handle.Gate)
+                {
+                    try
+                    {
+                        var at = append ? file.Length : position;
+                        Wait(file.WriteAsync(at, rented.AsMemory(0, length), CancellationToken.None).AsTask());
+                    }
+                    finally
+                    {
+                        handle.ReadAhead.Forget();
+                    }
+                }
+
                 return PosixResult.Success;
             });
             if (result != PosixResult.Success)
@@ -225,16 +246,21 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
     }
 
     public PosixResult Flush(ReadOnlyNativeMemory<byte> fileNamePtr, ref FuseFileInfo fileInfo)
-        => fileInfo.Context is IVfsFile file ? Guard(() => { Wait(file.FlushAsync(CancellationToken.None).AsTask()); return PosixResult.Success; }) : PosixResult.Success;
+        => fileInfo.Context is Handle handle ? Guard(() => { Wait(handle.File.FlushAsync(CancellationToken.None).AsTask()); return PosixResult.Success; }) : PosixResult.Success;
 
     public PosixResult FSync(ReadOnlyNativeMemory<byte> fileNamePtr, bool datasync, ref FuseFileInfo fileInfo) => Flush(fileNamePtr, ref fileInfo);
 
     public PosixResult Release(ReadOnlyNativeMemory<byte> fileNamePtr, ref FuseFileInfo fileInfo)
     {
-        if (fileInfo.Context is IVfsFile file)
+        if (fileInfo.Context is Handle handle)
         {
             fileInfo.Context = null!;
-            return Guard(() => { Wait(file.DisposeAsync().AsTask()); return PosixResult.Success; });
+            lock (handle.Gate)
+            {
+                handle.ReadAhead.Dispose();
+            }
+
+            return Guard(() => { Wait(handle.File.DisposeAsync().AsTask()); return PosixResult.Success; });
         }
 
         return PosixResult.Success;
@@ -447,5 +473,18 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
         public IVfsFile File => file;
 
         public void Dispose() => Wait(file.DisposeAsync().AsTask());
+    }
+
+    /// <summary>
+    /// One open file handle (<see cref="FuseFileInfo.Context"/>): the VFS file and its read-ahead. Reads and writes on
+    /// it run one at a time under <see cref="Gate"/>, so the read-ahead never holds what a write replaced.
+    /// </summary>
+    private sealed class Handle(IVfsFile file)
+    {
+        public IVfsFile File { get; } = file;
+
+        public Lock Gate { get; } = new();
+
+        public SequentialReadAhead ReadAhead { get; } = new();
     }
 }

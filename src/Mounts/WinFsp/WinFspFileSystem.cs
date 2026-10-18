@@ -245,20 +245,14 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         }
     }
 
-    /// <summary>What a handle reads from the source at once when it reads on from where its last read ended.</summary>
-    private const int ReadAheadBytes = 1 << 20;
-
-    /// <summary>Reads up to this size are served through the read-ahead buffer; bigger ones go to the source as they are.</summary>
-    private const int ReadAheadThreshold = 256 * 1024;
-
     /// <summary>
     /// WinFsp hands every application read to user mode as it is: the volume runs with a 1 s file-info timeout, not
     /// WinFsp's full caching mode, because that mode keeps serving a file's old contents and size after it changed on
     /// the source (the lab checked). A sequential reader with a small buffer (Get-FileHash and .NET's default
     /// FileStream read 4 KB at a time) would then pay one round trip to the source per read, which is 17 MiB/s on the
-    /// lab's VM. So a handle that reads on from where its previous read ended gets <see cref="ReadAheadBytes"/> from
-    /// the source and is served from that until it runs out, seeks, or writes. Nothing outlives the handle, so a reopen
-    /// is as fresh as before; while a handle is open it may see what it read ahead, like a client with an SMB lease.
+    /// lab's VM. So a handle's reads go through its <see cref="SequentialReadAhead"/> (shared with the FUSE mount): a
+    /// read that follows on from the last fetches 1 MiB and the handle is served from that until it runs out, seeks or
+    /// writes; nothing outlives the handle.
     /// </summary>
     public override int Read(object fileNode, object fileDesc, IntPtr buffer, ulong offset, uint length, out uint bytesTransferred)
     {
@@ -273,56 +267,20 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         var count = (int)length;
         lock (desc.ReadLock)
         {
-            if (desc.Ahead is { } held && at >= desc.AheadOffset && at + count <= desc.AheadOffset + desc.AheadLength)
-            {
-                Marshal.Copy(held, (int)(at - desc.AheadOffset), buffer, count);
-                bytesTransferred = (uint)count;
-                desc.NextRead = at + count;
-                return STATUS_SUCCESS;
-            }
-
             var file = desc.File;
-            var sequential = at == desc.NextRead && count <= ReadAheadThreshold;
-            byte[]? rented = null;
+            var rented = ArrayPool<byte>.Shared.Rent(count);
             try
             {
-                byte[] data;
                 var n = 0;
-                if (sequential)
+                var target = rented.AsMemory(0, count);
+                var status = Guard(() =>
                 {
-                    desc.Ahead ??= ArrayPool<byte>.Shared.Rent(ReadAheadBytes);
-                    desc.AheadLength = 0;
-                    data = desc.Ahead;
-                    var target = data.AsMemory(0, ReadAheadBytes);
-                    var status = Guard(() =>
-                    {
-                        n = Wait(file.ReadFullyAsync(at, target, CancellationToken.None).AsTask());
-                        return STATUS_SUCCESS;
-                    });
-                    if (status < 0)
-                    {
-                        return status;
-                    }
-
-                    desc.AheadOffset = at;
-                    desc.AheadLength = n;
-                    n = Math.Min(n, count);
-                }
-                else
+                    n = Wait(desc.ReadAhead.ReadAsync(file, at, target, CancellationToken.None).AsTask());
+                    return STATUS_SUCCESS;
+                });
+                if (status < 0)
                 {
-                    // a seek or a big read: whatever was read ahead no longer says where this handle is
-                    desc.AheadLength = 0;
-                    data = rented = ArrayPool<byte>.Shared.Rent(count);
-                    var target = data.AsMemory(0, count);
-                    var status = Guard(() =>
-                    {
-                        n = Wait(file.ReadFullyAsync(at, target, CancellationToken.None).AsTask());
-                        return STATUS_SUCCESS;
-                    });
-                    if (status < 0)
-                    {
-                        return status;
-                    }
+                    return status;
                 }
 
                 if (n == 0)
@@ -330,17 +288,13 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
                     return STATUS_END_OF_FILE;
                 }
 
-                Marshal.Copy(data, 0, buffer, n);
+                Marshal.Copy(rented, 0, buffer, n);
                 bytesTransferred = (uint)n;
-                desc.NextRead = at + n;
                 return STATUS_SUCCESS;
             }
             finally
             {
-                if (rented is not null)
-                {
-                    ArrayPool<byte>.Shared.Return(rented);
-                }
+                ArrayPool<byte>.Shared.Return(rented);
             }
         }
     }
@@ -803,31 +757,11 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         /// <summary>Reads and writes on one handle run one at a time, so the read-ahead never holds what a write replaced.</summary>
         public object ReadLock { get; } = new();
 
-        /// <summary>The rented read-ahead buffer; <see cref="AheadLength"/> bytes of the file from <see cref="AheadOffset"/>.</summary>
-        public byte[]? Ahead { get; set; }
-
-        public long AheadOffset { get; set; }
-
-        public int AheadLength { get; set; }
-
-        /// <summary>Where the handle's last read ended; a read starting there is sequential.</summary>
-        public long NextRead { get; set; } = -1;
+        public SequentialReadAhead ReadAhead { get; } = new();
 
         /// <summary>After a write or a resize through this handle: the buffer and the position mean nothing now.</summary>
-        public void ForgetReadAhead()
-        {
-            AheadLength = 0;
-            NextRead = -1;
-        }
+        public void ForgetReadAhead() => ReadAhead.Forget();
 
-        public void ReleaseReadAhead()
-        {
-            if (Ahead is { } rented)
-            {
-                Ahead = null;
-                AheadLength = 0;
-                ArrayPool<byte>.Shared.Return(rented);
-            }
-        }
+        public void ReleaseReadAhead() => ReadAhead.Dispose();
     }
 }
