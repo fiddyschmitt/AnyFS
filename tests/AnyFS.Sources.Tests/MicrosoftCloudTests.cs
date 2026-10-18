@@ -172,7 +172,7 @@ public class MicrosoftCloudTests
     }
 }
 
-/// <summary>The Cloud setting of the Online and Embedded sources.</summary>
+/// <summary>The Cloud setting of the Online and Embedded sources, and the Server source's refusal of a Microsoft 365 address.</summary>
 [TestClass]
 public class SharePointCloudSettingsTests
 {
@@ -258,5 +258,24 @@ public class SharePointCloudSettingsTests
         var test = plugin.TestAsync(new SharePointEmbeddedSettings { ContainerTypeId = "91710488-5756-407f-9046-fbe5f0b4de73", Tenant = "acme.onmicrosoft.us" }, new Progress<string>(), CancellationToken.None).GetAwaiter().GetResult();
         Assert.IsFalse(test.Success);
         StringAssert.Contains(test.Message, "global cloud");
+    }
+
+    [TestMethod]
+    [DataRow("https://acme.sharepoint.us/sites/Bar")]
+    [DataRow("https://contoso.sharepoint.com/sites/Team")]
+    public void TheServerTypeRefusesAMicrosoft365Site(string url)
+    {
+        var plugin = new SharePointServerPlugin();
+        var settings = new SharePointServerSettings { SiteUrl = url, Username = @"ACME\someone", Password = "x" };
+        var message = plugin.Validate(settings).Single();
+        Assert.AreEqual(nameof(SharePointServerSettings.SiteUrl), message.Property);
+        StringAssert.Contains(message.Message, "use the SharePoint Online source type");
+
+        var test = plugin.TestAsync(settings, new Progress<string>(), CancellationToken.None).GetAwaiter().GetResult();
+        Assert.IsFalse(test.Success, "refused before any request, so no proxy or 401 confuses it");
+        StringAssert.Contains(test.Message, "SharePoint Online");
+
+        settings.SiteUrl = "http://anyfs-sp-1/sites/anyfs";
+        Assert.AreEqual(0, plugin.Validate(settings).Count(), "an on-premises address is what this type is for");
     }
 }

@@ -77,12 +77,26 @@ public sealed class SharePointServerPlugin : ISourcePlugin, IValidatable, ITesta
 
     public ISource CreateSource(object settings) => new SharePointServerSource((SharePointServerSettings)settings);
 
+    /// <summary>
+    /// Why a SharePoint Online address is refused here, or null for any other: Microsoft 365 takes no Windows
+    /// password, so this source could only fail there, and how it fails (a proxy's error, a 401) does not say that
+    /// the type is wrong (18-Oct-2026: a .sharepoint.us site was set up as SharePoint Server).
+    /// </summary>
+    internal static string? OnlineSiteProblem(SiteAddress site)
+        => MicrosoftCloud.FromSiteHost(site.Host) is null
+            ? null
+            : $"{site.Host} is SharePoint Online, in Microsoft 365, which takes a work-account sign-in rather than a Windows password: use the SharePoint Online source type for it. This type is for SharePoint Server on your own network.";
+
     public IEnumerable<ValidationMessage> Validate(object settings)
     {
         var s = (SharePointServerSettings)settings;
-        if (!SiteAddress.TryParse(s.SiteUrl, out _, out var reason))
+        if (!SiteAddress.TryParse(s.SiteUrl, out var site, out var reason))
         {
             yield return new ValidationMessage(reason, nameof(SharePointServerSettings.SiteUrl));
+        }
+        else if (OnlineSiteProblem(site) is { } online)
+        {
+            yield return new ValidationMessage(online, nameof(SharePointServerSettings.SiteUrl));
         }
 
         if (s.PinnedLibrary is { } library)
@@ -133,6 +147,11 @@ public sealed class SharePointServerPlugin : ISourcePlugin, IValidatable, ITesta
             return new TestResult(false, reason);
         }
 
+        if (OnlineSiteProblem(site) is { } online)
+        {
+            return new TestResult(false, online);
+        }
+
         progress.Report($"Connecting to {site.Url}");
         using var rest = new SharePointRestClient(new Uri(site.Url), s.Credentials(), s.TrustAnyCertificate, NullLogger.Instance);
         try
@@ -177,6 +196,11 @@ public sealed class SharePointServerSource : SharePointSource
         if (!SiteAddress.TryParse(_settings.SiteUrl, out var site, out var reason))
         {
             throw new SourceFailedException(reason, permanent: true);
+        }
+
+        if (SharePointServerPlugin.OnlineSiteProblem(site) is { } online)
+        {
+            throw new SourceFailedException(online, permanent: true);
         }
 
         if (_settings.UsesCurrentLogon && !OperatingSystem.IsWindows())
