@@ -61,7 +61,7 @@ public sealed class SharePointOnlineSource : SharePointSource
         }
         catch (SignInRequiredException ex)
         {
-            throw new SourceFailedException(ex.Message, permanent: ex.Message.Contains("Conditional Access", StringComparison.Ordinal), ex);
+            throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
         }
 
         var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy, cloud: cloud);

@@ -116,6 +116,46 @@ public class MicrosoftCloudTests
         CollectionAssert.AreEqual(EntraSignIn.SiteScopes, global.Scopes.ToArray());
     }
 
+    [TestMethod]
+    public void RefusalsAreExplainedInTheSettingsTerms()
+    {
+        var gov = MicrosoftCloud.UsGovernment;
+        const string own = "11111111-2222-3333-4444-555555555555";
+        static MsalServiceException Refusal(string text) => new("invalid_request", text);
+
+        // what the US Government endpoint answers AnyFS's own client ID with (checked by hand, 18-Oct-2026)
+        var unknownApp = Refusal("AADSTS50059: No tenant-identifying information found in either the request or implied by any provided credentials. Trace ID: x");
+        var message = EntraSignIn.Describe(unknownApp, gov, SharePointOnlinePlugin.DefaultClientId, "organizations");
+        StringAssert.Contains(message, "global cloud");
+        StringAssert.Contains(message, "client ID");
+        Assert.IsTrue(EntraSignIn.IsPermanent(unknownApp), "retrying cannot help, and would open the browser again");
+
+        message = EntraSignIn.Describe(Refusal("AADSTS700016: Application with identifier '" + own + "' was not found in the directory 'acme'."), gov, own, "acme.onmicrosoft.us");
+        StringAssert.Contains(message, own);
+        StringAssert.Contains(message, "for tenant acme.onmicrosoft.us");
+
+        StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS50194: Application is not configured as a multi-tenant application."), gov, own, "organizations"), "Tenant setting");
+        StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS90002: Tenant 'acme.onmicrosoft.us' not found."), gov, own, "acme.onmicrosoft.us"), "tenant acme.onmicrosoft.us was not found in the US Government (GCC High) cloud");
+        StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS7000218: The request body must contain the following parameter: 'client_assertion' or 'client_secret'."), gov, own, "acme.onmicrosoft.us"), "Allow public client flows");
+        StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS65001: The user or administrator has not consented to use the application."), gov, own, "acme.onmicrosoft.us"), "administrator must consent");
+        StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS530035: Access has been blocked by security defaults."), MicrosoftCloud.Global, SharePointOnlinePlugin.DefaultClientId, "organizations"), "Conditional Access");
+
+        var other = Refusal("AADSTS12345: Something new.\nmore detail");
+        Assert.AreEqual("the sign-in failed: AADSTS12345: Something new.", EntraSignIn.Describe(other, gov, own, "organizations"));
+        Assert.IsFalse(EntraSignIn.IsPermanent(other));
+        Assert.IsFalse(EntraSignIn.IsPermanent(new MsalServiceException("authorization_declined", "The user declined.")), "a decline is the user's, not the settings'");
+    }
+
+    [TestMethod]
+    public void AadstsCodesAreReadFromTheMessage()
+    {
+        Assert.AreEqual(50059, EntraSignIn.AadstsCode("AADSTS50059: No tenant-identifying information"));
+        Assert.AreEqual(530035, EntraSignIn.AadstsCode("blocked: AADSTS530035: Access has been blocked"));
+        Assert.AreEqual(7000218, EntraSignIn.AadstsCode("AADSTS7000218: The request body"));
+        Assert.IsNull(EntraSignIn.AadstsCode("no code here"));
+        Assert.IsNull(EntraSignIn.AadstsCode("AADSTS: nothing after it"));
+    }
+
     private static SignInOptions Options(string clientId, string tenant, MicrosoftCloud? cloud)
         => new(clientId, tenant, null, SignInMethod.DeviceCode, EntraSignIn.SiteScopes, _ => { }, null, () => null, _ => { }, Cloud: cloud);
 

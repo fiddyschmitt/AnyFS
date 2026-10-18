@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Identity.Client;
 using LogLevel = Microsoft.Extensions.Logging.LogLevel;
@@ -40,8 +41,12 @@ internal sealed record SignInOptions(
     bool ForceLogin = false,
     MicrosoftCloud? Cloud = null);
 
-/// <summary>Thrown when a token can't be had without the user signing in again (the refresh token expired or was revoked).</summary>
-public sealed class SignInRequiredException(string message, Exception? inner = null) : Exception(message, inner);
+/// <summary>Thrown when a token can't be had without the user signing in again (the refresh token expired or was revoked), or the sign-in was refused.</summary>
+/// <param name="permanent">The refusal is about the settings or the organisation's policy, so trying again unchanged would only fail again (and open the browser again).</param>
+public sealed class SignInRequiredException(string message, Exception? inner = null, bool permanent = false) : Exception(message, inner)
+{
+    public bool Permanent { get; } = permanent;
+}
 
 /// <summary>
 /// The Microsoft identity platform sign-in behind the SharePoint Online and Embedded sources, on MSAL. Silent
@@ -246,7 +251,7 @@ internal sealed class EntraSignIn
         }
         catch (MsalServiceException ex)
         {
-            throw new SignInRequiredException(Describe(ex), ex);
+            throw new SignInRequiredException(Describe(ex, _cloud, _options.ClientId, _options.Tenant), ex, IsPermanent(ex));
         }
         catch (MsalClientException ex)
         {
@@ -275,16 +280,45 @@ internal sealed class EntraSignIn
         }
         catch (MsalServiceException ex)
         {
-            throw new SignInRequiredException(Describe(ex), ex);
+            throw new SignInRequiredException(Describe(ex, _cloud, _options.ClientId, _options.Tenant), ex, IsPermanent(ex));
         }
     }
 
-    private static string Describe(MsalServiceException ex)
+    /// <summary>
+    /// Whether a refusal is about the settings or the organisation's policy (the codes <see cref="Describe"/> explains,
+    /// except declines and expiries): starting the source again unchanged would be refused the same way, after
+    /// opening the browser again, so it waits for the user's Retry instead.
+    /// </summary>
+    internal static bool IsPermanent(MsalServiceException ex)
+        => AadstsCode(ex.Message) is 53000 or 53003 or 530035 or 50059 or 700016 or 50194 or 90002 or 900023 or 65001 or 90094 or 50011 or 7000218;
+
+    /// <summary>
+    /// What a refused sign-in means, in the settings' terms. The identity platform's AADSTS codes say which setting
+    /// is wrong; the ones here are those an organisation's own registration, or the wrong cloud, runs into (the US
+    /// Government endpoint answers AnyFS's own client ID with AADSTS50059: it has no such app).
+    /// </summary>
+    internal static string Describe(MsalServiceException ex, MicrosoftCloud cloud, string clientId, string tenant)
     {
         var message = ex.Message;
-        if (message.Contains("AADSTS53003", StringComparison.Ordinal) || message.Contains("AADSTS530035", StringComparison.Ordinal) || message.Contains("AADSTS53000", StringComparison.Ordinal))
+        var organizations = string.Equals(tenant, "organizations", StringComparison.OrdinalIgnoreCase);
+        switch (AadstsCode(message))
         {
-            return "your organisation's Conditional Access policy blocked this sign-in (the device-code flow is often blocked: choose the browser sign-in in the settings)";
+            case 53000 or 53003 or 530035:
+                return "your organisation's Conditional Access policy blocked this sign-in (the device-code flow is often blocked: choose the browser sign-in in the settings)";
+            case 50059 or 700016:
+                return !cloud.HasShippedRegistration && string.Equals(clientId, SharePointOnlinePlugin.DefaultClientId, StringComparison.OrdinalIgnoreCase)
+                    ? $"AnyFS's own app registration exists only in Microsoft's global cloud, not the {cloud.Name} cloud: put your organisation's own registration's client ID in the settings"
+                    : $"the app registration {clientId} does not exist in the {cloud.Name} cloud{(organizations ? "" : $" for tenant {tenant}")}: check the Client ID, Tenant and Cloud settings";
+            case 50194:
+                return $"the app registration {clientId} takes accounts of its own tenant only: put that tenant's domain or id in the Tenant setting";
+            case 90002 or 900023:
+                return $"tenant {tenant} was not found in the {cloud.Name} cloud: check the Tenant and Cloud settings";
+            case 65001 or 90094:
+                return $"an administrator must consent to the app registration {clientId} for the organisation before anyone can sign in with it";
+            case 50011:
+                return $"the app registration {clientId} does not list the redirect URI http://localhost: add it under the Mobile and desktop applications platform";
+            case 7000218:
+                return $"the app registration {clientId} is not set up as a public client: turn on Allow public client flows in its Authentication settings";
         }
 
         if (ex.ErrorCode == "authorization_declined" || ex.ErrorCode == "access_denied")
@@ -299,6 +333,25 @@ internal sealed class EntraSignIn
 
         var firstLine = message.Split('\n')[0].Trim();
         return $"the sign-in failed: {firstLine}";
+    }
+
+    /// <summary>The first AADSTS error code in an identity platform message (AADSTS50059: ... is 50059), or null.</summary>
+    internal static int? AadstsCode(string message)
+    {
+        var at = message.IndexOf("AADSTS", StringComparison.Ordinal);
+        if (at < 0)
+        {
+            return null;
+        }
+
+        var start = at + "AADSTS".Length;
+        var end = start;
+        while (end < message.Length && char.IsAsciiDigit(message[end]))
+        {
+            end++;
+        }
+
+        return end > start && int.TryParse(message.AsSpan(start, end - start), NumberStyles.None, CultureInfo.InvariantCulture, out var code) ? code : null;
     }
 
     private static bool TryOpenBrowser(Uri uri)
