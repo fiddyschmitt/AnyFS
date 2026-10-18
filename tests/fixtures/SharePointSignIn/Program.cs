@@ -3,8 +3,10 @@
 // live tests load into their source's secret store. DPAPI-protected on Windows; elsewhere the file is plain and
 // made private, so keep it out of shared folders. Run it again when the tests report the sign-in has lapsed.
 //
-// usage: SharePointSignIn [--account name@tenant] [--tenant organizations|<domain>|<id>] [--scopes site|containers|all] [--device-code] [--force-login] [--print-url] [--out <file>] [--get <graph path>]...
+// usage: SharePointSignIn [--account name@tenant] [--tenant organizations|<domain>|<id>] [--scopes site|containers|all] [--device-code] [--force-login] [--print-url] [--out <file>] [--get <graph path>]... [--cloud global|usgov] [--client-id <id>]
 //
+// --cloud usgov signs in to the US Government cloud (GCC High) and asks its Graph; AnyFS's own registration does
+// not exist there, so it needs --client-id with the organisation's own (and usually --tenant contoso.onmicrosoft.us).
 // --print-url prints the sign-in page's address instead of opening a browser, for signing in from another
 // browser or machine (the reply still arrives on this machine's loopback port). The default file is what the
 // tests look for when ANYFS_TEST_SPO_CACHE is not set. The sign-in asks for the SharePoint Online and the
@@ -27,6 +29,8 @@ IReadOnlyList<string> scopes = [.. EntraSignIn.SiteScopes.Concat(EntraSignIn.Con
 var printUrl = false;
 var output = SignInCacheFile.DefaultPath;
 var gets = new List<string>();
+var cloud = MicrosoftCloud.Global;
+var clientId = SharePointOnlinePlugin.DefaultClientId;
 for (var i = 0; i < args.Length; i++)
 {
     switch (args[i])
@@ -47,6 +51,15 @@ for (var i = 0; i < args.Length; i++)
         case "--print-url": printUrl = true; break;
         case "--out": output = args[++i]; break;
         case "--get": gets.Add(args[++i]); break;
+        case "--cloud":
+            cloud = args[++i] switch
+            {
+                "global" => MicrosoftCloud.Global,
+                "usgov" => MicrosoftCloud.UsGovernment,
+                var other => throw new ArgumentException($"--cloud {other}: global or usgov"),
+            };
+            break;
+        case "--client-id": clientId = args[++i]; break;
         default:
             Console.Error.WriteLine($"unknown argument {args[i]}");
             return 2;
@@ -54,13 +67,14 @@ for (var i = 0; i < args.Length; i++)
 }
 
 var signIn = new EntraSignIn(new SignInOptions(
-    SharePointOnlinePlugin.DefaultClientId, tenant, account, deviceCode ? SignInMethod.DeviceCode : SignInMethod.Browser, scopes,
+    clientId, tenant, account, deviceCode ? SignInMethod.DeviceCode : SignInMethod.Browser, scopes,
     Progress: Console.WriteLine,
     Prompt: (title, message) => { Console.WriteLine($"{title}: {message}"); return Task.CompletedTask; },
     LoadCache: () => SignInCacheFile.Read(output),
     SaveCache: bytes => SignInCacheFile.Write(output, bytes),
     OpenBrowser: printUrl ? uri => { Console.WriteLine($"OPEN THIS URL TO SIGN IN: {uri.AbsoluteUri}"); return true; } : null,
-    ForceLogin: forceLogin), NullLogger.Instance);
+    ForceLogin: forceLogin,
+    Cloud: cloud), NullLogger.Instance);
 try
 {
     await signIn.SignInAsync(CancellationToken.None);
@@ -80,7 +94,7 @@ if (account is not null && !string.Equals(signIn.Username, account, StringCompar
 Console.WriteLine($"signed in as {signIn.Username}; the sign-in is kept in {output}");
 if (gets.Count > 0)
 {
-    using var graph = new GraphClient((ct, refresh) => signIn.GetAccessTokenAsync(ct, refresh), NullLogger.Instance);
+    using var graph = new GraphClient((ct, refresh) => signIn.GetAccessTokenAsync(ct, refresh), NullLogger.Instance, cloud: cloud);
     foreach (var path in gets)
     {
         Console.WriteLine($"--- GET {path}");

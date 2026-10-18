@@ -39,14 +39,22 @@ public sealed class SharePointOnlineSource : SharePointSource
             throw new SourceFailedException("The client ID is not a GUID.", permanent: true);
         }
 
+        // the settings dialog checks this too, but a source saved before (or edited by hand) gets here unchecked
+        var cloud = _settings.EffectiveCloud;
+        if (CloudSettings.NeedsOwnRegistration(cloud, _settings.EffectiveClientId))
+        {
+            throw new SourceFailedException(CloudSettings.OwnRegistrationNeeded(cloud, SharePointOnlinePlugin.RegistrationPermissions), permanent: true);
+        }
+
         var secrets = Context.Secrets;
         var signIn = new EntraSignIn(new SignInOptions(
             _settings.EffectiveClientId, _settings.EffectiveTenant, _settings.LoginHint, _settings.Method, EntraSignIn.SiteScopes,
             Progress: message => Context.ReportProgress(message),
             Prompt: (title, message) => Context.PromptAsync(new PromptRequest(PromptKind.YesNo, title, message), ct),
             LoadCache: () => secrets.Get("msal-cache") is { } saved ? Convert.FromBase64String(saved) : null,
-            SaveCache: bytes => secrets.Set("msal-cache", Convert.ToBase64String(bytes))), Logger);
-        Context.ReportProgress("Signing in to Microsoft 365");
+            SaveCache: bytes => secrets.Set("msal-cache", Convert.ToBase64String(bytes)),
+            Cloud: cloud), Logger);
+        Context.ReportProgress(cloud.IsGlobal ? "Signing in to Microsoft 365" : $"Signing in to Microsoft 365 in the {cloud.Name} cloud");
         try
         {
             await signIn.SignInAsync(ct).ConfigureAwait(false);
@@ -56,7 +64,7 @@ public sealed class SharePointOnlineSource : SharePointSource
             throw new SourceFailedException(ex.Message, permanent: ex.Message.Contains("Conditional Access", StringComparison.Ordinal), ex);
         }
 
-        var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy);
+        var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy, cloud: cloud);
         Context.ReportProgress($"Looking up {_site.Url}");
         GraphDocumentStore? store;
         try

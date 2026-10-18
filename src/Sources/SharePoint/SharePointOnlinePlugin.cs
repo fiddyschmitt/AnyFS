@@ -19,15 +19,20 @@ public sealed class SharePointOnlineSettings
     public string? Account { get; set; }
 
     [Setting("Sign in with", Order = 3, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [BrowserMethod, DeviceCodeMethod],
-        Hint = "Browser: a sign-in page opens in your browser, the usual way. Device code: a code to type at microsoft.com/devicelogin from any device, for machines without a browser; some organisations block it.")]
+        Hint = "Browser: a sign-in page opens in your browser, the usual way. Device code: a code to enter on Microsoft's device sign-in page from any device (the message says where), for machines without a browser; some organisations block it.")]
     public string SignInMethod { get; set; } = BrowserMethod;
 
+    [Setting("Cloud", Advanced = true, Order = 9, Group = "Sign-in", Kind = SettingKind.Choice,
+        Choices = [MicrosoftCloud.AutomaticName, MicrosoftCloud.GlobalName, MicrosoftCloud.UsGovernmentName],
+        Hint = "The Microsoft cloud the tenant is in. Automatic goes by the site's address: a site under .sharepoint.us is in the US Government cloud (GCC High), which needs your organisation's own app registration in Client ID.")]
+    public string Cloud { get; set; } = MicrosoftCloud.AutomaticName;
+
     [Setting("Tenant", Advanced = true, Order = 10, Group = "Sign-in",
-        Hint = "organizations (any work or school account), or your tenant's domain or id when the sign-in needs steering to it.")]
+        Hint = "organizations (any work or school account), or your tenant's domain or id when the sign-in needs steering to it. In the US Government cloud, organizations means the site's own tenant.")]
     public string Tenant { get; set; } = "organizations";
 
     [Setting("Client ID", Advanced = true, Order = 11, Group = "Sign-in",
-        Hint = "The app registration AnyFS signs in as. Leave the default unless your organisation registered its own for AnyFS.")]
+        Hint = "The app registration AnyFS signs in as. Leave the default unless your organisation registered its own for AnyFS; in the US Government cloud it must have, since AnyFS's own exists only in the global cloud.")]
     public string ClientId { get; set; } = SharePointOnlinePlugin.DefaultClientId;
 
     [Setting("Connections", Advanced = true, Order = 20, Hint = "Parallel downloads per open file.")]
@@ -46,23 +51,50 @@ public sealed class SharePointOnlineSettings
 
     internal string? LoginHint => string.IsNullOrWhiteSpace(Account) ? null : Account.Trim();
 
-    internal string EffectiveTenant => string.IsNullOrWhiteSpace(Tenant) ? "organizations" : Tenant.Trim();
+    /// <summary>The cloud to sign in to: the one chosen, else the site's (a .sharepoint.us site is US Government), else the tenant's.</summary>
+    internal MicrosoftCloud EffectiveCloud => MicrosoftCloud.Resolve(Cloud, SiteHost, Tenant);
+
+    /// <summary>
+    /// The tenant the sign-in goes to. Outside the global cloud, organizations becomes the site's own tenant
+    /// (contoso.sharepoint.us is contoso.onmicrosoft.us): the organisation's own app registration there is often
+    /// for its own tenant only, which the organizations endpoint refuses (AADSTS50194).
+    /// </summary>
+    internal string EffectiveTenant
+    {
+        get
+        {
+            var tenant = string.IsNullOrWhiteSpace(Tenant) ? "organizations" : Tenant.Trim();
+            var cloud = EffectiveCloud;
+            if (!cloud.IsGlobal && string.Equals(tenant, "organizations", StringComparison.OrdinalIgnoreCase) && cloud.TenantForSiteHost(SiteHost) is { } siteTenant)
+            {
+                return siteTenant;
+            }
+
+            return tenant;
+        }
+    }
 
     internal string EffectiveClientId => string.IsNullOrWhiteSpace(ClientId) ? SharePointOnlinePlugin.DefaultClientId : ClientId.Trim();
+
+    private string? SiteHost => SiteAddress.TryParse(SiteUrl, out var site, out _) ? site.Host : null;
 }
 
 /// <summary>
 /// SharePoint Online (type <c>sharepoint-online</c>, folder <c>sharepoint</c>, spec 7.3): a Microsoft 365 site's
 /// document libraries, through Microsoft Graph. The user signs in once with their work account (the system
-/// browser, or a device code) as the app registration AnyFS ships; the sign-in is kept in the source's secret
-/// store and renewed silently. Each library is a top-level folder, or one library is the root. Reads are
+/// browser, or a device code) as the app registration AnyFS ships, or in the US Government cloud as their
+/// organisation's own (<see cref="MicrosoftCloud"/>); the sign-in is kept in the source's secret store and renewed
+/// silently. Each library is a top-level folder, or one library is the root. Reads are
 /// ranged requests on SharePoint's pre-authenticated download URLs, small files spooled whole; writes are
 /// spooled locally and uploaded when the file is closed. Names follow SharePoint's rules, case-insensitively.
 /// </summary>
 public sealed class SharePointOnlinePlugin : ISourcePlugin, IValidatable, ITestable
 {
-    /// <summary>The AnyFS app registration (provisioning/sharepoint/README.md): a multi-tenant public client with delegated Graph scopes.</summary>
+    /// <summary>The AnyFS app registration (provisioning/sharepoint/README.md): a multi-tenant public client with delegated Graph scopes, in the global cloud only.</summary>
     public const string DefaultClientId = "824dc5b9-f3c4-42b7-871d-6f0de8bc0a4a";
+
+    /// <summary>The delegated Graph permissions an organisation's own registration needs (<see cref="EntraSignIn.SiteScopes"/>), as messages list them.</summary>
+    internal const string RegistrationPermissions = "User.Read, Files.ReadWrite.All and Sites.ReadWrite.All";
 
     public string TypeId => "sharepoint-online";
 
@@ -116,6 +148,12 @@ public sealed class SharePointOnlinePlugin : ISourcePlugin, IValidatable, ITesta
             yield return new ValidationMessage("The client ID is the app registration's Application (client) ID, a GUID.", nameof(SharePointOnlineSettings.ClientId));
         }
 
+        var siteHost = SiteAddress.TryParse(s.SiteUrl, out var site, out _) ? site.Host : null;
+        foreach (var message in CloudSettings.Check(s.Cloud, s.EffectiveCloud, s.Tenant, s.EffectiveClientId, siteHost, RegistrationPermissions, tenantRequired: false))
+        {
+            yield return message;
+        }
+
         if (s.Connections is < 1 or > 16)
         {
             yield return new ValidationMessage("Connections must be between 1 and 16.", nameof(SharePointOnlineSettings.Connections));
@@ -139,17 +177,24 @@ public sealed class SharePointOnlinePlugin : ISourcePlugin, IValidatable, ITesta
             return new TestResult(false, reason);
         }
 
+        var cloud = s.EffectiveCloud;
+        if (CloudSettings.NeedsOwnRegistration(cloud, s.EffectiveClientId))
+        {
+            return new TestResult(false, CloudSettings.OwnRegistrationNeeded(cloud, RegistrationPermissions));
+        }
+
         var signIn = new EntraSignIn(new SignInOptions(
             s.EffectiveClientId, s.EffectiveTenant, s.LoginHint, s.Method, EntraSignIn.SiteScopes,
             Progress: progress.Report,
             Prompt: null,
             LoadCache: () => EntraSignIn.RecentCache(s.EffectiveClientId, s.EffectiveTenant, s.LoginHint),
-            SaveCache: _ => { }), NullLogger.Instance);
+            SaveCache: _ => { },
+            Cloud: cloud), NullLogger.Instance);
         try
         {
-            progress.Report("Signing in");
+            progress.Report(cloud.IsGlobal ? "Signing in" : $"Signing in to the {cloud.Name} cloud");
             await signIn.SignInAsync(ct).ConfigureAwait(false);
-            using var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), NullLogger.Instance);
+            using var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), NullLogger.Instance, cloud: cloud);
             progress.Report($"Signed in as {signIn.Username}; looking up {site.Url}");
             using var siteDoc = await graph.GetJsonAsync($"{site.GraphPath}?$select=id,displayName,webUrl", site.Url, ct).ConfigureAwait(false);
             var siteId = siteDoc.RootElement.GetProperty("id").GetString()!;

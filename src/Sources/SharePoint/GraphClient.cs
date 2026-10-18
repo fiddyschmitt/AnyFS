@@ -19,7 +19,6 @@ internal sealed record DriveInfo(string Id, string Name, long? QuotaTotal, long?
 /// </summary>
 internal sealed class GraphClient : IDisposable
 {
-    public const string BaseUrl = "https://graph.microsoft.com/v1.0/";
     public const int MaxAttempts = 6;
 
     /// <summary>Graph's limit for a one-request upload; bigger files use an upload session.</summary>
@@ -39,12 +38,14 @@ internal sealed class GraphClient : IDisposable
     /// <param name="token">(cancellation, forceRefresh) → a bearer token for Graph.</param>
     /// <param name="onTrouble">Called with a reason when the upstream misbehaves (throttling, outages), for the source's health.</param>
     /// <param name="onSuccess">Called after a request succeeded, so the source can turn healthy again.</param>
-    public GraphClient(Func<CancellationToken, bool, Task<string>> token, ILogger logger, Action<string>? onTrouble = null, Action? onSuccess = null, HttpMessageHandler? handler = null)
+    /// <param name="cloud">Whose Graph to call (the token must be for the same cloud); null: the global cloud.</param>
+    public GraphClient(Func<CancellationToken, bool, Task<string>> token, ILogger logger, Action<string>? onTrouble = null, Action? onSuccess = null, HttpMessageHandler? handler = null, MicrosoftCloud? cloud = null)
     {
         _token = token;
         _logger = logger;
         _onTrouble = onTrouble;
         _onSuccess = onSuccess;
+        BaseUrl = (cloud ?? MicrosoftCloud.Global).GraphBaseUrl;
         handler ??= new SocketsHttpHandler
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
@@ -54,6 +55,9 @@ internal sealed class GraphClient : IDisposable
         _http = new HttpClient(handler, disposeHandler: true) { Timeout = RequestTimeout };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(GraphClient).Assembly.GetName().Version?.ToString(3) ?? "0"}");
     }
+
+    /// <summary>Graph's v1.0 root that relative addresses are resolved against: https://graph.microsoft.com/v1.0/ in the global cloud.</summary>
+    public string BaseUrl { get; }
 
     public void Dispose() => _http.Dispose();
 
@@ -317,7 +321,7 @@ internal sealed class GraphClient : IDisposable
 
     // --- the one send path ---------------------------------------------------------------------------------
 
-    private static string Absolute(string url) => url.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ? url : BaseUrl + url;
+    private string Absolute(string url) => url.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ? url : BaseUrl + url;
 
     private static DateTimeOffset? ReadTime(JsonElement element, string property)
         => element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out var time) ? time : null;

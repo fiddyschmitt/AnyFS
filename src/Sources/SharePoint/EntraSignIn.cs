@@ -25,6 +25,7 @@ public enum SignInMethod
 /// <param name="SaveCache">Stores the serialised MSAL cache after it changed.</param>
 /// <param name="OpenBrowser">Shows the sign-in page: false when it could not (the device code is used instead). Null: the system browser.</param>
 /// <param name="ForceLogin">The browser sign-in asks for credentials rather than offering the browser's signed-in accounts (for signing in as exactly the named account).</param>
+/// <param name="Cloud">The Microsoft cloud to sign in to and whose Graph the scopes are for; null: the global cloud.</param>
 internal sealed record SignInOptions(
     string ClientId,
     string Tenant,
@@ -36,7 +37,8 @@ internal sealed record SignInOptions(
     Func<byte[]?> LoadCache,
     Action<byte[]> SaveCache,
     Func<Uri, bool>? OpenBrowser = null,
-    bool ForceLogin = false);
+    bool ForceLogin = false,
+    MicrosoftCloud? Cloud = null);
 
 /// <summary>Thrown when a token can't be had without the user signing in again (the refresh token expired or was revoked).</summary>
 public sealed class SignInRequiredException(string message, Exception? inner = null) : Exception(message, inner);
@@ -62,6 +64,8 @@ internal sealed class EntraSignIn
     private readonly SignInOptions _options;
     private readonly ILogger _logger;
     private readonly IPublicClientApplication _app;
+    private readonly MicrosoftCloud _cloud;
+    private readonly IReadOnlyList<string> _scopes;
     private byte[]? _cache;
     private bool _cacheLoaded;
     private IAccount? _account;
@@ -70,8 +74,10 @@ internal sealed class EntraSignIn
     {
         _options = options;
         _logger = logger;
+        _cloud = options.Cloud ?? MicrosoftCloud.Global;
+        _scopes = _cloud.QualifyScopes(options.Scopes);
         var builder = PublicClientApplicationBuilder.Create(options.ClientId)
-            .WithAuthority(AzureCloudInstance.AzurePublic, options.Tenant)
+            .WithAuthority(_cloud.Instance, options.Tenant)
             .WithDefaultRedirectUri()
             .WithClientName("AnyFS");
         if (logger.IsEnabled(LogLevel.Debug))
@@ -92,6 +98,9 @@ internal sealed class EntraSignIn
 
     /// <summary>The signed-in account's name, once <see cref="SignInAsync"/> has succeeded.</summary>
     public string? Username => _account?.Username;
+
+    /// <summary>The scopes asked for, qualified for the cloud (for tests).</summary>
+    internal IReadOnlyList<string> Scopes => _scopes;
 
     /// <summary>The key under which a sign-in's cache is remembered in this process (the Test button hands over to the source through it).</summary>
     public static string RecentCacheKey(string clientId, string tenant, string? loginHint) => $"{clientId}|{tenant}|{loginHint}".ToLowerInvariant();
@@ -183,7 +192,7 @@ internal sealed class EntraSignIn
     /// </summary>
     private AcquireTokenSilentParameterBuilder Silent(IAccount account, bool forceRefresh)
     {
-        var builder = _app.AcquireTokenSilent(_options.Scopes, account).WithForceRefresh(forceRefresh);
+        var builder = _app.AcquireTokenSilent(_scopes, account).WithForceRefresh(forceRefresh);
         if (account.HomeAccountId?.TenantId is { Length: > 0 } tenantId)
         {
             builder = builder.WithTenantId(tenantId);
@@ -196,7 +205,7 @@ internal sealed class EntraSignIn
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(InteractiveTimeout);
-        var builder = _app.AcquireTokenInteractive(_options.Scopes)
+        var builder = _app.AcquireTokenInteractive(_scopes)
             .WithUseEmbeddedWebView(false)
             .WithPrompt(_options.ForceLogin ? Prompt.ForceLogin : Prompt.SelectAccount)
             .WithSystemWebViewOptions(new SystemWebViewOptions
@@ -249,7 +258,7 @@ internal sealed class EntraSignIn
     {
         try
         {
-            return await _app.AcquireTokenWithDeviceCode(_options.Scopes, code =>
+            return await _app.AcquireTokenWithDeviceCode(_scopes, code =>
             {
                 _options.Progress(code.Message);
                 _logger.LogInformation("sharepoint: {Message}", code.Message);

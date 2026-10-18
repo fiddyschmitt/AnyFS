@@ -19,15 +19,20 @@ public sealed class SharePointEmbeddedSettings
     public string? Account { get; set; }
 
     [Setting("Sign in with", Order = 3, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [SharePointOnlineSettings.BrowserMethod, SharePointOnlineSettings.DeviceCodeMethod],
-        Hint = "Browser: a sign-in page opens in your browser, the usual way. Device code: a code to type at microsoft.com/devicelogin from any device, for machines without a browser; some organisations block it.")]
+        Hint = "Browser: a sign-in page opens in your browser, the usual way. Device code: a code to enter on Microsoft's device sign-in page from any device (the message says where), for machines without a browser; some organisations block it.")]
     public string SignInMethod { get; set; } = SharePointOnlineSettings.BrowserMethod;
 
+    [Setting("Cloud", Advanced = true, Order = 9, Group = "Sign-in", Kind = SettingKind.Choice,
+        Choices = [MicrosoftCloud.AutomaticName, MicrosoftCloud.GlobalName, MicrosoftCloud.UsGovernmentName],
+        Hint = "The Microsoft cloud the tenant is in. Automatic goes by the tenant's domain: one under .onmicrosoft.us is in the US Government cloud (GCC High), which needs your tenant in Tenant and your organisation's own app registration in Client ID.")]
+    public string Cloud { get; set; } = MicrosoftCloud.AutomaticName;
+
     [Setting("Tenant", Advanced = true, Order = 10, Group = "Sign-in",
-        Hint = "organizations (any work or school account), or your tenant's domain or id when the sign-in needs steering to it.")]
+        Hint = "organizations (any work or school account), or your tenant's domain or id when the sign-in needs steering to it; in the US Government cloud, your tenant.")]
     public string Tenant { get; set; } = "organizations";
 
     [Setting("Client ID", Advanced = true, Order = 11, Group = "Sign-in",
-        Hint = "The app registration AnyFS signs in as. The default is AnyFS's own, which works once your administrator has registered it on the container type; otherwise the owning application's client id, if that application allows a sign-in from a desktop app.")]
+        Hint = "The app registration AnyFS signs in as. The default is AnyFS's own, which works once your administrator has registered it on the container type; otherwise the owning application's client id, if that application allows a sign-in from a desktop app. In the US Government cloud, your organisation's own: AnyFS's exists only in the global cloud.")]
     public string ClientId { get; set; } = SharePointOnlinePlugin.DefaultClientId;
 
     [Setting("Connections", Advanced = true, Order = 20, Hint = "Parallel downloads per open file.")]
@@ -50,6 +55,9 @@ public sealed class SharePointEmbeddedSettings
 
     internal string EffectiveClientId => string.IsNullOrWhiteSpace(ClientId) ? SharePointOnlinePlugin.DefaultClientId : ClientId.Trim();
 
+    /// <summary>The cloud to sign in to: the one chosen, else the tenant's (contoso.onmicrosoft.us is US Government), else the global cloud.</summary>
+    internal MicrosoftCloud EffectiveCloud => MicrosoftCloud.Resolve(Cloud, null, Tenant);
+
     internal bool TryGetContainerType(out Guid id) => Guid.TryParse(ContainerTypeId?.Trim(), out id);
 }
 
@@ -63,6 +71,12 @@ public sealed class SharePointEmbeddedSettings
 /// </summary>
 public sealed class SharePointEmbeddedPlugin : ISourcePlugin, IValidatable, ITestable
 {
+    /// <summary>The delegated Graph permissions an organisation's own registration needs (<see cref="EntraSignIn.ContainerScopes"/>), as messages list them.</summary>
+    internal const string RegistrationPermissions = "User.Read and FileStorageContainer.Selected";
+
+    /// <summary>What an organisation's own registration needs besides its permissions.</summary>
+    internal const string RegistrationExtra = ", and registers it on the container type";
+
     public string TypeId => "sharepoint-embedded";
 
     public string DisplayName => "SharePoint Embedded";
@@ -108,6 +122,11 @@ public sealed class SharePointEmbeddedPlugin : ISourcePlugin, IValidatable, ITes
             yield return new ValidationMessage("The client ID is the app registration's Application (client) ID, a GUID.", nameof(SharePointEmbeddedSettings.ClientId));
         }
 
+        foreach (var message in CloudSettings.Check(s.Cloud, s.EffectiveCloud, s.Tenant, s.EffectiveClientId, siteHost: null, RegistrationPermissions, tenantRequired: true, RegistrationExtra))
+        {
+            yield return message;
+        }
+
         if (s.Connections is < 1 or > 16)
         {
             yield return new ValidationMessage("Connections must be between 1 and 16.", nameof(SharePointEmbeddedSettings.Connections));
@@ -128,17 +147,24 @@ public sealed class SharePointEmbeddedPlugin : ISourcePlugin, IValidatable, ITes
             return new TestResult(false, "The container type is its id, a GUID.");
         }
 
+        var cloud = s.EffectiveCloud;
+        if (CloudSettings.NeedsOwnRegistration(cloud, s.EffectiveClientId))
+        {
+            return new TestResult(false, CloudSettings.OwnRegistrationNeeded(cloud, RegistrationPermissions, RegistrationExtra));
+        }
+
         var signIn = new EntraSignIn(new SignInOptions(
             s.EffectiveClientId, s.EffectiveTenant, s.LoginHint, s.Method, EntraSignIn.ContainerScopes,
             Progress: progress.Report,
             Prompt: null,
             LoadCache: () => EntraSignIn.RecentCache(s.EffectiveClientId, s.EffectiveTenant, s.LoginHint),
-            SaveCache: _ => { }), NullLogger.Instance);
+            SaveCache: _ => { },
+            Cloud: cloud), NullLogger.Instance);
         try
         {
-            progress.Report("Signing in");
+            progress.Report(cloud.IsGlobal ? "Signing in" : $"Signing in to the {cloud.Name} cloud");
             await signIn.SignInAsync(ct).ConfigureAwait(false);
-            using var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), NullLogger.Instance);
+            using var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), NullLogger.Instance, cloud: cloud);
             if (s.PinnedContainerId is { } id)
             {
                 progress.Report($"Signed in as {signIn.Username}; looking up container {id}");
@@ -210,14 +236,22 @@ public sealed class SharePointEmbeddedSource : SharePointSource
             throw new SourceFailedException("The client ID is not a GUID.", permanent: true);
         }
 
+        // the settings dialog checks this too, but a source saved before (or edited by hand) gets here unchecked
+        var cloud = _settings.EffectiveCloud;
+        if (CloudSettings.NeedsOwnRegistration(cloud, _settings.EffectiveClientId))
+        {
+            throw new SourceFailedException(CloudSettings.OwnRegistrationNeeded(cloud, SharePointEmbeddedPlugin.RegistrationPermissions, SharePointEmbeddedPlugin.RegistrationExtra), permanent: true);
+        }
+
         var secrets = Context.Secrets;
         var signIn = new EntraSignIn(new SignInOptions(
             _settings.EffectiveClientId, _settings.EffectiveTenant, _settings.LoginHint, _settings.Method, EntraSignIn.ContainerScopes,
             Progress: message => Context.ReportProgress(message),
             Prompt: (title, message) => Context.PromptAsync(new PromptRequest(PromptKind.YesNo, title, message), ct),
             LoadCache: () => secrets.Get("msal-cache") is { } saved ? Convert.FromBase64String(saved) : null,
-            SaveCache: bytes => secrets.Set("msal-cache", Convert.ToBase64String(bytes))), Logger);
-        Context.ReportProgress("Signing in to Microsoft 365");
+            SaveCache: bytes => secrets.Set("msal-cache", Convert.ToBase64String(bytes)),
+            Cloud: cloud), Logger);
+        Context.ReportProgress(cloud.IsGlobal ? "Signing in to Microsoft 365" : $"Signing in to Microsoft 365 in the {cloud.Name} cloud");
         try
         {
             await signIn.SignInAsync(ct).ConfigureAwait(false);
@@ -227,7 +261,7 @@ public sealed class SharePointEmbeddedSource : SharePointSource
             throw new SourceFailedException(ex.Message, permanent: ex.Message.Contains("Conditional Access", StringComparison.Ordinal), ex);
         }
 
-        var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy);
+        var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy, cloud: cloud);
         Context.ReportProgress($"Listing the containers of type {containerType}");
         try
         {
