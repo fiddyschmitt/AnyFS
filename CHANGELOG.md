@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md).
+
+### Milestone 6: SharePoint
+
+- **SharePoint Online** (`sharepoint-online`, spec 7.3): a Microsoft 365 site's document libraries
+  through Microsoft Graph, after a browser or device-code sign-in with the shipped app registration
+  (MSAL, the cache in the source's secret store); ranged reads with spooling below a threshold,
+  write-on-close uploads (one PUT up to 4 MiB, upload sessions in 10 MiB pieces above), renames,
+  times, quota, SharePoint's name rules checked before any request, Graph's error codes mapped.
+- **SharePoint Server** (`sharepoint-server`, spec 7.4): an on-premises site through the REST API with
+  a Windows account (NTLM or Kerberos; a user name and password, or the current logon on Windows),
+  by name or by address; the same file-system half as Online over a REST store; chunked uploads
+  through `StartUpload`/`ContinueUpload`/`FinishUpload`; times through a client-object-model request
+  (`UpdateOverwriteVersion`), which SharePoint honours for site collection administrators.
+- **SharePoint Embedded** (`sharepoint-embedded`, spec 7.5): the containers of a container type,
+  each a drive, with the same source over the Graph store; a container by name or by id.
+- **The lab farms** (`provisioning/sharepoint/`, `provisioning/windows/dc-*.ps1`, `sp-*.ps1`): a
+  domain controller and two one-server farms on SQL Server 2022 Developer, SharePoint Server
+  Subscription Edition on Windows Server 2022 (`anyfs-sp-1`) and SharePoint Server 2019 on Windows
+  Server 2019 (`anyfs-sp-2`), built by SharePointDsc from pinned images
+  (`scripts/fetch-sharepoint.ps1`), with the restarts the build needs driven by the Vagrantfile; the
+  shipped app registration (`register-app.ps1`) and the sandbox tenant's Embedded rig
+  (`embedded-rig.ps1`) as scripts.
+- **E2E**: a collection pair per lab farm on every host (`sharepoint`, `sharepoint2019`, each with a
+  `-ro` twin), the fixture seeded through the source; `ANYFS_E2E_COLLECTIONS` selects collections.
+- **SDK**: `ListingCache.Update` corrects one cached entry in place after a source's own write;
+  `SequentialReadAhead`, the per-handle read-ahead the WinFsp mount had, as a helper for mounts.
+- **SMB**: the VFS endpoint keeps read handles between `/read` requests (`ReadHandles`); the bundled
+  server gets a minute to start, not 15 s (its first launch on a freshly booted Windows machine).
+- **FUSE**: per-handle read-ahead through `SequentialReadAhead` (the kernel's 128 KiB reads cost a
+  round trip each on a slow source); WinFsp uses the same helper.
+- **Sources that upload on close**: a pending file answers stats, listings, reads, times, deletes and
+  renames itself until the upload lands (Windows opens files for their attributes alone and posts the
+  close without waiting).
+- **Publishing**: `System.Net.Security.UseManagedNtlm` on, for NTLM from Linux without the
+  gss-ntlmssp plugin (on in macOS builds too, untested there so far).
+
 ## 0.1.1 (2026-10-17)
 
 The release notes are in [docs/release-notes/v0.1.1.md](docs/release-notes/v0.1.1.md).
