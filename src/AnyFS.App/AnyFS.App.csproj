@@ -152,4 +152,13 @@
   <ItemGroup>
     <InternalsVisibleTo Include="AnyFS.App.Tests" />
   </ItemGroup>
+  <PropertyGroup>
+    <!-- NTLM to SharePoint Server (and any Windows-authenticated upstream) from Linux: .NET's GSSAPI path needs the
+         gss-ntlmssp plugin, which the lab's Debian host lacks, so .NET's own NTLM is switched on (for macOS builds
+         too, untested there so far). It is a trimmer feature switch (System.Net.Security.UseManagedNtlm) that the
+         ILLink targets default to false for linux RIDs through this private property, so this is the one place it
+         can be set; Windows uses SSPI and ignores it (18-Oct-2026: the E2E SharePoint rows on Linux got a 401 until
+         this). -->
+    <_UseManagedNtlm>true</_UseManagedNtlm>
+  </PropertyGroup>
 </Project>
