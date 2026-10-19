@@ -130,6 +130,8 @@ src/AnyFS.Core           model, plugin host, router, read-only layers, status, s
 src/AnyFS.App            anyfs: the window (Gui/) and the command line (Cli/)
 src/Sources/Mirror       the Mirror source
 src/Sources/Sshfs        the SSHFS source over SSH.NET
+src/Sources/SharePoint   the SharePoint source: Graph after an MSAL sign-in, REST with a Windows account or a web
+                         session read from a browser over DevTools (Selenium WebDriver where that is closed)
 src/Mounts/WinFsp        the WinFsp mount (Windows)
 src/Mounts/Smb           the SMB mount: the VFS endpoint and the portable-smb-server process
 src/Mounts/Fuse          the FUSE mount (Linux)

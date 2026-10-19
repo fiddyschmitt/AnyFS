@@ -19,7 +19,12 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   Graph's error codes mapped); a *web session*, for an organisation that allows no app
   registration, where the person signs in in Edge or Chrome opened by AnyFS with a profile of its
   own, the session's cookies go to SharePoint's REST API, and a headless browser renews them while
-  Microsoft's sign-in lasts; a *Windows account* (NTLM or Kerberos; a user name and password, or the
+  Microsoft's sign-in lasts (one browser per profile at a time, a browser left open on it closed
+  first; a closed window or a Defender for Cloud Apps proxy named, and the source then waits for
+  Retry). Where AnyFS cannot reach the browser's DevTools port itself (Edge's or Chrome's
+  RemoteDebuggingAllowed or UserDataDir policy, or no port opening), the sign-in goes through
+  Selenium WebDriver instead, as Mount3DX's does: the default browser first, then Firefox, Chrome and
+  Edge, each with a profile of AnyFS's own; a *Windows account* (NTLM or Kerberos; a user name and password, or the
   current logon on Windows) for SharePoint Server through the REST API. The REST store uploads in
   chunks through `StartUpload`/`ContinueUpload`/`FinishUpload` and sets times through a
   client-object-model request (`UpdateOverwriteVersion`), which SharePoint honours for site
@@ -56,7 +61,8 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   renames itself until the upload lands (Windows opens files for their attributes alone and posts the
   close without waiting).
 - **Publishing**: `System.Net.Security.UseManagedNtlm` on, for NTLM from Linux without the
-  gss-ntlmssp plugin (on in macOS builds too, untested there so far).
+  gss-ntlmssp plugin (on in macOS builds too, untested there so far). Selenium Manager rides in the
+  single-file build as a native file (3.7 MB on Windows), for the web session's WebDriver fallback.
 
 ## 0.1.1 (2026-10-17)
 
