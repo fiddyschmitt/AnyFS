@@ -293,10 +293,12 @@ public class SharePointCloudSettingsTests
     }
 
     [TestMethod]
-    [DataRow("https://contoso.sharepoint.com/sites/Team", null, "contoso Team")]
-    [DataRow("https://contoso.sharepoint.com/teams/Ops/Shared%20Documents/Forms/AllItems.aspx", null, "contoso Ops")]
-    [DataRow("https://contoso.sharepoint.com", null, "contoso")]
-    [DataRow("acme.sharepoint.us/sites/Bar", null, "acme Bar")]
+    [DataRow("https://contoso.sharepoint.com/sites/Team", null, "contoso.sharepoint.com Team")]
+    [DataRow("https://contoso.sharepoint.com/teams/Ops/Shared%20Documents/Forms/AllItems.aspx", null, "contoso.sharepoint.com Ops")]
+    [DataRow("https://contoso.sharepoint.com", null, "contoso.sharepoint.com")]
+    [DataRow("https://acme.sharepoint.us", null, "acme.sharepoint.us")]
+    [DataRow("https://acme.sharepoint.us/", null, "acme.sharepoint.us")]
+    [DataRow("acme.sharepoint.us/sites/Bar", null, "acme.sharepoint.us Bar")]
     [DataRow("http://anyfs-sp-1/sites/anyfs", null, "anyfs-sp-1 anyfs")]
     [DataRow("http://192.168.0.92/sites/anyfs/", null, "192.168.0.92 anyfs")]
     [DataRow("https://intranet.contoso.local:8443/dept/hr", null, "intranet.contoso.local hr")]

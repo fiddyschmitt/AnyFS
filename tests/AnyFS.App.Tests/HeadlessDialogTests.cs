@@ -112,9 +112,13 @@ public class HeadlessDialogTests
                 Assert.IsTrue(site.TranslatePoint(default, dialog)!.Value.Y < name.TranslatePoint(default, dialog)!.Value.Y, "it is asked above the name");
                 Assert.AreEqual(1, dialog.GetVisualDescendants().OfType<TextBox>().Count(t => t.PlaceholderText == site.PlaceholderText), "and not again in the form");
 
+                site.Text = "https://acme.sharepoint.us";
+                Assert.AreEqual("acme.sharepoint.us", name.Text, "the host as given, not just the tenant");
+                Assert.AreEqual("sharepoint/acme.sharepoint.us", source.Path);
+
                 site.Text = "https://contoso.sharepoint.com/sites/Team";
-                Assert.AreEqual("contoso Team", name.Text);
-                Assert.AreEqual("sharepoint/contoso Team", source.Path);
+                Assert.AreEqual("contoso.sharepoint.com Team", name.Text);
+                Assert.AreEqual("sharepoint/contoso.sharepoint.com Team", source.Path);
                 dialog.Close();
                 return true;
             }, CancellationToken.None);

@@ -239,10 +239,9 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     public ISource CreateSource(object settings) => new SharePointSiteSource((SharePointSettings)settings);
 
     /// <summary>
-    /// A new source's name from its address: the tenant and the site for SharePoint Online ("contoso Team"; the root
-    /// site is just "contoso", since the type folder already says sharepoint), the server and the site for SharePoint
-    /// Server ("intranet Team"), and for SharePoint Embedded the pinned container, else "Embedded". Null until the
-    /// address parses.
+    /// A new source's name from its address: the host as given and the site after it ("contoso.sharepoint.com Team",
+    /// "intranet Team"; a root site is the host alone, "acme.sharepoint.us"), without a port, and for SharePoint
+    /// Embedded the pinned container, else "Embedded". Null until the address parses.
     /// </summary>
     public string? SuggestName(object settings)
     {
@@ -259,9 +258,8 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
         SiteAddress.TryParse(s.SiteUrl, out var site, out _);
         var host = site.Host.StartsWith('[') ? site.Host[..(site.Host.IndexOf(']') + 1)] : site.Host.Split(':')[0];
-        var server = kind == SharePointKind.Online ? host.Split('.')[0] : host;
         var siteName = site.ServerRelativePath.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
-        return SafeName(siteName is null ? server : $"{server} {siteName}");
+        return SafeName(siteName is null ? host : $"{host} {siteName}");
     }
 
     /// <summary>A name that is also a valid path segment: what no file system takes becomes a dash, and no leading or trailing dot or space.</summary>
