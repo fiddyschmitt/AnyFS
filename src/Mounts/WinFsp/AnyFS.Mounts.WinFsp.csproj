@@ -6,10 +6,10 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
-    <!-- 2.1.25156 is the current stable WinFsp .NET layer (the 2.2.x packages are the 2026 betas); the driver is installed
-         separately (spec 8.1) and must share the package's major.minor (Directory.Packages.props, scripts/winfsp.json;
-         AnyFS.App checks the two agree). The App roots this assembly whole at publish: the prefix-only mount reaches
-         its internals by reflection. -->
+    <!-- 2.2.26286 is the WinFsp 2026 Beta 5 .NET layer (the last stable is 2.1.25156); the driver is installed separately
+         (spec 8.1) and must share the package's major.minor (Directory.Packages.props, scripts/winfsp.json; AnyFS.App
+         checks the two agree). The App roots this assembly whole at publish: the prefix-only mount reaches its
+         internals by reflection. -->
     <PackageReference Include="winfsp.net" GeneratePathProperty="true" />
   </ItemGroup>
   <ItemGroup>

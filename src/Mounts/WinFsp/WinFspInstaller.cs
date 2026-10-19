@@ -12,14 +12,18 @@ namespace AnyFS.Mounts.WinFsp;
 /// "winfsp.msi" (scripts/fetch-winfsp.ps1 fetches the pinned release and checks its published hash), and the Install
 /// button runs it through msiexec with no installer windows, so the only thing the user sees is the administrator
 /// prompt. The default feature set (Core: driver, launcher and DLL) is what anyfs needs. WinFsp is GPLv3 with a FLOSS
-/// exception; the MSI is conveyed unmodified and its source is at https://github.com/winfsp/winfsp (tag v2.1).
+/// exception; the MSI is conveyed unmodified and its source is at https://github.com/winfsp/winfsp (tag v2.2B5).
 /// </summary>
 internal static class WinFspInstaller
 {
     public const string ResourceName = "winfsp.msi";
 
-    /// <summary>The release scripts/winfsp.json pins; shown in the button's tooltip.</summary>
-    public const string Version = "2.1.25156";
+    /// <summary>
+    /// The release scripts/winfsp.json pins, shown in the button's tooltip: WinFsp 2026 Beta 5, whose network provider
+    /// accepts a connection to a share no launcher manages, so Explorer opens \\anyfs\&lt;collection&gt; itself and
+    /// programs that look a path up through the shell (Paint) open files below it; 2.1's provider refused it.
+    /// </summary>
+    public const string Version = "2.2.26286";
 
     private const int ErrorCancelled = 1223;
     private const int SuccessRebootRequired = 3010;

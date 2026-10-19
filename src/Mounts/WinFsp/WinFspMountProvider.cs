@@ -372,8 +372,8 @@ internal static class WinFspRuntime
 /// winfsp.net's Mount always sets a mount point (null means a drive letter), but the C API doesn't need one for a
 /// network file system: spike 1 showed \\anyfs\&lt;collection&gt; working with none. This replicates
 /// FileSystemHost.MountEx minus FspFileSystemSetMountPointEx through reflection on the internal interop class,
-/// pinned to winfsp.net 2.1.25156 (the App roots the assembly whole for trimming). The interim until winfsp.net
-/// grows a prefix-only overload.
+/// pinned to winfsp.net 2.2.26286 (the same internals as 2.1.25156; the App roots the assembly whole for trimming). The
+/// interim until winfsp.net grows a prefix-only overload.
 /// </summary>
 [SupportedOSPlatform("windows")]
 internal static class PrefixOnlyMount
@@ -439,5 +439,5 @@ internal static class PrefixOnlyMount
         => (api.GetField(name, Static)?.GetValue(null) as Delegate) ?? throw Changed(name);
 
     private static InvalidOperationException Changed(string member)
-        => new($"winfsp.net's internals changed ({member} not found); the prefix-only mount needs winfsp.net 2.1.25156");
+        => new($"winfsp.net's internals changed ({member} not found); the prefix-only mount needs winfsp.net 2.2.26286");
 }

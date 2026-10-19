@@ -21,9 +21,10 @@
     <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
     <!-- mount providers (spec 8, 15) -->
     <!-- winfsp.net must stay on the major.minor of the driver scripts/winfsp.json bundles: its interop refuses any other
-         driver version at load ("incorrect dll version"). The 2.2.x packages are the WinFsp 2026 betas; AnyFS.App checks
-         the two agree at build. -->
-    <PackageVersion Include="winfsp.net" Version="2.1.25156" />
+         driver version at load ("incorrect dll version"). 2.2.26286 is WinFsp 2026 Beta 5, taken before the final
+         release for its network provider (a share root \\anyfs\<collection> opens in Explorer); AnyFS.App checks the two
+         agree at build. -->
+    <PackageVersion Include="winfsp.net" Version="2.2.26286" />
     <PackageVersion Include="LTRData.FuseDotNet" Version="1.0.0.14" />
     <!-- the window (spec 11) -->
     <PackageVersion Include="Avalonia" Version="12.1.4" />

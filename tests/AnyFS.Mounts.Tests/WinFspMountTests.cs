@@ -249,11 +249,12 @@ public class WinFspMountTests
     [TestMethod]
     public void DriverVersionRuleIsWinFspsOwn()
     {
-        var required = new Version(2, 1, 25156);
+        var required = new Version(2, 2, 26286);
         Assert.AreEqual(required, WinFspRuntime.Required);
-        Assert.IsTrue(WinFspRuntime.Accepts(new Version(2, 1, 25156), required));
-        Assert.IsTrue(WinFspRuntime.Accepts(new Version(2, 2, 26286), required), "a newer 2.x driver serves an older layer");
-        Assert.IsFalse(WinFspRuntime.Accepts(new Version(2, 0, 23075), required), "an older minor is 'incorrect dll version'");
+        Assert.IsTrue(WinFspRuntime.Accepts(new Version(2, 2, 26286), required));
+        Assert.IsTrue(WinFspRuntime.Accepts(new Version(2, 3, 27000), required), "a newer 2.x driver serves an older layer");
+        Assert.IsFalse(WinFspRuntime.Accepts(new Version(2, 1, 25156), required), "an older minor is 'incorrect dll version': a 2.1 install is asked to upgrade");
+        Assert.IsFalse(WinFspRuntime.Accepts(new Version(2, 0, 23075), required));
         Assert.IsFalse(WinFspRuntime.Accepts(new Version(1, 12, 22339), required));
         Assert.IsFalse(WinFspRuntime.Accepts(new Version(3, 0, 1), required));
         StringAssert.Contains(WinFspRuntime.Explain(new TypeLoadException("incorrect dll version (need 2.2, have 2.1)")), "need 2.2, have 2.1");

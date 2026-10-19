@@ -64,8 +64,8 @@
     <Message Importance="high" Text="WinFsp: no installer under $(WinFspMsiDir); run scripts/fetch-winfsp.ps1 first or the Install button will fall back to winget" Condition="'$(BundleIsWindows)' == 'true' and '@(WinFspMsi)' == ''" />
     <Error Text="WinFsp: more than one installer under $(WinFspMsiDir) (@(WinFspMsi)); keep the one scripts/winfsp.json pins" Condition="'@(WinFspMsi->Count())' &gt; '1'" />
     <!-- The .NET layer (winfsp.net) and the bundled driver must share a major.minor: Fsp.Interop.Api.CheckVersion refuses
-         a driver of another major or an older minor at load ("incorrect dll version"). NuGet's newest winfsp.net is a
-         2.2 beta, so an "update all" trips this on purpose. -->
+         a driver of another major or an older minor at load ("incorrect dll version"), so a package bump without the
+         installer (or the other way round) trips this on purpose. -->
     <PropertyGroup>
       <_WinFspPackageVersion>@(PackageVersion->WithMetadataValue('Identity', 'winfsp.net')->'%(Version)')</_WinFspPackageVersion>
       <_WinFspMsiVersion>@(WinFspMsi->'%(Filename)'->Replace('winfsp-', ''))</_WinFspMsiVersion>
