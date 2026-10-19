@@ -5,6 +5,8 @@ using AnyFS.Core.Runtime;
 using AnyFS.Core.Settings;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
+using AnyFS.Sources.SharePoint;
+using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.VisualTree;
@@ -70,6 +72,50 @@ public class HeadlessDialogTests
                 await ShowAsync(new ConfirmDialog(new ConfirmDialogViewModel("Delete collection", "Delete 'work'?", "Delete", "No", "Cancel", "Also delete the orphaned sources", true)));
                 await ShowAsync(new ConfirmDialog(new ConfirmDialogViewModel("Oops", "Something went wrong.", "OK", cancelText: null)));
                 await ShowAsync(new TextDialog(new TextDialogViewModel("Mount command", "sudo mount -t nfs host:/work ~/anyfs/work", clipboard)));
+                return true;
+            }, CancellationToken.None);
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task TheSiteUrlIsAskedFirstAndNamesTheSource()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "anyfs-tests", "dialogs-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await Session.Dispatch(async () =>
+            {
+                var registry = new PluginRegistry();
+                registry.AddBuiltIn(new SharePointPlugin());
+                registry.AddBuiltIn(new FakeMountProvider());
+                await using var engine = new AnyFsEngine(SettingsPaths.Resolve(Path.Combine(root, "settings")), registry, NullLoggerFactory.Instance);
+                engine.Load();
+                await engine.StartAsync(null, CancellationToken.None);
+                var source = new SourceDialogViewModel(engine, new FakeDialogs(), null, null, askPath: true);
+                var dialog = new SourceDialog(source);
+                dialog.Show();
+                await Task.Delay(50);
+
+                var site = dialog.FindControl<ContentControl>("PrimaryField")!.GetVisualDescendants().OfType<TextBox>().Single();
+                var name = dialog.FindControl<TextBox>("NameBox")!;
+                Assert.IsTrue(site.IsFocused, "the site's address has the focus");
+                Assert.IsTrue(site.TranslatePoint(default, dialog)!.Value.Y < name.TranslatePoint(default, dialog)!.Value.Y, "it is asked above the name");
+                Assert.AreEqual(1, dialog.GetVisualDescendants().OfType<TextBox>().Count(t => t.PlaceholderText == site.PlaceholderText), "and not again in the form");
+
+                site.Text = "https://contoso.sharepoint.com/sites/Team";
+                Assert.AreEqual("contoso Team", name.Text);
+                Assert.AreEqual("sharepoint/contoso Team", source.Path);
+                dialog.Close();
                 return true;
             }, CancellationToken.None);
         }

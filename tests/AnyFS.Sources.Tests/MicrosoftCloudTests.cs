@@ -1,4 +1,5 @@
 using System.Net;
+using System.Reflection;
 using System.Text;
 using AnyFS.Sdk;
 using AnyFS.Sources.SharePoint;
@@ -172,7 +173,7 @@ public class MicrosoftCloudTests
     }
 }
 
-/// <summary>The cloud and the sign-in a SharePoint source gets for its address, and the combinations it refuses.</summary>
+/// <summary>The cloud, the sign-in and the name a SharePoint source gets for its address, and the combinations it refuses.</summary>
 [TestClass]
 public class SharePointCloudSettingsTests
 {
@@ -289,5 +290,31 @@ public class SharePointCloudSettingsTests
         settings.SiteUrl = "http://anyfs-sp-1/sites/anyfs";
         Assert.AreEqual(SharePointKind.Server, settings.Kind);
         Assert.AreEqual(0, plugin.Validate(settings).Count(), "an on-premises address takes the Windows account");
+    }
+
+    [TestMethod]
+    [DataRow("https://contoso.sharepoint.com/sites/Team", null, "contoso Team")]
+    [DataRow("https://contoso.sharepoint.com/teams/Ops/Shared%20Documents/Forms/AllItems.aspx", null, "contoso Ops")]
+    [DataRow("https://contoso.sharepoint.com", null, "contoso")]
+    [DataRow("acme.sharepoint.us/sites/Bar", null, "acme Bar")]
+    [DataRow("http://anyfs-sp-1/sites/anyfs", null, "anyfs-sp-1 anyfs")]
+    [DataRow("http://192.168.0.92/sites/anyfs/", null, "192.168.0.92 anyfs")]
+    [DataRow("https://intranet.contoso.local:8443/dept/hr", null, "intranet.contoso.local hr")]
+    [DataRow("https://[fe80::1]:8443/sites/x", null, "[fe80--1] x")]
+    [DataRow(ContainerType, null, "Embedded")]
+    [DataRow(ContainerType, "anyfs-test", "anyfs-test")]
+    [DataRow("", null, null)]
+    [DataRow("ftp://files", null, null)]
+    public void TheNameComesFromTheAddress(string address, string? library, string? name)
+    {
+        var suggested = new SharePointPlugin().SuggestName(new SharePointSettings { SiteUrl = address, Library = library });
+        Assert.AreEqual(name, suggested);
+        if (suggested is not null)
+        {
+            Assert.IsTrue(VfsPath.IsValidSegment(suggested, out var reason), $"the default path is made from it: {reason}");
+        }
+
+        var site = typeof(SharePointSettings).GetProperty(nameof(SharePointSettings.SiteUrl))!.GetCustomAttribute<SettingAttribute>()!;
+        Assert.IsTrue(site.Primary, "the Add source dialog asks the address first, above the name");
     }
 }

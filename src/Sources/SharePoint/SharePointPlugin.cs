@@ -42,7 +42,7 @@ public sealed class SharePointSettings
     public const string WebSession = "Web session, no app registration";
     public const string Windows = "Windows account";
 
-    [Setting("Site", Required = true, Order = 0, Placeholder = "https://contoso.sharepoint.com/sites/Team",
+    [Setting("Site URL", Required = true, Primary = true, Order = 0, Placeholder = "https://contoso.sharepoint.com/sites/Team",
         Hint = "The site's address: SharePoint Online (contoso.sharepoint.com, or .sharepoint.us in GCC High) or SharePoint Server on your own network (http://intranet/sites/Team). A library or page pasted after the site is fine. For SharePoint Embedded, the container type's id instead.")]
     public string SiteUrl { get; set; } = "";
 
@@ -237,6 +237,39 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     public object CreateDefaultSettings() => new SharePointSettings();
 
     public ISource CreateSource(object settings) => new SharePointSiteSource((SharePointSettings)settings);
+
+    /// <summary>
+    /// A new source's name from its address: the tenant and the site for SharePoint Online ("contoso Team"; the root
+    /// site is just "contoso", since the type folder already says sharepoint), the server and the site for SharePoint
+    /// Server ("intranet Team"), and for SharePoint Embedded the pinned container, else "Embedded". Null until the
+    /// address parses.
+    /// </summary>
+    public string? SuggestName(object settings)
+    {
+        var s = (SharePointSettings)settings;
+        if (s.Kind is not { } kind)
+        {
+            return null;
+        }
+
+        if (kind == SharePointKind.Embedded)
+        {
+            return SafeName(s.PinnedLibrary ?? "Embedded");
+        }
+
+        SiteAddress.TryParse(s.SiteUrl, out var site, out _);
+        var host = site.Host.StartsWith('[') ? site.Host[..(site.Host.IndexOf(']') + 1)] : site.Host.Split(':')[0];
+        var server = kind == SharePointKind.Online ? host.Split('.')[0] : host;
+        var siteName = site.ServerRelativePath.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+        return SafeName(siteName is null ? server : $"{server} {siteName}");
+    }
+
+    /// <summary>A name that is also a valid path segment: what no file system takes becomes a dash, and no leading or trailing dot or space.</summary>
+    private static string? SafeName(string name)
+    {
+        var safe = string.Concat(name.Select(c => c < ' ' || "\\/:*?\"<>|".Contains(c) ? '-' : c)).Trim().Trim('.').Trim();
+        return safe.Length == 0 ? null : safe;
+    }
 
     /// <summary>
     /// The browser profile that keeps a web session's sign-in, one per site host, shared by every source for that
