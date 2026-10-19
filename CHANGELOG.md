@@ -16,7 +16,12 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   has that title), each named by the last part of its address and holding its own libraries and
   `Subsites`, listed when first opened; over the REST API a subsite's calls go to its own `_api`
   (subsites the account may open, `getsubwebsfilteredforcurrentuser`), over Graph to
-  `sites/{id}/sites`; the Test button names them.
+  `sites/{id}/sites`; the Test button names them. At the tenant's root site (an address with no
+  path) a `Sites` folder beside them holds the tenant's other sites, the site collections the
+  account can open (`/sites/x`, `/teams/x`), found by SharePoint's search (`contentclass:STS_Site`;
+  Graph's site search with the app sign-in) at the start and again at most every five minutes,
+  each named as its address ends ("Ops (teams)" beside "Ops (sites)") and holding its own libraries
+  and `Subsites`; a search that fails (a farm without a search service) leaves the folder out.
 - **Sign in with** (Automatic by default; a sign-in that cannot serve the address, such as a Windows
   password for Microsoft 365, is caught in the settings): an *app sign-in*, browser or device code,
   with the shipped app registration or the organisation's own (MSAL, the cache in the source's
