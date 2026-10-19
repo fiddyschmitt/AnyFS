@@ -7,7 +7,8 @@ namespace AnyFS.Sources.SharePoint;
 /// <param name="Name">The folder name it shows as.</param>
 /// <param name="Web">The subsite it belongs to (that <see cref="WebInfo"/>), or null for the source's own site.</param>
 /// <param name="Folder">Where it shows in the source ("Foo/Documents" for a subsite's), for messages; null for its name alone.</param>
-internal sealed record LibraryInfo(string Key, string Name, long? QuotaTotal, long? QuotaRemaining, WebInfo? Web = null, string? Folder = null)
+/// <param name="Pages">The site's pages (Site Pages): each .aspx page shows as a read-only Markdown file (<see cref="SharePointPages"/>).</param>
+internal sealed record LibraryInfo(string Key, string Name, long? QuotaTotal, long? QuotaRemaining, WebInfo? Web = null, string? Folder = null, bool Pages = false)
 {
     /// <summary>The library as messages name it.</summary>
     public string Shown => Folder ?? Name;

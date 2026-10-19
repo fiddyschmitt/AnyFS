@@ -313,6 +313,76 @@ internal static class SpsTestServer
         Assert.IsNull(await source.StatAsync(path, none));
     }
 
+    /// <summary>The site's pages library, as it shows.</summary>
+    public const string PagesLibrary = "Site Pages";
+
+    /// <summary>The test page's title; its file name SharePoint makes from it (AnyFS-test-page.aspx).</summary>
+    public const string PageTitle = "AnyFS test page";
+
+    /// <summary>The test page's one text web part, and the Markdown the page reads as.</summary>
+    public const string PageText = "<h2>Heading two</h2><p>Hello <strong>world</strong> from <a href=\"https://example.com/x\">AnyFS</a>.</p><ul><li>one</li><li>two</li></ul>";
+
+    public static readonly byte[] PageMarkdown = Encoding.UTF8.GetBytes($"# {PageTitle}\n\n## Heading two\n\nHello **world** from [AnyFS](https://example.com/x).\n\n- one\n- two\n");
+
+    /// <summary>
+    /// The test page in the site's pages, made through the site pages API when there is none with its title: created,
+    /// saved with a canvas of one text web part (the API takes the canvas as JSON), published. The source shows pages
+    /// read-only, so the test makes it beside it, as it makes the subsite. Returns the name it shows as.
+    /// </summary>
+    public static async Task<string> EnsurePageAsync(SharePointSiteSource source)
+    {
+        var rest = ((RestDocumentStore)source.Store).Rest;
+        var none = CancellationToken.None;
+        using (var pages = await rest.GetJsonAsync("sitepages/pages?$select=Id,Title,FileName", "the site's pages", none))
+        {
+            foreach (var page in pages.RootElement.GetProperty("value").EnumerateArray())
+            {
+                if (page.GetProperty("Title").GetString() == PageTitle)
+                {
+                    return SharePointPages.Shown(page.GetProperty("FileName").GetString()!);
+                }
+            }
+        }
+
+        int id;
+        using (var created = await rest.PostJsonAsync("sitepages/pages", "{\"PageLayoutType\":\"Article\"}", "a new page", none))
+        {
+            id = created.RootElement.GetProperty("Id").GetInt32();
+        }
+
+        var canvas = "[{\"controlType\":4,\"displayMode\":2,\"id\":\"1212fc8d-dd6b-408a-8d5d-9f1cc787efbb\",\"position\":{\"zoneIndex\":1,\"sectionIndex\":1,\"controlIndex\":1,\"sectionFactor\":12,\"layoutIndex\":1},\"emphasis\":{},\"innerHTML\":" + Json.Quote(PageText) + "}]";
+        using (await rest.PostJsonAsync($"sitepages/pages({id})/checkoutpage", null, "the new page", none))
+        using (await rest.PostJsonAsync($"sitepages/pages({id})/savepage", "{\"Title\":" + Json.Quote(PageTitle) + ",\"CanvasContent1\":" + Json.Quote(canvas) + "}", "the new page", none))
+        using (await rest.PostJsonAsync($"sitepages/pages({id})/publish", null, "the new page", none))
+        using (var saved = await rest.GetJsonAsync($"sitepages/pages({id})?$select=FileName", "the new page", none))
+        {
+            return SharePointPages.Shown(saved.RootElement.GetProperty("FileName").GetString()!);
+        }
+    }
+
+    /// <summary>The test page reads as its Markdown, is read-only, and only pages show there (as .md, no .aspx).</summary>
+    public static async Task CheckPageAsync(ISource source, string page)
+    {
+        var none = CancellationToken.None;
+        var names = await NamesAsync(source, PagesLibrary);
+        CollectionAssert.Contains(names, page);
+        Assert.IsFalse(names.Any(n => n.EndsWith(".aspx", StringComparison.OrdinalIgnoreCase)), string.Join(", ", names));
+        var path = VfsPath.Join(PagesLibrary, page);
+        var entry = await source.StatAsync(path, none);
+        Assert.IsNotNull(entry);
+        Assert.AreEqual(PageMarkdown.Length, entry.Length, "the size a listing gives is the Markdown's");
+        Assert.IsTrue(entry.Attributes.HasFlag(VfsAttributes.ReadOnly));
+        await using (var file = await source.OpenAsync(path, VfsOpenMode.Read, none))
+        {
+            var back = new byte[PageMarkdown.Length];
+            Assert.AreEqual(back.Length, await file.ReadFullyAsync(0, back, none));
+            Assert.AreEqual(Encoding.UTF8.GetString(PageMarkdown), Encoding.UTF8.GetString(back));
+        }
+
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync(path, VfsOpenMode.ReadWrite, none));
+        Assert.AreEqual(VfsError.ReadOnly, ex.Error);
+    }
+
     /// <summary>The tenant's root site of a site's address: its scheme and host.</summary>
     public static string RootOf(string siteUrl)
     {
@@ -476,6 +546,15 @@ public class SharePointServerLiveTests
         await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
         await SpsTestServer.EnsureSubsiteAsync(source);
         await SpsTestServer.CheckSubsiteAsync(source);
+    }
+
+    [TestMethod]
+    public async Task TheSitesPagesAreReadOnlyMarkdown()
+    {
+        SpsTestServer.Require();
+        await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
+        var page = await SpsTestServer.EnsurePageAsync(source);
+        await SpsTestServer.CheckPageAsync(source, page);
     }
 
     [TestMethod]

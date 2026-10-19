@@ -424,11 +424,12 @@ internal sealed class MemoryDocumentStore : IDocumentStore
         return store;
     }
 
-    public void AddLibrary(string web, string key, string name, long? quotaTotal = null, long? quotaRemaining = null)
+    /// <param name="pages">A library of the site's pages (its files are taken as the pages' Markdown).</param>
+    public void AddLibrary(string web, string key, string name, long? quotaTotal = null, long? quotaRemaining = null, bool pages = false)
     {
         lock (_gate)
         {
-            _libraries[web].Add(new LibraryInfo(key, name, quotaTotal, quotaRemaining));
+            _libraries[web].Add(new LibraryInfo(key, name, quotaTotal, quotaRemaining, Pages: pages));
             _webOfLibrary[key] = web;
         }
     }

@@ -12,6 +12,10 @@
          (a policy, or a profile the browser will not take). Selenium Manager, a native helper in the package, finds or
          downloads the driver that matches the browser; the single-file publish carries it (spec 7.3.2). -->
     <PackageReference Include="Selenium.WebDriver" />
+    <!-- ReverseMarkdown (MIT) over AngleSharp (MIT): a site's pages show as Markdown (SharePointPages). MarkItDown's
+         .NET ports carry cloud SDKs and image libraries for other formats; HTML is all a page is. -->
+    <PackageReference Include="ReverseMarkdown" />
+    <PackageReference Include="AngleSharp" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />

@@ -13,7 +13,11 @@ internal sealed class GraphDocumentStore : IDocumentStore
 {
     private const string ChildrenSelect = "$select=id,name,size,file,folder,fileSystemInfo,lastModifiedDateTime,createdDateTime,eTag,cTag&$top=500";
 
+    /// <summary>The same for the site's pages, with each page's content fields (<see cref="SharePointPages"/>).</summary>
+    private const string PageSelect = "$select=id,name,size,file,folder,fileSystemInfo,lastModifiedDateTime,createdDateTime,eTag,cTag,webUrl&$expand=listItem($select=id;$expand=fields($select=" + SharePointPages.Fields + "))";
+
     private readonly GraphClient _graph;
+    private readonly PageCache _pages = new();
     private readonly Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> _listLibraries;
     private readonly SiteAddress? _site;
 
@@ -33,6 +37,9 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
     /// <summary>The site's Graph id (for tests); empty for containers.</summary>
     public string SiteId { get; }
+
+    /// <summary>The Graph client (for tests, which make their page through it).</summary>
+    internal GraphClient Graph => _graph;
 
     /// <summary>Resolves the site; null when Graph has no such site for this account.</summary>
     public static async Task<GraphDocumentStore?> ConnectAsync(GraphClient graph, SiteAddress site, CancellationToken ct)
@@ -160,7 +167,10 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
     private static async Task<IReadOnlyList<LibraryInfo>> ListDrivesAsync(GraphClient graph, string siteId, WebInfo? web, string description, CancellationToken ct)
     {
-        using var doc = await graph.GetJsonAsync($"sites/{siteId}/drives?$select=id,name,driveType,quota", description, ct).ConfigureAwait(false);
+        var drivesCall = graph.GetJsonAsync($"sites/{siteId}/drives?$select=id,name,driveType,quota", description, ct);
+        var pagesCall = PagesLibraryAsync(graph, siteId, web, description, ct);
+        await Task.WhenAll(drivesCall, pagesCall).ConfigureAwait(false);
+        using var doc = await drivesCall.ConfigureAwait(false);
         var libraries = new List<LibraryInfo>();
         foreach (var element in doc.RootElement.GetProperty("value").EnumerateArray())
         {
@@ -171,7 +181,46 @@ internal sealed class GraphDocumentStore : IDocumentStore
             }
         }
 
+        if (await pagesCall.ConfigureAwait(false) is { } pages && !libraries.Any(l => l.Key == pages.Key))
+        {
+            libraries.Add(pages);
+        }
+
         return libraries;
+    }
+
+    /// <summary>
+    /// The site's pages as a library: Graph keeps Site Pages out of a site's drives (it is a system list), so its drive is
+    /// found through the site's lists, selected with their system facet. Null where there is none, or the account may
+    /// not list the lists (its libraries still show).
+    /// </summary>
+    private static async Task<LibraryInfo?> PagesLibraryAsync(GraphClient graph, string siteId, WebInfo? web, string description, CancellationToken ct)
+    {
+        var url = $"sites/{siteId}/lists?$select=id,displayName,list,system&$expand=drive($select=id)";
+        try
+        {
+            while (url is not null)
+            {
+                using var doc = await graph.GetJsonAsync(url, description, ct).ConfigureAwait(false);
+                foreach (var list in doc.RootElement.GetProperty("value").EnumerateArray())
+                {
+                    if (list.TryGetProperty("list", out var facet) && facet.TryGetProperty("template", out var template) && template.GetString() == SharePointPages.GraphTemplate
+                        && !(facet.TryGetProperty("hidden", out var hidden) && hidden.ValueKind == JsonValueKind.True)
+                        && list.TryGetProperty("drive", out var drive) && drive.TryGetProperty("id", out var id) && id.GetString() is { Length: > 0 } driveId)
+                    {
+                        var name = list.TryGetProperty("displayName", out var dn) ? dn.GetString() : null;
+                        return new LibraryInfo(driveId, string.IsNullOrWhiteSpace(name) ? "Site Pages" : name, null, null, web, Pages: true);
+                    }
+                }
+
+                url = doc.RootElement.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
+            }
+        }
+        catch (VfsException ex) when (ex.Error is VfsError.AccessDenied or VfsError.NotFound)
+        {
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -248,28 +297,71 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
     public async IAsyncEnumerable<(VfsEntry Entry, ItemRef Item)> ListChildrenAsync(LibraryInfo library, string itemPath, [EnumeratorCancellation] CancellationToken ct)
     {
-        var url = $"{SharePointPaths.ItemAddress(library.Key, itemPath)}/children?{ChildrenSelect}";
+        var url = $"{SharePointPaths.ItemAddress(library.Key, itemPath)}/children?{(library.Pages ? PageSelect : ChildrenSelect)}";
         while (url is not null)
         {
             using var doc = await _graph.GetJsonAsync(url, Display(library, itemPath), ct).ConfigureAwait(false);
             foreach (var element in doc.RootElement.GetProperty("value").EnumerateArray())
             {
-                yield return GraphClient.ParseItem(element);
+                if (!library.Pages || element.TryGetProperty("folder", out _))
+                {
+                    yield return GraphClient.ParseItem(element);
+                }
+                else if (SharePointPages.IsPage(element.GetProperty("name").GetString() ?? ""))
+                {
+                    yield return ParsePage(element);
+                }
             }
 
             url = doc.RootElement.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
         }
     }
 
+    /// <summary>A page as its Markdown file; the Markdown kept for the read that follows.</summary>
+    private (VfsEntry Entry, ItemRef Item) ParsePage(JsonElement element)
+    {
+        var (entry, item) = GraphClient.ParseItem(element);
+        var fields = element.TryGetProperty("listItem", out var listItem) && listItem.TryGetProperty("fields", out var f) ? f : default;
+        var pageUrl = element.TryGetProperty("webUrl", out var w) && Uri.TryCreate(w.GetString(), UriKind.Absolute, out var u) ? u : null;
+        var markdown = SharePointPages.Markdown(fields, pageUrl);
+        var version = SharePointPages.Version(markdown);
+        _pages.Remember(item.Id, version, markdown);
+        return (VfsEntry.File(SharePointPages.Shown(entry.Name), markdown.Length, entry.Modified, entry.Created, VfsAttributes.ReadOnly, version), item with { Version = version, DownloadUrl = null, Size = markdown.Length });
+    }
+
     public async Task<ItemRef?> GetItemAsync(LibraryInfo library, string itemPath, CancellationToken ct)
     {
+        // in the site's pages a file is a page, by its Markdown name; anything else there is a folder or nothing
+        if (library.Pages && SharePointPages.Upstream(itemPath) is { } page)
+        {
+            using var found = await _graph.TryGetJsonAsync($"{SharePointPaths.ItemAddress(library.Key, page)}?{PageSelect}", Display(library, itemPath), ct).ConfigureAwait(false);
+            if (found is not null && !found.RootElement.TryGetProperty("folder", out _))
+            {
+                return ParsePage(found.RootElement).Item;
+            }
+        }
+
         // no $select: the download URL is an annotation that only comes with the whole item
         using var doc = await _graph.TryGetJsonAsync(SharePointPaths.ItemAddress(library.Key, itemPath), Display(library, itemPath), ct).ConfigureAwait(false);
-        return doc is null ? null : GraphClient.ParseItem(doc.RootElement).Item;
+        var item = doc is null ? null : GraphClient.ParseItem(doc.RootElement).Item;
+        return library.Pages && item is { IsFolder: false } ? null : item;
     }
 
     public async Task<HttpResponseMessage> OpenContentAsync(LibraryInfo library, string itemPath, ItemRef item, long offset, CancellationToken ct)
     {
+        if (library.Pages)
+        {
+            // a page is its Markdown: from the listing that sized it, else made again
+            var markdown = _pages.Find(item.Id, item.Version);
+            if (markdown is null)
+            {
+                var again = await GetItemAsync(library, itemPath, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(Display(library, itemPath));
+                markdown = _pages.Find(again.Id, again.Version) ?? throw VfsException.NotFound(Display(library, itemPath));
+            }
+
+            return SharePointPages.Response(markdown, offset);
+        }
+
         var path = Display(library, itemPath);
         var url = item.DownloadUrl ?? await FreshDownloadUrlAsync(library, itemPath, ct).ConfigureAwait(false);
         try

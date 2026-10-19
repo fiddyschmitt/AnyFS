@@ -296,6 +296,38 @@ internal static class SpoTestServer
         return source;
     }
 
+    /// <summary>
+    /// The test page (<see cref="SpsTestServer.PageTitle"/>) made through Graph's pages API when the site has none with
+    /// its title: one text web part, published. Either suite may have made it; it reads the same. Returns the name it
+    /// shows as.
+    /// </summary>
+    public static async Task<string> EnsurePageAsync(SharePointSiteSource source)
+    {
+        var store = (GraphDocumentStore)source.Store;
+        var none = CancellationToken.None;
+        using (var pages = await store.Graph.GetJsonAsync($"sites/{store.SiteId}/pages?$select=id,name,title", "the site's pages", none))
+        {
+            foreach (var page in pages.RootElement.GetProperty("value").EnumerateArray())
+            {
+                if (page.TryGetProperty("title", out var title) && title.GetString() == SpsTestServer.PageTitle)
+                {
+                    return SharePointPages.Shown(page.GetProperty("name").GetString()!);
+                }
+            }
+        }
+
+        var body = "{\"@odata.type\":\"#microsoft.graph.sitePage\",\"name\":\"AnyFS-test-page.aspx\",\"title\":" + Json.Quote(SpsTestServer.PageTitle)
+            + ",\"pageLayout\":\"article\",\"showComments\":false,\"showRecommendedPages\":false,\"canvasLayout\":{\"horizontalSections\":[{\"layout\":\"oneColumn\",\"id\":\"1\",\"emphasis\":\"none\",\"columns\":[{\"id\":\"1\",\"width\":12,\"webparts\":["
+            + "{\"@odata.type\":\"#microsoft.graph.textWebPart\",\"innerHtml\":" + Json.Quote(SpsTestServer.PageText) + "}]}]}]}}";
+        using var created = await store.Graph.SendJsonAsync(HttpMethod.Post, $"sites/{store.SiteId}/pages", body, "a new page", none);
+        var id = created.RootElement.GetProperty("id").GetString();
+        using (await store.Graph.SendJsonAsync(HttpMethod.Post, $"sites/{store.SiteId}/pages/{id}/microsoft.graph.sitePage/publish", "{}", "the new page", none))
+        {
+        }
+
+        return SharePointPages.Shown(created.RootElement.GetProperty("name").GetString()!);
+    }
+
     /// <summary>50,000 bytes that are the same every run (so a stale fixture is still right).</summary>
     public static byte[] MediumBytes()
     {
@@ -421,6 +453,15 @@ public class SharePointOnlineLiveTests
         }
 
         await SpsTestServer.CheckSubsiteAsync(source);
+    }
+
+    [TestMethod]
+    public async Task TheSitesPagesAreReadOnlyMarkdown()
+    {
+        SpoTestServer.Require();
+        await using var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings());
+        var page = await SpoTestServer.EnsurePageAsync(source);
+        await SpsTestServer.CheckPageAsync(source, page);
     }
 
     [TestMethod]

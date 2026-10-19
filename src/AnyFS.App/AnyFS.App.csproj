@@ -119,9 +119,11 @@
   </ItemGroup>
 
   <!-- Mount-provider libraries kept whole (spec 14.1): winfsp.net, because the prefix-only mount reaches its internals
-       by reflection. (The FTP server is our own code now; the library that needed rooting is gone.) -->
+       by reflection. (The FTP server is our own code now; the library that needed rooting is gone.) ReverseMarkdown,
+       which finds its tag converters by scanning its own assembly: the SharePoint source's pages as Markdown. -->
   <ItemGroup Condition="'$(PublishTrimmed)' == 'true'">
     <TrimmerRootAssembly Include="winfsp-msil" />
+    <TrimmerRootAssembly Include="ReverseMarkdown" />
   </ItemGroup>
 
   <ItemGroup>

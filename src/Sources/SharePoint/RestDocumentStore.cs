@@ -20,6 +20,10 @@ internal sealed class RestDocumentStore : IDocumentStore
 
     private readonly SharePointRestClient _rest;
     private readonly ConcurrentDictionary<string, SharePointRestClient> _subsites = new(StringComparer.OrdinalIgnoreCase);
+    private readonly PageCache _pages = new();
+
+    // a SharePoint without modern pages has no CanvasContent1 to ask for; found out once, on the first page listing
+    private volatile bool _noCanvas;
 
     private RestDocumentStore(SharePointRestClient rest, string description)
     {
@@ -55,16 +59,17 @@ internal sealed class RestDocumentStore : IDocumentStore
 
     public async Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(WebInfo? web, CancellationToken ct)
     {
-        // BaseTemplate 101: document libraries; the hidden ones are SharePoint's own (Form Templates and the like)
-        using var doc = await Client(web).GetJsonAsync("web/lists?$filter=BaseTemplate%20eq%20101%20and%20Hidden%20eq%20false&$select=Title,RootFolder/ServerRelativeUrl&$expand=RootFolder", web?.Key ?? Description, ct).ConfigureAwait(false);
+        // BaseTemplate 101: document libraries, 119: the site's pages; the hidden ones are SharePoint's own
+        using var doc = await Client(web).GetJsonAsync($"web/lists?$filter=(BaseTemplate%20eq%20101%20or%20BaseTemplate%20eq%20{SharePointPages.PageLibraryTemplate})%20and%20Hidden%20eq%20false&$select=Title,BaseTemplate,RootFolder/ServerRelativeUrl&$expand=RootFolder", web?.Key ?? Description, ct).ConfigureAwait(false);
         var libraries = new List<LibraryInfo>();
         foreach (var list in doc.RootElement.GetProperty("value").EnumerateArray())
         {
             var title = list.TryGetProperty("Title", out var t) ? t.GetString() : null;
             var root = list.TryGetProperty("RootFolder", out var rf) && rf.TryGetProperty("ServerRelativeUrl", out var sru) ? sru.GetString() : null;
+            var pages = list.TryGetProperty("BaseTemplate", out var bt) && bt.TryGetInt32(out var template) && template == SharePointPages.PageLibraryTemplate;
             if (!string.IsNullOrEmpty(title) && !string.IsNullOrEmpty(root))
             {
-                libraries.Add(new LibraryInfo(root.TrimEnd('/'), title, null, null, web));
+                libraries.Add(new LibraryInfo(root.TrimEnd('/'), title, null, null, web, Pages: pages));
             }
         }
 
@@ -128,8 +133,9 @@ internal sealed class RestDocumentStore : IDocumentStore
     public async IAsyncEnumerable<(VfsEntry Entry, ItemRef Item)> ListChildrenAsync(LibraryInfo library, string itemPath, [EnumeratorCancellation] CancellationToken ct)
     {
         var folder = Url(library, itemPath);
-        var api = $"{SharePointRestClient.FolderApi(folder)}?$expand=Folders,Files&$select=Exists,{Prefix("Folders", FolderSelect)},{Prefix("Files", FileSelect)}";
-        using var doc = await Client(library).GetJsonAsync(api, Display(library, itemPath), ct).ConfigureAwait(false);
+        using var doc = library.Pages
+            ? await PageFolderAsync(library, itemPath, ct).ConfigureAwait(false)
+            : await Client(library).GetJsonAsync($"{SharePointRestClient.FolderApi(folder)}?$expand=Folders,Files&$select=Exists,{Prefix("Folders", FolderSelect)},{Prefix("Files", FileSelect)}", Display(library, itemPath), ct).ConfigureAwait(false);
         if (doc.RootElement.TryGetProperty("Exists", out var exists) && exists.ValueKind == JsonValueKind.False)
         {
             throw VfsException.NotFound(Display(library, itemPath));
@@ -153,16 +159,64 @@ internal sealed class RestDocumentStore : IDocumentStore
         {
             foreach (var element in files.EnumerateArray())
             {
-                yield return ParseFile(element);
+                if (!library.Pages)
+                {
+                    yield return ParseFile(element);
+                }
+                else if (SharePointPages.IsPage(element.GetProperty("Name").GetString() ?? ""))
+                {
+                    yield return ParsePage(library, element);
+                }
             }
         }
     }
 
+    /// <summary>A folder of the site's pages with each page's content fields, for the Markdown (<see cref="SharePointPages"/>).</summary>
+    private async Task<JsonDocument> PageFolderAsync(LibraryInfo library, string itemPath, CancellationToken ct)
+    {
+        var folder = SharePointRestClient.FolderApi(Url(library, itemPath));
+        try
+        {
+            return await Client(library).GetJsonAsync($"{folder}?$expand=Folders,Files,Files/ListItemAllFields&$select=Exists,{Prefix("Folders", FolderSelect)},{Prefix("Files", FileSelect)},{Prefix("Files/ListItemAllFields", PageFields)}", Display(library, itemPath), ct).ConfigureAwait(false);
+        }
+        catch (VfsException ex) when (!_noCanvas && ex.Message.Contains("CanvasContent1", StringComparison.Ordinal))
+        {
+            _noCanvas = true;
+            return await PageFolderAsync(library, itemPath, ct).ConfigureAwait(false);
+        }
+    }
+
+    private string PageFields => _noCanvas ? SharePointPages.WikiFields : SharePointPages.Fields;
+
+    /// <summary>A page as its Markdown file; the Markdown kept for the read that follows.</summary>
+    private (VfsEntry Entry, ItemRef Item) ParsePage(LibraryInfo library, JsonElement file)
+    {
+        var (entry, item) = ParseFile(file);
+        var fields = file.TryGetProperty("ListItemAllFields", out var f) ? f : default;
+        var serverRelative = file.TryGetProperty("ServerRelativeUrl", out var u) ? u.GetString() : null;
+        var pageUrl = serverRelative is null ? null : new Uri(Client(library).SiteUrl, SiteAddress.EscapePath(serverRelative));
+        var markdown = SharePointPages.Markdown(fields, pageUrl);
+        var version = SharePointPages.Version(markdown);
+        _pages.Remember(item.Id, version, markdown);
+        return (VfsEntry.File(SharePointPages.Shown(entry.Name), markdown.Length, entry.Modified, entry.Created, VfsAttributes.ReadOnly, version), item with { Version = version, Size = markdown.Length });
+    }
+
     public async Task<ItemRef?> GetItemAsync(LibraryInfo library, string itemPath, CancellationToken ct)
     {
-        var url = Url(library, itemPath);
-        using (var file = await Client(library).TryGetJsonAsync($"{SharePointRestClient.FileApi(url)}?$select={FileSelect},Exists", Display(library, itemPath), ct).ConfigureAwait(false))
+        // in the site's pages a file is a page, by its Markdown name; anything else there is a folder or nothing
+        if (library.Pages && SharePointPages.Upstream(itemPath) is { } page)
         {
+            using var found = await Client(library).TryGetJsonAsync($"{SharePointRestClient.FileApi(Url(library, page))}?$expand=ListItemAllFields&$select={FileSelect},Exists,{Prefix("ListItemAllFields", PageFields)}", Display(library, itemPath), ct).ConfigureAwait(false);
+            if (found is not null && !(found.RootElement.TryGetProperty("Exists", out var pe) && pe.ValueKind == JsonValueKind.False))
+            {
+                return ParsePage(library, found.RootElement).Item;
+            }
+        }
+
+        var url = Url(library, itemPath);
+        if (!library.Pages)
+        {
+            using var file = await Client(library).TryGetJsonAsync($"{SharePointRestClient.FileApi(url)}?$select={FileSelect},Exists", Display(library, itemPath), ct).ConfigureAwait(false);
             if (file is not null && !(file.RootElement.TryGetProperty("Exists", out var fe) && fe.ValueKind == JsonValueKind.False))
             {
                 return ParseFile(file.RootElement).Item;
@@ -178,8 +232,23 @@ internal sealed class RestDocumentStore : IDocumentStore
         return ParseFolder(folder.RootElement).Item;
     }
 
-    public Task<HttpResponseMessage> OpenContentAsync(LibraryInfo library, string itemPath, ItemRef item, long offset, CancellationToken ct)
-        => Client(library).GetContentAsync(Url(library, itemPath), offset, Display(library, itemPath), ct);
+    public async Task<HttpResponseMessage> OpenContentAsync(LibraryInfo library, string itemPath, ItemRef item, long offset, CancellationToken ct)
+    {
+        if (!library.Pages)
+        {
+            return await Client(library).GetContentAsync(Url(library, itemPath), offset, Display(library, itemPath), ct).ConfigureAwait(false);
+        }
+
+        // a page is its Markdown: from the listing that sized it, else made again
+        var markdown = _pages.Find(item.Id, item.Version);
+        if (markdown is null)
+        {
+            var again = await GetItemAsync(library, itemPath, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(Display(library, itemPath));
+            markdown = _pages.Find(again.Id, again.Version) ?? throw VfsException.NotFound(Display(library, itemPath));
+        }
+
+        return SharePointPages.Response(markdown, offset);
+    }
 
     public async Task<ItemRef> UploadAsync(LibraryInfo library, string itemPath, string localPath, long length, CancellationToken ct)
     {

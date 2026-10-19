@@ -11,7 +11,8 @@ namespace AnyFS.Sources.SharePoint;
 /// are <c>library/folder/file</c>, with a site's subsites in a <c>Subsites</c> folder beside its libraries, each with
 /// its own inside it (<c>Subsites/subsite/library/folder/file</c>, and so on down), at the tenant's root site the
 /// tenant's other sites in a <c>Sites</c> folder the same way (<c>Sites/Axle/library/...</c>, found by search), or
-/// just <c>folder/file</c> when one library is pinned.
+/// just <c>folder/file</c> when one library is pinned. The site's pages (a library of <see cref="LibraryInfo.Pages"/>)
+/// are read-only Markdown files made by the store.
 /// Listings sit in a two-second <see cref="ListingCache"/> and stats are answered from it; a listing also remembers each item's
 /// ids (and download URL, where the flavour has one), so an open needs no extra round trip. Files below the
 /// spool threshold are downloaded whole into the <see cref="SpoolCache"/> (and served again from it while
@@ -295,6 +296,7 @@ public abstract class SharePointSource : SourceBase
         }
 
         RequireWrite("writing");
+        RequireNotPages(library, path);
         SharePointNames.Require(path);
         var parentPath = VfsPath.Parent(path);
         if (existing is null && itemPath.Contains('/'))
@@ -430,6 +432,7 @@ public abstract class SharePointSource : SourceBase
             };
         }
 
+        RequireNotPages(library, path);
         SharePointNames.Require(path);
         var itemPath = place.ItemPath;
         if (await Listings.StatAsync(path, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false) is not null)
@@ -461,6 +464,7 @@ public abstract class SharePointSource : SourceBase
         RequireWrite("deleting");
         path = VfsPath.Normalize(path);
         var (library, itemPath) = await InsideLibraryAsync(path, ct).ConfigureAwait(false);
+        RequireNotPages(library, path);
         if (_pending.TryGetValue(path, out var pendingFile))
         {
             if (pendingFile.IsClosed)
@@ -515,6 +519,8 @@ public abstract class SharePointSource : SourceBase
         toPath = VfsPath.Normalize(toPath);
         var (fromLibrary, fromItemPath) = await InsideLibraryAsync(fromPath, ct).ConfigureAwait(false);
         var (toLibrary, toItemPath) = await InsideLibraryAsync(toPath, ct).ConfigureAwait(false);
+        RequireNotPages(fromLibrary, fromPath);
+        RequireNotPages(toLibrary, toPath);
         if (string.Equals(fromPath, toPath, StringComparison.Ordinal))
         {
             return;
@@ -576,6 +582,8 @@ public abstract class SharePointSource : SourceBase
         {
             return;   // a subsite's or a library's own folder keeps SharePoint's times
         }
+
+        RequireNotPages(library, path);
 
         if (_pending.TryGetValue(path, out var pending))
         {
@@ -855,6 +863,15 @@ public abstract class SharePointSource : SourceBase
         }
 
         return nearest;
+    }
+
+    /// <summary>The site's pages show as Markdown made from them (<see cref="SharePointPages"/>): nothing there is the client's to write.</summary>
+    private static void RequireNotPages(LibraryInfo library, string path)
+    {
+        if (library.Pages)
+        {
+            throw VfsException.ReadOnly(path, $"{library.Shown} shows the site's pages as Markdown, for reading");
+        }
     }
 
     /// <summary>The item's ids, from the last listing that saw it, else from the store.</summary>

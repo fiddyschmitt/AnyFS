@@ -48,7 +48,7 @@ public sealed class SharePointSettings
     public string SiteUrl { get; set; } = "";
 
     [Setting("Library", Order = 1, Placeholder = "Documents",
-        Hint = "Leave empty to show every document library as a top-level folder, and the site's subsites in a Subsites folder beside them (at the tenant's root site also a Sites folder with every other site you can open), or name one library to serve just that. For SharePoint Embedded, a container, by its name or its id.")]
+        Hint = "Leave empty to show every document library as a top-level folder (the site's pages among them, as Markdown), and the site's subsites in a Subsites folder beside them (at the tenant's root site also a Sites folder with every other site you can open), or name one library to serve just that. For SharePoint Embedded, a container, by its name or its id.")]
     public string? Library { get; set; }
 
     [Setting("Sign in with", Order = 2, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [Automatic, AppBrowser, AppDeviceCode, WebSession, WindowsCurrent, Windows],
@@ -236,7 +236,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
     public string DisplayName => "SharePoint";
 
-    public string Description => "A SharePoint site's document libraries and subsites: SharePoint Online (Microsoft 365, GCC High too), SharePoint Server on your own network, or SharePoint Embedded's containers, told apart by the address. Reads, writes, renames.";
+    public string Description => "A SharePoint site's document libraries, subsites and pages (as Markdown): SharePoint Online (Microsoft 365, GCC High too), SharePoint Server on your own network, or SharePoint Embedded's containers, told apart by the address. Reads, writes, renames.";
 
     public string TypeFolder => "sharepoint";
 
