@@ -112,7 +112,7 @@ public class MicrosoftCloudTests
             new[] { "https://graph.microsoft.us/User.Read", "https://graph.microsoft.us/Files.ReadWrite.All", "https://graph.microsoft.us/Sites.ReadWrite.All" },
             signIn.Scopes.ToArray());
 
-        var global = new EntraSignIn(Options(SharePointOnlinePlugin.DefaultClientId, "organizations", null), NullLogger.Instance);
+        var global = new EntraSignIn(Options(SharePointPlugin.DefaultClientId, "organizations", null), NullLogger.Instance);
         CollectionAssert.AreEqual(EntraSignIn.SiteScopes, global.Scopes.ToArray());
     }
 
@@ -125,7 +125,7 @@ public class MicrosoftCloudTests
 
         // what the US Government endpoint answers AnyFS's own client ID with (checked by hand, 18-Oct-2026)
         var unknownApp = Refusal("AADSTS50059: No tenant-identifying information found in either the request or implied by any provided credentials. Trace ID: x");
-        var message = EntraSignIn.Describe(unknownApp, gov, SharePointOnlinePlugin.DefaultClientId, "organizations");
+        var message = EntraSignIn.Describe(unknownApp, gov, SharePointPlugin.DefaultClientId, "organizations");
         StringAssert.Contains(message, "global cloud");
         StringAssert.Contains(message, "client ID");
         Assert.IsTrue(EntraSignIn.IsPermanent(unknownApp), "retrying cannot help, and would open the browser again");
@@ -138,7 +138,7 @@ public class MicrosoftCloudTests
         StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS90002: Tenant 'acme.onmicrosoft.us' not found."), gov, own, "acme.onmicrosoft.us"), "tenant acme.onmicrosoft.us was not found in the US Government (GCC High) cloud");
         StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS7000218: The request body must contain the following parameter: 'client_assertion' or 'client_secret'."), gov, own, "acme.onmicrosoft.us"), "Allow public client flows");
         StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS65001: The user or administrator has not consented to use the application."), gov, own, "acme.onmicrosoft.us"), "administrator must consent");
-        StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS530035: Access has been blocked by security defaults."), MicrosoftCloud.Global, SharePointOnlinePlugin.DefaultClientId, "organizations"), "Conditional Access");
+        StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS530035: Access has been blocked by security defaults."), MicrosoftCloud.Global, SharePointPlugin.DefaultClientId, "organizations"), "Conditional Access");
 
         var other = Refusal("AADSTS12345: Something new.\nmore detail");
         Assert.AreEqual("the sign-in failed: AADSTS12345: Something new.", EntraSignIn.Describe(other, gov, own, "organizations"));
@@ -172,42 +172,49 @@ public class MicrosoftCloudTests
     }
 }
 
-/// <summary>The Cloud setting of the Online and Embedded sources, and the Server source's refusal of a Microsoft 365 address.</summary>
+/// <summary>The cloud and the sign-in a SharePoint source gets for its address, and the combinations it refuses.</summary>
 [TestClass]
 public class SharePointCloudSettingsTests
 {
     private const string OwnClientId = "11111111-2222-3333-4444-555555555555";
+    private const string ContainerType = "91710488-5756-407f-9046-fbe5f0b4de73";
 
     [TestMethod]
     public void AUsGovernmentSiteSignsInThereToItsOwnTenant()
     {
-        var settings = new SharePointOnlineSettings { SiteUrl = "https://acme.sharepoint.us/sites/Bar", ClientId = OwnClientId };
+        var settings = new SharePointSettings { SiteUrl = "https://acme.sharepoint.us/sites/Bar", ClientId = OwnClientId };
         Assert.AreSame(MicrosoftCloud.UsGovernment, settings.EffectiveCloud);
         Assert.AreEqual("acme.onmicrosoft.us", settings.EffectiveTenant, "an organisation's own registration is often for its own tenant only");
 
         settings.Tenant = "acme.gov";
         Assert.AreEqual("acme.gov", settings.EffectiveTenant, "a tenant given is kept");
 
-        var global = new SharePointOnlineSettings { SiteUrl = "https://contoso.sharepoint.com/sites/Team" };
+        var global = new SharePointSettings { SiteUrl = "https://contoso.sharepoint.com/sites/Team" };
         Assert.AreSame(MicrosoftCloud.Global, global.EffectiveCloud);
         Assert.AreEqual("organizations", global.EffectiveTenant, "the global cloud keeps signing in as before");
     }
 
     [TestMethod]
-    public void AUsGovernmentSiteNeedsTheOrganisationsOwnRegistration()
+    public void AUsGovernmentSiteWithoutARegistrationGetsTheWebSession()
     {
-        var plugin = new SharePointOnlinePlugin();
-        var settings = new SharePointOnlineSettings { SiteUrl = "https://acme.sharepoint.us/sites/Bar" };
-        var message = plugin.Validate(settings).Single();
-        Assert.AreEqual(nameof(SharePointOnlineSettings.ClientId), message.Property);
-        StringAssert.Contains(message.Message, "global cloud");
-        StringAssert.Contains(message.Message, "http://localhost");
-        StringAssert.Contains(message.Message, SharePointOnlinePlugin.RegistrationPermissions);
-
-        settings.ClientId = OwnClientId;
+        var plugin = new SharePointPlugin();
+        var settings = new SharePointSettings { SiteUrl = "https://acme.sharepoint.us/sites/Bar" };
+        Assert.AreEqual(SharePointSignIn.WebSession, settings.EffectiveSignIn, "AnyFS's own registration cannot exist in that cloud");
         Assert.AreEqual(0, plugin.Validate(settings).Count());
 
-        var test = plugin.TestAsync(new SharePointOnlineSettings { SiteUrl = "https://acme.sharepoint.us/sites/Bar" }, new Progress<string>(), CancellationToken.None).GetAwaiter().GetResult();
+        settings.ClientId = OwnClientId;
+        Assert.AreEqual(SharePointSignIn.AppBrowser, settings.EffectiveSignIn, "the organisation's own registration makes it an app sign-in");
+        Assert.AreEqual(0, plugin.Validate(settings).Count());
+
+        // an app sign-in chosen by hand without the organisation's registration is refused, before any sign-in
+        settings = new SharePointSettings { SiteUrl = "https://acme.sharepoint.us/sites/Bar", SignInMethod = SharePointSettings.AppBrowser };
+        var message = plugin.Validate(settings).Single();
+        Assert.AreEqual(nameof(SharePointSettings.ClientId), message.Property);
+        StringAssert.Contains(message.Message, "global cloud");
+        StringAssert.Contains(message.Message, "http://localhost");
+        StringAssert.Contains(message.Message, SharePointPlugin.SitePermissions);
+
+        var test = plugin.TestAsync(settings, new Progress<string>(), CancellationToken.None).GetAwaiter().GetResult();
         Assert.IsFalse(test.Success);
         StringAssert.Contains(test.Message, "global cloud", "the Test button says so before any sign-in");
     }
@@ -215,47 +222,47 @@ public class SharePointCloudSettingsTests
     [TestMethod]
     public void ACloudChoiceThatContradictsTheSiteOrTenantIsCaught()
     {
-        var plugin = new SharePointOnlinePlugin();
-        var settings = new SharePointOnlineSettings { SiteUrl = "https://acme.sharepoint.us/sites/Bar", ClientId = OwnClientId, Cloud = MicrosoftCloud.GlobalName };
+        var plugin = new SharePointPlugin();
+        var settings = new SharePointSettings { SiteUrl = "https://acme.sharepoint.us/sites/Bar", ClientId = OwnClientId, Cloud = MicrosoftCloud.GlobalName };
         var message = plugin.Validate(settings).Single();
-        Assert.AreEqual(nameof(SharePointOnlineSettings.Cloud), message.Property);
+        Assert.AreEqual(nameof(SharePointSettings.Cloud), message.Property);
         StringAssert.Contains(message.Message, "acme.sharepoint.us is a site in the US Government (GCC High) cloud");
 
         settings.Cloud = "Mars";
-        Assert.AreEqual(nameof(SharePointOnlineSettings.Cloud), plugin.Validate(settings).Single().Property);
+        Assert.AreEqual(nameof(SharePointSettings.Cloud), plugin.Validate(settings).Single().Property);
 
         settings.Cloud = MicrosoftCloud.AutomaticName;
         settings.Tenant = "contoso.onmicrosoft.com";
         message = plugin.Validate(settings).Single();
-        Assert.AreEqual(nameof(SharePointOnlineSettings.Tenant), message.Property);
+        Assert.AreEqual(nameof(SharePointSettings.Tenant), message.Property);
         StringAssert.Contains(message.Message, "contoso.onmicrosoft.com is a tenant in the Global cloud");
     }
 
     [TestMethod]
     public void EmbeddedGoesByTheTenantsDomain()
     {
-        var plugin = new SharePointEmbeddedPlugin();
-        var settings = new SharePointEmbeddedSettings { ContainerTypeId = "91710488-5756-407f-9046-fbe5f0b4de73", Tenant = "acme.onmicrosoft.us" };
+        var plugin = new SharePointPlugin();
+        var settings = new SharePointSettings { SiteUrl = ContainerType, Tenant = "acme.onmicrosoft.us" };
         Assert.AreSame(MicrosoftCloud.UsGovernment, settings.EffectiveCloud);
         var message = plugin.Validate(settings).Single();
-        Assert.AreEqual(nameof(SharePointEmbeddedSettings.ClientId), message.Property);
-        StringAssert.Contains(message.Message, SharePointEmbeddedPlugin.RegistrationPermissions);
+        Assert.AreEqual(nameof(SharePointSettings.ClientId), message.Property);
+        StringAssert.Contains(message.Message, SharePointPlugin.ContainerPermissions);
         StringAssert.Contains(message.Message, "container type");
 
         settings.ClientId = OwnClientId;
         Assert.AreEqual(0, plugin.Validate(settings).Count());
 
         // chosen by hand, the cloud needs the tenant named: Embedded has no site to take it from
-        settings = new SharePointEmbeddedSettings { ContainerTypeId = "91710488-5756-407f-9046-fbe5f0b4de73", Cloud = MicrosoftCloud.UsGovernmentName, ClientId = OwnClientId };
+        settings = new SharePointSettings { SiteUrl = ContainerType, Cloud = MicrosoftCloud.UsGovernmentName, ClientId = OwnClientId };
         message = plugin.Validate(settings).Single();
-        Assert.AreEqual(nameof(SharePointEmbeddedSettings.Tenant), message.Property);
+        Assert.AreEqual(nameof(SharePointSettings.Tenant), message.Property);
         StringAssert.Contains(message.Message, "contoso.onmicrosoft.us");
 
-        var defaults = new SharePointEmbeddedSettings { ContainerTypeId = "91710488-5756-407f-9046-fbe5f0b4de73" };
+        var defaults = new SharePointSettings { SiteUrl = ContainerType };
         Assert.AreSame(MicrosoftCloud.Global, defaults.EffectiveCloud);
         Assert.AreEqual(0, plugin.Validate(defaults).Count(), "the global cloud is unchanged");
 
-        var test = plugin.TestAsync(new SharePointEmbeddedSettings { ContainerTypeId = "91710488-5756-407f-9046-fbe5f0b4de73", Tenant = "acme.onmicrosoft.us" }, new Progress<string>(), CancellationToken.None).GetAwaiter().GetResult();
+        var test = plugin.TestAsync(new SharePointSettings { SiteUrl = ContainerType, Tenant = "acme.onmicrosoft.us" }, new Progress<string>(), CancellationToken.None).GetAwaiter().GetResult();
         Assert.IsFalse(test.Success);
         StringAssert.Contains(test.Message, "global cloud");
     }
@@ -263,19 +270,24 @@ public class SharePointCloudSettingsTests
     [TestMethod]
     [DataRow("https://acme.sharepoint.us/sites/Bar")]
     [DataRow("https://contoso.sharepoint.com/sites/Team")]
-    public void TheServerTypeRefusesAMicrosoft365Site(string url)
+    public void AMicrosoft365AddressNeverTakesAWindowsPassword(string url)
     {
-        var plugin = new SharePointServerPlugin();
-        var settings = new SharePointServerSettings { SiteUrl = url, Username = @"ACME\someone", Password = "x" };
+        var plugin = new SharePointPlugin();
+        var settings = new SharePointSettings { SiteUrl = url, Username = @"ACME\someone", Password = "x" };
+        Assert.AreEqual(SharePointKind.Online, settings.Kind);
+        Assert.AreNotEqual(SharePointSignIn.Windows, settings.EffectiveSignIn, "Automatic never picks a Windows password for Microsoft 365");
+
+        settings.SignInMethod = SharePointSettings.Windows;
         var message = plugin.Validate(settings).Single();
-        Assert.AreEqual(nameof(SharePointServerSettings.SiteUrl), message.Property);
-        StringAssert.Contains(message.Message, "use the SharePoint Online source type");
+        Assert.AreEqual(nameof(SharePointSettings.SignInMethod), message.Property);
+        StringAssert.Contains(message.Message, "Microsoft sign-in");
 
         var test = plugin.TestAsync(settings, new Progress<string>(), CancellationToken.None).GetAwaiter().GetResult();
         Assert.IsFalse(test.Success, "refused before any request, so no proxy or 401 confuses it");
-        StringAssert.Contains(test.Message, "SharePoint Online");
+        StringAssert.Contains(test.Message, "Microsoft sign-in");
 
         settings.SiteUrl = "http://anyfs-sp-1/sites/anyfs";
-        Assert.AreEqual(0, plugin.Validate(settings).Count(), "an on-premises address is what this type is for");
+        Assert.AreEqual(SharePointKind.Server, settings.Kind);
+        Assert.AreEqual(0, plugin.Validate(settings).Count(), "an on-premises address takes the Windows account");
     }
 }

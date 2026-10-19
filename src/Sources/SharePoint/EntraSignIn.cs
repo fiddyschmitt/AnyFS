@@ -49,7 +49,7 @@ public sealed class SignInRequiredException(string message, Exception? inner = n
 }
 
 /// <summary>
-/// The Microsoft identity platform sign-in behind the SharePoint Online and Embedded sources, on MSAL. Silent
+/// The Microsoft identity platform sign-in behind the SharePoint source's app sign-in (Online and Embedded), on MSAL. Silent
 /// first (the cache from the last run, refresh tokens included); otherwise the system browser or a device
 /// code, as the settings say. The cache is handed back to the caller serialised, so the source keeps it in its
 /// secret store; a process-wide copy also bridges the settings dialog's Test button and the source it then
@@ -306,7 +306,7 @@ internal sealed class EntraSignIn
             case 53000 or 53003 or 530035:
                 return "your organisation's Conditional Access policy blocked this sign-in (the device-code flow is often blocked: choose the browser sign-in in the settings)";
             case 50059 or 700016:
-                return !cloud.HasShippedRegistration && string.Equals(clientId, SharePointOnlinePlugin.DefaultClientId, StringComparison.OrdinalIgnoreCase)
+                return !cloud.HasShippedRegistration && string.Equals(clientId, SharePointPlugin.DefaultClientId, StringComparison.OrdinalIgnoreCase)
                     ? $"AnyFS's own app registration exists only in Microsoft's global cloud, not the {cloud.Name} cloud: put your organisation's own registration's client ID in the settings"
                     : $"the app registration {clientId} does not exist in the {cloud.Name} cloud{(organizations ? "" : $" for tenant {tenant}")}: check the Client ID, Tenant and Cloud settings";
             case 50194:

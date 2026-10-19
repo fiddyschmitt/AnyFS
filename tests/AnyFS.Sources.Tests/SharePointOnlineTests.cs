@@ -176,15 +176,15 @@ public class SharePointOnlinePluginTests
     [TestMethod]
     public void DefaultsNeedOnlyASite()
     {
-        var plugin = new SharePointOnlinePlugin();
-        var settings = (SharePointOnlineSettings)plugin.CreateDefaultSettings();
+        var plugin = new SharePointPlugin();
+        var settings = (SharePointSettings)plugin.CreateDefaultSettings();
         var messages = plugin.Validate(settings).ToList();
         Assert.AreEqual(1, messages.Count);
-        Assert.AreEqual(nameof(SharePointOnlineSettings.SiteUrl), messages[0].Property);
+        Assert.AreEqual(nameof(SharePointSettings.SiteUrl), messages[0].Property);
 
         settings.SiteUrl = "https://contoso.sharepoint.com/sites/Team";
         Assert.AreEqual(0, plugin.Validate(settings).Count());
-        Assert.AreEqual(SharePointOnlinePlugin.DefaultClientId, settings.EffectiveClientId);
+        Assert.AreEqual(SharePointPlugin.DefaultClientId, settings.EffectiveClientId);
         Assert.AreEqual("organizations", settings.EffectiveTenant);
         Assert.AreEqual(SignInMethod.Browser, settings.Method);
     }
@@ -192,8 +192,8 @@ public class SharePointOnlinePluginTests
     [TestMethod]
     public void ValidationCatchesTheUsualMistakes()
     {
-        var plugin = new SharePointOnlinePlugin();
-        var settings = new SharePointOnlineSettings
+        var plugin = new SharePointPlugin();
+        var settings = new SharePointSettings
         {
             SiteUrl = "https://contoso.sharepoint.com/sites/Team",
             Library = "Shared/Documents",
@@ -202,13 +202,13 @@ public class SharePointOnlinePluginTests
             ClientId = "not-a-guid",
             Connections = 0,
             SpoolBelowMiB = -1,
-            SignInMethod = SharePointOnlineSettings.DeviceCodeMethod,
+            SignInMethod = SharePointSettings.AppDeviceCode,
         };
         var properties = plugin.Validate(settings).Select(m => m.Property).ToList();
         CollectionAssert.AreEquivalent(new[]
         {
-            nameof(SharePointOnlineSettings.Library), nameof(SharePointOnlineSettings.Account), nameof(SharePointOnlineSettings.Tenant),
-            nameof(SharePointOnlineSettings.ClientId), nameof(SharePointOnlineSettings.Connections), nameof(SharePointOnlineSettings.SpoolBelowMiB),
+            nameof(SharePointSettings.Library), nameof(SharePointSettings.Account), nameof(SharePointSettings.Tenant),
+            nameof(SharePointSettings.ClientId), nameof(SharePointSettings.Connections), nameof(SharePointSettings.SpoolBelowMiB),
         }, properties);
         Assert.AreEqual(SignInMethod.DeviceCode, settings.Method);
     }
@@ -252,20 +252,20 @@ internal static class SpoTestServer
     /// lapsed a device-code attempt fails at once in a tenant that blocks it (or sits unanswered until the timeout
     /// below), where the browser flow would open a browser on the test machine and wait for a person.
     /// </summary>
-    public static SharePointOnlineSettings Settings(string? library = null, int spoolBelowMiB = 8) => new()
+    public static SharePointSettings Settings(string? library = null, int spoolBelowMiB = 8) => new()
     {
         SiteUrl = Site!,
         Library = library,
         Account = Account,
         SpoolBelowMiB = spoolBelowMiB,
-        SignInMethod = SharePointOnlineSettings.DeviceCodeMethod,
+        SignInMethod = SharePointSettings.AppDeviceCode,
     };
 
     /// <summary>A context whose secret store already holds the sign-in, so the source starts silently. ANYFS_TEST_SPO_LOG names a file that gets the source's log.</summary>
     public static TestSourceContext Context()
     {
         var logPath = Environment.GetEnvironmentVariable("ANYFS_TEST_SPO_LOG");
-        var context = new TestSourceContext("sharepoint-online", string.IsNullOrWhiteSpace(logPath) ? null : new FileLogger(logPath));
+        var context = new TestSourceContext("sharepoint", string.IsNullOrWhiteSpace(logPath) ? null : new FileLogger(logPath));
         var cache = SignInCacheFile.Read(CachePath);
         if (cache is not null)
         {
@@ -276,9 +276,9 @@ internal static class SpoTestServer
     }
 
     /// <summary>Starts a source and makes sure the fixture tree exists in the library: readme.txt, medium.bin (50,000 bytes), docs/a.txt, scratch/.</summary>
-    public static async Task<SharePointOnlineSource> StartWithFixtureAsync(SharePointOnlineSettings settings)
+    public static async Task<SharePointSiteSource> StartWithFixtureAsync(SharePointSettings settings)
     {
-        var source = (SharePointOnlineSource)new SharePointOnlinePlugin().CreateSource(settings);
+        var source = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
         var context = Context();
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         try

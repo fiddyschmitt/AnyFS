@@ -12,16 +12,18 @@ public class SharePointEmbeddedPluginTests
     private const string ContainerType = "91710488-5756-407f-9046-fbe5f0b4de73";
 
     [TestMethod]
-    public void DefaultsNeedOnlyAContainerType()
+    public void AContainerTypeIdIsTheAddressOfEmbedded()
     {
-        var plugin = new SharePointEmbeddedPlugin();
-        var settings = (SharePointEmbeddedSettings)plugin.CreateDefaultSettings();
-        Assert.AreEqual("sharepoint-embedded", plugin.TypeId);
+        var plugin = new SharePointPlugin();
+        var settings = (SharePointSettings)plugin.CreateDefaultSettings();
+        Assert.AreEqual("sharepoint", plugin.TypeId);
         Assert.AreEqual("sharepoint", plugin.TypeFolder);
-        Assert.AreEqual(SharePointOnlinePlugin.DefaultClientId, settings.ClientId);
-        CollectionAssert.AreEqual(new[] { nameof(SharePointEmbeddedSettings.ContainerTypeId) }, plugin.Validate(settings).Select(m => m.Property).ToArray());
+        Assert.AreEqual(SharePointPlugin.DefaultClientId, settings.ClientId);
+        CollectionAssert.AreEqual(new[] { nameof(SharePointSettings.SiteUrl) }, plugin.Validate(settings).Select(m => m.Property).ToArray());
 
-        settings.ContainerTypeId = $" {ContainerType} ";
+        settings.SiteUrl = $" {ContainerType} ";
+        Assert.AreEqual(SharePointKind.Embedded, settings.Kind);
+        Assert.AreEqual(SharePointSignIn.AppBrowser, settings.EffectiveSignIn, "Automatic signs in to Embedded as an app");
         Assert.AreEqual(0, plugin.Validate(settings).Count());
         Assert.IsTrue(settings.TryGetContainerType(out var id));
         Assert.AreEqual(Guid.Parse(ContainerType), id);
@@ -30,11 +32,11 @@ public class SharePointEmbeddedPluginTests
     [TestMethod]
     public void BadValuesAreNamed()
     {
-        var plugin = new SharePointEmbeddedPlugin();
-        var settings = new SharePointEmbeddedSettings
+        var plugin = new SharePointPlugin();
+        var settings = new SharePointSettings
         {
-            ContainerTypeId = "not-a-guid",
-            Container = "a/b",
+            SiteUrl = ContainerType,
+            Library = "a/b",
             Account = "no-at-sign",
             Tenant = "has space",
             ClientId = "nope",
@@ -44,20 +46,19 @@ public class SharePointEmbeddedPluginTests
         var fields = plugin.Validate(settings).Select(m => m.Property).ToList();
         CollectionAssert.AreEquivalent(new[]
         {
-            nameof(SharePointEmbeddedSettings.ContainerTypeId), nameof(SharePointEmbeddedSettings.Container), nameof(SharePointEmbeddedSettings.Account),
-            nameof(SharePointEmbeddedSettings.Tenant), nameof(SharePointEmbeddedSettings.ClientId), nameof(SharePointEmbeddedSettings.Connections),
-            nameof(SharePointEmbeddedSettings.SpoolBelowMiB),
+            nameof(SharePointSettings.Library), nameof(SharePointSettings.Account), nameof(SharePointSettings.Tenant),
+            nameof(SharePointSettings.ClientId), nameof(SharePointSettings.Connections), nameof(SharePointSettings.SpoolBelowMiB),
         }, fields);
     }
 
     [TestMethod]
     public void SignInMethodAndTenantFallBack()
     {
-        var settings = new SharePointEmbeddedSettings { ContainerTypeId = ContainerType, SignInMethod = "device CODE", Tenant = " ", ClientId = "" };
-        Assert.AreEqual(SignInMethod.DeviceCode, settings.Method);
+        var settings = new SharePointSettings { SiteUrl = ContainerType, SignInMethod = "device CODE", Tenant = " ", ClientId = "" };
+        Assert.AreEqual(SignInMethod.DeviceCode, settings.Method, "the earlier \"Device code\" value still works");
         Assert.AreEqual("organizations", settings.EffectiveTenant);
-        Assert.AreEqual(SharePointOnlinePlugin.DefaultClientId, settings.EffectiveClientId);
-        Assert.IsNull(settings.PinnedContainer);
+        Assert.AreEqual(SharePointPlugin.DefaultClientId, settings.EffectiveClientId);
+        Assert.IsNull(settings.PinnedLibrary);
         Assert.IsNull(settings.LoginHint);
     }
 }
@@ -103,9 +104,9 @@ public class ContainerListingTests
     public void AContainerIdIsToldFromAName(string value, bool isId)
     {
         Assert.AreEqual(isId, GraphDocumentStore.LooksLikeContainerId(value));
-        var settings = new SharePointEmbeddedSettings { ContainerTypeId = "91710488-5756-407f-9046-fbe5f0b4de73", Container = value };
+        var settings = new SharePointSettings { SiteUrl = "91710488-5756-407f-9046-fbe5f0b4de73", Library = value };
         Assert.AreEqual(isId ? value : null, settings.PinnedContainerId);
-        Assert.AreEqual(value, settings.PinnedContainer);
+        Assert.AreEqual(value, settings.PinnedLibrary);
     }
 
     [TestMethod]
@@ -155,19 +156,19 @@ internal static class SpeTestServer
     }
 
     /// <summary>Device code as the method, as for Online: a lapsed sign-in fails fast instead of opening a browser on the test machine.</summary>
-    public static SharePointEmbeddedSettings Settings(string? container = null, int spoolBelowMiB = 8) => new()
+    public static SharePointSettings Settings(string? container = null, int spoolBelowMiB = 8) => new()
     {
-        ContainerTypeId = ContainerType!,
-        Container = container,
+        SiteUrl = ContainerType!,
+        Library = container,
         Account = Account,
         SpoolBelowMiB = spoolBelowMiB,
-        SignInMethod = SharePointOnlineSettings.DeviceCodeMethod,
+        SignInMethod = SharePointSettings.AppDeviceCode,
     };
 
     public static TestSourceContext Context()
     {
         var logPath = Environment.GetEnvironmentVariable("ANYFS_TEST_SPE_LOG");
-        var context = new TestSourceContext("sharepoint-embedded", string.IsNullOrWhiteSpace(logPath) ? null : new SpoTestServer.FileLogger(logPath));
+        var context = new TestSourceContext("sharepoint", string.IsNullOrWhiteSpace(logPath) ? null : new SpoTestServer.FileLogger(logPath));
         var cache = SignInCacheFile.Read(CachePath);
         if (cache is not null)
         {
@@ -178,9 +179,9 @@ internal static class SpeTestServer
     }
 
     /// <summary>Starts a source and makes sure the fixture tree exists in the container: the same tree as the Online tests use.</summary>
-    public static async Task<SharePointEmbeddedSource> StartWithFixtureAsync(SharePointEmbeddedSettings settings)
+    public static async Task<SharePointSiteSource> StartWithFixtureAsync(SharePointSettings settings)
     {
-        var source = (SharePointEmbeddedSource)new SharePointEmbeddedPlugin().CreateSource(settings);
+        var source = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
         var context = Context();
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         try
@@ -196,7 +197,7 @@ internal static class SpeTestServer
             Assert.Inconclusive("the saved sign-in has lapsed and the source waited for a new one; run tests/fixtures/SharePointSignIn again");
         }
 
-        var root = settings.Container is null ? Container : "";
+        var root = settings.Library is null ? Container : "";
         var fixture = VfsPath.Join(root, SpoTestServer.FixtureFolder);
         await SpoTestServer.EnsureDirectoryAsync(source, fixture);
         await SpoTestServer.EnsureDirectoryAsync(source, VfsPath.Join(fixture, "docs"));
@@ -318,7 +319,7 @@ public class SharePointEmbeddedLiveTests
         // the Test button has only the process-wide cache (a source that signed in would have left it there)
         EntraSignIn.Remember(settings.EffectiveClientId, settings.EffectiveTenant, settings.LoginHint, SignInCacheFile.Read(SpeTestServer.CachePath)!);
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-        var result = await new SharePointEmbeddedPlugin().TestAsync(settings, new Progress<string>(), timeout.Token);
+        var result = await new SharePointPlugin().TestAsync(settings, new Progress<string>(), timeout.Token);
         if (!result.Success && result.Message.Contains("sign-in", StringComparison.OrdinalIgnoreCase))
         {
             Assert.Inconclusive($"the saved sign-in did not work ({result.Message}); run tests/fixtures/SharePointSignIn again");

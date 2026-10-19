@@ -92,7 +92,7 @@ public class SharePointServerPluginTests
     [TestMethod]
     public void CredentialsAreSplitTheWindowsWay()
     {
-        var settings = new SharePointServerSettings { Username = @"ANYFS\sp_user", Password = "pw" };
+        var settings = new SharePointSettings { Username = @"ANYFS\sp_user", Password = "pw" };
         var credential = (NetworkCredential)settings.Credentials();
         Assert.AreEqual("sp_user", credential.UserName);
         Assert.AreEqual("ANYFS", credential.Domain);
@@ -111,10 +111,10 @@ public class SharePointServerPluginTests
     [TestMethod]
     public void ValidationCatchesTheUsualMistakes()
     {
-        var plugin = new SharePointServerPlugin();
-        var settings = (SharePointServerSettings)plugin.CreateDefaultSettings();
+        var plugin = new SharePointPlugin();
+        var settings = (SharePointSettings)plugin.CreateDefaultSettings();
         var properties = plugin.Validate(settings).Select(m => m.Property).ToList();
-        CollectionAssert.Contains(properties, nameof(SharePointServerSettings.SiteUrl));
+        CollectionAssert.Contains(properties, nameof(SharePointSettings.SiteUrl));
 
         settings.SiteUrl = "http://anyfs-sp-1/sites/anyfs";
         settings.Username = @"ANYFS\sp_user";
@@ -125,25 +125,35 @@ public class SharePointServerPluginTests
         settings.Library = "a/b";
         settings.Connections = 99;
         properties = plugin.Validate(settings).Select(m => m.Property).ToList();
-        CollectionAssert.AreEquivalent(new[] { nameof(SharePointServerSettings.Username), nameof(SharePointServerSettings.Library), nameof(SharePointServerSettings.Connections) }, properties);
+        CollectionAssert.AreEquivalent(new[] { nameof(SharePointSettings.Username), nameof(SharePointSettings.Library), nameof(SharePointSettings.Connections) }, properties);
 
         settings.Username = null;
         settings.Library = null;
         settings.Connections = 4;
         properties = plugin.Validate(settings).Select(m => m.Property).ToList();
-        CollectionAssert.Contains(properties, nameof(SharePointServerSettings.Username), "a password without a user name");
+        CollectionAssert.Contains(properties, nameof(SharePointSettings.Username), "a password without a user name");
     }
 }
 
 /// <summary>
-/// Where the live tests run: ANYFS_TEST_SPS_SITE (http://192.168.0.92/sites/anyfs in the lab), _USER
+/// Where the REST live tests run: ANYFS_TEST_SPS_SITE (http://192.168.0.92/sites/anyfs in the lab), _USER
 /// (ANYFS\sp_user), _PASSWORD and _LIBRARY (Documents). Without a site the live tests are inconclusive. The
 /// fixture tree is made by the tests through the source, as for SharePoint Online.
+///
+/// With ANYFS_TEST_SPS_SIGNIN=web the same tests run against SharePoint Online on a web session (the browser
+/// sign-in that needs no app registration): the site is a Microsoft 365 one, no user or password, and
+/// ANYFS_SHAREPOINT_PROFILES names where the signed-in browser profiles are kept, so a profile signed in once
+/// serves every run without a window.
 /// </summary>
 internal static class SpsTestServer
 {
-    public const string FixtureFolder = "anyfs-fixture";
     public static readonly byte[] ReadmeBytes = Encoding.UTF8.GetBytes("hello readme from sharepoint server\n");
+
+    /// <summary>
+    /// On SharePoint Online the Graph suite keeps its own anyfs-fixture in the same library, with a readme of the
+    /// same length ("online" and "server"), which the length-only fixture check would take for this one's.
+    /// </summary>
+    public static string FixtureFolder => WebSession ? "anyfs-fixture-rest" : "anyfs-fixture";
 
     public static string? Site => Env("ANYFS_TEST_SPS_SITE");
 
@@ -153,29 +163,32 @@ internal static class SpsTestServer
 
     public static string Library => Env("ANYFS_TEST_SPS_LIBRARY") ?? "Documents";
 
+    public static bool WebSession => string.Equals(Env("ANYFS_TEST_SPS_SIGNIN"), "web", StringComparison.OrdinalIgnoreCase);
+
     public static void Require()
     {
         if (Site is null)
         {
-            Assert.Inconclusive("no SharePoint Server test site: set ANYFS_TEST_SPS_SITE (and _USER, _PASSWORD, _LIBRARY)");
+            Assert.Inconclusive("no SharePoint REST test site: set ANYFS_TEST_SPS_SITE (and _USER, _PASSWORD, _LIBRARY; or _SIGNIN=web for a Microsoft 365 site)");
         }
     }
 
-    public static SharePointServerSettings Settings(string? library = null, int spoolBelowMiB = 8) => new()
+    public static SharePointSettings Settings(string? library = null, int spoolBelowMiB = 8) => new()
     {
         SiteUrl = Site!,
         Library = library,
-        Username = User,
-        Password = Password,
+        SignInMethod = WebSession ? SharePointSettings.WebSession : SharePointSettings.Automatic,
+        Username = WebSession ? null : User,
+        Password = WebSession ? null : Password,
         SpoolBelowMiB = spoolBelowMiB,
         TrustAnyCertificate = true,
     };
 
-    public static async Task<SharePointServerSource> StartWithFixtureAsync(SharePointServerSettings settings)
+    public static async Task<SharePointSiteSource> StartWithFixtureAsync(SharePointSettings settings)
     {
-        var source = (SharePointServerSource)new SharePointServerPlugin().CreateSource(settings);
+        var source = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
         var logPath = Environment.GetEnvironmentVariable("ANYFS_TEST_SPS_LOG");
-        var context = new TestSourceContext("sharepoint-server", string.IsNullOrWhiteSpace(logPath) ? null : new FileLogger(logPath));
+        var context = new TestSourceContext("sharepoint", string.IsNullOrWhiteSpace(logPath) ? null : new FileLogger(logPath));
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         await source.InitialiseAsync(context, timeout.Token);
         var root = settings.Library is null ? Library : "";

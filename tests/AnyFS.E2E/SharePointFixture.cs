@@ -22,7 +22,7 @@ public static class SharePointFixture
     /// <summary>The source for the hosts' settings, after making sure the tree is there; null, with the reason, when the farm is not usable.</summary>
     public static SourceSpec? TryPrepare(SharePointLab lab, out string? unavailable)
     {
-        var settings = new SharePointServerSettings { SiteUrl = lab.SiteUrl, Library = Library, Username = lab.User, Password = lab.Password, Connections = 4 };
+        var settings = new SharePointSettings { SiteUrl = lab.SiteUrl, Library = Library, Username = lab.User, Password = lab.Password, Connections = 4 };
         try
         {
             SeedAsync(settings).GetAwaiter().GetResult();
@@ -34,7 +34,7 @@ public static class SharePointFixture
         }
 
         unavailable = null;
-        return new SourceSpec(lab.Collection, "sharepoint-server", TreePrefix, new JsonObject
+        return new SourceSpec(lab.Collection, "sharepoint", TreePrefix, new JsonObject
         {
             ["siteUrl"] = lab.SiteUrl,
             ["library"] = Library,
@@ -45,11 +45,11 @@ public static class SharePointFixture
     }
 
     /// <summary>Uploads what is missing or of another size, folder by folder, several files at a time; a second run finds everything there.</summary>
-    private static async Task SeedAsync(SharePointServerSettings settings)
+    private static async Task SeedAsync(SharePointSettings settings)
     {
         _ = Fixture.Manifest;   // generates the local tree when it is not there yet
         var local = Fixture.LocalDir;
-        await using var source = new SharePointServerPlugin().CreateSource(settings);
+        await using var source = new SharePointPlugin().CreateSource(settings);
         using var context = new TestSourceContext("sharepoint-e2e");
         using var startup = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         await source.InitialiseAsync(context, startup.Token);

@@ -19,9 +19,7 @@ public static class BuiltIns
         var registry = new PluginRegistry();
         registry.AddBuiltIn(new MirrorPlugin());
         registry.AddBuiltIn(new SshfsPlugin());
-        registry.AddBuiltIn(new SharePointOnlinePlugin());
-        registry.AddBuiltIn(new SharePointServerPlugin());
-        registry.AddBuiltIn(new SharePointEmbeddedPlugin());
+        registry.AddBuiltIn(new SharePointPlugin());
         registry.AddBuiltIn(new WinFspMountProvider());
         registry.AddBuiltIn(new FuseMountProvider());
         registry.AddBuiltIn(new SmbMountProvider());

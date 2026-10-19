@@ -30,7 +30,7 @@ var printUrl = false;
 var output = SignInCacheFile.DefaultPath;
 var gets = new List<string>();
 var cloud = MicrosoftCloud.Global;
-var clientId = SharePointOnlinePlugin.DefaultClientId;
+var clientId = SharePointPlugin.DefaultClientId;
 for (var i = 0; i < args.Length; i++)
 {
     switch (args[i])
