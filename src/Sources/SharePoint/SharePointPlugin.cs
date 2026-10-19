@@ -40,6 +40,7 @@ public sealed class SharePointSettings
     public const string AppBrowser = "App sign-in, browser";
     public const string AppDeviceCode = "App sign-in, device code";
     public const string WebSession = "Web session, no app registration";
+    public const string WindowsCurrent = "Windows account, as yourself";
     public const string Windows = "Windows account";
 
     [Setting("Site URL", Required = true, Primary = true, Order = 0, Placeholder = "https://contoso.sharepoint.com/sites/Team",
@@ -50,8 +51,8 @@ public sealed class SharePointSettings
         Hint = "Leave empty to show every document library as a top-level folder, and the site's subsites in a Subsites folder beside them (at the tenant's root site also a Sites folder with every other site you can open), or name one library to serve just that. For SharePoint Embedded, a container, by its name or its id.")]
     public string? Library { get; set; }
 
-    [Setting("Sign in with", Order = 2, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [Automatic, AppBrowser, AppDeviceCode, WebSession, Windows],
-        Hint = "Automatic picks for the address: a Windows account on your own network; for Microsoft 365, app sign-in where AnyFS's app (or your organisation's, under Advanced) can be used, the web session otherwise. App sign-in: AnyFS signs in as a registered app; an administrator may have to approve it once. Web session: you sign in in a browser window and AnyFS uses that session, for when no app registration is allowed. Windows account: SharePoint Server, with a user name and password or as yourself.")]
+    [Setting("Sign in with", Order = 2, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [Automatic, AppBrowser, AppDeviceCode, WebSession, WindowsCurrent, Windows],
+        Hint = "Automatic picks for the address: a Windows account on your own network; for Microsoft 365, app sign-in where AnyFS's app (or your organisation's, under Advanced) can be used, the web session otherwise. App sign-in: AnyFS signs in as a registered app; an administrator may have to approve it once. Web session: you sign in in a browser window and AnyFS uses that session, for when no app registration is allowed. Windows account, as yourself: SharePoint Server, as you are signed in to Windows (a smartcard or Windows Hello sign-in too), with nothing to type. Windows account: SharePoint Server, with a user name and password.")]
     public string SignInMethod { get; set; } = Automatic;
 
     [Setting("Account", Order = 3, Group = "Sign-in", Placeholder = "name@contoso.com",
@@ -59,7 +60,7 @@ public sealed class SharePointSettings
     public string? Account { get; set; }
 
     [Setting("Username", Order = 4, Group = "Sign-in", Placeholder = @"CONTOSO\name or name@contoso.local",
-        Hint = "A Windows account the server knows. Leave empty to use the account AnyFS runs as (Windows only).")]
+        Hint = "A Windows account the server knows. Left empty, AnyFS signs in as you are signed in to Windows, as Windows account, as yourself does (Windows only).")]
     public string? Username { get; set; }
 
     [Setting("Password", Secret = true, Order = 5, Group = "Sign-in")]
@@ -167,7 +168,14 @@ public sealed class SharePointSettings
         }
     }
 
-    internal bool UsesCurrentLogon => string.IsNullOrWhiteSpace(Username);
+    /// <summary>Windows account, as yourself was chosen: the user name and password are not asked for, or used.</summary>
+    internal bool IsWindowsCurrent => string.Equals((SignInMethod ?? "").Trim(), WindowsCurrent, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The Windows sign-in AnyFS runs as, not a user name and password: chosen outright, or no user name given.</summary>
+    internal bool UsesCurrentLogon => IsWindowsCurrent || string.IsNullOrWhiteSpace(Username);
+
+    /// <summary>The Windows account a Windows sign-in goes as, for messages.</summary>
+    internal string WindowsAccount => UsesCurrentLogon ? $@"{Environment.UserDomainName}\{Environment.UserName} (your Windows sign-in)" : Username!.Trim();
 
     internal bool TryGetContainerType(out Guid id) => Guid.TryParse(SiteUrl?.Trim(), out id);
 
@@ -196,7 +204,7 @@ public sealed class SharePointSettings
         var c when c.Equals(AppBrowser, StringComparison.OrdinalIgnoreCase) || c.Equals("Browser", StringComparison.OrdinalIgnoreCase) => SharePointSignIn.AppBrowser,
         var c when c.Equals(AppDeviceCode, StringComparison.OrdinalIgnoreCase) || c.Equals("Device code", StringComparison.OrdinalIgnoreCase) => SharePointSignIn.AppDeviceCode,
         var c when c.Equals(WebSession, StringComparison.OrdinalIgnoreCase) => SharePointSignIn.WebSession,
-        var c when c.Equals(Windows, StringComparison.OrdinalIgnoreCase) => SharePointSignIn.Windows,
+        var c when c.Equals(Windows, StringComparison.OrdinalIgnoreCase) || c.Equals(WindowsCurrent, StringComparison.OrdinalIgnoreCase) => SharePointSignIn.Windows,
         _ => null,
     };
 }
@@ -295,7 +303,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     internal static string? Mismatch(SharePointKind kind, SharePointSignIn signIn) => (kind, signIn) switch
     {
         (SharePointKind.Online, SharePointSignIn.Windows) => "SharePoint Online takes a Microsoft sign-in, not a Windows password: choose Automatic, an app sign-in or the web session.",
-        (SharePointKind.Server, not SharePointSignIn.Windows) => "SharePoint Server on your own network signs in with a Windows account: choose Automatic or Windows account. (An address under .sharepoint.com or .sharepoint.us is SharePoint Online.)",
+        (SharePointKind.Server, not SharePointSignIn.Windows) => "SharePoint Server on your own network signs in with a Windows account: choose Automatic, Windows account, as yourself (as you are signed in to Windows, a smartcard too), or Windows account (a user name and password). (An address under .sharepoint.com or .sharepoint.us is SharePoint Online.)",
         (SharePointKind.Embedded, SharePointSignIn.WebSession or SharePointSignIn.Windows) => "SharePoint Embedded's containers take an app sign-in: choose Automatic or one of the app sign-ins.",
         _ => null,
     };
@@ -315,8 +323,8 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
             // turns the US Government cloud's web session into an app sign-in), so they stay in sight
             nameof(SharePointSettings.Cloud) or nameof(SharePointSettings.Tenant) or nameof(SharePointSettings.ClientId)
                 => app || (s.IsAutomatic && s.Kind == SharePointKind.Online),
-            nameof(SharePointSettings.Username) or nameof(SharePointSettings.Password) or nameof(SharePointSettings.TrustAnyCertificate)
-                => signIn is SharePointSignIn.Windows,
+            nameof(SharePointSettings.Username) or nameof(SharePointSettings.Password) => signIn is SharePointSignIn.Windows && !s.IsWindowsCurrent,
+            nameof(SharePointSettings.TrustAnyCertificate) => signIn is SharePointSignIn.Windows,
             nameof(SharePointSettings.BrowserPath) => signIn is SharePointSignIn.WebSession,
             _ => true,
         };
@@ -337,7 +345,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
         if (!s.IsAutomatic && SharePointSettings.SignInFrom(s.SignInMethod) is null)
         {
-            yield return new ValidationMessage($"Sign in with one of: {SharePointSettings.Automatic}, {SharePointSettings.AppBrowser}, {SharePointSettings.AppDeviceCode}, {SharePointSettings.WebSession}, {SharePointSettings.Windows}.", nameof(SharePointSettings.SignInMethod));
+            yield return new ValidationMessage($"Sign in with one of: {SharePointSettings.Automatic}, {SharePointSettings.AppBrowser}, {SharePointSettings.AppDeviceCode}, {SharePointSettings.WebSession}, {SharePointSettings.WindowsCurrent}, {SharePointSettings.Windows}.", nameof(SharePointSettings.SignInMethod));
         }
 
         var signIn = s.EffectiveSignIn;
@@ -387,7 +395,15 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
         if (signIn == SharePointSignIn.Windows)
         {
-            if (s.UsesCurrentLogon)
+            if (s.IsWindowsCurrent)
+            {
+                // the user name and password are hidden and not used; one kept from an earlier choice is no error
+                if (!OperatingSystem.IsWindows())
+                {
+                    yield return new ValidationMessage("Signing in as yourself works on Windows only: choose Windows account and give a user name and password.", nameof(SharePointSettings.SignInMethod));
+                }
+            }
+            else if (s.UsesCurrentLogon)
             {
                 if (!string.IsNullOrEmpty(s.Password))
                 {
@@ -507,11 +523,19 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     private static async Task<TestResult> TestWindowsAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
     {
         SiteAddress.TryParse(s.SiteUrl, out var site, out _);
-        progress.Report($"Connecting to {site.Url}");
+        var who = s.WindowsAccount;
+        progress.Report($"Connecting to {site.Url} as {who}");
         using var rest = new SharePointRestClient(new Uri(site.Url), s.Credentials(), s.TrustAnyCertificate, NullLogger.Instance);
-        var store = await RestDocumentStore.ConnectAsync(rest, ct).ConfigureAwait(false);
-        progress.Report($"Connected to {store.Description}; listing the libraries");
-        return await LibrariesAsync(store.Description, s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
+        try
+        {
+            var store = await RestDocumentStore.ConnectAsync(rest, ct).ConfigureAwait(false);
+            progress.Report($"Connected to {store.Description}; listing the libraries");
+            return await LibrariesAsync($"Signed in as {who}. {store.Description}", s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.AccessDenied)
+        {
+            return new TestResult(false, $"{ex.Message.TrimEnd('.')}. AnyFS tried to sign in as {who}.");
+        }
     }
 
     private static async Task<TestResult> TestContainersAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
@@ -777,7 +801,7 @@ public sealed class SharePointSiteSource : SharePointSource
             throw new SourceFailedException("Give a user name and password: signing in as the current account works on Windows only.", permanent: true);
         }
 
-        Progress($"Connecting to {site.Url}");
+        Progress($"Connecting to {site.Url} as {_settings.WindowsAccount}");
         var rest = new SharePointRestClient(new Uri(site.Url), _settings.Credentials(), _settings.TrustAnyCertificate, Logger, MarkDegraded, MarkHealthy);
         try
         {
@@ -786,7 +810,8 @@ public sealed class SharePointSiteSource : SharePointSource
         catch (VfsException ex)
         {
             rest.Dispose();
-            throw new SourceFailedException($"{site.Url}: {ex.Message}", permanent: ex.Error is VfsError.AccessDenied or VfsError.NotFound, ex);
+            var who = ex.Error == VfsError.AccessDenied ? $" (AnyFS tried to sign in as {_settings.WindowsAccount})" : "";
+            throw new SourceFailedException($"{site.Url}: {ex.Message}{who}", permanent: ex.Error is VfsError.AccessDenied or VfsError.NotFound, ex);
         }
     }
 

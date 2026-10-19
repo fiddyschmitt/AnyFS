@@ -109,6 +109,29 @@ public class SharePointServerPluginTests
     }
 
     [TestMethod]
+    public void WindowsAccountAsYourselfAsksForNothing()
+    {
+        var plugin = new SharePointPlugin();
+        var settings = new SharePointSettings { SiteUrl = "http://anyfs-sp-1/sites/anyfs", SignInMethod = SharePointSettings.WindowsCurrent, Username = @"ANYFS\left-over", Password = "left-over" };
+        Assert.AreEqual(SharePointSignIn.Windows, settings.EffectiveSignIn);
+        Assert.IsTrue(settings.UsesCurrentLogon);
+        Assert.AreSame(CredentialCache.DefaultNetworkCredentials, settings.Credentials(), "the Windows sign-in AnyFS runs as, whatever is left in the boxes");
+        Assert.IsFalse(plugin.IsVisible(settings, nameof(SharePointSettings.Username)));
+        Assert.IsFalse(plugin.IsVisible(settings, nameof(SharePointSettings.Password)));
+        Assert.IsTrue(plugin.IsVisible(settings, nameof(SharePointSettings.TrustAnyCertificate)));
+        Assert.AreEqual(OperatingSystem.IsWindows() ? 0 : 1, plugin.Validate(settings).Count(), "the hidden user name and password are no error; elsewhere than Windows the choice is");
+        StringAssert.Contains(settings.WindowsAccount, Environment.UserName);
+
+        settings.SignInMethod = SharePointSettings.Windows;
+        Assert.IsFalse(settings.UsesCurrentLogon, "Windows account takes the user name and password");
+        Assert.IsTrue(plugin.IsVisible(settings, nameof(SharePointSettings.Username)));
+        Assert.AreEqual(@"ANYFS\left-over", settings.WindowsAccount);
+
+        settings.SignInMethod = SharePointSettings.WebSession;
+        StringAssert.Contains(plugin.Validate(settings).Single().Message, SharePointSettings.WindowsCurrent, "the refusal names the choice");
+    }
+
+    [TestMethod]
     public void ValidationCatchesTheUsualMistakes()
     {
         var plugin = new SharePointPlugin();
