@@ -6,24 +6,29 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
 
 ### Milestone 6: SharePoint
 
-- **SharePoint Online** (`sharepoint-online`, spec 7.3): a Microsoft 365 site's document libraries
-  through Microsoft Graph, after a browser or device-code sign-in with the shipped app registration
-  (MSAL, the cache in the source's secret store); ranged reads with spooling below a threshold,
-  write-on-close uploads (one PUT up to 4 MiB, upload sessions in 10 MiB pieces above), renames,
-  times, quota, SharePoint's name rules checked before any request, Graph's error codes mapped.
-- **SharePoint Server** (`sharepoint-server`, spec 7.4): an on-premises site through the REST API with
-  a Windows account (NTLM or Kerberos; a user name and password, or the current logon on Windows),
-  by name or by address; the same file-system half as Online over a REST store; chunked uploads
-  through `StartUpload`/`ContinueUpload`/`FinishUpload`; times through a client-object-model request
-  (`UpdateOverwriteVersion`), which SharePoint honours for site collection administrators.
-- **SharePoint Embedded** (`sharepoint-embedded`, spec 7.5): the containers of a container type,
-  each a drive, with the same source over the Graph store; a container by name or by id.
-- **The US Government cloud** (GCC High): the Online and Embedded sources sign in at
-  `login.microsoftonline.us` and call `graph.microsoft.us` for a site under `.sharepoint.us` or a
-  tenant under `.onmicrosoft.us`, and a Cloud setting overrides; there the organisation's own app
-  registration is required, since AnyFS's exists only in the global cloud. Sign-in refusals say which
-  setting to fix and stop the source instead of retrying. The SharePoint Server source refuses a
-  Microsoft 365 address and names the right type.
+- **SharePoint** (`sharepoint`, spec 7.3): one source for every kind of SharePoint, told apart by
+  the address. A site under `.sharepoint.com` or `.sharepoint.us` is SharePoint Online, a container
+  type's id is SharePoint Embedded's containers (each a drive, one pinned by name or by id), and any
+  other address is SharePoint Server on the person's own network, by name or by address. Every kind
+  shares one file-system half: ranged reads with spooling below a threshold, write-on-close uploads,
+  renames, times, quota, SharePoint's name rules checked before any request.
+- **Sign in with** (Automatic by default; a sign-in that cannot serve the address, such as a Windows
+  password for Microsoft 365, is caught in the settings): an *app sign-in*, browser or device code,
+  with the shipped app registration or the organisation's own (MSAL, the cache in the source's
+  secret store), then Microsoft Graph (one PUT up to 4 MiB, upload sessions in 10 MiB pieces above,
+  Graph's error codes mapped); a *web session*, for an organisation that allows no app
+  registration, where the person signs in in Edge or Chrome opened by AnyFS with a profile of its
+  own, the session's cookies go to SharePoint's REST API, and a headless browser renews them while
+  Microsoft's sign-in lasts; a *Windows account* (NTLM or Kerberos; a user name and password, or the
+  current logon on Windows) for SharePoint Server through the REST API. The REST store uploads in
+  chunks through `StartUpload`/`ContinueUpload`/`FinishUpload` and sets times through a
+  client-object-model request (`UpdateOverwriteVersion`), which SharePoint honours for site
+  collection administrators.
+- **The US Government cloud** (GCC High): app sign-ins go to `login.microsoftonline.us` and
+  `graph.microsoft.us` for a site under `.sharepoint.us` or a tenant under `.onmicrosoft.us`, and a
+  Cloud setting overrides; an app sign-in there needs the organisation's own registration, since
+  AnyFS's exists only in the global cloud, so Automatic takes the web session until its client ID is
+  given. Sign-in refusals say which setting to fix and stop the source instead of retrying.
 - **The lab farms** (`provisioning/sharepoint/`, `provisioning/windows/dc-*.ps1`, `sp-*.ps1`): a
   domain controller and two one-server farms on SQL Server 2022 Developer, SharePoint Server
   Subscription Edition on Windows Server 2022 (`anyfs-sp-1`) and SharePoint Server 2019 on Windows
@@ -34,7 +39,10 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
 - **E2E**: a collection pair per lab farm on every host (`sharepoint`, `sharepoint2019`, each with a
   `-ro` twin), the fixture seeded through the source; `ANYFS_E2E_COLLECTIONS` selects collections.
 - **SDK**: `ListingCache.Update` corrects one cached entry in place after a source's own write;
-  `SequentialReadAhead`, the per-handle read-ahead the WinFsp mount had, as a helper for mounts.
+  `SequentialReadAhead`, the per-handle read-ahead the WinFsp mount had, as a helper for mounts;
+  `ISettingVisibility`, for a plugin whose fields depend on what has been entered (the window's
+  form asks it after every change and hides what it rules out; Test now waits up to ten minutes,
+  for a sign-in in a browser window).
 - **SMB**: the VFS endpoint keeps read handles between `/read` requests (`ReadHandles`); the bundled
   server gets a minute to start, not 15 s (its first launch on a freshly booted Windows machine).
 - **FUSE**: per-handle read-ahead through `SequentialReadAhead` (the kernel's 128 KiB reads cost a

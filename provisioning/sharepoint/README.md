@@ -1,13 +1,14 @@
 # SharePoint test rigs
 
-What the SharePoint sources are developed and tested against, and how each piece was made. The
-flavours are SharePoint Online and SharePoint Embedded (both Microsoft 365, reached through Microsoft
-Graph) and SharePoint Server on-premises (reached through its REST API). Nothing here holds a password:
-sign-ins are done by a person at the keyboard, and the scripts print device codes for them.
+What the SharePoint source is developed and tested against, and how each piece was made. It serves
+SharePoint Online and SharePoint Embedded (both Microsoft 365, reached through Microsoft Graph after an
+app sign-in, or Online through its REST API on a web session) and SharePoint Server on-premises (reached
+through its REST API with a Windows account). Nothing here holds a password: sign-ins are done by a
+person at the keyboard, and the scripts print device codes for them.
 
 ## The shipped app registration
 
-AnyFS's SharePoint Online and Embedded sources sign users in through the Microsoft identity platform, as a *public
+AnyFS's app sign-in, for SharePoint Online and Embedded, goes through the Microsoft identity platform as a *public
 client*: no secret, the sign-in happens in the user's browser or by device code. The registration that
 identifies it lives in an Entra tenant owned by the project, which must outlive any test tenant: an
 app registration is tenant-bound, and the client id dies with its tenant.
@@ -35,11 +36,13 @@ costs nothing before the first release that ships the client id.
 Publisher verification is not done (it needs a Partner Center account), so other organisations see
 the app as unverified and an administrator there must consent once before their users can sign in.
 A user whose organisation forbids third-party apps can paste their own registration's client id into
-the source's settings instead.
+the source's settings instead, or, for SharePoint Online, sign in with the web session, which needs no
+registration at all.
 
 The registration exists only in Microsoft's global cloud: app registrations do not cross clouds. A
-tenant in the US Government cloud (GCC High, sites under `.sharepoint.us`) registers its own, and the
-SharePoint Online and Embedded sources refuse to start there without it. In that tenant's Entra admin
+tenant in the US Government cloud (GCC High, sites under `.sharepoint.us`) registers its own for an app
+sign-in, which refuses to start there without it; Automatic signs in to a SharePoint Online site there
+with the web session until a client id is given. In that tenant's Entra admin
 center: a new app registration; the Mobile and desktop applications platform with the redirect URI
 `http://localhost`; Allow public client flows on (for the device code); the delegated Microsoft Graph
 permissions `User.Read`, `Files.ReadWrite.All` and `Sites.ReadWrite.All` (`User.Read` and
@@ -62,7 +65,9 @@ Made 17-Oct-2026 through the Microsoft 365 Developer Program, which Visual Studi
 Enterprise subscribers qualify for (`my.visualstudio.com`, Benefits, "Developer subscription (E5)").
 
 The fixture tree the tests expect (`anyfs-fixture/` in a library or container) is made by the tests
-themselves through the source.
+themselves through the source. The web session's suite, the Server suite run over the session
+(`ANYFS_TEST_SPS_SIGNIN=web`, DEVELOPING.md), makes its own `anyfs-fixture-rest/` beside it: the two
+trees differ, and each suite knows its own by name.
 
 ### The SharePoint Embedded rig
 
@@ -77,7 +82,7 @@ Line Tools client; the device-code flow is blocked by the sandbox's Conditional 
 |---|---|
 | Owning app | `AnyFS lab (Embedded owner)`, client id `3f847419-dd1e-46fc-bbf7-17a09f1d91d8`: single tenant, a public client plus a two-day secret the script makes on each run (only a confidential client may create containers, and only the script does) |
 | Container type | `AnyFS lab`, id `eeed9b71-0a43-4258-a7be-21d3959d2c19`, trial: free, no Azure billing, 30 days (made 18-Oct-2026, expires 17-Nov-2026), five containers of 1 GB, this tenant only |
-| Registration | the owning app has `full` delegated and app-only access to the containers; AnyFS's shipped app (`824dc5b9-â€¦`) has `full` delegated access as a guest app, which is the arrangement AnyFS asks its users' administrators for |
+| Registration | the owning app has `full` delegated and app-only access to the containers; AnyFS's shipped app (`824dc5b9-…`) has `full` delegated access as a guest app, which is the arrangement AnyFS asks its users' administrators for |
 | Containers | `anyfs-test` (the tests pin it) and `anyfs-other`, created app-only and activated, with the administrator and the test account as owners (Graph lists only containers the signed-in user is a direct member of) |
 | Test account | `anyfs-tester@y0w7606wv.onmicrosoft.com`, a plain member the script makes and licenses (E5): Graph's container listing answers nothing for an account without a OneDrive, and the sandbox's administrator cannot have one, since a licence given to it is stripped again within minutes (seen three times on 18-Oct-2026). Its initial password is printed once by the script; the person sets a new one at the first sign-in (`tests/fixtures/SharePointSignIn --account anyfs-tester@…`). Nothing here holds it. |
 
@@ -126,7 +131,7 @@ What the farm looks like when it is up:
 
 Why a domain controller: SharePoint Server refuses local accounts for the farm, and the test machines
 that connect to it (Linux, macOS, Windows) are not domain members, so they authenticate with NTLM by
-address, which is what the SharePoint Server source does too.
+address, which is what the SharePoint source does with a Windows account too.
 
 The `vagrant` account on the domain controller is gone after promotion (Windows deletes every local
 account but Administrator), so that machine's `login_user` is `Administrator` with the lab's Windows
