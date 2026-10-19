@@ -106,10 +106,15 @@ public sealed class WinFspMountProvider : IMountProviderPlugin, IValidatable, II
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
         await process.WaitForExitAsync(ct).ConfigureAwait(false);
-        var installed = WinFspRuntime.IsInstalled();
-        return installed
-            ? new InstallResult(true, "WinFsp is installed. The mount can start now.")
-            : new InstallResult(false, $"winget exited with code {process.ExitCode} and WinFsp is still missing: {string.Join(" | ", tail)}");
+        if (!WinFspRuntime.IsInstalled())
+        {
+            return new InstallResult(false, $"winget exited with code {process.ExitCode} and WinFsp is still missing: {string.Join(" | ", tail)}");
+        }
+
+        // winget carries the stable WinFsp (2.1), older than the 2026 beta this build links
+        return WinFspRuntime.Problem() is { } problem
+            ? new InstallResult(false, $"{problem} winget installs the stable WinFsp only; install WinFsp {WinFspInstaller.Version} from https://github.com/winfsp/winfsp/releases.")
+            : new InstallResult(true, "WinFsp is installed. The mount can start now.");
 
         void Report(string? line)
         {
