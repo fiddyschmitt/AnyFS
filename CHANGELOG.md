@@ -42,7 +42,12 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   `SequentialReadAhead`, the per-handle read-ahead the WinFsp mount had, as a helper for mounts;
   `ISettingVisibility`, for a plugin whose fields depend on what has been entered (the window's
   form asks it after every change and hides what it rules out; Test now waits up to ten minutes,
-  for a sign-in in a browser window).
+  for a sign-in in a browser window); `SettingAttribute.Primary` and `ISourcePlugin.SuggestName`:
+  the Add source dialog asks the setting that says what the source is first, above the name, and
+  fills the name (and so the path) from it until the person types one (SharePoint's Site URL gives
+  "contoso Team" for `https://contoso.sharepoint.com/sites/Team`); editing a source whose name is
+  still the derived one keeps it in step, and on edit the path follows the name while it is the
+  default one for the name.
 - **SMB**: the VFS endpoint keeps read handles between `/read` requests (`ReadHandles`); the bundled
   server gets a minute to start, not 15 s (its first launch on a freshly booted Windows machine).
 - **FUSE**: per-handle read-ahead through `SequentialReadAhead` (the kernel's 128 KiB reads cost a
