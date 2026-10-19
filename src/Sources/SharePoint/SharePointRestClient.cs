@@ -314,6 +314,9 @@ internal sealed partial class SharePointRestClient : IDisposable
             : null;
     }
 
+    /// <summary>Whether SharePoint refused the account itself (signed in, but without access), not the sign-in: see <see cref="MapError"/>.</summary>
+    public static bool IsDenial(VfsException ex) => ex.Error == VfsError.AccessDenied && ex.InnerException is UnauthorizedAccessException;
+
     public static VfsException MapError(HttpStatusCode status, string body, string path, string? challenge = null)
     {
         var (code, message) = ErrorDetails(body);
@@ -329,6 +332,13 @@ internal sealed partial class SharePointRestClient : IDisposable
         {
             // a request this server does not understand (a parameter a newer SharePoint has): ours to fix, not a missing file
             return new VfsException(VfsError.IoError, $"SharePoint rejected the request for '{path}': {text}");
+        }
+
+        if (hresult == "-2147024891" || code.Contains("UnauthorizedAccessException", StringComparison.Ordinal))
+        {
+            // SharePoint's own refusal (E_ACCESSDENIED; a 401 for a Windows sign-in, which a refused sign-in gives with no
+            // body at all): it ran the request as the account, which may not do this
+            return new VfsException(VfsError.AccessDenied, $"access to '{path}' was denied{(text.Length > 0 ? ": " + text : "")}", new UnauthorizedAccessException(text));
         }
 
         if (hresult is "-2147024894" or "-2147024893" or "-2130575338" or "-2146232832" || code.Contains("FileNotFoundException", StringComparison.Ordinal) || code.Contains("DirectoryNotFoundException", StringComparison.Ordinal) || message.Contains("does not exist", StringComparison.OrdinalIgnoreCase) || message.Contains("not found", StringComparison.OrdinalIgnoreCase))

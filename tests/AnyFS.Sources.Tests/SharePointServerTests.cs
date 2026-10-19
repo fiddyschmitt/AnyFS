@@ -80,6 +80,29 @@ public class SharePointRestClientTests
     }
 
     [TestMethod]
+    public void ADenialIsNotARefusedSignIn()
+    {
+        // as the lab farm answers: an account signed in at a site it may not open (a 401 with SharePoint's own error,
+        // for a Windows sign-in), and a wrong password (a 401 with no body)
+        const string Body = """{"odata.error":{"code":"-2147024891, System.UnauthorizedAccessException","message":{"lang":"en-US","value":"Access denied. You do not have permission to perform this action or access this resource."}}}""";
+        var denied = SharePointRestClient.MapError(HttpStatusCode.Unauthorized, Body, "http://sp/", "NTLM");
+        Assert.AreEqual(VfsError.AccessDenied, denied.Error);
+        Assert.IsTrue(SharePointRestClient.IsDenial(denied));
+        Assert.AreEqual("access to 'http://sp/' was denied: Access denied. You do not have permission to perform this action or access this resource.", denied.Message);
+        Assert.IsTrue(SharePointRestClient.IsDenial(SharePointRestClient.MapError(HttpStatusCode.Forbidden, Body, "p")), "SharePoint Online says 403 for the same");
+
+        var refused = SharePointRestClient.MapError(HttpStatusCode.Unauthorized, "", "http://sp/", "NTLM");
+        Assert.AreEqual(VfsError.AccessDenied, refused.Error);
+        Assert.IsFalse(SharePointRestClient.IsDenial(refused));
+        StringAssert.Contains(refused.Message, "refused the sign-in (401; it asks for NTLM)");
+
+        var atRoot = SharePointPlugin.Denied(@"ANYFS\sp_user", denied, rootSite: true);
+        StringAssert.StartsWith(atRoot, @"Signed in as ANYFS\sp_user, but access to 'http://sp/' was denied: Access denied. You do not have permission to perform this action or access this resource. ");
+        StringAssert.Contains(atRoot, "give the address of a site this account may open instead");
+        Assert.AreEqual(@"Signed in as ANYFS\sp_user, but access to 'http://sp/' was denied: Access denied. You do not have permission to perform this action or access this resource.", SharePointPlugin.Denied(@"ANYFS\sp_user", denied, rootSite: false));
+    }
+
+    [TestMethod]
     public void ParsesFilesAndFolders()
     {
         using var file = JsonDocument.Parse("""{"Name":"report.docx","ServerRelativeUrl":"/sites/anyfs/Shared Documents/report.docx","Length":"1234","TimeCreated":"2026-01-02T03:04:05Z","TimeLastModified":"2026-02-03T04:05:06Z","UniqueId":"7f1d0b3e-1111-2222-3333-444444444444","ETag":"\"{7F1D0B3E-1111-2222-3333-444444444444},3\""}""");
@@ -468,8 +491,46 @@ public class SharePointServerLiveTests
         settings.SiteUrl = SpsTestServer.RootOf(settings.SiteUrl);
         await using var root = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
         using var context = new TestSourceContext("sharepoint");
-        await root.InitialiseAsync(context, None);
+        try
+        {
+            await root.InitialiseAsync(context, None);
+        }
+        catch (SourceFailedException ex) when (ex.InnerException is VfsException inner && SharePointRestClient.IsDenial(inner))
+        {
+            // the lab farms: the test account may open its test site but not the farm's root site (ARootSiteTheAccountMayNotOpenSaysSo)
+            Assert.Inconclusive($"the test account may not open {settings.SiteUrl}: {ex.Message}");
+        }
+
         await SpsTestServer.CheckOtherSitesAsync(root, SpsTestServer.Site!, SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
+    }
+
+    [TestMethod]
+    public async Task ARootSiteTheAccountMayNotOpenSaysSo()
+    {
+        SpsTestServer.Require();
+        if (SpsTestServer.WebSession)
+        {
+            Assert.Inconclusive("the Windows sign-in's answer; a Microsoft 365 root site is open to its members");
+        }
+
+        // the lab farms' root site belongs to the setup account; the test account may open only its test site
+        var settings = SpsTestServer.Settings();
+        settings.SiteUrl = SpsTestServer.RootOf(settings.SiteUrl);
+        var result = await new SharePointPlugin().TestAsync(settings, new Progress<string>(), None);
+        if (result.Success)
+        {
+            Assert.Inconclusive($"{SpsTestServer.User} may open {settings.SiteUrl} here: {result.Message}");
+        }
+
+        StringAssert.StartsWith(result.Message, $"Signed in as {SpsTestServer.User}, but access to '{settings.SiteUrl}/' was denied: ");
+        StringAssert.Contains(result.Message, "give the address of a site this account may open instead");
+        Assert.IsFalse(result.Message.Contains("refused the sign-in", StringComparison.Ordinal), result.Message);
+
+        await using var root = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
+        using var context = new TestSourceContext("sharepoint");
+        var failed = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => root.InitialiseAsync(context, None));
+        Assert.AreEqual(result.Message, failed.Message, "the source says what Test said");
+        Assert.IsTrue(failed.Permanent, "no point retrying until someone changes the site's permissions or the address");
     }
 
     [TestMethod]

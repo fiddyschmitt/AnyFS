@@ -299,6 +299,15 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     /// <summary>The web session's message when there is no browser to sign in with at all.</summary>
     internal const string NoBrowser = "No Edge, Chrome, Chromium or Firefox was found for the web session's sign-in. Install one, or set the Browser path under Advanced.";
 
+    /// <summary>
+    /// The answer when SharePoint takes the Windows sign-in but refuses the account the site (its "Access denied", not a
+    /// refused sign-in): who AnyFS went as, what SharePoint said, and at the server's root what that costs.
+    /// </summary>
+    internal static string Denied(string who, VfsException ex, bool rootSite)
+        => $"Signed in as {who}, but {ex.Message.TrimEnd('.')}." + (rootSite
+            ? " Everything AnyFS shows at the server's root (the root site's libraries, its Subsites, the other sites in Sites) is listed through the root site, so give the address of a site this account may open instead."
+            : "");
+
     /// <summary>Why a sign-in cannot serve the kind of address, or null when it can.</summary>
     internal static string? Mismatch(SharePointKind kind, SharePointSignIn signIn) => (kind, signIn) switch
     {
@@ -531,6 +540,10 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
             var store = await RestDocumentStore.ConnectAsync(rest, ct).ConfigureAwait(false);
             progress.Report($"Connected to {store.Description}; listing the libraries");
             return await LibrariesAsync($"Signed in as {who}. {store.Description}", s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
+        }
+        catch (VfsException ex) when (SharePointRestClient.IsDenial(ex))
+        {
+            return new TestResult(false, Denied(who, ex, s.IsRootSite));
         }
         catch (VfsException ex) when (ex.Error == VfsError.AccessDenied)
         {
@@ -810,6 +823,11 @@ public sealed class SharePointSiteSource : SharePointSource
         catch (VfsException ex)
         {
             rest.Dispose();
+            if (SharePointRestClient.IsDenial(ex))
+            {
+                throw new SourceFailedException(SharePointPlugin.Denied(_settings.WindowsAccount, ex, _settings.IsRootSite), permanent: true, ex);
+            }
+
             var who = ex.Error == VfsError.AccessDenied ? $" (AnyFS tried to sign in as {_settings.WindowsAccount})" : "";
             throw new SourceFailedException($"{site.Url}: {ex.Message}{who}", permanent: ex.Error is VfsError.AccessDenied or VfsError.NotFound, ex);
         }
