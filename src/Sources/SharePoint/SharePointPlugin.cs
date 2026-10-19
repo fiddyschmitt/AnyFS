@@ -287,6 +287,9 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         return Path.Combine(root, host);
     }
 
+    /// <summary>The web session's message when there is no browser to sign in with at all.</summary>
+    internal const string NoBrowser = "No Edge, Chrome, Chromium or Firefox was found for the web session's sign-in. Install one, or set the Browser path under Advanced.";
+
     /// <summary>Why a sign-in cannot serve the kind of address, or null when it can.</summary>
     internal static string? Mismatch(SharePointKind kind, SharePointSignIn signIn) => (kind, signIn) switch
     {
@@ -487,13 +490,13 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     private static async Task<TestResult> TestWebSessionAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
     {
         SiteAddress.TryParse(s.SiteUrl, out var site, out _);
-        if (BrowserLocator.Find(s.Browser) is not { } browserPath)
+        var siteUri = new Uri(site.Url);
+        var session = new BrowserSession(BrowserLocator.Find(s.Browser), ProfileDir(site.Host), NullLogger.Instance);
+        if (!session.CanSignIn)
         {
-            return new TestResult(false, "No Edge, Chrome or Chromium was found for the web session. Install one, or set the Browser path under Advanced.");
+            return new TestResult(false, NoBrowser);
         }
 
-        var siteUri = new Uri(site.Url);
-        var session = new BrowserSession(browserPath, ProfileDir(site.Host), NullLogger.Instance);
         var cookies = await session.SignInAsync(siteUri, interactive: true, progress.Report, ct).ConfigureAwait(false);
         using var handler = new BrowserSessionHandler(cookies, siteUri, c => session.SignInAsync(siteUri, interactive: false, progress.Report, c), NullLogger.Instance);
         using var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, NullLogger.Instance, handler: handler);
@@ -757,13 +760,13 @@ public sealed class SharePointSiteSource : SharePointSource
     private async Task<IDocumentStore> ConnectWebSessionAsync(CancellationToken ct)
     {
         SiteAddress.TryParse(_settings.SiteUrl, out var site, out _);
-        if (BrowserLocator.Find(_settings.Browser) is not { } browserPath)
+        var siteUri = new Uri(site.Url);
+        var session = new BrowserSession(BrowserLocator.Find(_settings.Browser), SharePointPlugin.ProfileDir(site.Host), Logger);
+        if (!session.CanSignIn)
         {
-            throw new SourceFailedException("No Edge, Chrome or Chromium was found for the web session's sign-in. Install one, or set the Browser path under Advanced.", permanent: true);
+            throw new SourceFailedException(SharePointPlugin.NoBrowser, permanent: true);
         }
 
-        var siteUri = new Uri(site.Url);
-        var session = new BrowserSession(browserPath, SharePointPlugin.ProfileDir(site.Host), Logger);
         Progress($"Signing in to {site.Host}");
         IReadOnlyList<SessionCookie> cookies;
         try

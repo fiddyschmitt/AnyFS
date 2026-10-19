@@ -20,7 +20,9 @@ internal sealed record SessionCookie(string Name, string Value, string Domain, s
 /// over the browser's DevTools protocol and replayed on plain requests to SharePoint's REST API, the way the
 /// site's own pages call it. The browser is open only long enough to read the cookies, never while files are
 /// served. The profile keeps the Microsoft sign-in session, so a later headless launch renews the site cookies
-/// with nobody at the keyboard until that session itself lapses; only then is a window shown again.
+/// with nobody at the keyboard until that session itself lapses; only then is a window shown again. Where AnyFS cannot
+/// reach the DevTools port itself (a policy, or a browser that never opens it), the sign-in goes through Selenium
+/// WebDriver instead (<see cref="WebDriverSession"/>), for good.
 /// </summary>
 internal sealed class BrowserSession
 {
@@ -28,26 +30,54 @@ internal sealed class BrowserSession
     private static readonly TimeSpan InteractiveDeadline = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan PortDeadline = TimeSpan.FromSeconds(30);
 
-    /// <summary>
-    /// One browser at a time on a profile. A second launch on a profile that is already open is handed to the browser
-    /// holding it and exits at once, so two sources for one site starting together, or a renewal during a sign-in,
-    /// would lose track of each other's browser.
-    /// </summary>
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ProfileGates = new(StringComparer.OrdinalIgnoreCase);
-
-    private readonly string _browserPath;
+    private readonly string? _browserPath;
     private readonly string _profileDir;
     private readonly ILogger _logger;
+    private readonly IReadOnlyList<WebDriverBrowser> _webDriverBrowsers;
+    private WebDriverSession? _webDriver;
 
-    public BrowserSession(string browserPath, string profileDir, ILogger logger)
+    /// <param name="browserPath">The Chromium browser to drive over DevTools, or null when there is none (WebDriver only, through Firefox).</param>
+    /// <param name="profileDir">AnyFS's profile for the site host; the WebDriver fallback keeps its own beside it.</param>
+    public BrowserSession(string? browserPath, string profileDir, ILogger logger)
     {
         _browserPath = browserPath;
         _profileDir = profileDir;
         _logger = logger;
+        _webDriverBrowsers = WebDriverSession.Browsers(Environment.GetEnvironmentVariable("ANYFS_SHAREPOINT_WEBDRIVER"));
     }
 
     /// <summary>The browser AnyFS will drive, for messages ("Microsoft Edge").</summary>
-    public string BrowserName => BrowserLocator.DisplayName(_browserPath);
+    public string BrowserName => _webDriver?.BrowserName ?? (_browserPath is null ? "a browser" : BrowserLocator.DisplayName(_browserPath));
+
+    /// <summary>Whether there is any browser to sign in with, over DevTools or WebDriver.</summary>
+    public bool CanSignIn => _browserPath is not null || _webDriverBrowsers.Count > 0;
+
+    /// <summary>
+    /// Why AnyFS should sign in through WebDriver from the start, or null: <c>ANYFS_SHAREPOINT_WEBDRIVER</c> says so (tests,
+    /// troubleshooting), there is no Chromium browser, or its policy blocks AnyFS's own DevTools launch.
+    /// </summary>
+    private string? WebDriverFromTheStart()
+    {
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ANYFS_SHAREPOINT_WEBDRIVER")))
+        {
+            return "ANYFS_SHAREPOINT_WEBDRIVER is set";
+        }
+
+        return _browserPath is null ? "no Edge, Chrome or Chromium is installed" : BrowserLocator.DevToolsBlocked(_browserPath);
+    }
+
+    /// <summary>Signs in through WebDriver from now on, renewals included, since AnyFS cannot drive the browser's DevTools port itself.</summary>
+    private Task<IReadOnlyList<SessionCookie>> FallBackAsync(string why, Uri site, bool interactive, Action<string> progress, CancellationToken ct)
+    {
+        if (_webDriverBrowsers.Count == 0)
+        {
+            throw new SignInRequiredException($"The web session cannot read the sign-in from {BrowserName} ({why}), and there is no other browser for its WebDriver fallback; install Firefox, or use an app sign-in (Sign in with).", permanent: true);
+        }
+
+        _logger.LogInformation("sharepoint: signing in to {Host} through WebDriver ({Browsers}), since {Why}", site.Host, string.Join(", ", _webDriverBrowsers.Select(b => b.Name)), why);
+        _webDriver ??= new WebDriverSession(_webDriverBrowsers, _profileDir, _logger);
+        return _webDriver.SignInAsync(site, interactive, progress, ct);
+    }
 
     /// <summary>Where a browser on the profile writes its DevTools port once it listens (<c>--remote-debugging-port=0</c>).</summary>
     private string PortFile => Path.Combine(_profileDir, "DevToolsActivePort");
@@ -61,44 +91,65 @@ internal sealed class BrowserSession
     /// </summary>
     public async Task<IReadOnlyList<SessionCookie>> SignInAsync(Uri site, bool interactive, Action<string> progress, CancellationToken ct)
     {
-        if (BrowserLocator.RemoteDebuggingOff(_browserPath) is { } policy)
+        if (_webDriver is not null)
         {
-            throw new SignInRequiredException($"{BrowserName} has remote debugging turned off by your organisation's policy ({policy}), and the web session reads the sign-in through it. Use an app sign-in instead (Sign in with), with your organisation's own app registration where AnyFS's cannot be used.", permanent: true);
+            return await _webDriver.SignInAsync(site, interactive, progress, ct).ConfigureAwait(false);
         }
 
-        var gate = ProfileGates.GetOrAdd(Path.GetFullPath(_profileDir), _ => new SemaphoreSlim(1, 1));
+        if (WebDriverFromTheStart() is { } why)
+        {
+            return await FallBackAsync(why, site, interactive, progress, ct).ConfigureAwait(false);
+        }
+
+        Capture silent;
+        var gate = ProfileLocks.For(_profileDir);
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var silent = await CaptureAsync(site, headless: true, SilentDeadline, ct).ConfigureAwait(false);
+            silent = await CaptureAsync(site, headless: true, SilentDeadline, ct).ConfigureAwait(false);
             if (silent.Cookies is { } cookies)
             {
                 return cookies;
             }
 
-            if (silent.Final)
+            if (silent.Final && !silent.DevToolsUnreachable)
             {
                 throw new SignInRequiredException(silent.Failure!, permanent: true);
             }
 
-            if (!interactive)
+            if (!silent.DevToolsUnreachable)
             {
-                throw new SignInRequiredException($"the browser sign-in for {site.Host} has lapsed; sign in again (open the source, or its Retry)", permanent: false);
+                return await SignInWithAWindowAsync(site, interactive, progress, silent, ct).ConfigureAwait(false);
             }
-
-            _logger.LogInformation("sharepoint: no sign-in to read for {Host} without a window ({Why}); opening {Browser} for the person to sign in", site.Host, silent.Failure, BrowserName);
-            progress($"Sign in to {site.Host} in the {BrowserName} window that opened");
-            var shown = await CaptureAsync(site, headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
-            return shown.Cookies ?? throw new SignInRequiredException(shown.Failure!, permanent: true);
         }
         finally
         {
             gate.Release();
         }
+
+        // the browser would not let AnyFS at its DevTools port: WebDriver instead, outside the gate (it keeps its own profile)
+        return await FallBackAsync(silent.Failure!, site, interactive, progress, ct).ConfigureAwait(false);
     }
 
-    /// <summary>What one launch of the browser came to: the site's cookies, or why not, and whether trying again can help.</summary>
-    private sealed record Capture(IReadOnlyList<SessionCookie>? Cookies, string? Failure = null, bool Final = false);
+    /// <summary>After a headless launch found no saved sign-in: a window for the person, where one may be shown.</summary>
+    private async Task<IReadOnlyList<SessionCookie>> SignInWithAWindowAsync(Uri site, bool interactive, Action<string> progress, Capture silent, CancellationToken ct)
+    {
+        if (!interactive)
+        {
+            throw new SignInRequiredException($"the browser sign-in for {site.Host} has lapsed; sign in again (open the source, or its Retry)", permanent: false);
+        }
+
+        _logger.LogInformation("sharepoint: no sign-in to read for {Host} without a window ({Why}); opening {Browser} for the person to sign in", site.Host, silent.Failure, BrowserName);
+        progress($"Sign in to {site.Host} in the {BrowserName} window that opened");
+        var shown = await CaptureAsync(site, headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
+        return shown.Cookies ?? throw new SignInRequiredException(shown.Failure!, permanent: true);
+    }
+
+    /// <summary>
+    /// What one launch of the browser came to: the site's cookies, or why not; whether trying again can help; whether the
+    /// browser kept AnyFS from its DevTools port, which WebDriver may still get past.
+    /// </summary>
+    private sealed record Capture(IReadOnlyList<SessionCookie>? Cookies, string? Failure = null, bool Final = false, bool DevToolsUnreachable = false);
 
     /// <summary>
     /// Opens <paramref name="site"/> in the browser and waits for its FedAuth cookie with a page on the site, meaning the
@@ -116,7 +167,7 @@ internal sealed class BrowserSession
             var endpoint = await DevToolsEndpointAsync(browser, ct).ConfigureAwait(false);
             if (endpoint is null)
             {
-                return new Capture(null, NoDevTools(browser.HasExited), Final: true);
+                return new Capture(null, NoDevTools(browser.HasExited), Final: true, DevToolsUnreachable: true);
             }
 
             cdp = await Cdp.ConnectAsync(endpoint, ct).ConfigureAwait(false);
@@ -182,8 +233,8 @@ internal sealed class BrowserSession
     private string WindowClosed(Uri site) => $"the {BrowserName} window was closed before the sign-in to {site.Host} finished; Retry to sign in";
 
     private string NoDevTools(bool handedOver) => handedOver
-        ? $"{BrowserName} handed the sign-in to another {BrowserName} that is open on AnyFS's profile for this site and cannot be reached; close that window and Retry"
-        : $"{BrowserName} opened but never opened its DevTools port, which the web session reads the sign-in through. On a managed machine that is usually your organisation's RemoteDebuggingAllowed policy (edge://policy lists the policies in force); there the web session cannot work, and an app sign-in (Sign in with) can.";
+        ? $"{BrowserName} handed the launch to another {BrowserName} that holds the profile and cannot be reached (a window left open, or a profile folder fixed by policy)"
+        : $"{BrowserName} started without opening its DevTools port (your organisation's RemoteDebuggingAllowed policy does this; edge://policy lists the policies in force)";
 
     /// <summary>A Microsoft Defender for Cloud Apps session proxy serves the site under its own suffix (contoso.sharepoint.com.mcas.ms).</summary>
     private static bool IsSessionProxy(Uri page, Uri site)
@@ -243,7 +294,7 @@ internal sealed class BrowserSession
 
     private Process LaunchBrowser(Uri site, bool headless)
     {
-        var info = new ProcessStartInfo(_browserPath) { UseShellExecute = false };
+        var info = new ProcessStartInfo(_browserPath ?? throw new InvalidOperationException("no Chromium browser to launch")) { UseShellExecute = false };
         foreach (var arg in new[] { $"--user-data-dir={_profileDir}", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--new-window" })
         {
             info.ArgumentList.Add(arg);
@@ -376,6 +427,18 @@ internal sealed class BrowserSession
         {
         }
     }
+}
+
+/// <summary>
+/// One browser at a time on a profile. A second launch on a profile that is already open is handed to the browser holding
+/// it and exits at once, so two sources for one site starting together, or a renewal during a sign-in, would lose track
+/// of each other's browser.
+/// </summary>
+internal static class ProfileLocks
+{
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.OrdinalIgnoreCase);
+
+    public static SemaphoreSlim For(string profileDir) => Gates.GetOrAdd(Path.GetFullPath(profileDir), _ => new SemaphoreSlim(1, 1));
 }
 
 /// <summary>Just enough of the Chrome DevTools protocol: commands over one WebSocket, answers matched by id; events ignored (the caller polls).</summary>
