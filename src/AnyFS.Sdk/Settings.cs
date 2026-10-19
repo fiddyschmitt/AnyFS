@@ -63,6 +63,19 @@ public interface ISettingTextProvider
     string? PlaceholderFor(string propertyName);
 }
 
+/// <summary>
+/// A plugin whose form shows only the fields that apply to what has been entered so far: one source that serves
+/// several kinds of upstream, told apart by an address, each with its own way of signing in. The host asks for
+/// every property each time a field changes; false hides the field. A hidden field keeps its value in the JSON,
+/// so a plugin's Validate should ignore the fields it hides.
+/// </summary>
+public interface ISettingVisibility
+{
+    /// <param name="settings">The settings POCO with the form's values already written into it.</param>
+    /// <param name="propertyName">The property whose field is in question.</param>
+    bool IsVisible(object settings, string propertyName);
+}
+
 public sealed record ValidationMessage(string Message, string? Property = null, bool IsError = true);
 
 /// <summary>A plugin that checks its settings before they're saved.</summary>

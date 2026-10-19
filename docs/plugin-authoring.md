@@ -121,6 +121,13 @@ POCO. Implement `IValidatable` to check settings before they're saved and `ITest
 Test button. When a hint or placeholder depends on the machine (an example path for this OS),
 implement `ISettingTextProvider` on the plugin: `HintFor(propertyName)` and
 `PlaceholderFor(propertyName)` are asked for each property and null keeps the attribute's text.
+When which fields apply depends on what has been entered (one plugin for several kinds of upstream,
+each with its own sign-in, like SharePoint's), implement `ISettingVisibility`: after every change
+the form writes its values into a settings object and asks `IsVisible(settings, propertyName)` for
+each property, hiding those you answer false for, and a group whose fields are all hidden. A hidden
+field keeps its value in the JSON, and a parse error in it doesn't hold up the save, so your
+`Validate` should ignore what it hides; a message it still returns for a hidden field is shown at
+the top of the form.
 
 ## Prompts
 

@@ -319,7 +319,7 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
     }
 
     private SettingsFormViewModel BuildForm(ISourcePlugin plugin, object settings)
-        => new(plugin.SettingsType, settings, plugin as IValidatable, plugin as ITestable, plugin as ISettingTextProvider, _dialogs);
+        => new(plugin.SettingsType, settings, plugin as IValidatable, plugin as ITestable, plugin as ISettingTextProvider, _dialogs, plugin as ISettingVisibility);
 }
 
 /// <summary>"Existing source ▸": only the path and read-only are asked (spec 11.1).</summary>
@@ -621,7 +621,7 @@ public sealed partial class MountDialogViewModel : DialogViewModelBase
     }
 
     private SettingsFormViewModel BuildForm(IMountProviderPlugin provider, object settings)
-        => new(provider.SettingsType, settings, provider as IValidatable, provider as ITestable, provider as ISettingTextProvider, _dialogs);
+        => new(provider.SettingsType, settings, provider as IValidatable, provider as ITestable, provider as ISettingTextProvider, _dialogs, provider as ISettingVisibility);
 }
 
 /// <summary>A plugin's question to the user (spec 6.4, 11.4).</summary>

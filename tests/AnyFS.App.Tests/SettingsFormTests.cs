@@ -219,4 +219,99 @@ public class SettingsFormTests
         var without = new SettingsFormViewModel(plugin.SettingsType, plugin.CreateDefaultSettings(), plugin, null, null, new FakeDialogs());
         Assert.AreEqual("", without.Fields.Single(f => f.PropertyName == nameof(MirrorSettings.Paths)).Placeholder, "without the provider the attribute's (empty) placeholder stands");
     }
+
+    /// <summary>A plugin whose fields depend on a choice: a folder when local, a server and port when remote.</summary>
+    private sealed class ModeSettings : IValidatable, ISettingVisibility
+    {
+        [Setting("Mode", Order = 0, Kind = SettingKind.Choice, Choices = ["Local", "Remote"])]
+        public string Mode { get; set; } = "Local";
+
+        [Setting("Folder", Order = 1, Group = "Local")]
+        public string? Folder { get; set; }
+
+        [Setting("Server", Order = 2, Group = "Remote")]
+        public string? Server { get; set; }
+
+        [Setting("Port", Order = 3, Group = "Remote")]
+        public int Port { get; set; } = 21;
+
+        public bool IsVisible(object settings, string propertyName)
+        {
+            var remote = ((ModeSettings)settings).Mode == "Remote";
+            return propertyName switch
+            {
+                nameof(Folder) => !remote,
+                nameof(Server) or nameof(Port) => remote,
+                _ => true,
+            };
+        }
+
+        public IEnumerable<ValidationMessage> Validate(object settings)
+        {
+            var s = (ModeSettings)settings;
+            if (s.Mode == "Remote" && string.IsNullOrEmpty(s.Server))
+            {
+                yield return new ValidationMessage("A server is needed.", nameof(Server));
+            }
+
+            if (s.Folder == "bad")
+            {
+                yield return new ValidationMessage("That folder is bad.", nameof(Folder));
+            }
+        }
+    }
+
+    private static SettingsFormViewModel ModeForm(ModeSettings settings)
+        => new(typeof(ModeSettings), settings, settings, null, null, new FakeDialogs(), settings);
+
+    [TestMethod]
+    public void FieldsFollowWhatHasBeenEntered()
+    {
+        var form = ModeForm(new ModeSettings());
+        SettingFieldViewModel Field(string name) => form.Fields.Single(f => f.PropertyName == name);
+        SettingGroupViewModel Group(string name) => form.Groups.Single(g => g.Name == name);
+
+        Assert.IsTrue(Field(nameof(ModeSettings.Folder)).IsVisible);
+        Assert.IsFalse(Field(nameof(ModeSettings.Server)).IsVisible);
+        Assert.IsFalse(Field(nameof(ModeSettings.Port)).IsVisible);
+        Assert.IsTrue(Group("Local").IsVisible);
+        Assert.IsFalse(Group("Remote").IsVisible, "a group with every field hidden hides its heading too");
+
+        Field(nameof(ModeSettings.Mode)).SelectedChoice = "Remote";
+        Assert.IsFalse(Field(nameof(ModeSettings.Folder)).IsVisible);
+        Assert.IsTrue(Field(nameof(ModeSettings.Server)).IsVisible);
+        Assert.IsTrue(Field(nameof(ModeSettings.Port)).IsVisible);
+        Assert.IsFalse(Group("Local").IsVisible);
+        Assert.IsTrue(Group("Remote").IsVisible);
+
+        var plain = new SettingsFormViewModel(typeof(ModeSettings), new ModeSettings(), null, null, null, new FakeDialogs());
+        Assert.IsTrue(plain.Fields.All(f => f.IsVisible), "without the provider every field shows, as before");
+    }
+
+    [TestMethod]
+    public void AHiddenFieldNeverHoldsUpTheSave()
+    {
+        var settings = new ModeSettings();
+        var form = ModeForm(settings);
+        SettingFieldViewModel Field(string name) => form.Fields.Single(f => f.PropertyName == name);
+
+        Field(nameof(ModeSettings.Port)).Text = "not a number";
+        Assert.IsTrue(form.Validate(), "the port is hidden while local, so what is left in its box does not count");
+
+        Field(nameof(ModeSettings.Mode)).SelectedChoice = "Remote";
+        Assert.IsFalse(form.Validate());
+        Assert.AreEqual("Enter a whole number.", Field(nameof(ModeSettings.Port)).Error, "shown, it counts");
+
+        // the plugin's own rules run once every shown field parses
+        Field(nameof(ModeSettings.Port)).Text = "2121";
+        Assert.IsFalse(form.Validate());
+        Assert.AreEqual("A server is needed.", Field(nameof(ModeSettings.Server)).Error);
+
+        Field(nameof(ModeSettings.Server)).Text = "files";
+        settings.Folder = "bad";
+        Field(nameof(ModeSettings.Folder)).Text = "bad";
+        Assert.IsFalse(form.Validate());
+        Assert.IsNull(Field(nameof(ModeSettings.Folder)).Error, "the folder is hidden, so its message cannot sit there unseen");
+        Assert.AreEqual("That folder is bad.", form.FormError);
+    }
 }

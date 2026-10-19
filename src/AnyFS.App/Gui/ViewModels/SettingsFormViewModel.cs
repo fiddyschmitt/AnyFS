@@ -18,8 +18,15 @@ namespace AnyFS.App.Gui.ViewModels;
 /// </summary>
 public sealed partial class SettingsFormViewModel : ObservableObject
 {
+    /// <summary>
+    /// How long the Test button waits: long enough for a person to finish an interactive sign-in (a browser window,
+    /// multi-factor), which several source types do as their test.
+    /// </summary>
+    private static readonly TimeSpan TestTimeout = TimeSpan.FromMinutes(10);
+
     private readonly IValidatable? _validator;
     private readonly ITestable? _tester;
+    private readonly ISettingVisibility? _visibility;
 
     public SettingsFormViewModel(
         [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)] Type settingsType,
@@ -27,11 +34,13 @@ public sealed partial class SettingsFormViewModel : ObservableObject
         IValidatable? validator,
         ITestable? tester,
         ISettingTextProvider? texts,
-        IDialogs dialogs)
+        IDialogs dialogs,
+        ISettingVisibility? visibility = null)
     {
         Settings = settings;
         _validator = validator;
         _tester = tester;
+        _visibility = visibility;
         Fields = PluginSettingsBinder.Describe(settingsType).Where(p => p.IsForThisPlatform).Select(p => new SettingFieldViewModel(p, texts, dialogs)).ToList();
         foreach (var field in Fields)
         {
@@ -52,6 +61,40 @@ public sealed partial class SettingsFormViewModel : ObservableObject
 
         Groups = new ObservableCollection<SettingGroupViewModel>(groups);
         TestCommand = new AsyncRelayCommand(TestAsync, () => HasTest && !TestRunning);
+        if (_visibility is not null)
+        {
+            foreach (var field in Fields)
+            {
+                field.PropertyChanged += (_, e) =>
+                {
+                    if (e.PropertyName is nameof(SettingFieldViewModel.Text) or nameof(SettingFieldViewModel.Checked) or nameof(SettingFieldViewModel.SelectedChoice))
+                    {
+                        RefreshVisibility();
+                    }
+                };
+            }
+
+            RefreshVisibility();
+        }
+    }
+
+    /// <summary>Writes what is on screen into the POCO and asks the plugin which fields apply to it; a group with none left hides.</summary>
+    private void RefreshVisibility()
+    {
+        foreach (var field in Fields)
+        {
+            field.Preview(Settings);
+        }
+
+        foreach (var field in Fields)
+        {
+            field.IsVisible = _visibility!.IsVisible(Settings, field.PropertyName);
+        }
+
+        foreach (var group in Groups)
+        {
+            group.Refresh();
+        }
     }
 
     public object Settings { get; }
@@ -85,7 +128,9 @@ public sealed partial class SettingsFormViewModel : ObservableObject
         FormError = null;
         foreach (var field in Fields)
         {
-            field.Error = field.Apply(Settings);
+            // a field the plugin hides does not apply, so what is left in its box cannot hold up the save
+            var error = field.Apply(Settings);
+            field.Error = field.IsVisible ? error : null;
             field.Warning = null;
             ok &= field.Error is null;
         }
@@ -109,12 +154,13 @@ public sealed partial class SettingsFormViewModel : ObservableObject
             }
 
             ok = false;
-            if (field is not null)
+            if (field is { IsVisible: true })
             {
                 field.Error = field.Error is null ? message.Message : field.Error + "\n" + message.Message;
             }
             else
             {
+                // no field, or one the plugin hides: the message still has to be seen
                 FormError = FormError is null ? message.Message : FormError + "\n" + message.Message;
             }
         }
@@ -135,7 +181,7 @@ public sealed partial class SettingsFormViewModel : ObservableObject
         try
         {
             var progress = new Progress<string>(message => TestMessage = message);
-            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            using var cts = new CancellationTokenSource(TestTimeout);
             var result = await _tester.TestAsync(Settings, progress, cts.Token);
             TestSucceeded = result.Success;
             TestMessage = result.Message;
@@ -155,7 +201,7 @@ public sealed partial class SettingsFormViewModel : ObservableObject
     }
 }
 
-public sealed class SettingGroupViewModel(string name, bool isAdvanced, IReadOnlyList<SettingFieldViewModel> fields)
+public sealed partial class SettingGroupViewModel(string name, bool isAdvanced, IReadOnlyList<SettingFieldViewModel> fields) : ObservableObject
 {
     public string Name { get; } = name;
 
@@ -164,6 +210,12 @@ public sealed class SettingGroupViewModel(string name, bool isAdvanced, IReadOnl
     public bool IsAdvanced { get; } = isAdvanced;
 
     public IReadOnlyList<SettingFieldViewModel> Fields { get; } = fields;
+
+    /// <summary>False when the plugin hides every field in the group, so its heading (or the Advanced expander) goes too.</summary>
+    [ObservableProperty]
+    public partial bool IsVisible { get; set; } = true;
+
+    public void Refresh() => IsVisible = Fields.Any(f => f.IsVisible);
 }
 
 /// <summary>One property of the settings POCO as a form field.</summary>
@@ -273,6 +325,10 @@ public sealed partial class SettingFieldViewModel : ObservableObject
 
     public bool HasWarning => Warning is not null;
 
+    /// <summary>False when the plugin's <see cref="ISettingVisibility"/> says the field does not apply to what has been entered.</summary>
+    [ObservableProperty]
+    public partial bool IsVisible { get; set; } = true;
+
     public AsyncRelayCommand BrowseCommand { get; }
 
     public void Load(object settings)
@@ -294,6 +350,44 @@ public sealed partial class SettingFieldViewModel : ObservableObject
                     _ => value.ToString() ?? "",
                 };
                 break;
+        }
+    }
+
+    /// <summary>
+    /// Writes what is on screen into the POCO without judging it (an empty required box is written empty, a number
+    /// only once it parses), so a plugin's <see cref="ISettingVisibility"/> sees the form as it stands.
+    /// </summary>
+    public void Preview(object settings)
+    {
+        try
+        {
+            switch (Kind)
+            {
+                case SettingKind.Bool:
+                    _property.Property.SetValue(settings, Checked);
+                    break;
+                case SettingKind.Choice:
+                    if (SelectedChoice is not null)
+                    {
+                        _property.Property.SetValue(settings, _type.IsEnum ? Enum.Parse(_type, SelectedChoice) : SelectedChoice);
+                    }
+
+                    break;
+                case SettingKind.Number:
+                    if (TryParseNumber(Text.Trim(), out var number))
+                    {
+                        _property.Property.SetValue(settings, number);
+                    }
+
+                    break;
+                default:
+                    var value = Kind == SettingKind.Multiline ? Text.Replace("\r\n", "\n") : Text.Trim();
+                    _property.Property.SetValue(settings, value.Length == 0 && _nullable ? null : value);
+                    break;
+            }
+        }
+        catch (Exception ex) when (ex is ArgumentException or FormatException or OverflowException or System.Reflection.TargetInvocationException)
+        {
         }
     }
 

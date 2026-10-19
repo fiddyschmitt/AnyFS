@@ -8,21 +8,21 @@
   <UserControl.Resources>
     <views:FieldTemplateSelector x:Key="FieldTemplates">
       <DataTemplate x:Key="Text" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10">
+        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
           <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
           <TextBox Text="{Binding Text}" PlaceholderText="{Binding Placeholder}" />
           <views:FieldFooter />
         </StackPanel>
       </DataTemplate>
       <DataTemplate x:Key="Multiline" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10">
+        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
           <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
           <TextBox Text="{Binding Text}" PlaceholderText="{Binding Placeholder}" AcceptsReturn="True" TextWrapping="NoWrap" MinHeight="96" MaxHeight="220" FontFamily="Cascadia Mono,Consolas,Menlo,DejaVu Sans Mono,monospace" />
           <views:FieldFooter />
         </StackPanel>
       </DataTemplate>
       <DataTemplate x:Key="Password" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10">
+        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
           <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
           <TextBox Text="{Binding Text}" PlaceholderText="{Binding Placeholder}" PasswordChar="●" RevealPassword="{Binding Reveal}">
             <TextBox.InnerRightContent>
@@ -35,27 +35,27 @@
         </StackPanel>
       </DataTemplate>
       <DataTemplate x:Key="Number" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10">
+        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
           <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
           <TextBox Text="{Binding Text}" PlaceholderText="{Binding Placeholder}" MaxWidth="200" HorizontalAlignment="Left" MinWidth="120" />
           <views:FieldFooter />
         </StackPanel>
       </DataTemplate>
       <DataTemplate x:Key="Bool" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10">
+        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
           <CheckBox IsChecked="{Binding Checked}" Content="{Binding Label}" />
           <views:FieldFooter />
         </StackPanel>
       </DataTemplate>
       <DataTemplate x:Key="Choice" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10">
+        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
           <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
           <ComboBox ItemsSource="{Binding Choices}" SelectedItem="{Binding SelectedChoice}" MinWidth="220" HorizontalAlignment="Left" />
           <views:FieldFooter />
         </StackPanel>
       </DataTemplate>
       <DataTemplate x:Key="Path" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10">
+        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
           <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
           <Grid ColumnDefinitions="*,Auto">
             <TextBox Text="{Binding Text}" PlaceholderText="{Binding Placeholder}" />
@@ -71,7 +71,7 @@
     <ItemsControl ItemsSource="{Binding Groups}">
       <ItemsControl.ItemTemplate>
         <DataTemplate x:DataType="vm:SettingGroupViewModel">
-          <StackPanel>
+          <StackPanel IsVisible="{Binding IsVisible}">
             <TextBlock Classes="group" Text="{Binding Name}" IsVisible="{Binding HasName}" />
             <ItemsControl ItemsSource="{Binding Fields}" ItemTemplate="{StaticResource FieldTemplates}" IsVisible="{Binding !IsAdvanced}" />
             <Expander Header="Advanced" IsVisible="{Binding IsAdvanced}" IsExpanded="False" HorizontalAlignment="Stretch" Margin="0,4,0,8">
