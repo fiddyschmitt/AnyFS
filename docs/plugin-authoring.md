@@ -96,10 +96,12 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
 - Read-only is not your setting: say what you *can* do in `Capabilities`; the user decides per
   collection and per mount whether writes are allowed.
 - File counts: keep `Counters` up to date if you know your tree's size. When the user ticks
-  "Count files on start" the host walks your tree directory by directory, unless your source
-  implements `ICountable`, in which case it calls your `CountFilesAsync` instead (Mirror walks every
-  configured path at the same time). Return `true` from the plugin's `IsQuickToCount` when that walk
-  is cheap for your kind of source (local disks): the checkbox then defaults on for new sources of it.
+  "Count files on start" the host walks your tree through `ListAsync`, eight folders at a time
+  (`TreeCount`), unless your source implements `ICountable`, in which case it calls your
+  `CountFilesAsync` instead (Mirror walks every configured path at the same time). A source with a
+  cheaper listing of its own can pass it to `TreeCount.CountAsync` from there, as SSHFS does with
+  SFTP. Return `true` from the plugin's `IsQuickToCount` when that walk is cheap for your kind of
+  source (local disks): the checkbox then defaults on for new sources of it.
 
 ## Settings
 

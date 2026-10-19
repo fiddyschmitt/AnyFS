@@ -43,6 +43,10 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   (`embedded-rig.ps1`) as scripts.
 - **E2E**: a collection pair per lab farm on every host (`sharepoint`, `sharepoint2019`, each with a
   `-ro` twin), the fixture seeded through the source; `ANYFS_E2E_COLLECTIONS` selects collections.
+- **Count files on start** lists several folders at a time: the host's walk, for every source that
+  is not `ICountable`, keeps 8 listings in flight through the SDK's new `TreeCount`, and SSHFS's own
+  count uses the same helper with its SFTP listing (a SharePoint site's walk went from 4.3 s to 1.2 s
+  on the test site's small tree).
 - **SDK**: `ListingCache.Update` corrects one cached entry in place after a source's own write;
   `SequentialReadAhead`, the per-handle read-ahead the WinFsp mount had, as a helper for mounts;
   `ISettingVisibility`, for a plugin whose fields depend on what has been entered (the window's
