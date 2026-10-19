@@ -47,7 +47,7 @@ public sealed class SharePointSettings
     public string SiteUrl { get; set; } = "";
 
     [Setting("Library", Order = 1, Placeholder = "Documents",
-        Hint = "Leave empty to show every document library as a top-level folder, and the site's subsites in a Subsites folder beside them, or name one library to serve just that. For SharePoint Embedded, a container, by its name or its id.")]
+        Hint = "Leave empty to show every document library as a top-level folder, and the site's subsites in a Subsites folder beside them (at the tenant's root site also a Sites folder with every other site you can open), or name one library to serve just that. For SharePoint Embedded, a container, by its name or its id.")]
     public string? Library { get; set; }
 
     [Setting("Sign in with", Order = 2, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [Automatic, AppBrowser, AppDeviceCode, WebSession, Windows],
@@ -131,6 +131,9 @@ public sealed class SharePointSettings
     internal SignInMethod Method => EffectiveSignIn == SharePointSignIn.AppDeviceCode ? SharePoint.SignInMethod.DeviceCode : SharePoint.SignInMethod.Browser;
 
     internal string? PinnedLibrary => string.IsNullOrWhiteSpace(Library) ? null : Library.Trim();
+
+    /// <summary>Whether the address is the tenant's root site (no path after the host), where the tenant's other sites show.</summary>
+    internal bool IsRootSite => Kind is SharePointKind.Online or SharePointKind.Server && SiteAddress.TryParse(SiteUrl, out var site, out _) && site.ServerRelativePath.Length == 0;
 
     /// <summary>SharePoint Embedded's pinned container when it was given by id rather than by name.</summary>
     internal string? PinnedContainerId => Kind == SharePointKind.Embedded && PinnedLibrary is { } pinned && GraphDocumentStore.LooksLikeContainerId(pinned) ? pinned : null;
@@ -475,7 +478,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         {
             // the store is not disposed: it would dispose the client, which the using above does
             var store = await GraphDocumentStore.ConnectAsync(graph, site, ct).ConfigureAwait(false);
-            return store is null ? notFound : await LibrariesAsync($"Signed in as {signIn.Username}. {store.Description}", s.PinnedLibrary, store, ct).ConfigureAwait(false);
+            return store is null ? notFound : await LibrariesAsync($"Signed in as {signIn.Username}. {store.Description}", s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
         }
         catch (VfsException ex) when (ex.Error == VfsError.NotFound)
         {
@@ -498,7 +501,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         using var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, NullLogger.Instance, handler: handler);
         var store = await RestDocumentStore.ConnectAsync(rest, ct).ConfigureAwait(false);
         progress.Report($"Signed in to {store.Description}; listing the libraries");
-        return await LibrariesAsync($"Signed in with {session.BrowserName}. {store.Description}", s.PinnedLibrary, store, ct).ConfigureAwait(false);
+        return await LibrariesAsync($"Signed in with {session.BrowserName}. {store.Description}", s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
     }
 
     private static async Task<TestResult> TestWindowsAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
@@ -508,7 +511,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         using var rest = new SharePointRestClient(new Uri(site.Url), s.Credentials(), s.TrustAnyCertificate, NullLogger.Instance);
         var store = await RestDocumentStore.ConnectAsync(rest, ct).ConfigureAwait(false);
         progress.Report($"Connected to {store.Description}; listing the libraries");
-        return await LibrariesAsync(store.Description, s.PinnedLibrary, store, ct).ConfigureAwait(false);
+        return await LibrariesAsync(store.Description, s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
     }
 
     private static async Task<TestResult> TestContainersAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
@@ -558,8 +561,11 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         }
     }
 
-    /// <summary>The Test button's answer for a site: its libraries and, unless one library is pinned, its subsites.</summary>
-    private static async Task<TestResult> LibrariesAsync(string what, string? pinned, IDocumentStore store, CancellationToken ct)
+    /// <summary>
+    /// The Test button's answer for a site: its libraries and, unless one library is pinned, its subsites, and at the
+    /// tenant's root site how many other sites search finds (the first ten named).
+    /// </summary>
+    private static async Task<TestResult> LibrariesAsync(string what, string? pinned, IDocumentStore store, bool rootSite, CancellationToken ct)
     {
         var names = (await store.ListLibrariesAsync(null, ct).ConfigureAwait(false)).Select(l => l.Name).ToList();
         if (pinned is not null && !names.Any(n => string.Equals(n, pinned, StringComparison.OrdinalIgnoreCase)))
@@ -578,6 +584,23 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         }
 
         var also = subsites.Count == 0 ? "" : $", and {subsites.Count} subsite{(subsites.Count == 1 ? "" : "s")}: {string.Join(", ", subsites)}";
+        if (pinned is null && rootSite)
+        {
+            try
+            {
+                var sites = (await store.ListSitesAsync(ct).ConfigureAwait(false)).Select(w => w.Name).ToList();
+                if (sites.Count > 0)
+                {
+                    var shown = string.Join(", ", sites.Take(10)) + (sites.Count > 10 ? $" and {sites.Count - 10} more" : "");
+                    also += $". Search finds {sites.Count} other site{(sites.Count == 1 ? "" : "s")} in the tenant, shown in a Sites folder: {shown}";
+                }
+            }
+            catch (VfsException ex)
+            {
+                also += $". The tenant's other sites could not be listed through search: {ex.Message}";
+            }
+        }
+
         return new TestResult(true, $"{what} has {names.Count} document librar{(names.Count == 1 ? "y" : "ies")}: {string.Join(", ", names)}{also}.");
     }
 
@@ -606,6 +629,9 @@ public sealed class SharePointSiteSource : SharePointSource
     protected override long SpoolBelowBytes => (long)_settings.SpoolBelowMiB << 20;
 
     protected override string Target => _settings.Kind == SharePointKind.Embedded ? $"container type {_settings.SiteUrl.Trim()}" : _settings.SiteUrl;
+
+    /// <summary>The tenant's root site (https://contoso.sharepoint.com, http://intranet) shows the tenant's other sites in a Sites folder.</summary>
+    protected override bool ShowsOtherSites => _settings.IsRootSite;
 
     private protected override Task<IDocumentStore> ConnectAsync(CancellationToken ct)
     {

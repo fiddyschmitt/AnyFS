@@ -424,6 +424,23 @@ public class SharePointOnlineLiveTests
     }
 
     [TestMethod]
+    public async Task TheTenantsRootSiteShowsItsOtherSites()
+    {
+        SpoTestServer.Require();
+        await using (await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings()))
+        {
+            // the fixture is in place in the test site
+        }
+
+        var settings = SpoTestServer.Settings();
+        settings.SiteUrl = SpsTestServer.RootOf(settings.SiteUrl);
+        await using var root = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
+        using var context = SpoTestServer.Context();
+        await root.InitialiseAsync(context, None);
+        await SpsTestServer.CheckOtherSitesAsync(root, SpoTestServer.Site!, SpoTestServer.Library, SpoTestServer.FixtureFolder, SpoTestServer.ReadmeBytes);
+    }
+
+    [TestMethod]
     public async Task RangedReadsAgreeWithTheWholeFileSpooledAndNot()
     {
         SpoTestServer.Require();

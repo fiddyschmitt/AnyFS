@@ -88,6 +88,43 @@ internal sealed class RestDocumentStore : IDocumentStore
         return subsites;
     }
 
+    /// <summary>
+    /// The site collections SharePoint's search finds for the account (contentclass STS_Site: what it may open, no
+    /// subsites), 500 at a time, on this site's host only, this site left out.
+    /// </summary>
+    public async Task<IReadOnlyList<WebInfo>> ListSitesAsync(CancellationToken ct)
+    {
+        const int Page = 500;
+        var own = _rest.SiteUrl.AbsolutePath.TrimEnd('/');
+        var found = new List<(string, string)>();
+        for (var start = 0; start < 100 * Page; start += Page)
+        {
+            using var doc = await _rest.GetJsonAsync($"search/query?querytext='contentclass:STS_Site'&selectproperties='Path'&trimduplicates=false&rowlimit={Page}&startrow={start}", Description, ct).ConfigureAwait(false);
+            var results = doc.RootElement.GetProperty("PrimaryQueryResult").GetProperty("RelevantResults");
+            var rows = results.GetProperty("Table").GetProperty("Rows");
+            foreach (var row in rows.EnumerateArray())
+            {
+                var path = row.GetProperty("Cells").EnumerateArray().Where(c => c.GetProperty("Key").GetString() == "Path").Select(c => c.GetProperty("Value").GetString()).FirstOrDefault();
+                if (Uri.TryCreate(path, UriKind.Absolute, out var site) && string.Equals(site.Authority, _rest.SiteUrl.Authority, StringComparison.OrdinalIgnoreCase))
+                {
+                    var serverRelative = Uri.UnescapeDataString(site.AbsolutePath).TrimEnd('/');
+                    if (!string.Equals(serverRelative, own, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found.Add((serverRelative, serverRelative));
+                    }
+                }
+            }
+
+            var total = results.TryGetProperty("TotalRows", out var t) && t.TryGetInt32(out var n) ? n : 0;
+            if (rows.GetArrayLength() < Page || start + Page >= total)
+            {
+                break;
+            }
+        }
+
+        return WebInfo.Sites(found);
+    }
+
     public async IAsyncEnumerable<(VfsEntry Entry, ItemRef Item)> ListChildrenAsync(LibraryInfo library, string itemPath, [EnumeratorCancellation] CancellationToken ct)
     {
         var folder = Url(library, itemPath);

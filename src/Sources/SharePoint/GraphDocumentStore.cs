@@ -15,14 +15,16 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
     private readonly GraphClient _graph;
     private readonly Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> _listLibraries;
+    private readonly SiteAddress? _site;
 
-    private GraphDocumentStore(GraphClient graph, string description, string libraryNoun, string siteId, Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> listLibraries)
+    private GraphDocumentStore(GraphClient graph, string description, string libraryNoun, string siteId, Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> listLibraries, SiteAddress? site = null)
     {
         _graph = graph;
         Description = description;
         LibraryNoun = libraryNoun;
         SiteId = siteId;
         _listLibraries = listLibraries;
+        _site = site;
     }
 
     public string Description { get; }
@@ -44,7 +46,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
         var id = doc.RootElement.GetProperty("id").GetString() ?? throw new VfsException(VfsError.IoError, "Graph returned a site without an id");
         var name = doc.RootElement.TryGetProperty("displayName", out var dn) ? dn.GetString() ?? site.Url : site.Url;
         var description = $"{name} ({site.Url})";
-        return new GraphDocumentStore(graph, description, "document library", id, ct2 => ListDrivesAsync(graph, id, null, description, ct2));
+        return new GraphDocumentStore(graph, description, "document library", id, ct2 => ListDrivesAsync(graph, id, null, description, ct2), site);
     }
 
     /// <summary>
@@ -118,6 +120,42 @@ internal sealed class GraphDocumentStore : IDocumentStore
         }
 
         return subsites;
+    }
+
+    /// <summary>
+    /// Graph's site search across the tenant (what the account may open), kept to site collections on this site's host:
+    /// SharePoint Online's are the root and /sites/x or /teams/x, so a deeper address is a subsite and is left out.
+    /// </summary>
+    public async Task<IReadOnlyList<WebInfo>> ListSitesAsync(CancellationToken ct)
+    {
+        if (_site is null)
+        {
+            return [];
+        }
+
+        var url = "sites?search=*&$select=id,webUrl";
+        var found = new List<(string, string)>();
+        while (url is not null)
+        {
+            using var doc = await _graph.GetJsonAsync(url, Description, ct).ConfigureAwait(false);
+            foreach (var element in doc.RootElement.GetProperty("value").EnumerateArray())
+            {
+                var id = element.TryGetProperty("id", out var i) ? i.GetString() : null;
+                if (!string.IsNullOrEmpty(id) && element.TryGetProperty("webUrl", out var w) && Uri.TryCreate(w.GetString(), UriKind.Absolute, out var site)
+                    && string.Equals(site.Authority, _site.Host, StringComparison.OrdinalIgnoreCase))
+                {
+                    var path = Uri.UnescapeDataString(site.AbsolutePath).TrimEnd('/');
+                    if (path.Count(c => c == '/') == 2 && !string.Equals(path, _site.ServerRelativePath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found.Add((id, path));
+                    }
+                }
+            }
+
+            url = doc.RootElement.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
+        }
+
+        return WebInfo.Sites(found);
     }
 
     private static async Task<IReadOnlyList<LibraryInfo>> ListDrivesAsync(GraphClient graph, string siteId, WebInfo? web, string description, CancellationToken ct)

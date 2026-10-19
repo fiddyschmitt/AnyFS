@@ -241,6 +241,35 @@ internal static class SpsTestServer
         Assert.IsNull(await source.StatAsync(path, none));
     }
 
+    /// <summary>The tenant's root site of a site's address: its scheme and host.</summary>
+    public static string RootOf(string siteUrl)
+    {
+        Assert.IsTrue(SiteAddress.TryParse(siteUrl, out var site, out var reason), reason);
+        return $"{site.Scheme}://{site.Host}";
+    }
+
+    /// <summary>
+    /// A source on the tenant's root site shows the test site in its Sites folder, and the fixture's readme reads through
+    /// it (a request to another site collection's own address); Inconclusive where search finds no other site (a farm
+    /// without a search service).
+    /// </summary>
+    public static async Task CheckOtherSitesAsync(ISource root, string siteUrl, string library, string fixtureFolder, byte[] readme)
+    {
+        if (!(await NamesAsync(root, "")).Contains(SharePointSource.SitesFolder))
+        {
+            Assert.Inconclusive($"search finds no other site from {RootOf(siteUrl)} (no search service, or nothing indexed yet)");
+        }
+
+        Assert.IsTrue(SiteAddress.TryParse(siteUrl, out var site, out _));
+        var name = site.ServerRelativePath[(site.ServerRelativePath.LastIndexOf('/') + 1)..];
+        CollectionAssert.Contains(await NamesAsync(root, SharePointSource.SitesFolder), name);
+        var path = $"{SharePointSource.SitesFolder}/{name}/{library}/{fixtureFolder}/readme.txt";
+        await using var file = await root.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
+        var back = new byte[readme.Length];
+        Assert.AreEqual(back.Length, await file.ReadFullyAsync(0, back, CancellationToken.None));
+        CollectionAssert.AreEqual(readme, back);
+    }
+
     public static async Task<List<string>> NamesAsync(ISource source, string path)
     {
         var names = new List<string>();
@@ -375,6 +404,23 @@ public class SharePointServerLiveTests
         await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
         await SpsTestServer.EnsureSubsiteAsync(source);
         await SpsTestServer.CheckSubsiteAsync(source);
+    }
+
+    [TestMethod]
+    public async Task TheTenantsRootSiteShowsItsOtherSites()
+    {
+        SpsTestServer.Require();
+        await using (await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings()))
+        {
+            // the fixture is in place in the test site
+        }
+
+        var settings = SpsTestServer.Settings();
+        settings.SiteUrl = SpsTestServer.RootOf(settings.SiteUrl);
+        await using var root = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
+        using var context = new TestSourceContext("sharepoint");
+        await root.InitialiseAsync(context, None);
+        await SpsTestServer.CheckOtherSitesAsync(root, SpsTestServer.Site!, SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
     }
 
     [TestMethod]

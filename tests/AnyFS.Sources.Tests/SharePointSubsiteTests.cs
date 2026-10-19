@@ -168,6 +168,155 @@ public class SharePointSubsiteTests
     }
 }
 
+/// <summary>
+/// The tenant's other sites (site collections found by search) in a Sites folder at the tenant's root site, against the
+/// in-memory store: each with its own libraries and Subsites, written through its own address, the search kept a while.
+/// </summary>
+[TestClass]
+public class SharePointOtherSitesTests
+{
+    private static readonly CancellationToken None = CancellationToken.None;
+
+    /// <summary>The sample site as the tenant's root, with three other sites: /sites/Axle (Documents, a subsite Plan), /sites/Ops and /teams/Ops.</summary>
+    internal static MemoryDocumentStore Tenant()
+    {
+        var store = MemoryDocumentStore.Sample();
+        store.AddSite("/sites/Axle");
+        store.AddLibrary("/sites/Axle", "/sites/Axle/Shared Documents", "Documents");
+        store.AddSubsite("/sites/Axle", "/sites/Axle/Plan", "Plan");
+        store.AddLibrary("/sites/Axle/Plan", "/sites/Axle/Plan/Shared Documents", "Documents");
+        store.AddSite("/sites/Ops");
+        store.AddLibrary("/sites/Ops", "/sites/Ops/Shared Documents", "Documents");
+        store.AddSite("/teams/Ops");
+        store.AddLibrary("/teams/Ops", "/teams/Ops/Shared Documents", "Documents");
+        return store;
+    }
+
+    [TestMethod]
+    public async Task TheRootSiteShowsTheOtherSitesInASitesFolder()
+    {
+        var store = Tenant();
+        await using var source = await MemorySharePointSource.StartAsync(store, otherSites: true);
+        CollectionAssert.AreEqual(new[] { "Documents", "Site Assets", "Subsites", "Sites" }, await NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "Axle", "Ops (sites)", "Ops (teams)" }, await NamesAsync(source, "Sites"), "named as their addresses end, the rest of the path where two end alike");
+        CollectionAssert.AreEqual(new[] { "Documents", "Subsites" }, await NamesAsync(source, "Sites/Axle"));
+        CollectionAssert.AreEqual(new[] { "Documents" }, await NamesAsync(source, "Sites/Axle/Subsites/Plan"));
+        Assert.IsTrue(await source.StatAsync("sites", None) is { IsDirectory: true, Name: "Sites" });
+
+        await using (var file = await source.OpenAsync("Sites/Axle/Documents/plan.txt", VfsOpenMode.CreateNew, None))
+        {
+            await file.WriteAsync(0, "axle"u8.ToArray(), None);
+        }
+
+        Assert.IsTrue(store.Has("/sites/Axle/Shared Documents", "plan.txt"), "in the other site's Documents, through its own address");
+        Assert.AreEqual(4, (await source.StatAsync("Sites/Axle/Documents/plan.txt", None))?.Length);
+        await source.DeleteAsync("Sites/Axle/Documents/plan.txt", None);
+
+        await AssertErrorAsync(VfsError.AlreadyExists, () => source.CreateDirectoryAsync("Sites", None));
+        await AssertErrorAsync(VfsError.NotSupported, () => source.CreateDirectoryAsync("Sites/New site", None));
+        await AssertErrorAsync(VfsError.AccessDenied, () => source.DeleteAsync("Sites/Axle", None));
+        await AssertErrorAsync(VfsError.AccessDenied, () => source.RenameAsync("Sites/Axle", "Sites/Axel", false, None));
+        await AssertErrorAsync(VfsError.InvalidPath, () => source.OpenAsync("Sites/loose.txt", VfsOpenMode.Create, None));
+    }
+
+    [TestMethod]
+    public async Task OnlyTheRootSiteSearchesAndOnlyWithNoLibraryPinned()
+    {
+        var store = Tenant();
+        await using (var site = await MemorySharePointSource.StartAsync(store))
+        {
+            CollectionAssert.DoesNotContain(await NamesAsync(site, ""), "Sites", "a site that is not the tenant's root");
+        }
+
+        store.Seed("/Shared Documents", "a.txt", "a"u8.ToArray());
+        await using (var pinned = await MemorySharePointSource.StartAsync(store, pinned: "Documents", otherSites: true))
+        {
+            CollectionAssert.AreEqual(new[] { "a.txt" }, await NamesAsync(pinned, ""));
+        }
+
+        Assert.AreEqual(0, store.SiteSearches);
+    }
+
+    [TestMethod]
+    public async Task TheSearchIsKeptAWhile()
+    {
+        var store = Tenant();
+        await using var source = await MemorySharePointSource.StartAsync(store, otherSites: true);
+        for (var i = 0; i < 3; i++)
+        {
+            await NamesAsync(source, "");
+            await NamesAsync(source, "Sites");
+            await Task.Delay(2100);   // past the listings' own two seconds, so the site is listed again each time
+        }
+
+        Assert.AreEqual(1, store.SiteSearches, "searched once, at the start, for the next five minutes");
+        Assert.IsTrue(store.Loads("") >= 3, "while the libraries and subsites are listed each time");
+    }
+
+    [TestMethod]
+    public async Task ASearchThatFailsLeavesTheRestAlone()
+    {
+        var store = Tenant();
+        store.SearchFails = true;
+        await using var source = await MemorySharePointSource.StartAsync(store, otherSites: true);
+        CollectionAssert.AreEqual(new[] { "Documents", "Site Assets", "Subsites" }, await NamesAsync(source, ""));
+        Assert.IsNull(await source.StatAsync("Sites/Axle", None));
+    }
+
+    [TestMethod]
+    public async Task ALibraryCalledSitesKeepsItsName()
+    {
+        var store = new MemoryDocumentStore();
+        store.AddLibrary("", "/Sites Library", "Sites");
+        store.AddSite("/sites/Axle");
+        store.AddLibrary("/sites/Axle", "/sites/Axle/Shared Documents", "Documents");
+        await using var source = await MemorySharePointSource.StartAsync(store, otherSites: true);
+        CollectionAssert.AreEqual(new[] { "Sites", "Sites (2)" }, await NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "Axle" }, await NamesAsync(source, "Sites (2)"));
+    }
+
+    [TestMethod]
+    public void SitesAreNamedAsTheirAddressesEnd()
+    {
+        var names = WebInfo.Sites([("1", "/sites/Axle"), ("2", "/teams/Ops"), ("3", "/sites/Ops"), ("4", "/sites/axle/"), ("5", "/"), ("6", "/portals/Hub")]).Select(w => $"{w.Key}={w.Name}").ToList();
+        CollectionAssert.AreEquivalent(new[] { "1=Axle", "6=Hub", "3=Ops (sites)", "2=Ops (teams)" }, names, "the same address once, the root left out");
+    }
+
+    private static async Task<string[]> NamesAsync(ISource source, string path)
+    {
+        var names = new List<string>();
+        await foreach (var entry in source.ListAsync(path, None))
+        {
+            names.Add(entry.Name);
+        }
+
+        return [.. names];
+    }
+
+    private static async Task AssertErrorAsync(VfsError expected, Func<Task> action)
+    {
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(action);
+        Assert.AreEqual(expected, ex.Error, ex.Message);
+    }
+}
+
+/// <summary>The SDK's contract inside a library of another site of the tenant, reached through the root site's Sites folder.</summary>
+[TestClass]
+public class SharePointOtherSiteContractTests : SourceContractTests
+{
+    private static readonly byte[] Readme = Encoding.UTF8.GetBytes("hello readme from another site of the tenant\n");
+
+    protected override async Task<SourceContractSetup> SetUpAsync()
+    {
+        var store = SharePointOtherSitesTests.Tenant();
+        store.Seed("/sites/Axle/Shared Documents", "fixture/readme.txt", Readme);
+        store.Seed("/sites/Axle/Shared Documents", "fixture/scratch", null);
+        var source = await MemorySharePointSource.StartAsync(store, otherSites: true);
+        const string fixture = "Sites/Axle/Documents/fixture";
+        return new SourceContractSetup(source, fixture, fixture + "/readme.txt", Readme, WritableDirectory: fixture + "/scratch");
+    }
+}
+
 /// <summary>The SDK's contract inside a library of a subsite's subsite, against the in-memory store.</summary>
 [TestClass]
 public class SharePointSubsiteContractTests : SourceContractTests
@@ -186,7 +335,7 @@ public class SharePointSubsiteContractTests : SourceContractTests
 }
 
 /// <summary>The SharePoint source over a <see cref="MemoryDocumentStore"/>, with a test context of its own.</summary>
-internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? pinned) : SharePointSource
+internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? pinned, bool otherSites) : SharePointSource
 {
     private readonly TestSourceContext _context = new("sharepoint");
 
@@ -198,9 +347,12 @@ internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? 
 
     protected override string Target => store.Description;
 
-    public static async Task<MemorySharePointSource> StartAsync(MemoryDocumentStore store, string? pinned = null)
+    protected override bool ShowsOtherSites => otherSites;
+
+    /// <param name="otherSites">As for the tenant's root site: the store's other sites show in a Sites folder.</param>
+    public static async Task<MemorySharePointSource> StartAsync(MemoryDocumentStore store, string? pinned = null, bool otherSites = false)
     {
-        var source = new MemorySharePointSource(store, pinned);
+        var source = new MemorySharePointSource(store, pinned, otherSites);
         await source.InitialiseAsync(source._context, CancellationToken.None);
         return source;
     }
@@ -227,7 +379,9 @@ internal sealed class MemoryDocumentStore : IDocumentStore
     private readonly Dictionary<string, string> _webOfLibrary = [];
     private readonly Dictionary<(string Library, string Path), Item> _items = [];
     private readonly ConcurrentDictionary<string, int> _loads = new();
+    private readonly List<string> _sites = [];
     private int _subsiteListings;
+    private int _siteSearches;
 
     public string Description => "the memory site";
 
@@ -237,6 +391,23 @@ internal sealed class MemoryDocumentStore : IDocumentStore
     public int Loads(string web) => _loads.GetValueOrDefault(web);
 
     public int SubsiteListings => Volatile.Read(ref _subsiteListings);
+
+    /// <summary>How often the tenant's other sites were searched for.</summary>
+    public int SiteSearches => Volatile.Read(ref _siteSearches);
+
+    /// <summary>Makes the search for other sites fail, as on a farm without a search service.</summary>
+    public bool SearchFails { get; set; }
+
+    /// <summary>Another site of the tenant (a site collection), by its server-relative URL, which is also its key.</summary>
+    public void AddSite(string url)
+    {
+        lock (_gate)
+        {
+            _sites.Add(url);
+            _libraries[url] = [];
+            _subsites[url] = [];
+        }
+    }
 
     /// <summary>Libraries Documents and Site Assets; subsites Foo (Documents, and a subsite Bar with Shared) and hr (Documents).</summary>
     public static MemoryDocumentStore Sample()
@@ -315,6 +486,20 @@ internal sealed class MemoryDocumentStore : IDocumentStore
         lock (_gate)
         {
             return Task.FromResult<IReadOnlyList<WebInfo>>(_subsites[web?.Key ?? ""].ToList());
+        }
+    }
+
+    public Task<IReadOnlyList<WebInfo>> ListSitesAsync(CancellationToken ct)
+    {
+        Interlocked.Increment(ref _siteSearches);
+        if (SearchFails)
+        {
+            throw new VfsException(VfsError.IoError, "the search service is not available");
+        }
+
+        lock (_gate)
+        {
+            return Task.FromResult(WebInfo.Sites(_sites.Select(url => (url, url))));
         }
     }
 
