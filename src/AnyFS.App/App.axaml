@@ -12,6 +12,7 @@
       <ResourceDictionary.MergedDictionaries>
         <ResourceInclude Source="avares://anyfs/Gui/Views/Icons.axaml" />
         <ResourceInclude Source="avares://anyfs/Gui/Views/Tiles.axaml" />
+        <ResourceInclude Source="avares://anyfs/Gui/Views/FieldTemplates.axaml" />
       </ResourceDictionary.MergedDictionaries>
     </ResourceDictionary>
   </Application.Resources>

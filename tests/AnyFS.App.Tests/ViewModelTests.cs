@@ -35,6 +35,7 @@ public class ViewModelTests
         var registry = new PluginRegistry();
         registry.AddBuiltIn(new MemoryPlugin());
         registry.AddBuiltIn(new QuickPlugin());
+        registry.AddBuiltIn(new NamedPlugin());
         registry.AddBuiltIn(new FakeMountProvider());
         _installable = new InstallableProvider();
         registry.AddBuiltIn(_installable);
@@ -512,6 +513,88 @@ public class ViewModelTests
     }
 
     [TestMethod]
+    public void SourceDialogNamesTheSourceFromTheSettingAskedFirst()
+    {
+        var dialog = new SourceDialogViewModel(_engine, _dialogs, null, null, askPath: true);
+        dialog.SelectedPlugin = dialog.PluginChoices.Single(p => p.TypeId == "named");
+        var server = dialog.Form!.PrimaryField!;
+        Assert.AreEqual(nameof(NamedServerSettings.Server), server.PropertyName, "asked above the name");
+        StringAssert.Contains(dialog.NameHint, "Server");
+        Assert.AreEqual("", dialog.Name, "nothing to name it from yet");
+
+        server.Text = "aus-files-01.contoso.local";
+        Assert.AreEqual("aus-files-01", dialog.Name);
+        Assert.AreEqual("named/aus-files-01", dialog.Path, "the path follows the name, as before");
+
+        server.Text = "";
+        Assert.AreEqual("", dialog.Name, "a suggestion that lapses empties the box again");
+
+        server.Text = "syd-files-02";
+        dialog.Name = "Sydney";
+        server.Text = "syd-files-03";
+        Assert.AreEqual("Sydney", dialog.Name, "typed by hand: the suggestions stop");
+        Assert.AreEqual("named/Sydney", dialog.Path);
+
+        dialog.Name = "";
+        server.Text = "syd-files-04";
+        Assert.AreEqual("syd-files-04", dialog.Name, "an emptied box follows again");
+        Assert.IsTrue(dialog.Validate());
+        Assert.AreEqual("syd-files-04", ((NamedServerSettings)dialog.Settings!).Server);
+
+        dialog.SelectedPlugin = dialog.PluginChoices.Single(p => p.TypeId == "memory");
+        Assert.AreEqual("", dialog.Name, "another type: the old type's suggestion goes");
+        Assert.IsNull(dialog.Form!.PrimaryField, "Memory marks no setting to ask first");
+        Assert.AreEqual(SourceDialogViewModel.NameTip, dialog.NameHint);
+    }
+
+    [TestMethod]
+    public async Task SourceDialogKeepsANameTypedFirstAndAnExistingSourcesName()
+    {
+        var dialog = new SourceDialogViewModel(_engine, _dialogs, null, null, askPath: true);
+        dialog.Name = "mine";
+        dialog.SelectedPlugin = dialog.PluginChoices.Single(p => p.TypeId == "named");
+        dialog.Form!.PrimaryField!.Text = "aus-files-01";
+        Assert.AreEqual("mine", dialog.Name, "a name typed before the type was chosen is kept");
+
+        var definition = await _engine.AddSourceAsync("Sydney office", "named", true, false, new NamedServerSettings { Server = "syd-files-02" });
+        var edit = new SourceDialogViewModel(_engine, _dialogs, definition, null, askPath: false);
+        Assert.AreEqual("syd-files-02", edit.Form!.PrimaryField!.Text, "asked first when editing too");
+        edit.Form.PrimaryField.Text = "syd-files-03";
+        Assert.AreEqual("Sydney office", edit.Name, "a name of the person's own is kept");
+        Assert.AreEqual(SourceDialogViewModel.NameTip, edit.NameHint);
+    }
+
+    [TestMethod]
+    public async Task SourceDialogEditFollowsANameThePluginMade()
+    {
+        var collection = _engine.Collections.Single();
+        var definition = await _engine.AddSourceAsync("syd-files-02", "named", true, false, new NamedServerSettings { Server = "syd-files-02.contoso.local" });
+        await _engine.AddMembershipAsync(collection.Id, definition.Id, "named/syd-files-02", false);
+        var edit = new SourceDialogViewModel(_engine, _dialogs, definition, collection.Definition.Sources.Single(m => m.Id == definition.Id), askPath: true);
+        StringAssert.Contains(edit.NameHint, "Server", "the name was the plugin's when the edit began");
+
+        edit.Form!.PrimaryField!.Text = "syd-files-03.contoso.local";
+        Assert.AreEqual("syd-files-03", edit.Name, "so it goes on following the settings");
+        Assert.AreEqual("named/syd-files-03", edit.Path, "and the path, the default one for the name, follows the name");
+
+        edit.Name = "Sydney";
+        edit.Form.PrimaryField.Text = "syd-files-04";
+        Assert.AreEqual("Sydney", edit.Name, "typed by hand: the suggestions stop");
+        Assert.AreEqual("named/Sydney", edit.Path);
+
+        // a path of the person's own stays put while the name follows
+        await _engine.UpdateMembershipAsync(collection.Id, definition.Id, "servers/sydney", false);
+        var moved = new SourceDialogViewModel(_engine, _dialogs, definition, collection.Definition.Sources.Single(m => m.Id == definition.Id), askPath: true);
+        moved.Form!.PrimaryField!.Text = "syd-files-05";
+        Assert.AreEqual("syd-files-05", moved.Name);
+        Assert.AreEqual("servers/sydney", moved.Path);
+
+        var fromAllSources = new SourceDialogViewModel(_engine, _dialogs, definition, null, askPath: false);
+        fromAllSources.Form!.PrimaryField!.Text = "syd-files-06";
+        Assert.AreEqual("syd-files-06", fromAllSources.Name, "the same from the All sources tab, which has no path");
+    }
+
+    [TestMethod]
     public void SourceDialogCountsOnStartByDefaultForQuickSourcesUntilToggledByHand()
     {
         var dialog = new SourceDialogViewModel(_engine, _dialogs, null, null, askPath: true);
@@ -626,7 +709,7 @@ public class ViewModelTests
     public void SourceDialogFiltersTheTypesByText()
     {
         var dialog = new SourceDialogViewModel(_engine, _dialogs, null, null, askPath: true);
-        CollectionAssert.AreEqual(new[] { "memory", "quick" }, dialog.VisiblePlugins.Select(p => p.TypeId).ToList());
+        CollectionAssert.AreEqual(new[] { "memory", "named", "quick" }, dialog.VisiblePlugins.Select(p => p.TypeId).ToList());
         dialog.Filter = "QUICK";
         CollectionAssert.AreEqual(new[] { "quick" }, dialog.VisiblePlugins.Select(p => p.TypeId).ToList(), "name, case-insensitively");
         Assert.AreEqual("quick", dialog.SelectedPlugin!.TypeId, "a filtered-out selection moves to the first visible type");
@@ -634,7 +717,7 @@ public class ViewModelTests
         CollectionAssert.AreEqual(new[] { "memory" }, dialog.VisiblePlugins.Select(p => p.TypeId).ToList(), "description");
         var form = dialog.Form;
         dialog.Filter = "";
-        Assert.AreEqual(2, dialog.VisiblePlugins.Count);
+        Assert.AreEqual(3, dialog.VisiblePlugins.Count);
         Assert.AreSame(form, dialog.Form, "clearing the filter keeps the form of the selected type");
         dialog.Filter = "nothing like this";
         Assert.AreEqual(0, dialog.VisiblePlugins.Count);
@@ -728,4 +811,37 @@ public class ViewModelTests
 
         public ISource CreateSource(object settings) => _inner.CreateSource(settings);
     }
+
+    /// <summary>A Memory source with a server to name it after, which the Add source dialog asks first.</summary>
+    private sealed class NamedPlugin : ISourcePlugin
+    {
+        private readonly MemoryPlugin _inner = new();
+
+        public string TypeId => "named";
+
+        public string DisplayName => "Named";
+
+        public string Description => "named after its server";
+
+        public string TypeFolder => "named";
+
+        public Stream? OpenIcon() => null;
+
+        public Type SettingsType => typeof(NamedServerSettings);
+
+        public object CreateDefaultSettings() => new NamedServerSettings();
+
+        public ISource CreateSource(object settings) => _inner.CreateSource(_inner.CreateDefaultSettings());
+
+        public string? SuggestName(object settings) => ((NamedServerSettings)settings).Server is { Length: > 0 } server ? server.Split('.')[0] : null;
+    }
+}
+
+public sealed class NamedServerSettings
+{
+    [Setting("Share", Order = 0)]
+    public string? Share { get; set; }
+
+    [Setting("Server", Required = true, Primary = true, Order = 1)]
+    public string Server { get; set; } = "";
 }

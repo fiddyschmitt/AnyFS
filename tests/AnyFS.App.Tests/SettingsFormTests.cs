@@ -314,4 +314,48 @@ public class SettingsFormTests
         Assert.IsNull(Field(nameof(ModeSettings.Folder)).Error, "the folder is hidden, so its message cannot sit there unseen");
         Assert.AreEqual("That folder is bad.", form.FormError);
     }
+
+    /// <summary>A source whose address says what it is.</summary>
+    private sealed class AddressSettings
+    {
+        [Setting("Port", Order = 0)]
+        public int Port { get; set; } = 22;
+
+        [Setting("Address", Required = true, Primary = true, Order = 1)]
+        public string Address { get; set; } = "";
+
+        [Setting("Retries", Advanced = true, Order = 2)]
+        public int Retries { get; set; } = 3;
+    }
+
+    [TestMethod]
+    public void ThePrimarySettingIsLiftedOutOfTheFormWhenAsked()
+    {
+        var lifted = new SettingsFormViewModel(typeof(AddressSettings), new AddressSettings(), null, null, null, new FakeDialogs(), liftPrimary: true);
+        Assert.AreEqual(nameof(AddressSettings.Address), lifted.PrimaryField!.PropertyName);
+        Assert.IsTrue(lifted.Groups.SelectMany(g => g.Fields).All(f => f.PropertyName != nameof(AddressSettings.Address)), "the dialog shows it, so the form does not");
+        Assert.AreEqual(3, lifted.Fields.Count, "it is still a field: validated and saved with the rest");
+
+        lifted.PrimaryField.Text = "";
+        Assert.IsFalse(lifted.Validate());
+        Assert.AreEqual("Required.", lifted.PrimaryField.Error);
+
+        var inPlace = new SettingsFormViewModel(typeof(AddressSettings), new AddressSettings(), null, null, null, new FakeDialogs());
+        Assert.IsNull(inPlace.PrimaryField, "a form not asked to lift it keeps it in its group (the mount dialog)");
+        Assert.IsTrue(inPlace.Groups.SelectMany(g => g.Fields).Any(f => f.PropertyName == nameof(AddressSettings.Address)));
+    }
+
+    [TestMethod]
+    public void EveryChangeIsReportedWithTheSettingsAlreadyWritten()
+    {
+        var settings = new AddressSettings();
+        var form = new SettingsFormViewModel(typeof(AddressSettings), settings, null, null, null, new FakeDialogs(), liftPrimary: true);
+        var seen = new List<string>();
+        form.Changed += (_, _) => seen.Add($"{settings.Address}:{settings.Port}");
+
+        form.PrimaryField!.Text = "files-01";
+        form.Fields.Single(f => f.PropertyName == nameof(AddressSettings.Port)).Text = "2222";
+        form.Fields.Single(f => f.PropertyName == nameof(AddressSettings.Port)).Text = "22x";
+        CollectionAssert.AreEqual(new[] { "files-01:22", "files-01:2222", "files-01:2222" }, seen, "a number that does not parse yet leaves the last good value");
+    }
 }

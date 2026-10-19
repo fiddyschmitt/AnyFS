@@ -103,7 +103,10 @@ internal static class VisibleList
     }
 }
 
-/// <summary>The Add source / Edit source dialog (spec 11.1): plugin, name, path and read-only (in a collection), then the plugin's form.</summary>
+/// <summary>
+/// The Add source / Edit source dialog (spec 11.1): plugin; the setting that says what the source is, when the plugin
+/// marks one; name, path and read-only (in a collection); then the rest of the plugin's form.
+/// </summary>
 public sealed partial class SourceDialogViewModel : DialogViewModelBase
 {
     public const string NameTip = "Tip: use the server's name, e.g. aus-files-01";
@@ -114,6 +117,10 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
     private readonly bool? _countDefault;
     private bool _pathFollowsName;
     private bool _settingPath;
+    private bool _nameCanFollow;
+    private bool _nameFollowsSettings;
+    private bool _settingName;
+    private string? _suggestedName;
     private bool _countFollowsPlugin;
     private bool _settingCount;
     private ISourcePlugin? _formPlugin;
@@ -131,6 +138,7 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
         if (existing is null)
         {
             _pathFollowsName = true;
+            _nameCanFollow = _nameFollowsSettings = true;
             _countFollowsPlugin = true;
             SelectedPlugin = PluginChoices.FirstOrDefault();
         }
@@ -143,6 +151,13 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
             if (SelectedPlugin is not null && engine.SourceSettingsFor(existing) is { } settings)
             {
                 Form = BuildForm(SelectedPlugin.Plugin, settings);
+
+                // a name the plugin made from these settings goes on following them; a name of the person's own stays
+                if (SelectedPlugin.Plugin.SuggestName(settings)?.Trim() is { Length: > 0 } derived && derived == existing.Name)
+                {
+                    _nameCanFollow = _nameFollowsSettings = true;
+                    _suggestedName = derived;
+                }
             }
             else if (SelectedPlugin is null)
             {
@@ -152,6 +167,9 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
             if (membership is not null)
             {
                 SetPath(membership.Path);
+
+                // likewise the path in this collection, while it is the default one for the name
+                _pathFollowsName = membership.Path == DefaultPath;
                 ReadOnly = membership.ReadOnly || readOnlyLocked;
             }
         }
@@ -197,9 +215,13 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasForm))]
+    [NotifyPropertyChangedFor(nameof(NameHint))]
     public partial SettingsFormViewModel? Form { get; set; }
 
     public bool HasForm => Form is not null;
+
+    /// <summary>Under the Name box: where the name comes from when the plugin makes it from the setting asked first, else the tip.</summary>
+    public string NameHint => _nameCanFollow && Form?.PrimaryField is { } primary ? $"Filled in from the {primary.Label} until you type a name of your own." : NameTip;
 
     public string DefaultPath => SelectedPlugin is null ? "" : Name.Trim().Length == 0 ? SelectedPlugin.Plugin.TypeFolder : SettingsStore.DefaultSourcePath(SelectedPlugin.Plugin, Name.Trim());
 
@@ -243,6 +265,7 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
         {
             Form = BuildForm(value.Plugin, value.Plugin.CreateDefaultSettings());
             _formPlugin = value.Plugin;
+            SuggestName();
         }
 
         OnPropertyChanged(nameof(DefaultPath));
@@ -289,10 +312,56 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
 
     partial void OnNameChanged(string value)
     {
+        if (!_settingName)
+        {
+            // typed by hand: the plugin's suggestions stop, until the box is emptied again
+            _nameFollowsSettings = _nameCanFollow && (value.Trim().Length == 0 || value == _suggestedName);
+        }
+
         OnPropertyChanged(nameof(DefaultPath));
         if (_pathFollowsName)
         {
             SetPath(DefaultPath);
+        }
+    }
+
+    /// <summary>
+    /// Fills the Name box with the name the plugin makes from the settings as they stand, until a name is typed: for a
+    /// new source, and for one whose name was the plugin's when the edit began. The path follows the name while it is
+    /// the default one. A plugin that suggests nothing leaves the box alone, and a suggestion that lapses (the address
+    /// cleared, another type chosen) empties it again.
+    /// </summary>
+    private void SuggestName()
+    {
+        if (!_nameFollowsSettings || SelectedPlugin is null || Form is null)
+        {
+            return;
+        }
+
+        var suggestion = SelectedPlugin.Plugin.SuggestName(Form.Settings)?.Trim() ?? "";
+        if (suggestion.Length == 0 && _suggestedName is null)
+        {
+            return;
+        }
+
+        _suggestedName = suggestion.Length == 0 ? null : suggestion;
+        _settingName = true;
+        try
+        {
+            Name = suggestion;
+        }
+        finally
+        {
+            _settingName = false;
+        }
+    }
+
+    private void OnFormChanged(object? sender, EventArgs e)
+    {
+        // a form left behind by a change of type can still raise it
+        if (ReferenceEquals(sender, Form))
+        {
+            SuggestName();
         }
     }
 
@@ -319,7 +388,11 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
     }
 
     private SettingsFormViewModel BuildForm(ISourcePlugin plugin, object settings)
-        => new(plugin.SettingsType, settings, plugin as IValidatable, plugin as ITestable, plugin as ISettingTextProvider, _dialogs, plugin as ISettingVisibility);
+    {
+        var form = new SettingsFormViewModel(plugin.SettingsType, settings, plugin as IValidatable, plugin as ITestable, plugin as ISettingTextProvider, _dialogs, plugin as ISettingVisibility, liftPrimary: true);
+        form.Changed += OnFormChanged;
+        return form;
+    }
 }
 
 /// <summary>"Existing source ▸": only the path and read-only are asked (spec 11.1).</summary>

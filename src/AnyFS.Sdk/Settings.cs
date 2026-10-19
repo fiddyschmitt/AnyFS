@@ -44,6 +44,13 @@ public sealed class SettingAttribute(string label) : Attribute
     public string[]? Choices { get; set; }
 
     /// <summary>
+    /// The setting that says what the source is: a server's address, a site's URL. The Add source dialog asks it
+    /// first, above the source's name, which <see cref="ISourcePlugin.SuggestName"/> can then fill in from it. One
+    /// per settings class; the first one marked wins.
+    /// </summary>
+    public bool Primary { get; set; }
+
+    /// <summary>
     /// Shown only on these operating systems, named as <see cref="OperatingSystem.IsOSPlatform(string)"/> takes
     /// them: "windows", "linux", "macos". The JSON keeps the value everywhere, so a settings file travels between
     /// machines; the form just leaves the field out elsewhere (and a plugin's Validate should ignore it there).

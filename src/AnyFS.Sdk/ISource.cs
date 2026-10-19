@@ -37,6 +37,15 @@ public interface ISourcePlugin
     /// default false. Optional: the default is false.
     /// </summary>
     bool IsQuickToCount => false;
+
+    /// <summary>
+    /// A name for a source made from its settings as they stand (the server's name in its address), or null for none
+    /// yet. The Add source dialog keeps the Name box, and with it the default path, filled with it until the person
+    /// types a name of their own; editing a source whose name is still the one this made does the same. It must be a
+    /// valid path segment (no <c>\ / : * ? " &lt; &gt; |</c>, no leading or trailing dot or space). Optional: the
+    /// default suggests nothing.
+    /// </summary>
+    string? SuggestName(object settings) => null;
 }
 
 /// <summary>

@@ -7,7 +7,8 @@
         Title="{Binding Title}"
         Width="720" SizeToContent="Height" MaxHeight="820" CanResize="True"
         WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
-  <!-- spec 11.1: (1) pick the plugin, (2) name, path, read-only, then the plugin's settings form -->
+  <!-- spec 11.1: (1) pick the plugin, (2) the setting that says what the source is (when the plugin marks one), name,
+       path, read-only, then the rest of the plugin's settings form -->
   <DockPanel Margin="16">
     <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
       <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" Margin="0,0,0,8" />
@@ -45,11 +46,13 @@
           <TextBlock Classes="muted" Text="{Binding SelectedPlugin.Description, FallbackValue=''}" TextWrapping="Wrap" />
         </StackPanel>
 
-        <!-- (2) name, path, flags, the form -->
+        <!-- (2) the primary setting (a site's address), name, path, flags, the rest of the form -->
         <StackPanel Grid.Column="2">
+          <ContentControl Name="PrimaryField" Content="{Binding Form.PrimaryField, FallbackValue={x:Null}}" ContentTemplate="{StaticResource FieldTemplates}"
+                          IsVisible="{Binding Form.PrimaryField, Converter={x:Static ObjectConverters.IsNotNull}, FallbackValue=False}" />
           <TextBlock Classes="caption" Text="Name *" />
           <TextBox Name="NameBox" Text="{Binding Name}" />
-          <TextBlock Classes="hint" Text="{x:Static vm:SourceDialogViewModel.NameTip}" />
+          <TextBlock Classes="hint" Text="{Binding NameHint}" />
 
           <StackPanel IsVisible="{Binding AskPath}" Margin="0,10,0,0">
             <TextBlock Classes="caption" Text="Virtual Path" />

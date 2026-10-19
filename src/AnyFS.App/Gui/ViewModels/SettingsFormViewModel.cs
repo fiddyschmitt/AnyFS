@@ -35,7 +35,8 @@ public sealed partial class SettingsFormViewModel : ObservableObject
         ITestable? tester,
         ISettingTextProvider? texts,
         IDialogs dialogs,
-        ISettingVisibility? visibility = null)
+        ISettingVisibility? visibility = null,
+        bool liftPrimary = false)
     {
         Settings = settings;
         _validator = validator;
@@ -47,13 +48,15 @@ public sealed partial class SettingsFormViewModel : ObservableObject
             field.Load(settings);
         }
 
+        PrimaryField = liftPrimary ? Fields.FirstOrDefault(f => f.IsPrimary) : null;
+        var grouped = Fields.Where(f => !ReferenceEquals(f, PrimaryField)).ToList();
         var groups = new List<SettingGroupViewModel>();
-        foreach (var group in Fields.Where(f => !f.IsAdvanced).GroupBy(f => f.Group ?? ""))
+        foreach (var group in grouped.Where(f => !f.IsAdvanced).GroupBy(f => f.Group ?? ""))
         {
             groups.Add(new SettingGroupViewModel(group.Key, isAdvanced: false, group.ToList()));
         }
 
-        var advanced = Fields.Where(f => f.IsAdvanced).ToList();
+        var advanced = grouped.Where(f => f.IsAdvanced).ToList();
         if (advanced.Count > 0)
         {
             groups.Add(new SettingGroupViewModel("Advanced", isAdvanced: true, advanced));
@@ -61,31 +64,50 @@ public sealed partial class SettingsFormViewModel : ObservableObject
 
         Groups = new ObservableCollection<SettingGroupViewModel>(groups);
         TestCommand = new AsyncRelayCommand(TestAsync, () => HasTest && !TestRunning);
+        foreach (var field in Fields)
+        {
+            field.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName is nameof(SettingFieldViewModel.Text) or nameof(SettingFieldViewModel.Checked) or nameof(SettingFieldViewModel.SelectedChoice))
+                {
+                    OnFieldChanged();
+                }
+            };
+        }
+
         if (_visibility is not null)
         {
-            foreach (var field in Fields)
-            {
-                field.PropertyChanged += (_, e) =>
-                {
-                    if (e.PropertyName is nameof(SettingFieldViewModel.Text) or nameof(SettingFieldViewModel.Checked) or nameof(SettingFieldViewModel.SelectedChoice))
-                    {
-                        RefreshVisibility();
-                    }
-                };
-            }
-
+            Preview();
             RefreshVisibility();
         }
     }
 
-    /// <summary>Writes what is on screen into the POCO and asks the plugin which fields apply to it; a group with none left hides.</summary>
-    private void RefreshVisibility()
+    /// <summary>Raised after any field's value changes, with what is on screen already written into <see cref="Settings"/>.</summary>
+    public event EventHandler? Changed;
+
+    /// <summary>Writes what is on screen into the POCO without judging it (<see cref="SettingFieldViewModel.Preview"/>), for the plugin to look at.</summary>
+    public void Preview()
     {
         foreach (var field in Fields)
         {
             field.Preview(Settings);
         }
+    }
 
+    private void OnFieldChanged()
+    {
+        Preview();
+        if (_visibility is not null)
+        {
+            RefreshVisibility();
+        }
+
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Asks the plugin which fields apply to the POCO as it stands; a group with none left hides.</summary>
+    private void RefreshVisibility()
+    {
         foreach (var field in Fields)
         {
             field.IsVisible = _visibility!.IsVisible(Settings, field.PropertyName);
@@ -100,6 +122,13 @@ public sealed partial class SettingsFormViewModel : ObservableObject
     public object Settings { get; }
 
     public IReadOnlyList<SettingFieldViewModel> Fields { get; }
+
+    /// <summary>
+    /// The setting the plugin marks <see cref="SettingAttribute.Primary"/>, when the dialog asks it above everything
+    /// else (the Add source dialog puts it above the name); it is then left out of <see cref="Groups"/>. Null when the
+    /// form was not asked to lift it or the plugin marks none.
+    /// </summary>
+    public SettingFieldViewModel? PrimaryField { get; }
 
     public ObservableCollection<SettingGroupViewModel> Groups { get; }
 
@@ -285,6 +314,9 @@ public sealed partial class SettingFieldViewModel : ObservableObject
 
     public bool IsAdvanced => _property.Attribute.Advanced;
 
+    /// <summary>The setting that says what the source is (<see cref="SettingAttribute.Primary"/>).</summary>
+    public bool IsPrimary => _property.Attribute.Primary;
+
     public SettingKind Kind { get; }
 
     /// <summary>Which template the form uses: Text, Multiline, Password, Number, Bool, Choice or Path.</summary>
@@ -355,7 +387,8 @@ public sealed partial class SettingFieldViewModel : ObservableObject
 
     /// <summary>
     /// Writes what is on screen into the POCO without judging it (an empty required box is written empty, a number
-    /// only once it parses), so a plugin's <see cref="ISettingVisibility"/> sees the form as it stands.
+    /// only once it parses), so the plugin sees the form as it stands: its <see cref="ISettingVisibility"/>, the name
+    /// it suggests.
     /// </summary>
     public void Preview(object settings)
     {

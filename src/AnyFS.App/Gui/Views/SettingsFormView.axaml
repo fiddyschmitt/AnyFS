@@ -4,69 +4,7 @@
              xmlns:views="using:AnyFS.App.Gui.Views"
              x:Class="AnyFS.App.Gui.Views.SettingsFormView"
              x:DataType="vm:SettingsFormViewModel">
-  <!-- The form generated from [Setting] attributes (spec 6.7): one template per kind, picked by FieldTemplateSelector -->
-  <UserControl.Resources>
-    <views:FieldTemplateSelector x:Key="FieldTemplates">
-      <DataTemplate x:Key="Text" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
-          <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
-          <TextBox Text="{Binding Text}" PlaceholderText="{Binding Placeholder}" />
-          <views:FieldFooter />
-        </StackPanel>
-      </DataTemplate>
-      <DataTemplate x:Key="Multiline" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
-          <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
-          <TextBox Text="{Binding Text}" PlaceholderText="{Binding Placeholder}" AcceptsReturn="True" TextWrapping="NoWrap" MinHeight="96" MaxHeight="220" FontFamily="Cascadia Mono,Consolas,Menlo,DejaVu Sans Mono,monospace" />
-          <views:FieldFooter />
-        </StackPanel>
-      </DataTemplate>
-      <DataTemplate x:Key="Password" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
-          <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
-          <TextBox Text="{Binding Text}" PlaceholderText="{Binding Placeholder}" PasswordChar="●" RevealPassword="{Binding Reveal}">
-            <TextBox.InnerRightContent>
-              <ToggleButton IsChecked="{Binding Reveal}" Background="Transparent" BorderThickness="0" Padding="6" ToolTip.Tip="Show">
-                <PathIcon Classes="small" Data="{StaticResource IconEye}" />
-              </ToggleButton>
-            </TextBox.InnerRightContent>
-          </TextBox>
-          <views:FieldFooter />
-        </StackPanel>
-      </DataTemplate>
-      <DataTemplate x:Key="Number" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
-          <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
-          <TextBox Text="{Binding Text}" PlaceholderText="{Binding Placeholder}" MaxWidth="200" HorizontalAlignment="Left" MinWidth="120" />
-          <views:FieldFooter />
-        </StackPanel>
-      </DataTemplate>
-      <DataTemplate x:Key="Bool" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
-          <CheckBox IsChecked="{Binding Checked}" Content="{Binding Label}" />
-          <views:FieldFooter />
-        </StackPanel>
-      </DataTemplate>
-      <DataTemplate x:Key="Choice" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
-          <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
-          <ComboBox ItemsSource="{Binding Choices}" SelectedItem="{Binding SelectedChoice}" MinWidth="220" HorizontalAlignment="Left" />
-          <views:FieldFooter />
-        </StackPanel>
-      </DataTemplate>
-      <DataTemplate x:Key="Path" x:DataType="vm:SettingFieldViewModel">
-        <StackPanel Margin="0,0,0,10" IsVisible="{Binding IsVisible}">
-          <TextBlock Classes="caption" Text="{Binding LabelWithMark}" />
-          <Grid ColumnDefinitions="*,Auto">
-            <TextBox Text="{Binding Text}" PlaceholderText="{Binding Placeholder}" />
-            <Button Grid.Column="1" Content="Browse..." Command="{Binding BrowseCommand}" Margin="6,0,0,0" />
-          </Grid>
-          <views:FieldFooter />
-        </StackPanel>
-      </DataTemplate>
-    </views:FieldTemplateSelector>
-  </UserControl.Resources>
-
+  <!-- The form generated from [Setting] attributes (spec 6.7): one template per kind, picked by the FieldTemplates in FieldTemplates.axaml -->
   <StackPanel>
     <ItemsControl ItemsSource="{Binding Groups}">
       <ItemsControl.ItemTemplate>

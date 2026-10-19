@@ -1,6 +1,7 @@
 using AnyFS.App.Gui.ViewModels;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.VisualTree;
 
 namespace AnyFS.App.Gui.Views;
 
@@ -10,7 +11,9 @@ public partial class SourceDialog : Window
     {
         InitializeComponent();
         DataContext = viewModel;
-        Opened += (_, _) => NameBox.Focus();
+
+        // the setting asked first, when the plugin marks one (the name is made from it), else the name
+        Opened += (_, _) => (PrimaryField.IsVisible && PrimaryField.GetVisualDescendants().OfType<TextBox>().FirstOrDefault() is { } box ? box : NameBox).Focus();
     }
 
     private async void Ok_Click(object? sender, RoutedEventArgs e)

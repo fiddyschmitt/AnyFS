@@ -104,7 +104,7 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
 ## Settings
 
 A plain POCO with public get/set properties. `[Setting]` gives the label and, optionally,
-`Hint`, `Placeholder`, `Required`, `Kind`, `Group`, `Advanced`, `Order`, `Choices` and `Platforms`. With
+`Hint`, `Placeholder`, `Required`, `Kind`, `Group`, `Advanced`, `Order`, `Choices`, `Platforms` and `Primary`. With
 `Kind = Auto` (the default) the form follows the property type: `bool` is a checkbox, `int`,
 `long`, `double`, `float` and `decimal` are number boxes (nullable ones may be left empty), an
 enum or a property with `Choices` is a drop-down, a `Secret` string is a masked password box,
@@ -128,6 +128,15 @@ each property, hiding those you answer false for, and a group whose fields are a
 field keeps its value in the JSON, and a parse error in it doesn't hold up the save, so your
 `Validate` should ignore what it hides; a message it still returns for a hidden field is shown at
 the top of the form.
+
+Mark the one setting that says what the source is (a server's address, a site's URL) with
+`Primary = true`: the Add source dialog asks it first, above the source's name. Then implement
+`SuggestName(settings)` on the plugin (an `ISourcePlugin` member that returns null unless you
+override it) to make a name from the settings as they stand, such as the server's name from its
+address; the dialog keeps the Name box, and with it the default path, filled with it until the
+person types a name of their own, and does the same when a source whose name is still yours is
+edited later. Return something that is valid as a path segment (no
+`\ / : * ? " < > |`, no leading or trailing dot or space), or null while there is nothing to go on.
 
 ## Prompts
 
