@@ -35,7 +35,12 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   RemoteDebuggingAllowed or UserDataDir policy, or no port opening), the sign-in goes through
   Selenium WebDriver instead, as Mount3DX's does: the default browser first, then Firefox, Chrome and
   Edge, each with a profile of AnyFS's own; a *Windows account* (NTLM or Kerberos; a user name and password, or the
-  current logon on Windows) for SharePoint Server through the REST API. The REST store uploads in
+  current logon on Windows, which *Windows account, as yourself* names outright and asks nothing for: a smartcard
+  or Windows Hello sign-in passes through) for SharePoint Server through the REST API. A refused sign-in says what
+  the server asks for (Negotiate, NTLM, a sign-in in a browser) or where it sends the request, and which Windows
+  account AnyFS tried; a site that takes the sign-in but refuses the account (SharePoint's "Access denied", a 401 for
+  a Windows sign-in) says so instead, as whom, and at the server's root that everything shown there is listed
+  through the root site, so a site the account may open is the address to give. The REST store uploads in
   chunks through `StartUpload`/`ContinueUpload`/`FinishUpload` and sets times through a
   client-object-model request (`UpdateOverwriteVersion`), which SharePoint honours for site
   collection administrators.
