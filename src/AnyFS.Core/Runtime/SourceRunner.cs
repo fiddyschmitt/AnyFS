@@ -256,7 +256,7 @@ public sealed class SourceRunner : IAsyncDisposable
 
     /// <summary>
     /// The opt-in "Count files on start" walk (spec 6.8), with the spinner on: the source's own
-    /// <see cref="ICountable.CountFilesAsync"/> when it has one, else a directory-by-directory walk with no pause between folders.
+    /// <see cref="ICountable.CountFilesAsync"/> when it has one, else the host's walk, several folders listed at a time.
     /// </summary>
     private async Task CountAsync(ISource source, CancellationToken ct)
     {
@@ -295,39 +295,17 @@ public sealed class SourceRunner : IAsyncDisposable
         source.Counters.SetState(EnumerationState.Complete);
     }
 
+    /// <summary>
+    /// The host's walk for a source that does not count itself: <see cref="TreeCount.DefaultParallelism"/> folders listed at
+    /// a time, since a remote source spends most of a walk waiting for each listing (SharePoint's was slow one folder at a
+    /// time, 19-Oct-2026).
+    /// </summary>
     private async Task WalkAsync(ISource source, CancellationToken ct)
     {
-        long files = 0, directories = 0;
-        var queue = new Queue<string>();
-        queue.Enqueue("");
-        while (queue.Count > 0)
-        {
-            ct.ThrowIfCancellationRequested();
-            var dir = queue.Dequeue();
-            try
-            {
-                await foreach (var entry in source.ListAsync(dir, ct).ConfigureAwait(false))
-                {
-                    if (entry.IsDirectory)
-                    {
-                        directories++;
-                        queue.Enqueue(VfsPath.Join(dir, entry.Name));
-                    }
-                    else
-                    {
-                        files++;
-                    }
-                }
-            }
-            catch (VfsException ex)
-            {
-                _logger.LogDebug("source {Source}: count skipped '{Dir}': {Error}", Definition.Name, dir, ex.Message);
-            }
-
-            source.Counters.Set(files, directories, EnumerationState.InProgress);
-        }
-
-        source.Counters.Set(files, directories, EnumerationState.Complete);
+        source.Counters.Set(0, 0, EnumerationState.InProgress);
+        await TreeCount.CountAsync(source, source.Counters, TreeCount.DefaultParallelism,
+            (dir, ex) => _logger.LogDebug("source {Source}: count skipped '{Dir}': {Error}", Definition.Name, dir, ex.Message), ct).ConfigureAwait(false);
+        source.Counters.SetState(EnumerationState.Complete);
     }
 
     private async Task DisposeCurrentAsync()
