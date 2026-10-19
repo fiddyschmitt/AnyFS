@@ -188,7 +188,7 @@ internal sealed partial class SharePointRestClient : IDisposable
         var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            throw MapError(response.StatusCode, body, pathForErrors);
+            throw MapError(response.StatusCode, body, pathForErrors, Challenge(response));
         }
 
         JsonElement first;
@@ -254,8 +254,9 @@ internal sealed partial class SharePointRestClient : IDisposable
 
         var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         var status = response.StatusCode;
+        var challenge = Challenge(response);
         response.Dispose();
-        throw MapError(status, body, pathForErrors);
+        throw MapError(status, body, pathForErrors, challenge);
     }
 
     // --- errors ----------------------------------------------------------------------------------------------
@@ -290,11 +291,40 @@ internal sealed partial class SharePointRestClient : IDisposable
         return ("", HtmlTitle().Match(body) is { Success: true } title ? title.Groups[1].Value.Trim() : "");
     }
 
-    public static VfsException MapError(HttpStatusCode status, string body, string path)
+    /// <summary>
+    /// What a refusal asks for, for its message: on a 401 the schemes the server offers (Negotiate, NTLM, Bearer), or a
+    /// sign-in in a browser where SharePoint says forms or a federated sign-in is required; on a redirect, where it
+    /// sends the request (a sign-in page). Null for anything else.
+    /// </summary>
+    public static string? Challenge(HttpResponseMessage response)
+    {
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
+        {
+            if (response.Headers.Contains("X-Forms_Based_Auth_Required"))
+            {
+                return "a sign-in in a browser (forms, or a federated sign-in such as ADFS)";
+            }
+
+            var schemes = response.Headers.WwwAuthenticate.Select(h => h.Scheme).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            return schemes.Count == 0 ? "no sign-in it names" : string.Join(", ", schemes);
+        }
+
+        return (int)response.StatusCode is >= 300 and < 400 && response.Headers.Location is { } location
+            ? (location.IsAbsoluteUri ? location.GetLeftPart(UriPartial.Path) : location.OriginalString)
+            : null;
+    }
+
+    public static VfsException MapError(HttpStatusCode status, string body, string path, string? challenge = null)
     {
         var (code, message) = ErrorDetails(body);
         var hresult = code.Split(',')[0].Trim();
         var text = message.Length > 0 ? message : code;
+        if ((int)status is >= 300 and < 400 && challenge is not null)
+        {
+            // an unauthenticated request bounced to a sign-in page (a federated sign-in, forms): Windows credentials do not reach it
+            return new VfsException(VfsError.AccessDenied, $"'{path}': SharePoint sent the request to {challenge} ({(int)status}) instead of answering: it wants a sign-in there");
+        }
+
         if (code.Contains("InvalidClientQueryException", StringComparison.Ordinal))
         {
             // a request this server does not understand (a parameter a newer SharePoint has): ours to fix, not a missing file
@@ -324,7 +354,7 @@ internal sealed partial class SharePointRestClient : IDisposable
         return status switch
         {
             HttpStatusCode.NotFound => VfsException.NotFound(path),
-            HttpStatusCode.Unauthorized => new VfsException(VfsError.AccessDenied, $"'{path}': SharePoint refused the sign-in (401){(text.Length > 0 ? ": " + text : "")}"),
+            HttpStatusCode.Unauthorized => new VfsException(VfsError.AccessDenied, $"'{path}': SharePoint refused the sign-in (401{(challenge is null ? "" : $"; it asks for {challenge}")}){(text.Length > 0 ? ": " + text : "")}"),
             HttpStatusCode.Forbidden => new VfsException(VfsError.AccessDenied, $"access to '{path}' was denied{(text.Length > 0 ? ": " + text : "")}"),
             HttpStatusCode.Locked => new VfsException(VfsError.AccessDenied, $"'{path}' is locked{(text.Length > 0 ? ": " + text : "")}"),
             HttpStatusCode.Conflict => VfsException.AlreadyExists(path),
@@ -344,7 +374,7 @@ internal sealed partial class SharePointRestClient : IDisposable
         var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            throw MapError(response.StatusCode, body, pathForErrors);
+            throw MapError(response.StatusCode, body, pathForErrors, Challenge(response));
         }
 
         return body.Length == 0 ? JsonDocument.Parse("{}") : JsonDocument.Parse(body);

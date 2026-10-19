@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using AnyFS.Sdk;
@@ -51,6 +52,31 @@ public class SharePointRestClientTests
         Assert.AreEqual(VfsError.Unavailable, SharePointRestClient.MapError(HttpStatusCode.ServiceUnavailable, "", "p").Error);
         Assert.AreEqual(VfsError.Unavailable, SharePointRestClient.MapError(HttpStatusCode.InternalServerError, "", "p").Error);
         Assert.AreEqual(VfsError.IoError, SharePointRestClient.MapError(HttpStatusCode.InternalServerError, Body("-1, Microsoft.SharePoint.SPException", "Something else went wrong."), "p").Error);
+    }
+
+    [TestMethod]
+    public void ARefusalSaysWhatTheServerAsksFor()
+    {
+        using var windows = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+        windows.Headers.WwwAuthenticate.Add(new AuthenticationHeaderValue("Negotiate"));
+        windows.Headers.WwwAuthenticate.Add(new AuthenticationHeaderValue("NTLM"));
+        Assert.AreEqual("Negotiate, NTLM", SharePointRestClient.Challenge(windows));
+        StringAssert.Contains(SharePointRestClient.MapError(HttpStatusCode.Unauthorized, "", "p", "Negotiate, NTLM").Message, "(401; it asks for Negotiate, NTLM)");
+
+        using var forms = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+        forms.Headers.TryAddWithoutValidation("X-Forms_Based_Auth_Required", "https://sp.contoso.local/_login/default.aspx");
+        StringAssert.Contains(SharePointRestClient.Challenge(forms)!, "browser");
+
+        using var bounced = new HttpResponseMessage(HttpStatusCode.Found);
+        bounced.Headers.Location = new Uri("https://adfs.contoso.local/adfs/ls/?wa=wsignin1.0");
+        var challenge = SharePointRestClient.Challenge(bounced);
+        Assert.AreEqual("https://adfs.contoso.local/adfs/ls/", challenge, "where, without the query");
+        var ex = SharePointRestClient.MapError(HttpStatusCode.Found, "", "p", challenge);
+        Assert.AreEqual(VfsError.AccessDenied, ex.Error);
+        StringAssert.Contains(ex.Message, "adfs.contoso.local");
+
+        using var ok = new HttpResponseMessage(HttpStatusCode.OK);
+        Assert.IsNull(SharePointRestClient.Challenge(ok));
     }
 
     [TestMethod]
