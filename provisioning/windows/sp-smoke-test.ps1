@@ -44,7 +44,8 @@ function Wait-Running([string]$name, [int]$seconds = 150) {
     } while ((Get-Date) -lt $deadline)
     return $service
 }
-$sql = Wait-Running MSSQLSERVER
+# SQL Server longer: on a cold boot beside other VMs it took more than 150 s, twice (20-Oct-2026)
+$sql = Wait-Running MSSQLSERVER 300
 $borrowed = if (Test-Path 'C:\anyfs-lab\sp-smoke.json') { (Get-Content 'C:\anyfs-lab\sp-smoke.json' -Raw | ConvertFrom-Json).sql_server } else { $null }
 if ($sql) { Check 'SQL Server running' { $sql.Status -eq 'Running' } }
 elseif ($borrowed) { Check "SQL Server on $borrowed answers on 1433" { (Test-NetConnection -ComputerName $borrowed -Port 1433 -WarningAction SilentlyContinue).TcpTestSucceeded } }
