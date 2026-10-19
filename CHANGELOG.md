@@ -62,6 +62,13 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   "contoso.sharepoint.com Team" for `https://contoso.sharepoint.com/sites/Team`, and the host alone
   for a root site); editing a source whose name is still the derived one keeps it in step, and on
   edit the path follows the name while it is the default one for the name.
+- **WinFsp 2026 Beta 5** (2.2.26286) is the bundled driver, with `winfsp.net` 2.2.26286 (the
+  prefix-only mount's reflection finds the same internals, byte for byte). Its network provider
+  accepts a connection to a share no launcher manages (WinFsp commit f021496), which 2.1's refused:
+  on a PC with nothing else answering for the share (Dokan's network provider does), Explorer could
+  not open `\\anyfs\<collection>` itself and programs that look a path up through the shell (Paint,
+  Open dialogs) could not open files below it. Checked in the lab's Windows VM, 2.1 then the beta. A
+  2.1 install now shows **Upgrade WinFsp driver** on the tile.
 - **SMB**: the VFS endpoint keeps read handles between `/read` requests (`ReadHandles`); the bundled
   server gets a minute to start, not 15 s (its first launch on a freshly booted Windows machine).
 - **FUSE**: per-handle read-ahead through `SequentialReadAhead` (the kernel's 128 KiB reads cost a

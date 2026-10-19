@@ -48,17 +48,24 @@ Nothing outlives the handle. On the development PC that takes 4 KB reads from ab
 the source's own speed; a program that reads 64 KB or more at a time was already there.
 
 The WinFsp driver is a separate install with no reboot. Without it the tile is red ("The WinFsp
-driver is not installed.") and shows **Install WinFsp driver**: the WinFsp 2.1.25156 installer
-that Windows builds of anyfs carry runs silently (`msiexec /i winfsp.msi /qn /norestart`, so the
+driver is not installed.") and shows **Install WinFsp driver**: the WinFsp 2026 Beta 5 (2.2.26286)
+installer that Windows builds of anyfs carry runs silently (`msiexec /i winfsp.msi /qn /norestart`, so the
 only thing you see is the administrator prompt), and the mount starts once it is in; the Add mount
 dialog offers the same. A build without the installer inside it falls back to
 `winget install WinFsp.WinFsp`. WinFsp is GPLv3 with a FLOSS exception; the installer is conveyed
 unmodified and its source is at <https://github.com/winfsp/winfsp>.
 
+AnyFS takes the 2026 beta for its network provider: WinFsp 2.1's refuses a connection to a share
+that WinFsp's launcher does not manage, as anyfs's are, so on a PC with nothing else answering for
+it (Dokan's network provider does, which hides this) Explorer could not open `\\anyfs\<collection>`
+itself and programs that look a path up through the shell (Paint, a program's Open dialog) could
+not open files below it. With 2.2 both work. The final WinFsp 2026 release replaces the beta when
+it comes out.
+
 The driver and the .NET layer anyfs links (the `winfsp.net` package) must agree: WinFsp refuses a
-driver of another major version or an older minor ("incorrect dll version (need 2.1, have 2.0)"),
-while a newer 2.x driver is fine. An older driver shows that on the tile with **Upgrade WinFsp
-driver**, which runs the same silent install; the build itself fails if the package and the bundled
+driver of another major version or an older minor ("incorrect dll version (need 2.2, have 2.1)"),
+while a newer 2.x driver is fine. An older driver, 2.1 among them, shows that on the tile with
+**Upgrade WinFsp driver**, which runs the same silent install; the build itself fails if the package and the bundled
 installer drift apart. The published single-file exe keeps the .NET layer out of its bundle (the
 layer reads its version from its own file, and a bundled assembly has none) and writes a copy
 under `%LOCALAPPDATA%\AnyFS\winfsp` the first time a WinFsp mount starts: one per version, and
