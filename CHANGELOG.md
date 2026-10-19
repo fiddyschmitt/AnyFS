@@ -22,6 +22,23 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   Graph's site search with the app sign-in) at the start and again at most every five minutes,
   each named as its address ends ("Ops (teams)" beside "Ops (sites)") and holding its own libraries
   and `Subsites`; a search that fails (a farm without a search service) leaves the folder out.
+- **Several sites in one source**: the Site URLs setting takes one address per line. Each site is
+  then a top-level folder, named as its address ends (a root site by its host; the rest of its path,
+  or its server, in brackets where two would share a name), with its libraries, `Subsites` and, for a
+  root site, `Sites`; a library is pinned only with one site. The sites share the one sign-in: a
+  Windows account reaches sites on several servers, the web session one server, an app sign-in one
+  Microsoft cloud. The source starts when every site answers, and the Test button gives a line per
+  site. The suggested name is the server they share (`acme.sharepoint.us`), none when they share
+  none. An address deeper than a site now finds its site: a subsite under `/sites/x` is kept, and a
+  page, view, list or well-known library after the site is cut; since SharePoint answers a library's
+  or a folder's address with 404, connecting steps back a name at a time to the site that answers.
+- **A site's pages** (the Site Pages library) show in a `Site Pages` folder as Markdown, read-only:
+  `Page.aspx` is `Page.md`, the page's title as a heading and its body from the HTML SharePoint keeps
+  it in (`CanvasContent1` for a modern page, `WikiField` for a wiki page), web parts by the text
+  SharePoint renders of them for search, addresses made absolute. Over REST the folder's listing
+  carries every page's content in one request; over Graph, which keeps Site Pages out of a site's
+  drives, its drive is found through the site's lists. Converted with ReverseMarkdown (MIT) over
+  AngleSharp (MIT): MarkItDown's .NET ports carry cloud SDKs and image libraries for other formats.
 - **Sign in with** (Automatic by default; a sign-in that cannot serve the address, such as a Windows
   password for Microsoft 365, is caught in the settings): an *app sign-in*, browser or device code,
   with the shipped app registration or the organisation's own (MSAL, the cache in the source's
@@ -68,9 +85,10 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   form asks it after every change and hides what it rules out; Test now waits up to ten minutes,
   for a sign-in in a browser window); `SettingAttribute.Primary` and `ISourcePlugin.SuggestName`:
   the Add source dialog asks the setting that says what the source is first, above the name, and
-  fills the name (and so the path) from it until the person types one (SharePoint's Site URL gives
+  fills the name (and so the path) from it until the person types one (SharePoint's Site URLs give
   "contoso.sharepoint.com Team" for `https://contoso.sharepoint.com/sites/Team`, and the host alone
-  for a root site); editing a source whose name is still the derived one keeps it in step, and on
+  for a root site or for several sites on one server); editing a source whose name is still the
+  derived one keeps it in step, and on
   edit the path follows the name while it is the default one for the name.
 - **WinFsp 2026 Beta 5** (2.2.26286) is the bundled driver, with `winfsp.net` 2.2.26286 (the
   prefix-only mount's reflection finds the same internals, byte for byte). Its network provider
@@ -89,6 +107,8 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
 - **Publishing**: `System.Net.Security.UseManagedNtlm` on, for NTLM from Linux without the
   gss-ntlmssp plugin (on in macOS builds too, untested there so far). Selenium Manager rides in the
   single-file build as a native file (3.7 MB on Windows), for the web session's WebDriver fallback.
+  ReverseMarkdown and AngleSharp add 1.4 MB; the trimmer keeps ReverseMarkdown whole, since it finds
+  its tag converters by reflection.
 
 ## 0.1.1 (2026-10-17)
 

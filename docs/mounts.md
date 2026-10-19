@@ -23,9 +23,12 @@ share one server, each collection at its own name.
 
 One WinFsp *network* file system per collection with the prefix `\anyfs\<collection>`: WinFsp's
 network provider resolves `\\anyfs\<collection>\...` in Explorer, cmd and every program, with no
-DNS and no drive letter. `\\anyfs` itself is not browsable (error 53); the tile's Open button is
-the way in, or type the path. A drive letter is an opt-in setting (Advanced) for programs that
-cannot take UNC paths; when one is set, Open opens the letter.
+DNS and no drive letter. `\\anyfs` itself is not browsable (error 53): WinFsp's network provider
+lists its shares only as connected resources and answers no browse of a server (it takes no
+`RESOURCE_GLOBALNET` enumeration and claims no server name), so listing `\\anyfs` would take a
+network provider of AnyFS's own. The tile's Open button is the way in, or type the path. A drive
+letter is an opt-in setting (Advanced) for programs that cannot take UNC paths; when one is set,
+Open opens the letter.
 
 The first **Open containing folder** after a start takes a few seconds (about five on the
 development PC, and two to three for the first `\\anyfs\...` from any other new program); after
