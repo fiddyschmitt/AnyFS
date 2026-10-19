@@ -1,6 +1,5 @@
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
-using System.Threading.Channels;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 using Renci.SshNet;
@@ -290,68 +289,41 @@ public sealed class SshfsSource : SourceBase, ICountable
     }
 
     /// <summary>
-    /// "Count files on start": folders are listed several at a time (four per connection, so 16 with the default
-    /// pool; SFTP multiplexes them), with <see cref="SourceBase.Counters"/> updated per folder. Symbolic links are
-    /// counted as entries but not followed (a link to a parent would never end); a folder that can't be listed
-    /// contributes nothing.
+    /// "Count files on start": the SDK's <see cref="TreeCount"/> over SFTP listings, four per connection at a time (so 16
+    /// with the default pool; SFTP multiplexes them). Symbolic links are counted as entries but not followed (a link to a
+    /// parent would never end); a folder that can't be listed contributes nothing.
     /// </summary>
     public async Task CountFilesAsync(CancellationToken ct)
     {
         Counters.Set(0, 0, EnumerationState.InProgress);
-        var parallel = Math.Clamp(_settings.Connections * 4, 4, 32);
-        var pending = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = false, SingleWriter = false });
-        var outstanding = 1;
-        pending.Writer.TryWrite("");
-
-        async Task WorkerAsync()
-        {
-            await foreach (var dir in pending.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+        await TreeCount.CountAsync(
+            (dir, token) => RunAsync(dir, async client =>
             {
-                try
+                long files = 0;
+                var folders = new List<string>();
+                await foreach (var item in client.ListDirectoryAsync(Remote(dir), token).ConfigureAwait(false))
                 {
-                    var (files, folders) = await RunAsync(dir, async client =>
+                    if (item.Name is "." or "..")
                     {
-                        long files = 0, folders = 0;
-                        var remote = Remote(dir);
-                        await foreach (var item in client.ListDirectoryAsync(remote, ct).ConfigureAwait(false))
-                        {
-                            if (item.Name is "." or "..")
-                            {
-                                continue;
-                            }
+                        continue;
+                    }
 
-                            if (item.IsDirectory && !item.IsSymbolicLink)
-                            {
-                                folders++;
-                                Interlocked.Increment(ref outstanding);
-                                pending.Writer.TryWrite(VfsPath.Join(dir, item.Name));
-                            }
-                            else
-                            {
-                                files++;
-                            }
-                        }
-
-                        return (files, folders);
-                    }, ct).ConfigureAwait(false);
-                    Counters.Add(files, folders);
-                }
-                catch (VfsException ex)
-                {
-                    Logger.LogDebug("sshfs: count skipped '{Dir}': {Error}", dir, ex.Message);
-                }
-                finally
-                {
-                    if (Interlocked.Decrement(ref outstanding) == 0)
+                    if (item.IsDirectory && !item.IsSymbolicLink)
                     {
-                        pending.Writer.TryComplete();
+                        folders.Add(item.Name);
+                    }
+                    else
+                    {
+                        files++;
                     }
                 }
-            }
-        }
 
-        var workers = Enumerable.Range(0, parallel).Select(_ => Task.Run(WorkerAsync, ct)).ToList();
-        await Task.WhenAll(workers).ConfigureAwait(false);
+                return (files, (IReadOnlyList<string>)folders);
+            }, token),
+            Counters,
+            Math.Clamp(_settings.Connections * 4, 4, 32),
+            (dir, ex) => Logger.LogDebug("sshfs: count skipped '{Dir}': {Error}", dir, ex.Message),
+            ct).ConfigureAwait(false);
     }
 
     public override async Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct)
