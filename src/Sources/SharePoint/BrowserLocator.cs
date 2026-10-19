@@ -1,4 +1,6 @@
 using System.Runtime.Versioning;
+using System.Text.Json;
+using Microsoft.Win32;
 
 namespace AnyFS.Sources.SharePoint;
 
@@ -40,6 +42,75 @@ internal static class BrowserLocator
         }
 
         return FindOnPath("microsoft-edge", "microsoft-edge-stable", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser");
+    }
+
+    /// <summary>
+    /// Where the browser's policy turns remote debugging off (RemoteDebuggingAllowed = false), which the web session reads
+    /// the sign-in through, or null: the machine-wide and per-user policy keys on Windows, the managed policy files on
+    /// Linux. A policy that is not on disk (pushed from the cloud, or macOS's managed preferences) shows only when the
+    /// browser starts without a DevTools port.
+    /// </summary>
+    public static string? RemoteDebuggingOff(string browserPath)
+    {
+        var (vendor, linuxPolicies) = DisplayName(browserPath) switch
+        {
+            "Microsoft Edge" => (@"Microsoft\Edge", "/etc/opt/edge/policies/managed"),
+            "Google Chrome" => (@"Google\Chrome", "/etc/opt/chrome/policies/managed"),
+            "Chromium" => ("Chromium", "/etc/chromium/policies/managed"),
+            _ => ("", ""),
+        };
+        if (vendor.Length == 0)
+        {
+            return null;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return RegistryPolicyOff(vendor);
+        }
+
+        return OperatingSystem.IsLinux() ? PolicyFilesOff(linuxPolicies) : null;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string? RegistryPolicyOff(string vendor)
+    {
+        foreach (var (hive, name) in new[] { (Registry.LocalMachine, "HKLM"), (Registry.CurrentUser, "HKCU") })
+        {
+            using var policies = hive.OpenSubKey($@"SOFTWARE\Policies\{vendor}");
+            if (policies?.GetValue("RemoteDebuggingAllowed") is int allowed && allowed == 0)
+            {
+                return $@"{name}\SOFTWARE\Policies\{vendor}\RemoteDebuggingAllowed is 0";
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The first managed policy file in <paramref name="dir"/> that sets RemoteDebuggingAllowed to false, or null.</summary>
+    internal static string? PolicyFilesOff(string dir)
+    {
+        if (!Directory.Exists(dir))
+        {
+            return null;
+        }
+
+        foreach (var file in Directory.EnumerateFiles(dir, "*.json").Order(StringComparer.Ordinal))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(file));
+                if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("RemoteDebuggingAllowed", out var allowed) && allowed.ValueKind == JsonValueKind.False)
+                {
+                    return file;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            {
+            }
+        }
+
+        return null;
     }
 
     /// <summary>A short name for the browser found, for messages ("Microsoft Edge", "Google Chrome").</summary>
