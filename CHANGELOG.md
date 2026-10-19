@@ -11,7 +11,12 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   type's id is SharePoint Embedded's containers (each a drive, one pinned by name or by id), and any
   other address is SharePoint Server on the person's own network, by name or by address. Every kind
   shares one file-system half: ranged reads with spooling below a threshold, write-on-close uploads,
-  renames, times, quota, SharePoint's name rules checked before any request.
+  renames, times, quota, SharePoint's name rules checked before any request. A site's subsites are
+  in a `Subsites` folder beside its libraries (there when it has any; "Subsites (2)" where a library
+  has that title), each named by the last part of its address and holding its own libraries and
+  `Subsites`, listed when first opened; over the REST API a subsite's calls go to its own `_api`
+  (subsites the account may open, `getsubwebsfilteredforcurrentuser`), over Graph to
+  `sites/{id}/sites`; the Test button names them.
 - **Sign in with** (Automatic by default; a sign-in that cannot serve the address, such as a Windows
   password for Microsoft 365, is caught in the settings): an *app sign-in*, browser or device code,
   with the shipped app registration or the organisation's own (MSAL, the cache in the source's
@@ -54,9 +59,9 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   for a sign-in in a browser window); `SettingAttribute.Primary` and `ISourcePlugin.SuggestName`:
   the Add source dialog asks the setting that says what the source is first, above the name, and
   fills the name (and so the path) from it until the person types one (SharePoint's Site URL gives
-  "contoso Team" for `https://contoso.sharepoint.com/sites/Team`); editing a source whose name is
-  still the derived one keeps it in step, and on edit the path follows the name while it is the
-  default one for the name.
+  "contoso.sharepoint.com Team" for `https://contoso.sharepoint.com/sites/Team`, and the host alone
+  for a root site); editing a source whose name is still the derived one keeps it in step, and on
+  edit the path follows the name while it is the default one for the name.
 - **SMB**: the VFS endpoint keeps read handles between `/read` requests (`ReadHandles`); the bundled
   server gets a minute to start, not 15 s (its first launch on a freshly booted Windows machine).
 - **FUSE**: per-handle read-ahead through `SequentialReadAhead` (the kernel's 128 KiB reads cost a
