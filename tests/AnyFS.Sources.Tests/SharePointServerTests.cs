@@ -184,6 +184,74 @@ internal static class SpsTestServer
         TrustAnyCertificate = true,
     };
 
+    /// <summary>The subsite of the test site that the subsite tests work in (a team site with its Documents library).</summary>
+    public const string Subsite = "anyfs-subsite";
+
+    /// <summary>
+    /// Makes <see cref="Subsite"/> through the REST API when the site has none by that name yet, as the fixture folders
+    /// are made: Graph cannot make a subsite, so on SharePoint Online this suite's web-session run makes it for both.
+    /// </summary>
+    public static async Task EnsureSubsiteAsync(SharePointSiteSource source)
+    {
+        var store = (RestDocumentStore)source.Store;
+        if ((await store.ListSubsitesAsync(null, CancellationToken.None)).Any(w => string.Equals(w.Name, Subsite, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        var body = "{\"parameters\":{\"Url\":\"" + Subsite + "\",\"Title\":\"AnyFS subsite\",\"Description\":\"For AnyFS's live tests\",\"Language\":1033,\"WebTemplate\":\"STS#3\",\"UseUniquePermissions\":false}}";
+        try
+        {
+            using var _ = await store.Rest.PostJsonAsync("web/webinfos/add", body, Subsite, CancellationToken.None);
+        }
+        catch (VfsException ex) when (ex.Message.Contains("subsites are not available", StringComparison.OrdinalIgnoreCase))
+        {
+            // a tenant made since 2024 or so refuses new subsites unless its administrator allows them (the sandbox does)
+            Assert.Inconclusive($"SharePoint will not make the test subsite here: {ex.Message}");
+        }
+    }
+
+    /// <summary>Whether the site's Subsites folder holds <see cref="Subsite"/>.</summary>
+    public static async Task<bool> HasSubsiteAsync(ISource source)
+        => (await NamesAsync(source, "")).Contains(SharePointSource.SubsitesFolder) && (await NamesAsync(source, SharePointSource.SubsitesFolder)).Contains(Subsite);
+
+    /// <summary>The subsite in the Subsites folder beside the libraries, its own Documents inside it, a file written there, read back and deleted.</summary>
+    public static async Task CheckSubsiteAsync(ISource source)
+    {
+        var none = CancellationToken.None;
+        var subsite = VfsPath.Join(SharePointSource.SubsitesFolder, Subsite);
+        CollectionAssert.Contains(await NamesAsync(source, ""), SharePointSource.SubsitesFolder);
+        CollectionAssert.Contains(await NamesAsync(source, SharePointSource.SubsitesFolder), Subsite);
+        CollectionAssert.Contains(await NamesAsync(source, subsite), "Documents");
+        var path = VfsPath.Join(subsite, $"Documents/anyfs-subsite-{Guid.NewGuid():N}.txt");
+        await using (var file = await source.OpenAsync(path, VfsOpenMode.CreateNew, none))
+        {
+            await file.WriteAsync(0, ReadmeBytes, none);
+        }
+
+        Assert.AreEqual(ReadmeBytes.Length, (await source.StatAsync(path, none))?.Length);
+        await using (var file = await source.OpenAsync(path, VfsOpenMode.Read, none))
+        {
+            var back = new byte[ReadmeBytes.Length];
+            Assert.AreEqual(back.Length, await file.ReadFullyAsync(0, back, none));
+            CollectionAssert.AreEqual(ReadmeBytes, back);
+        }
+
+        await source.DeleteAsync(path, none);
+        Assert.IsNull(await source.StatAsync(path, none));
+    }
+
+    public static async Task<List<string>> NamesAsync(ISource source, string path)
+    {
+        var names = new List<string>();
+        await foreach (var entry in source.ListAsync(path, CancellationToken.None))
+        {
+            names.Add(entry.Name);
+        }
+
+        return names;
+    }
+
     public static async Task<SharePointSiteSource> StartWithFixtureAsync(SharePointSettings settings)
     {
         var source = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
@@ -298,6 +366,15 @@ public class SharePointServerLiveTests
 
         CollectionAssert.DoesNotContain(top, "Forms", "the library's own Forms folder stays hidden");
         CollectionAssert.Contains(top, SpsTestServer.FixtureFolder);
+    }
+
+    [TestMethod]
+    public async Task ASubsiteIsAFolderWithItsOwnLibraries()
+    {
+        SpsTestServer.Require();
+        await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
+        await SpsTestServer.EnsureSubsiteAsync(source);
+        await SpsTestServer.CheckSubsiteAsync(source);
     }
 
     [TestMethod]

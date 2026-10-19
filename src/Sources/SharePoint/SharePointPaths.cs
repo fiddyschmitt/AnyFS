@@ -83,23 +83,11 @@ public sealed record SiteAddress(string Host, string ServerRelativePath, string 
 }
 
 /// <summary>
-/// How a source path maps onto a site: the first segment names a document library (a Graph drive), the
-/// rest is the path inside it. With a library pinned in the settings, the whole source path is inside it.
+/// Paths inside a library (a Graph drive). Which library, and which subsite, a source path is in is the source's to
+/// work out (<see cref="SharePointSource"/>): its sites' libraries and subsites are folders, the rest is inside a library.
 /// </summary>
 public static class SharePointPaths
 {
-    /// <summary>Splits a normalised source path into the library name and the path inside the library ("" for its root).</summary>
-    public static (string Library, string ItemPath) Split(string path, string? pinnedLibrary)
-    {
-        if (!string.IsNullOrEmpty(pinnedLibrary))
-        {
-            return (pinnedLibrary, path);
-        }
-
-        var slash = path.IndexOf('/');
-        return slash < 0 ? (path, "") : (path[..slash], path[(slash + 1)..]);
-    }
-
     /// <summary>The Graph address of an item in a drive: <c>drives/{id}/root</c> or <c>drives/{id}/root:/{escaped path}:</c>.</summary>
     public static string ItemAddress(string driveId, string itemPath)
         => itemPath.Length == 0 ? $"drives/{driveId}/root" : $"drives/{driveId}/root:/{SiteAddress.EscapePath(itemPath)}:";

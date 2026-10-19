@@ -97,15 +97,6 @@ public class SiteAddressTests
 public class SharePointPathsTests
 {
     [TestMethod]
-    public void SplitsLibraryFromItemPath()
-    {
-        Assert.AreEqual(("Documents", ""), SharePointPaths.Split("Documents", null));
-        Assert.AreEqual(("Documents", "a/b.txt"), SharePointPaths.Split("Documents/a/b.txt", null));
-        Assert.AreEqual(("Documents", "a/b.txt"), SharePointPaths.Split("a/b.txt", "Documents"));
-        Assert.AreEqual(("Documents", ""), SharePointPaths.Split("", "Documents"));
-    }
-
-    [TestMethod]
     public void ItemAddressesAreEscapedPerSegment()
     {
         Assert.AreEqual("drives/d1/root", SharePointPaths.ItemAddress("d1", ""));
@@ -417,6 +408,19 @@ public class SharePointOnlineLiveTests
 
         var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.OpenAsync("new-library-as-file.txt", VfsOpenMode.Create, None));
         Assert.AreEqual(VfsError.InvalidPath, ex.Error, "a file can't be created beside the libraries");
+    }
+
+    [TestMethod]
+    public async Task ASubsiteIsAFolderWithItsOwnLibraries()
+    {
+        SpoTestServer.Require();
+        await using var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings());
+        if (!await SpsTestServer.HasSubsiteAsync(source))
+        {
+            Assert.Inconclusive($"the site has no subsite {SpsTestServer.Subsite}: the REST suite makes it (ASubsiteIsAFolderWithItsOwnLibraries on a web session against this site), since Graph cannot");
+        }
+
+        await SpsTestServer.CheckSubsiteAsync(source);
     }
 
     [TestMethod]

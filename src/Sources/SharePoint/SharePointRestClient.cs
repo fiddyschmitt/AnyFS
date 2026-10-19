@@ -30,6 +30,7 @@ internal sealed partial class SharePointRestClient : IDisposable
     private static readonly MediaTypeWithQualityHeaderValue JsonNoMetadata = MediaTypeWithQualityHeaderValue.Parse("application/json;odata=nometadata");
 
     private readonly HttpClient _http;
+    private readonly bool _ownsHttp = true;
     private readonly ILogger _logger;
     private readonly Action<string>? _onTrouble;
     private readonly Action? _onSuccess;
@@ -69,12 +70,33 @@ internal sealed partial class SharePointRestClient : IDisposable
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(SharePointRestClient).Assembly.GetName().Version?.ToString(3) ?? "0"}");
     }
 
+    private SharePointRestClient(SharePointRestClient parent, Uri siteUrl)
+    {
+        SiteUrl = new Uri(siteUrl.AbsoluteUri.TrimEnd('/') + "/");
+        _http = parent._http;
+        _ownsHttp = false;
+        _logger = parent._logger;
+        _onTrouble = parent._onTrouble;
+        _onSuccess = parent._onSuccess;
+    }
+
     /// <summary>The site's URL with a trailing slash; <c>_api/...</c> is relative to it.</summary>
     public Uri SiteUrl { get; }
 
+    /// <summary>
+    /// A client for another site on the same server (a subsite), by its server-relative URL: SharePoint answers for a
+    /// file only through its own site's <c>_api</c>. It shares this client's connections and sign-in and keeps its own
+    /// request digest; dispose it before this one.
+    /// </summary>
+    public SharePointRestClient ForSite(string serverRelativeUrl) => new(this, new Uri(SiteUrl, SiteAddress.EscapePath(serverRelativeUrl)));
+
     public void Dispose()
     {
-        _http.Dispose();
+        if (_ownsHttp)
+        {
+            _http.Dispose();
+        }
+
         _digestGate.Dispose();
     }
 

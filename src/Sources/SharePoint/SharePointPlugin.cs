@@ -47,7 +47,7 @@ public sealed class SharePointSettings
     public string SiteUrl { get; set; } = "";
 
     [Setting("Library", Order = 1, Placeholder = "Documents",
-        Hint = "Leave empty to show every document library as a top-level folder, or name one to serve just that. For SharePoint Embedded, a container, by its name or its id.")]
+        Hint = "Leave empty to show every document library as a top-level folder, and the site's subsites in a Subsites folder beside them, or name one library to serve just that. For SharePoint Embedded, a container, by its name or its id.")]
     public string? Library { get; set; }
 
     [Setting("Sign in with", Order = 2, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [Automatic, AppBrowser, AppDeviceCode, WebSession, Windows],
@@ -225,7 +225,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
     public string DisplayName => "SharePoint";
 
-    public string Description => "A SharePoint site's document libraries: SharePoint Online (Microsoft 365, GCC High too), SharePoint Server on your own network, or SharePoint Embedded's containers, told apart by the address. Reads, writes, renames.";
+    public string Description => "A SharePoint site's document libraries and subsites: SharePoint Online (Microsoft 365, GCC High too), SharePoint Server on your own network, or SharePoint Embedded's containers, told apart by the address. Reads, writes, renames.";
 
     public string TypeFolder => "sharepoint";
 
@@ -470,18 +470,16 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         await signIn.SignInAsync(ct).ConfigureAwait(false);
         using var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), NullLogger.Instance, cloud: cloud);
         progress.Report($"Signed in as {signIn.Username}; looking up {site.Url}");
+        var notFound = new TestResult(false, $"Signed in as {signIn.Username}, but {site.Url} was not found, or this account has no access to it.");
         try
         {
-            using var siteDoc = await graph.GetJsonAsync($"{site.GraphPath}?$select=id,displayName,webUrl", site.Url, ct).ConfigureAwait(false);
-            var siteId = siteDoc.RootElement.GetProperty("id").GetString()!;
-            var siteName = siteDoc.RootElement.TryGetProperty("displayName", out var dn) ? dn.GetString() : site.Url;
-            using var drivesDoc = await graph.GetJsonAsync($"sites/{siteId}/drives?$select=id,name,driveType", site.Url, ct).ConfigureAwait(false);
-            var names = drivesDoc.RootElement.GetProperty("value").EnumerateArray().Select(GraphClient.ParseDrive).Select(d => d.Name).ToList();
-            return Libraries($"Signed in as {signIn.Username}. The site \"{siteName}\"", s.PinnedLibrary, names);
+            // the store is not disposed: it would dispose the client, which the using above does
+            var store = await GraphDocumentStore.ConnectAsync(graph, site, ct).ConfigureAwait(false);
+            return store is null ? notFound : await LibrariesAsync($"Signed in as {signIn.Username}. {store.Description}", s.PinnedLibrary, store, ct).ConfigureAwait(false);
         }
         catch (VfsException ex) when (ex.Error == VfsError.NotFound)
         {
-            return new TestResult(false, $"Signed in as {signIn.Username}, but {site.Url} was not found, or this account has no access to it.");
+            return notFound;
         }
     }
 
@@ -500,8 +498,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         using var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, NullLogger.Instance, handler: handler);
         var store = await RestDocumentStore.ConnectAsync(rest, ct).ConfigureAwait(false);
         progress.Report($"Signed in to {store.Description}; listing the libraries");
-        var libraries = await store.ListLibrariesAsync(ct).ConfigureAwait(false);
-        return Libraries($"Signed in with {session.BrowserName}. {store.Description}", s.PinnedLibrary, libraries.Select(l => l.Name).ToList());
+        return await LibrariesAsync($"Signed in with {session.BrowserName}. {store.Description}", s.PinnedLibrary, store, ct).ConfigureAwait(false);
     }
 
     private static async Task<TestResult> TestWindowsAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
@@ -511,8 +508,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         using var rest = new SharePointRestClient(new Uri(site.Url), s.Credentials(), s.TrustAnyCertificate, NullLogger.Instance);
         var store = await RestDocumentStore.ConnectAsync(rest, ct).ConfigureAwait(false);
         progress.Report($"Connected to {store.Description}; listing the libraries");
-        var libraries = await store.ListLibrariesAsync(ct).ConfigureAwait(false);
-        return Libraries(store.Description, s.PinnedLibrary, libraries.Select(l => l.Name).ToList());
+        return await LibrariesAsync(store.Description, s.PinnedLibrary, store, ct).ConfigureAwait(false);
     }
 
     private static async Task<TestResult> TestContainersAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
@@ -562,14 +558,27 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         }
     }
 
-    private static TestResult Libraries(string what, string? pinned, IReadOnlyList<string> names)
+    /// <summary>The Test button's answer for a site: its libraries and, unless one library is pinned, its subsites.</summary>
+    private static async Task<TestResult> LibrariesAsync(string what, string? pinned, IDocumentStore store, CancellationToken ct)
     {
+        var names = (await store.ListLibrariesAsync(null, ct).ConfigureAwait(false)).Select(l => l.Name).ToList();
         if (pinned is not null && !names.Any(n => string.Equals(n, pinned, StringComparison.OrdinalIgnoreCase)))
         {
             return new TestResult(false, $"{what} has no library named {pinned}; it has: {string.Join(", ", names)}.");
         }
 
-        return new TestResult(true, $"{what} has {names.Count} document librar{(names.Count == 1 ? "y" : "ies")}: {string.Join(", ", names)}.");
+        List<string> subsites = [];
+        try
+        {
+            subsites = pinned is null ? (await store.ListSubsitesAsync(null, ct).ConfigureAwait(false)).Select(w => w.Name).ToList() : [];
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.AccessDenied)
+        {
+            // as the source: an account that may not list the subsites still has the libraries
+        }
+
+        var also = subsites.Count == 0 ? "" : $", and {subsites.Count} subsite{(subsites.Count == 1 ? "" : "s")}: {string.Join(", ", subsites)}";
+        return new TestResult(true, $"{what} has {names.Count} document librar{(names.Count == 1 ? "y" : "ies")}: {string.Join(", ", names)}{also}.");
     }
 
     /// <summary>The Microsoft sign-in for an app sign-in, as the settings describe it.</summary>

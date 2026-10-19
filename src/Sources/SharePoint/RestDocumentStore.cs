@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Security;
@@ -8,9 +9,9 @@ using AnyFS.Sdk;
 namespace AnyFS.Sources.SharePoint;
 
 /// <summary>
-/// A site's document libraries through SharePoint's REST API, for SharePoint Server: libraries are the
-/// site's lists of the document-library kind, items are files and folders under each library's root folder,
-/// all addressed by server-relative URL.
+/// A site's document libraries through SharePoint's REST API, for SharePoint Server and the web session: libraries
+/// are the site's lists of the document-library kind, items are files and folders under each library's root folder,
+/// all addressed by server-relative URL. A subsite's are reached through that subsite's own API.
 /// </summary>
 internal sealed class RestDocumentStore : IDocumentStore
 {
@@ -18,6 +19,7 @@ internal sealed class RestDocumentStore : IDocumentStore
     private const string FolderSelect = "Name,ServerRelativeUrl,TimeCreated,TimeLastModified,UniqueId,ItemCount";
 
     private readonly SharePointRestClient _rest;
+    private readonly ConcurrentDictionary<string, SharePointRestClient> _subsites = new(StringComparer.OrdinalIgnoreCase);
 
     private RestDocumentStore(SharePointRestClient rest, string description)
     {
@@ -29,6 +31,9 @@ internal sealed class RestDocumentStore : IDocumentStore
 
     public string LibraryNoun => "document library";
 
+    /// <summary>The client for the source's own site (for tests, which make their subsite through it).</summary>
+    internal SharePointRestClient Rest => _rest;
+
     /// <summary>Checks the site answers and names it.</summary>
     public static async Task<RestDocumentStore> ConnectAsync(SharePointRestClient rest, CancellationToken ct)
     {
@@ -38,12 +43,20 @@ internal sealed class RestDocumentStore : IDocumentStore
         return new RestDocumentStore(rest, $"{title ?? url ?? rest.SiteUrl.ToString()} ({url ?? rest.SiteUrl.ToString()})");
     }
 
-    public void Dispose() => _rest.Dispose();
+    public void Dispose()
+    {
+        foreach (var subsite in _subsites.Values)
+        {
+            subsite.Dispose();
+        }
 
-    public async Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(CancellationToken ct)
+        _rest.Dispose();
+    }
+
+    public async Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(WebInfo? web, CancellationToken ct)
     {
         // BaseTemplate 101: document libraries; the hidden ones are SharePoint's own (Form Templates and the like)
-        using var doc = await _rest.GetJsonAsync("web/lists?$filter=BaseTemplate%20eq%20101%20and%20Hidden%20eq%20false&$select=Title,RootFolder/ServerRelativeUrl&$expand=RootFolder", Description, ct).ConfigureAwait(false);
+        using var doc = await Client(web).GetJsonAsync("web/lists?$filter=BaseTemplate%20eq%20101%20and%20Hidden%20eq%20false&$select=Title,RootFolder/ServerRelativeUrl&$expand=RootFolder", web?.Key ?? Description, ct).ConfigureAwait(false);
         var libraries = new List<LibraryInfo>();
         foreach (var list in doc.RootElement.GetProperty("value").EnumerateArray())
         {
@@ -51,18 +64,35 @@ internal sealed class RestDocumentStore : IDocumentStore
             var root = list.TryGetProperty("RootFolder", out var rf) && rf.TryGetProperty("ServerRelativeUrl", out var sru) ? sru.GetString() : null;
             if (!string.IsNullOrEmpty(title) && !string.IsNullOrEmpty(root))
             {
-                libraries.Add(new LibraryInfo(root.TrimEnd('/'), title, null, null));
+                libraries.Add(new LibraryInfo(root.TrimEnd('/'), title, null, null, web));
             }
         }
 
         return libraries;
     }
 
+    /// <summary>The subsites the account may open, as SharePoint filters them for the current user (-1: of every template and configuration).</summary>
+    public async Task<IReadOnlyList<WebInfo>> ListSubsitesAsync(WebInfo? web, CancellationToken ct)
+    {
+        using var doc = await Client(web).GetJsonAsync("web/getsubwebsfilteredforcurrentuser(nwebtemplatefilter=-1,nconfigurationfilter=-1)", web?.Key ?? Description, ct).ConfigureAwait(false);
+        var subsites = new List<WebInfo>();
+        foreach (var element in doc.RootElement.GetProperty("value").EnumerateArray())
+        {
+            var url = element.TryGetProperty("ServerRelativeUrl", out var u) ? u.GetString()?.TrimEnd('/') : null;
+            if (!string.IsNullOrEmpty(url))
+            {
+                subsites.Add(new WebInfo(url, url[(url.LastIndexOf('/') + 1)..]));
+            }
+        }
+
+        return subsites;
+    }
+
     public async IAsyncEnumerable<(VfsEntry Entry, ItemRef Item)> ListChildrenAsync(LibraryInfo library, string itemPath, [EnumeratorCancellation] CancellationToken ct)
     {
         var folder = Url(library, itemPath);
         var api = $"{SharePointRestClient.FolderApi(folder)}?$expand=Folders,Files&$select=Exists,{Prefix("Folders", FolderSelect)},{Prefix("Files", FileSelect)}";
-        using var doc = await _rest.GetJsonAsync(api, Display(library, itemPath), ct).ConfigureAwait(false);
+        using var doc = await Client(library).GetJsonAsync(api, Display(library, itemPath), ct).ConfigureAwait(false);
         if (doc.RootElement.TryGetProperty("Exists", out var exists) && exists.ValueKind == JsonValueKind.False)
         {
             throw VfsException.NotFound(Display(library, itemPath));
@@ -94,7 +124,7 @@ internal sealed class RestDocumentStore : IDocumentStore
     public async Task<ItemRef?> GetItemAsync(LibraryInfo library, string itemPath, CancellationToken ct)
     {
         var url = Url(library, itemPath);
-        using (var file = await _rest.TryGetJsonAsync($"{SharePointRestClient.FileApi(url)}?$select={FileSelect},Exists", Display(library, itemPath), ct).ConfigureAwait(false))
+        using (var file = await Client(library).TryGetJsonAsync($"{SharePointRestClient.FileApi(url)}?$select={FileSelect},Exists", Display(library, itemPath), ct).ConfigureAwait(false))
         {
             if (file is not null && !(file.RootElement.TryGetProperty("Exists", out var fe) && fe.ValueKind == JsonValueKind.False))
             {
@@ -102,7 +132,7 @@ internal sealed class RestDocumentStore : IDocumentStore
             }
         }
 
-        using var folder = await _rest.TryGetJsonAsync($"{SharePointRestClient.FolderApi(url)}?$select={FolderSelect},Exists", Display(library, itemPath), ct).ConfigureAwait(false);
+        using var folder = await Client(library).TryGetJsonAsync($"{SharePointRestClient.FolderApi(url)}?$select={FolderSelect},Exists", Display(library, itemPath), ct).ConfigureAwait(false);
         if (folder is null || folder.RootElement.TryGetProperty("Exists", out var de) && de.ValueKind == JsonValueKind.False)
         {
             return null;
@@ -112,7 +142,7 @@ internal sealed class RestDocumentStore : IDocumentStore
     }
 
     public Task<HttpResponseMessage> OpenContentAsync(LibraryInfo library, string itemPath, ItemRef item, long offset, CancellationToken ct)
-        => _rest.GetContentAsync(Url(library, itemPath), offset, Display(library, itemPath), ct);
+        => Client(library).GetContentAsync(Url(library, itemPath), offset, Display(library, itemPath), ct);
 
     public async Task<ItemRef> UploadAsync(LibraryInfo library, string itemPath, string localPath, long length, CancellationToken ct)
     {
@@ -122,12 +152,12 @@ internal sealed class RestDocumentStore : IDocumentStore
         var add = $"{SharePointRestClient.FolderApi(folder)}/Files/AddUsingPath(decodedurl='{SharePointRestClient.Encode(name)}',overwrite=true)?$select={FileSelect}";
         if (length <= SharePointRestClient.SimpleUploadLimit)
         {
-            using var created = await _rest.PostBinaryAsync(add, () => OpenLocal(localPath), length, path, ct).ConfigureAwait(false);
+            using var created = await Client(library).PostBinaryAsync(add, () => OpenLocal(localPath), length, path, ct).ConfigureAwait(false);
             return ParseFile(created.RootElement).Item;
         }
 
         // an empty file first, then the pieces against it
-        using (var empty = await _rest.PostBinaryAsync(add, () => Stream.Null, 0, path, ct).ConfigureAwait(false))
+        using (var empty = await Client(library).PostBinaryAsync(add, () => Stream.Null, 0, path, ct).ConfigureAwait(false))
         {
         }
 
@@ -144,7 +174,7 @@ internal sealed class RestDocumentStore : IDocumentStore
                     ? $"{file}/FinishUpload(uploadId=guid'{uploadId}',fileOffset={offset})?$select={FileSelect}"
                     : $"{file}/ContinueUpload(uploadId=guid'{uploadId}',fileOffset={offset})";
             var from = offset;
-            using var result = await _rest.PostBinaryAsync(api, () => new SliceStream(OpenLocal(localPath), from, chunk), chunk, path, ct).ConfigureAwait(false);
+            using var result = await Client(library).PostBinaryAsync(api, () => new SliceStream(OpenLocal(localPath), from, chunk), chunk, path, ct).ConfigureAwait(false);
             offset += chunk;
             if (last)
             {
@@ -164,14 +194,14 @@ internal sealed class RestDocumentStore : IDocumentStore
             throw VfsException.NotFound(Display(library, parent));
         }
 
-        using var created = await _rest.PostJsonAsync($"web/Folders/AddUsingPath(decodedurl='{SharePointRestClient.Encode(url)}')?$select={FolderSelect}", null, Display(library, itemPath), ct).ConfigureAwait(false);
+        using var created = await Client(library).PostJsonAsync($"web/Folders/AddUsingPath(decodedurl='{SharePointRestClient.Encode(url)}')?$select={FolderSelect}", null, Display(library, itemPath), ct).ConfigureAwait(false);
         return ParseFolder(created.RootElement).Item;
     }
 
     public Task DeleteAsync(LibraryInfo library, string itemPath, bool isFolder, CancellationToken ct)
     {
         var url = Url(library, itemPath);
-        return _rest.DeleteAsync(isFolder ? SharePointRestClient.FolderApi(url) : SharePointRestClient.FileApi(url), Display(library, itemPath), ct);
+        return Client(library).DeleteAsync(isFolder ? SharePointRestClient.FolderApi(url) : SharePointRestClient.FileApi(url), Display(library, itemPath), ct);
     }
 
     public async Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, CancellationToken ct)
@@ -181,7 +211,7 @@ internal sealed class RestDocumentStore : IDocumentStore
         var api = isFolder
             ? $"{SharePointRestClient.FolderApi(from)}/MoveToUsingPath(DecodedUrl='{SharePointRestClient.Encode(to)}')"
             : $"{SharePointRestClient.FileApi(from)}/MoveToUsingPath(DecodedUrl='{SharePointRestClient.Encode(to)}',moveOperations=0)";
-        using (var _ = await _rest.PostJsonAsync(api, null, Display(library, fromPath), ct).ConfigureAwait(false))
+        using (var _ = await Client(library).PostJsonAsync(api, null, Display(library, fromPath), ct).ConfigureAwait(false))
         {
         }
 
@@ -227,7 +257,7 @@ internal sealed class RestDocumentStore : IDocumentStore
         var xml = "<Request xmlns=\"http://schemas.microsoft.com/sharepoint/clientquery/2009\" SchemaVersion=\"15.0.0.0\" LibraryVersion=\"16.0.0.0\" ApplicationName=\"AnyFS\"><Actions>" + actions
             + "</Actions><ObjectPaths><StaticProperty Id=\"0\" TypeId=\"{3747adcd-a3c3-41b9-bfab-4a64dd2f1e0a}\" Name=\"Current\" /><Property Id=\"1\" ParentId=\"0\" Name=\"Web\" /><Method Id=\"2\" ParentId=\"1\" Name=\"" + getter
             + "\"><Parameters><Parameter Type=\"String\">" + SecurityElement.Escape(Url(library, itemPath)) + "</Parameter></Parameters></Method><Property Id=\"3\" ParentId=\"2\" Name=\"ListItemAllFields\" /></ObjectPaths></Request>";
-        await _rest.PostCsomAsync(xml, Display(library, itemPath), ct).ConfigureAwait(false);
+        await Client(library).PostCsomAsync(xml, Display(library, itemPath), ct).ConfigureAwait(false);
     }
 
     // --- parsing -------------------------------------------------------------------------------------------
@@ -265,7 +295,12 @@ internal sealed class RestDocumentStore : IDocumentStore
 
     private static string Url(LibraryInfo library, string itemPath) => itemPath.Length == 0 ? library.Key : library.Key + "/" + itemPath;
 
-    private static string Display(LibraryInfo library, string itemPath) => itemPath.Length == 0 ? library.Name : library.Name + "/" + itemPath;
+    private static string Display(LibraryInfo library, string itemPath) => itemPath.Length == 0 ? library.Shown : library.Shown + "/" + itemPath;
+
+    /// <summary>The client for the source's own site, or for a subsite (made the first time it is needed).</summary>
+    private SharePointRestClient Client(WebInfo? web) => web is null ? _rest : _subsites.GetOrAdd(web.Key, _rest.ForSite);
+
+    private SharePointRestClient Client(LibraryInfo library) => Client(library.Web);
 
     private static FileStream OpenLocal(string path) => new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, FileOptions.Asynchronous);
 

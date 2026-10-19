@@ -6,8 +6,8 @@ namespace AnyFS.Sources.SharePoint;
 
 /// <summary>
 /// Drives through Microsoft Graph, items by path under each drive's root. SharePoint Online uses it with a
-/// site's document libraries as the drives (<see cref="ConnectAsync"/>); SharePoint Embedded with the
-/// containers of a container type (<see cref="ForContainersAsync"/>), whose ids are drive ids too.
+/// site's document libraries as the drives, and its subsites' (<see cref="ConnectAsync"/>); SharePoint Embedded
+/// with the containers of a container type (<see cref="ForContainersAsync"/>), whose ids are drive ids too.
 /// </summary>
 internal sealed class GraphDocumentStore : IDocumentStore
 {
@@ -44,7 +44,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
         var id = doc.RootElement.GetProperty("id").GetString() ?? throw new VfsException(VfsError.IoError, "Graph returned a site without an id");
         var name = doc.RootElement.TryGetProperty("displayName", out var dn) ? dn.GetString() ?? site.Url : site.Url;
         var description = $"{name} ({site.Url})";
-        return new GraphDocumentStore(graph, description, "document library", id, ct2 => ListDrivesAsync(graph, id, description, ct2));
+        return new GraphDocumentStore(graph, description, "document library", id, ct2 => ListDrivesAsync(graph, id, null, description, ct2));
     }
 
     /// <summary>
@@ -59,7 +59,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
             ? ct2 => ListContainersAsync(graph, containerTypeId, ct2)
             : ct2 => GetContainerAsync(graph, containerTypeId, containerId, ct2);
         var store = new GraphDocumentStore(graph, description, "container", "", list);
-        await store.ListLibrariesAsync(ct).ConfigureAwait(false);
+        await store.ListLibrariesAsync(null, ct).ConfigureAwait(false);
         return store;
     }
 
@@ -87,9 +87,40 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
     public void Dispose() => _graph.Dispose();
 
-    public Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(CancellationToken ct) => _listLibraries(ct);
+    public Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(WebInfo? web, CancellationToken ct)
+        => web is null ? _listLibraries(ct) : ListDrivesAsync(_graph, web.Key, web, web.Name, ct);
 
-    private static async Task<IReadOnlyList<LibraryInfo>> ListDrivesAsync(GraphClient graph, string siteId, string description, CancellationToken ct)
+    /// <summary>A site's subsites, each named by the last part of its address; containers have none.</summary>
+    public async Task<IReadOnlyList<WebInfo>> ListSubsitesAsync(WebInfo? web, CancellationToken ct)
+    {
+        if (SiteId.Length == 0)
+        {
+            return [];
+        }
+
+        var url = $"sites/{web?.Key ?? SiteId}/sites?$select=id,webUrl";
+        var subsites = new List<WebInfo>();
+        while (url is not null)
+        {
+            using var doc = await _graph.GetJsonAsync(url, web?.Name ?? Description, ct).ConfigureAwait(false);
+            foreach (var element in doc.RootElement.GetProperty("value").EnumerateArray())
+            {
+                var id = element.TryGetProperty("id", out var i) ? i.GetString() : null;
+                var address = element.TryGetProperty("webUrl", out var w) && Uri.TryCreate(w.GetString(), UriKind.Absolute, out var parsed) ? parsed : null;
+                var name = address is null ? "" : Uri.UnescapeDataString(address.AbsolutePath.TrimEnd('/').Split('/')[^1]);
+                if (!string.IsNullOrEmpty(id) && name.Length > 0)
+                {
+                    subsites.Add(new WebInfo(id, name));
+                }
+            }
+
+            url = doc.RootElement.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
+        }
+
+        return subsites;
+    }
+
+    private static async Task<IReadOnlyList<LibraryInfo>> ListDrivesAsync(GraphClient graph, string siteId, WebInfo? web, string description, CancellationToken ct)
     {
         using var doc = await graph.GetJsonAsync($"sites/{siteId}/drives?$select=id,name,driveType,quota", description, ct).ConfigureAwait(false);
         var libraries = new List<LibraryInfo>();
@@ -98,7 +129,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
             var drive = GraphClient.ParseDrive(element);
             if (drive.Name.Length > 0)
             {
-                libraries.Add(new LibraryInfo(drive.Id, drive.Name, drive.QuotaTotal, drive.QuotaRemaining));
+                libraries.Add(new LibraryInfo(drive.Id, drive.Name, drive.QuotaTotal, drive.QuotaRemaining, web));
             }
         }
 
@@ -260,7 +291,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
         string parentId;
         if (toParent.Length == 0)
         {
-            using var root = await _graph.GetJsonAsync($"drives/{library.Key}/root?$select=id", library.Name, ct).ConfigureAwait(false);
+            using var root = await _graph.GetJsonAsync($"drives/{library.Key}/root?$select=id", library.Shown, ct).ConfigureAwait(false);
             parentId = root.RootElement.GetProperty("id").GetString()!;
         }
         else
@@ -304,7 +335,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
     private static FileStream OpenLocal(string path) => new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, FileOptions.Asynchronous);
 
-    private static string Display(LibraryInfo library, string itemPath) => itemPath.Length == 0 ? library.Name : library.Name + "/" + itemPath;
+    private static string Display(LibraryInfo library, string itemPath) => itemPath.Length == 0 ? library.Shown : library.Shown + "/" + itemPath;
 }
 
 /// <summary>JSON string literals without a serializer (nothing for the trimmer to analyse).</summary>

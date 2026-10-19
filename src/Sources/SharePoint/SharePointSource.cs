@@ -8,8 +8,10 @@ namespace AnyFS.Sources.SharePoint;
 
 /// <summary>
 /// The file-system half shared by the SharePoint flavours, over an <see cref="IDocumentStore"/>. Source paths
-/// are <c>library/folder/file</c>, or just <c>folder/file</c> when one library is pinned. Listings sit in a
-/// two-second <see cref="ListingCache"/> and stats are answered from it; a listing also remembers each item's
+/// are <c>library/folder/file</c>, with a site's subsites in a <c>Subsites</c> folder beside its libraries, each with
+/// its own inside it (<c>Subsites/subsite/library/folder/file</c>, and so on down), or just <c>folder/file</c> when
+/// one library is pinned.
+/// Listings sit in a two-second <see cref="ListingCache"/> and stats are answered from it; a listing also remembers each item's
 /// ids (and download URL, where the flavour has one), so an open needs no extra round trip. Files below the
 /// spool threshold are downloaded whole into the <see cref="SpoolCache"/> (and served again from it while
 /// their version is unchanged); larger ones are read in ranges through <see cref="RandomAccessOverStream"/>,
@@ -19,9 +21,13 @@ namespace AnyFS.Sources.SharePoint;
 /// </summary>
 public abstract class SharePointSource : SourceBase
 {
+    /// <summary>The folder beside a site's libraries that holds its subsites, one folder each.</summary>
+    public const string SubsitesFolder = "Subsites";
+
     private static readonly TimeSpan ListingTtl = TimeSpan.FromSeconds(2);
 
-    private readonly ConcurrentDictionary<string, LibraryInfo> _libraries = new(StringComparer.OrdinalIgnoreCase);
+    // the source's own site; its subsites hang below it as they are listed
+    private readonly WebNode _root = new(null, "");
     private readonly ConcurrentDictionary<string, ItemRef> _items = new(StringComparer.OrdinalIgnoreCase);
 
     // files open for writing that SharePoint has not got yet (the upload comes when the handle closes): stats,
@@ -57,18 +63,19 @@ public abstract class SharePointSource : SourceBase
     {
         var store = await ConnectAsync(ct).ConfigureAwait(false);
         _store = store;
+        WebContents site;
         try
         {
-            await RefreshLibrariesAsync(ct).ConfigureAwait(false);
+            site = await LoadWebAsync(_root, ct).ConfigureAwait(false);
         }
         catch (VfsException ex)
         {
             throw new SourceFailedException($"{Target}: {ex.Message}", permanent: ex.Error is VfsError.AccessDenied or VfsError.NotFound, ex);
         }
 
-        if (PinnedLibrary is { } pinned && !_libraries.ContainsKey(pinned))
+        if (PinnedLibrary is { } pinned && !site.Libraries.ContainsKey(pinned))
         {
-            throw new SourceFailedException($"{store.Description} has no {store.LibraryNoun} named {pinned}; it has: {string.Join(", ", _libraries.Values.Select(l => l.Name))}", permanent: true);
+            throw new SourceFailedException($"{store.Description} has no {store.LibraryNoun} named {pinned}; it has: {string.Join(", ", site.Libraries.Values.Select(l => l.Name))}", permanent: true);
         }
 
         _listings = new ListingCache(ListingTtl, ListRemoteAsync);
@@ -85,7 +92,8 @@ public abstract class SharePointSource : SourceBase
             }
         }
 
-        Logger.LogInformation("sharepoint: serving {Site} ({Count} librar{Plural}){Pinned}", store.Description, _libraries.Count, _libraries.Count == 1 ? "y" : "ies", PinnedLibrary is { } p ? $", pinned to {p}" : "");
+        var subsites = site.Subsites.Count == 0 ? "" : $", {site.Subsites.Count} subsite{(site.Subsites.Count == 1 ? "" : "s")}";
+        Logger.LogInformation("sharepoint: serving {Site} ({Count} librar{Plural}{Subsites}){Pinned}", store.Description, site.Libraries.Count, site.Libraries.Count == 1 ? "y" : "ies", subsites, PinnedLibrary is { } p ? $", pinned to {p}" : "");
     }
 
     // --- listing and stat --------------------------------------------------------------------------------------
@@ -103,17 +111,15 @@ public abstract class SharePointSource : SourceBase
             return PendingEntry(path, pending);
         }
 
-        if (IsLibraryLevel(path))
+        // a site's libraries and subsites are answered from what the site's last listing found, without a request
+        return await ResolveAsync(path, ct).ConfigureAwait(false) switch
         {
-            if (!_libraries.ContainsKey(path))
-            {
-                await Listings.GetAsync("", ct).ConfigureAwait(false);   // refreshes the library list
-            }
-
-            return _libraries.TryGetValue(path, out var library) ? VfsEntry.Directory(library.Name) : null;
-        }
-
-        return await Listings.StatAsync(path, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false);
+            null => null,
+            { SubsitesFolder: { } folder } => VfsEntry.Directory(folder),
+            { Library: null } place => VfsEntry.Directory(place.Web.Name),
+            { Library: { } library, ItemPath.Length: 0 } => VfsEntry.Directory(library.Name),
+            _ => await Listings.StatAsync(path, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false),
+        };
     }
 
     public override async IAsyncEnumerable<VfsEntry> ListAsync(string path, [EnumeratorCancellation] CancellationToken ct)
@@ -127,18 +133,35 @@ public abstract class SharePointSource : SourceBase
 
     private async IAsyncEnumerable<VfsEntry> ListRemoteAsync(string path, [EnumeratorCancellation] CancellationToken ct)
     {
-        if (path.Length == 0 && PinnedLibrary is null)
+        var place = await ResolveAsync(path, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
+        if (place.Library is null)
         {
-            await RefreshLibrariesAsync(ct).ConfigureAwait(false);
-            foreach (var library in _libraries.Values.OrderBy(l => l.Name, StringComparer.OrdinalIgnoreCase))
+            // a site's folder or its subsites' folder: listed again each time, so a library or subsite made since shows up
+            var site = await LoadWebAsync(place.Web, ct).ConfigureAwait(false);
+            if (place.SubsitesFolder is not null)
+            {
+                foreach (var subsite in site.Subsites.Keys.Order(StringComparer.OrdinalIgnoreCase))
+                {
+                    yield return VfsEntry.Directory(subsite);
+                }
+
+                yield break;
+            }
+
+            foreach (var library in site.Libraries.Values.OrderBy(l => l.Name, StringComparer.OrdinalIgnoreCase))
             {
                 yield return VfsEntry.Directory(library.Name);
+            }
+
+            if (site.SubsitesFolder is { } folder)
+            {
+                yield return VfsEntry.Directory(folder);
             }
 
             yield break;
         }
 
-        var (library0, itemPath) = Locate(path);
+        var (library0, itemPath) = (place.Library, place.ItemPath);
         if (itemPath.Length > 0)
         {
             // the store answers a file's children with an error of its own choosing; the parent's listing says first
@@ -235,9 +258,15 @@ public abstract class SharePointSource : SourceBase
             throw VfsException.NotFound(path);
         }
 
-        if (IsLibraryLevel(path))
+        if (await ResolveAsync(path, ct).ConfigureAwait(false) is not { Library: { } library } place)
         {
-            throw VfsException.InvalidPath(path, $"files live inside a {Store.LibraryNoun}");
+            // a new name beside a site's libraries and subsites, or one under a site or library that is not there
+            if (await ResolveAsync(VfsPath.Parent(path), ct).ConfigureAwait(false) is { Library: null })
+            {
+                throw VfsException.InvalidPath(path, $"files live inside a {Store.LibraryNoun}");
+            }
+
+            throw VfsException.NotFound(VfsPath.Parent(path));
         }
 
         if (existing is not null && mode == VfsOpenMode.CreateNew)
@@ -245,16 +274,16 @@ public abstract class SharePointSource : SourceBase
             throw VfsException.AlreadyExists(path);
         }
 
+        var itemPath = place.ItemPath;
         if (mode == VfsOpenMode.Read)
         {
-            return await OpenForReadAsync(path, existing!, ct).ConfigureAwait(false);
+            return await OpenForReadAsync(path, library, itemPath, existing!, ct).ConfigureAwait(false);
         }
 
         RequireWrite("writing");
         SharePointNames.Require(path);
-        var (library, itemPath) = Locate(path);
         var parentPath = VfsPath.Parent(path);
-        if (existing is null && !IsLibraryLevel(parentPath))
+        if (existing is null && itemPath.Contains('/'))
         {
             var parent = await StatAsync(parentPath, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(parentPath);
             if (!parent.IsDirectory)
@@ -267,7 +296,7 @@ public abstract class SharePointSource : SourceBase
         var keepExisting = existing is not null && mode is VfsOpenMode.ReadWrite or VfsOpenMode.OpenOrCreate;
         if (keepExisting)
         {
-            await DownloadToAsync(path, existing!, tempPath, ct).ConfigureAwait(false);
+            await DownloadToAsync(path, library, itemPath, existing!, tempPath, ct).ConfigureAwait(false);
         }
 
         var file = new PendingUploadFile(path, tempPath, keepExisting, mustUpload: existing is null || mode == VfsOpenMode.Create,
@@ -285,9 +314,8 @@ public abstract class SharePointSource : SourceBase
         return file;
     }
 
-    private async Task<IVfsFile> OpenForReadAsync(string path, VfsEntry entry, CancellationToken ct)
+    private async Task<IVfsFile> OpenForReadAsync(string path, LibraryInfo library, string itemPath, VfsEntry entry, CancellationToken ct)
     {
-        var (library, itemPath) = Locate(path);
         var item = await ItemAsync(path, library, itemPath, ct).ConfigureAwait(false);
         if (entry.Length <= SpoolBelowBytes && _spool is { } spool)
         {
@@ -312,9 +340,8 @@ public abstract class SharePointSource : SourceBase
         }, maxStreams: Math.Clamp(Connections, 1, 16), maxSkipBytes: 1 << 20);
     }
 
-    private async Task DownloadToAsync(string path, VfsEntry entry, string tempPath, CancellationToken ct)
+    private async Task DownloadToAsync(string path, LibraryInfo library, string itemPath, VfsEntry entry, string tempPath, CancellationToken ct)
     {
-        var (library, itemPath) = Locate(path);
         var item = await ItemAsync(path, library, itemPath, ct).ConfigureAwait(false);
         using var response = await Run(() => Store.OpenContentAsync(library, itemPath, item, 0, ct)).ConfigureAwait(false);
         await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
@@ -372,13 +399,24 @@ public abstract class SharePointSource : SourceBase
             throw VfsException.AlreadyExists(path);
         }
 
-        if (IsLibraryLevel(path))
+        var place = await ResolveAsync(path, ct).ConfigureAwait(false);
+        if (place is { Library: null } or { ItemPath.Length: 0 })
         {
-            throw VfsException.NotSupported($"creating a {Store.LibraryNoun} (create folders inside one)");
+            throw VfsException.AlreadyExists(path);   // a subsite's or a library's own folder
+        }
+
+        if (place is not { Library: { } library })
+        {
+            throw await ResolveAsync(VfsPath.Parent(path), ct).ConfigureAwait(false) switch
+            {
+                { SubsitesFolder: not null } => VfsException.NotSupported("creating a subsite"),
+                { Library: null } => VfsException.NotSupported($"creating a {Store.LibraryNoun} (create folders inside one)"),
+                _ => VfsException.NotFound(VfsPath.Parent(path)),
+            };
         }
 
         SharePointNames.Require(path);
-        var (library, itemPath) = Locate(path);
+        var itemPath = place.ItemPath;
         if (await Listings.StatAsync(path, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false) is not null)
         {
             throw VfsException.AlreadyExists(path);
@@ -407,11 +445,7 @@ public abstract class SharePointSource : SourceBase
     {
         RequireWrite("deleting");
         path = VfsPath.Normalize(path);
-        if (path.Length == 0 || IsLibraryLevel(path))
-        {
-            throw VfsException.AccessDenied(path);
-        }
-
+        var (library, itemPath) = await InsideLibraryAsync(path, ct).ConfigureAwait(false);
         if (_pending.TryGetValue(path, out var pendingFile))
         {
             if (pendingFile.IsClosed)
@@ -422,10 +456,9 @@ public abstract class SharePointSource : SourceBase
             {
                 // deleted while still being written: nothing goes up when the handle closes; upstream may hold an older version
                 pendingFile.Discard();
-                var (pendingLibrary, pendingItemPath) = Locate(path);
                 try
                 {
-                    await Run(() => Store.DeleteAsync(pendingLibrary, pendingItemPath, false, ct)).ConfigureAwait(false);
+                    await Run(() => Store.DeleteAsync(library, itemPath, false, ct)).ConfigureAwait(false);
                 }
                 catch (VfsException ex) when (ex.Error == VfsError.NotFound)
                 {
@@ -447,7 +480,6 @@ public abstract class SharePointSource : SourceBase
             }
         }
 
-        var (library, itemPath) = Locate(path);
         try
         {
             await Run(() => Store.DeleteAsync(library, itemPath, entry.IsDirectory, ct)).ConfigureAwait(false);
@@ -466,11 +498,8 @@ public abstract class SharePointSource : SourceBase
         RequireWrite("renaming");
         fromPath = VfsPath.Normalize(fromPath);
         toPath = VfsPath.Normalize(toPath);
-        if (fromPath.Length == 0 || toPath.Length == 0 || IsLibraryLevel(fromPath) || IsLibraryLevel(toPath))
-        {
-            throw VfsException.AccessDenied(fromPath.Length == 0 || IsLibraryLevel(fromPath) ? fromPath : toPath);
-        }
-
+        var (fromLibrary, fromItemPath) = await InsideLibraryAsync(fromPath, ct).ConfigureAwait(false);
+        var (toLibrary, toItemPath) = await InsideLibraryAsync(toPath, ct).ConfigureAwait(false);
         if (string.Equals(fromPath, toPath, StringComparison.Ordinal))
         {
             return;
@@ -479,8 +508,6 @@ public abstract class SharePointSource : SourceBase
         SharePointNames.Require(toPath);
         await SettlePendingAsync(fromPath, "renaming").ConfigureAwait(false);
         await SettlePendingAsync(toPath, "renaming over").ConfigureAwait(false);
-        var (fromLibrary, fromItemPath) = Locate(fromPath);
-        var (toLibrary, toItemPath) = Locate(toPath);
         if (!string.Equals(fromLibrary.Key, toLibrary.Key, StringComparison.Ordinal))
         {
             throw VfsException.NotSupported("moving between document libraries");
@@ -524,9 +551,15 @@ public abstract class SharePointSource : SourceBase
     {
         RequireWrite("setting times");
         path = VfsPath.Normalize(path);
-        if (created is null && modified is null || path.Length == 0 || IsLibraryLevel(path))
+        if (created is null && modified is null || path.Length == 0)
         {
             return;
+        }
+
+        var place = await ResolveAsync(path, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
+        if (place is not { Library: { } library, ItemPath: { Length: > 0 } itemPath })
+        {
+            return;   // a subsite's or a library's own folder keeps SharePoint's times
         }
 
         if (_pending.TryGetValue(path, out var pending))
@@ -542,7 +575,6 @@ public abstract class SharePointSource : SourceBase
             await pending.Completion.ConfigureAwait(false);
         }
 
-        var (library, itemPath) = Locate(path);
         try
         {
             await Run(() => Store.SetTimesAsync(library, itemPath, created, modified, ct)).ConfigureAwait(false);
@@ -555,18 +587,7 @@ public abstract class SharePointSource : SourceBase
 
     public override Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct)
     {
-        path = VfsPath.Normalize(path);
-        LibraryInfo? library = null;
-        if (PinnedLibrary is { } pinned)
-        {
-            _libraries.TryGetValue(pinned, out library);
-        }
-        else if (path.Length > 0)
-        {
-            _libraries.TryGetValue(SharePointPaths.Split(path, null).Library, out library);
-        }
-
-        library ??= _libraries.Values.FirstOrDefault();
+        var library = KnownLibrary(VfsPath.Normalize(path));
         return Task.FromResult(library is { QuotaTotal: { } total, QuotaRemaining: { } remaining } ? new VfsSpace(total, remaining) : null);
     }
 
@@ -587,35 +608,185 @@ public abstract class SharePointSource : SourceBase
 
     private ListingCache Listings => _listings ?? throw VfsException.Unavailable($"{Target} is not connected yet");
 
-    /// <summary>True for a path that names a library (and nothing inside it) when the libraries are the top level.</summary>
-    private bool IsLibraryLevel(string path) => PinnedLibrary is null && path.Length > 0 && !path.Contains('/');
-
-    private async Task RefreshLibrariesAsync(CancellationToken ct)
+    /// <summary>
+    /// Where a source path leads: a site's own folder (the source's site at the root, a subsite's below it), the folder
+    /// of its subsites, or a place in one of its libraries; null for a name that is none of these.
+    /// </summary>
+    private async Task<Place?> ResolveAsync(string path, CancellationToken ct)
     {
-        var libraries = await Run(() => Store.ListLibrariesAsync(ct)).ConfigureAwait(false);
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var library in libraries)
+        if (PinnedLibrary is { } pinned)
         {
-            _libraries[library.Name] = library;
-            seen.Add(library.Name);
+            return new Place(_root, _root.Contents!.Libraries[pinned], path);
         }
 
-        foreach (var gone in _libraries.Keys.Where(k => !seen.Contains(k)).ToList())
+        var web = _root;
+        var rest = path;
+        while (rest.Length > 0)
         {
-            _libraries.TryRemove(gone, out _);
+            var name = Next(ref rest);
+            var site = await KnownAsync(web, s => s.Libraries.ContainsKey(name) || s.IsSubsitesFolder(name), ct).ConfigureAwait(false);
+            if (site.Libraries.TryGetValue(name, out var library))
+            {
+                return new Place(web, library, rest);
+            }
+
+            if (!site.IsSubsitesFolder(name))
+            {
+                return null;
+            }
+
+            if (rest.Length == 0)
+            {
+                return new Place(web, null, "", site.SubsitesFolder);
+            }
+
+            var subsiteName = Next(ref rest);
+            site = await KnownAsync(web, s => s.Subsites.ContainsKey(subsiteName), ct).ConfigureAwait(false);
+            if (!site.Subsites.TryGetValue(subsiteName, out var subsite))
+            {
+                return null;
+            }
+
+            web = subsite;
+        }
+
+        return new Place(web, null, "");
+    }
+
+    /// <summary>The first name of a path, taken off it.</summary>
+    private static string Next(ref string rest)
+    {
+        var slash = rest.IndexOf('/');
+        var name = slash < 0 ? rest : rest[..slash];
+        rest = slash < 0 ? "" : rest[(slash + 1)..];
+        return name;
+    }
+
+    /// <summary>
+    /// What is in a site, as its last listing found, listed again when that is not known yet or lacks what is looked for
+    /// (a library or subsite made since). The listing goes through the listing cache, so at most once in a listing's
+    /// life; and it cannot wait on itself, since listing a site resolves only its parents' names through here.
+    /// </summary>
+    private async Task<WebContents> KnownAsync(WebNode web, Func<WebContents, bool> has, CancellationToken ct)
+    {
+        if (web.Contents is { } site && has(site))
+        {
+            return site;
+        }
+
+        await Listings.GetAsync(web.Path, ct).ConfigureAwait(false);
+        return web.Contents ?? await LoadWebAsync(web, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The library and the path inside it for a path inside one (below its own folder); AccessDenied for a site's or a
+    /// library's own folder and for a new name beside them, which are not the client's to make, move or delete;
+    /// NotFound under a site or library that is not there.
+    /// </summary>
+    private async Task<(LibraryInfo Library, string ItemPath)> InsideLibraryAsync(string path, CancellationToken ct)
+    {
+        var place = await ResolveAsync(path, ct).ConfigureAwait(false);
+        if (place is { Library: { } library, ItemPath.Length: > 0 })
+        {
+            return (library, place.ItemPath);
+        }
+
+        if (place is not null || await ResolveAsync(VfsPath.Parent(path), ct).ConfigureAwait(false) is { Library: null })
+        {
+            throw VfsException.AccessDenied(path);
+        }
+
+        throw VfsException.NotFound(VfsPath.Parent(path));
+    }
+
+    /// <summary>
+    /// Lists a site's libraries and subsites into its node (no subsites with a library pinned). A library shows by its
+    /// title; the subsites, each by the last part of its address, in a folder <see cref="SubsitesFolder"/> beside the
+    /// libraries, there only when there are subsites ("Subsites (2)" where a library has that title). A subsite listed
+    /// before keeps its node, and with it what is known below it.
+    /// </summary>
+    private async Task<WebContents> LoadWebAsync(WebNode web, CancellationToken ct)
+    {
+        var librariesCall = Run(() => Store.ListLibrariesAsync(web.Info, ct));
+        var subsitesCall = PinnedLibrary is null ? SubsitesAsync(web, ct) : Task.FromResult<IReadOnlyList<WebInfo>>([]);
+        await Task.WhenAll(librariesCall, subsitesCall).ConfigureAwait(false);
+
+        var libraries = new Dictionary<string, LibraryInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (var library in await librariesCall.ConfigureAwait(false))
+        {
+            libraries[library.Name] = web.Info is null ? library : library with { Folder = VfsPath.Join(web.Path, library.Name) };
+        }
+
+        var found = await subsitesCall.ConfigureAwait(false);
+        var folder = found.Count == 0 ? null : SubsitesFolder;
+        for (var n = 2; folder is not null && libraries.ContainsKey(folder); n++)
+        {
+            folder = $"{SubsitesFolder} ({n})";
+        }
+
+        var known = web.Contents?.Subsites;
+        var subsites = new Dictionary<string, WebNode>(StringComparer.OrdinalIgnoreCase);
+        foreach (var subsite in found)
+        {
+            var path = VfsPath.Join(VfsPath.Join(web.Path, folder!), subsite.Name);
+            subsites[subsite.Name] = known is not null && known.TryGetValue(subsite.Name, out var node) && node.Info?.Key == subsite.Key && node.Path == path ? node : new WebNode(subsite, path);
+        }
+
+        var site = new WebContents(libraries, subsites, folder);
+        web.Contents = site;
+        return site;
+    }
+
+    /// <summary>A site's subsites; none when the account may not list them, which leaves the site's libraries to it.</summary>
+    private async Task<IReadOnlyList<WebInfo>> SubsitesAsync(WebNode web, CancellationToken ct)
+    {
+        try
+        {
+            return await Run(() => Store.ListSubsitesAsync(web.Info, ct)).ConfigureAwait(false);
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.AccessDenied)
+        {
+            Logger.LogDebug("sharepoint: the subsites of '{Site}' could not be listed: {Message}", web.Path.Length == 0 ? Store.Description : web.Path, ex.Message);
+            return [];
         }
     }
 
-    /// <summary>The library and the path inside it for a source path (the library must exist).</summary>
-    private (LibraryInfo Library, string ItemPath) Locate(string path)
+    /// <summary>
+    /// The library a path is in, from what is known already (statfs makes no request): the pinned one, the one the path
+    /// names, else the first library of the deepest site on the way.
+    /// </summary>
+    private LibraryInfo? KnownLibrary(string path)
     {
-        var (name, itemPath) = SharePointPaths.Split(path, PinnedLibrary);
-        if (!_libraries.TryGetValue(name, out var library))
+        if (_root.Contents is not { } site)
         {
-            throw VfsException.NotFound(PinnedLibrary is null ? name : path);
+            return null;
         }
 
-        return (library, itemPath);
+        if (PinnedLibrary is { } pinned)
+        {
+            return site.Libraries.GetValueOrDefault(pinned);
+        }
+
+        var nearest = site.Libraries.Values.FirstOrDefault();
+        var names = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i < names.Length; i++)
+        {
+            if (site.Libraries.TryGetValue(names[i], out var library))
+            {
+                return library;
+            }
+
+            // a subsite is two names down: the subsites' folder, then the subsite
+            if (!site.IsSubsitesFolder(names[i]) || i + 1 == names.Length || !site.Subsites.TryGetValue(names[++i], out var subsite) || subsite.Contents is not { } below)
+            {
+                break;
+            }
+
+            site = below;
+            nearest = site.Libraries.Values.FirstOrDefault() ?? nearest;
+        }
+
+        return nearest;
     }
 
     /// <summary>The item's ids, from the last listing that saw it, else from the store.</summary>
@@ -716,6 +887,33 @@ public abstract class SharePointSource : SourceBase
             Context.ReportHealth(ComponentHealth.Ready);
         }
     }
+
+    /// <summary>A site the source shows as a folder: its own site at the root, a subsite below it.</summary>
+    /// <param name="info">The subsite, or null for the source's own site.</param>
+    /// <param name="path">The folder it shows as ("" for the source's own site).</param>
+    private sealed class WebNode(WebInfo? info, string path)
+    {
+        public WebInfo? Info { get; } = info;
+
+        public string Path { get; } = path;
+
+        public string Name => VfsPath.SplitLast(Path).Name;
+
+        /// <summary>Its libraries and subsites as last listed; null until it is first needed.</summary>
+        public volatile WebContents? Contents;
+    }
+
+    /// <summary>What is in a site's folder: its libraries by title, its subsites by name, and the folder those are in.</summary>
+    /// <param name="SubsitesFolder">The folder of the subsites (<see cref="SharePointSource.SubsitesFolder"/>, or with a number where a library has that title); null when there are none.</param>
+    private sealed record WebContents(IReadOnlyDictionary<string, LibraryInfo> Libraries, IReadOnlyDictionary<string, WebNode> Subsites, string? SubsitesFolder)
+    {
+        public bool IsSubsitesFolder(string name) => SubsitesFolder is not null && string.Equals(name, SubsitesFolder, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Where a source path leads (<see cref="ResolveAsync"/>).</summary>
+    /// <param name="Library">The library, for a place in one ("" for its own folder); null for a site's own folder or its subsites' folder.</param>
+    /// <param name="SubsitesFolder">The name of the site's subsites' folder when that is the place; null otherwise.</param>
+    private sealed record Place(WebNode Web, LibraryInfo? Library, string ItemPath, string? SubsitesFolder = null);
 
     /// <summary>A response body stream that disposes its response with it.</summary>
     private sealed class ResponseStream(HttpResponseMessage response, Stream body) : Stream
