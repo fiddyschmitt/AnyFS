@@ -43,12 +43,12 @@ public sealed class SharePointSettings
     public const string WindowsCurrent = "Windows account, as yourself";
     public const string Windows = "Windows account";
 
-    [Setting("Site URL", Required = true, Primary = true, Order = 0, Placeholder = "https://contoso.sharepoint.com/sites/Team",
-        Hint = "The site's address: SharePoint Online (contoso.sharepoint.com, or .sharepoint.us in GCC High) or SharePoint Server on your own network (http://intranet/sites/Team). A library or page pasted after the site is fine. For SharePoint Embedded, the container type's id instead.")]
+    [Setting("Site URLs (one per line)", Required = true, Primary = true, Order = 0, Kind = SettingKind.Multiline, Placeholder = "https://contoso.sharepoint.com/sites/Team\nhttps://contoso.sharepoint.com/sites/Sales",
+        Hint = "The site's address: SharePoint Online (contoso.sharepoint.com, or .sharepoint.us in GCC High) or SharePoint Server on your own network (http://intranet/sites/Team). A subsite's address, or a library or page pasted after the site, is fine. Several sites, one per line, each show as a folder of their own, under the one sign-in. For SharePoint Embedded, the container type's id instead.")]
     public string SiteUrl { get; set; } = "";
 
     [Setting("Library", Order = 1, Placeholder = "Documents",
-        Hint = "Leave empty to show every document library as a top-level folder (the site's pages among them, as Markdown), and the site's subsites in a Subsites folder beside them (at the tenant's root site also a Sites folder with every other site you can open), or name one library to serve just that. For SharePoint Embedded, a container, by its name or its id.")]
+        Hint = "Leave empty to show every document library as a top-level folder (the site's pages among them, as Markdown), and the site's subsites in a Subsites folder beside them (at the tenant's root site also a Sites folder with every other site you can open), or name one library to serve just that, with one site only. For SharePoint Embedded, a container, by its name or its id.")]
     public string? Library { get; set; }
 
     [Setting("Sign in with", Order = 2, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [Automatic, AppBrowser, AppDeviceCode, WebSession, WindowsCurrent, Windows],
@@ -94,8 +94,21 @@ public sealed class SharePointSettings
         Hint = "Files this small are downloaded whole when opened and kept in the cache; larger ones are read in ranges as the client asks.")]
     public int SpoolBelowMiB { get; set; } = 8;
 
-    /// <summary>What the address is: a container type's id is Embedded, a Microsoft 365 host is Online, anything else that parses is Server; null while it is neither.</summary>
-    internal SharePointKind? Kind => KindOf(SiteUrl);
+    /// <summary>The lines of <see cref="SiteUrl"/> that hold something, trimmed: one site's address, several, or a container type's id.</summary>
+    internal IReadOnlyList<string> SiteLines => (SiteUrl ?? "").Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0).ToList();
+
+    /// <summary>The first address given, which says what the source is (<see cref="Kind"/>).</summary>
+    internal string FirstSite => SiteLines.FirstOrDefault() ?? "";
+
+    /// <summary>The sites given, each once; lines that are no site's address are left out (validation names them).</summary>
+    internal IReadOnlyList<SiteAddress> Sites
+        => SiteLines.Select(line => SiteAddress.TryParse(line, out var site, out _) ? site : null).OfType<SiteAddress>().DistinctBy(site => site.Url, StringComparer.OrdinalIgnoreCase).ToList();
+
+    /// <summary>Several sites were given: each shows as a folder of its own at the source's root.</summary>
+    internal bool IsMultiSite => Kind is SharePointKind.Online or SharePointKind.Server && Sites.Count > 1;
+
+    /// <summary>What the address is: a container type's id is Embedded, a Microsoft 365 host is Online, anything else that parses is Server; null while it is neither. The first address decides.</summary>
+    internal SharePointKind? Kind => KindOf(FirstSite);
 
     internal static SharePointKind? KindOf(string? address)
     {
@@ -133,8 +146,8 @@ public sealed class SharePointSettings
 
     internal string? PinnedLibrary => string.IsNullOrWhiteSpace(Library) ? null : Library.Trim();
 
-    /// <summary>Whether the address is the tenant's root site (no path after the host), where the tenant's other sites show.</summary>
-    internal bool IsRootSite => Kind is SharePointKind.Online or SharePointKind.Server && SiteAddress.TryParse(SiteUrl, out var site, out _) && site.ServerRelativePath.Length == 0;
+    /// <summary>Whether the one address given is the tenant's root site (no path after the host), where the tenant's other sites show.</summary>
+    internal bool IsRootSite => !IsMultiSite && Kind is SharePointKind.Online or SharePointKind.Server && SiteAddress.TryParse(FirstSite, out var site, out _) && site.IsRoot;
 
     /// <summary>SharePoint Embedded's pinned container when it was given by id rather than by name.</summary>
     internal string? PinnedContainerId => Kind == SharePointKind.Embedded && PinnedLibrary is { } pinned && GraphDocumentStore.LooksLikeContainerId(pinned) ? pinned : null;
@@ -177,7 +190,7 @@ public sealed class SharePointSettings
     /// <summary>The Windows account a Windows sign-in goes as, for messages.</summary>
     internal string WindowsAccount => UsesCurrentLogon ? $@"{Environment.UserDomainName}\{Environment.UserName} (your Windows sign-in)" : Username!.Trim();
 
-    internal bool TryGetContainerType(out Guid id) => Guid.TryParse(SiteUrl?.Trim(), out id);
+    internal bool TryGetContainerType(out Guid id) => Guid.TryParse(FirstSite, out id);
 
     /// <summary>The credentials for the Windows sign-in: DOMAIN\name is split, name@domain is passed as a user principal name, none means the account AnyFS runs as.</summary>
     internal ICredentials Credentials()
@@ -196,7 +209,7 @@ public sealed class SharePointSettings
 
     private bool IsShippedClientId => string.Equals(EffectiveClientId, SharePointPlugin.DefaultClientId, StringComparison.OrdinalIgnoreCase);
 
-    private string? SiteHost => SiteAddress.TryParse(SiteUrl, out var site, out _) ? site.Host : null;
+    private string? SiteHost => SiteAddress.TryParse(FirstSite, out var site, out _) ? site.Host : null;
 
     /// <summary>The sign-in a choice names, or null for Automatic (and anything not offered). "Browser" and "Device code" are the earlier values.</summary>
     internal static SharePointSignIn? SignInFrom(string? choice) => (choice ?? "").Trim() switch
@@ -236,7 +249,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
     public string DisplayName => "SharePoint";
 
-    public string Description => "A SharePoint site's document libraries, subsites and pages (as Markdown): SharePoint Online (Microsoft 365, GCC High too), SharePoint Server on your own network, or SharePoint Embedded's containers, told apart by the address. Reads, writes, renames.";
+    public string Description => "A SharePoint site's document libraries, subsites and pages (as Markdown), or several sites' in one source: SharePoint Online (Microsoft 365, GCC High too), SharePoint Server on your own network, or SharePoint Embedded's containers, told apart by the address. Reads, writes, renames.";
 
     public string TypeFolder => "sharepoint";
 
@@ -252,7 +265,8 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     /// <summary>
     /// A new source's name from its address: the host as given and the site after it ("contoso.sharepoint.com Team",
     /// "intranet Team"; a root site is the host alone, "acme.sharepoint.us"), without a port, and for SharePoint
-    /// Embedded the pinned container, else "Embedded". Null until the address parses.
+    /// Embedded the pinned container, else "Embedded". Several sites are named by the server they share (its root
+    /// site's name), and get no name when they share none. Null until the address parses.
     /// </summary>
     public string? SuggestName(object settings)
     {
@@ -267,11 +281,19 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
             return SafeName(s.PinnedLibrary ?? "Embedded");
         }
 
-        SiteAddress.TryParse(s.SiteUrl, out var site, out _);
-        var host = site.Host.StartsWith('[') ? site.Host[..(site.Host.IndexOf(']') + 1)] : site.Host.Split(':')[0];
-        var siteName = site.ServerRelativePath.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
-        return SafeName(siteName is null ? host : $"{host} {siteName}");
+        if (s.IsMultiSite)
+        {
+            var sites = s.Sites;
+            return sites.Select(site => (site.Scheme, site.Host)).Distinct().Count() == 1 ? SafeName(HostName(sites[0])) : null;
+        }
+
+        SiteAddress.TryParse(s.FirstSite, out var one, out _);
+        var siteName = one.ServerRelativePath.Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
+        return SafeName(siteName is null ? HostName(one) : $"{HostName(one)} {siteName}");
     }
+
+    /// <summary>A site's host as a name: without its port.</summary>
+    private static string HostName(SiteAddress site) => site.Host.StartsWith('[') ? site.Host[..(site.Host.IndexOf(']') + 1)] : site.Host.Split(':')[0];
 
     /// <summary>A name that is also a valid path segment: what no file system takes becomes a dash, and no leading or trailing dot or space.</summary>
     private static string? SafeName(string name)
@@ -344,12 +366,52 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         var s = (SharePointSettings)settings;
         if (s.Kind is not { } kind)
         {
-            if (!SiteAddress.TryParse(s.SiteUrl, out _, out var reason))
+            if (!SiteAddress.TryParse(s.FirstSite, out _, out var reason))
             {
                 yield return new ValidationMessage(reason, nameof(SharePointSettings.SiteUrl));
             }
 
             yield break;
+        }
+
+        var lines = s.SiteLines;
+        if (kind == SharePointKind.Embedded && lines.Count > 1)
+        {
+            yield return new ValidationMessage("SharePoint Embedded takes one container type's id.", nameof(SharePointSettings.SiteUrl));
+        }
+
+        if (kind != SharePointKind.Embedded)
+        {
+            for (var i = 1; i < lines.Count; i++)
+            {
+                if (!SiteAddress.TryParse(lines[i], out _, out var reason))
+                {
+                    yield return new ValidationMessage($"{lines[i]}: {reason}", nameof(SharePointSettings.SiteUrl));
+                }
+                else if (SharePointSettings.KindOf(lines[i]) != kind)
+                {
+                    yield return new ValidationMessage($"{lines[i]} is SharePoint {SharePointSettings.KindOf(lines[i])}, the first site SharePoint {kind}: the sites share one sign-in, so they are all SharePoint Online or all SharePoint Server. Add a source for the others.", nameof(SharePointSettings.SiteUrl));
+                }
+            }
+        }
+
+        if (s.IsMultiSite)
+        {
+            if (s.PinnedLibrary is not null)
+            {
+                yield return new ValidationMessage("With several sites each shows all its libraries; name one library only with one site.", nameof(SharePointSettings.Library));
+            }
+
+            var servers = s.Sites.Select(site => $"{site.Scheme}://{site.Host}").Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (s.EffectiveSignIn == SharePointSignIn.WebSession && servers.Count > 1)
+            {
+                yield return new ValidationMessage($"The web session signs in to one server, and these sites are on {servers.Count} ({string.Join(", ", servers)}): add a source for each server.", nameof(SharePointSettings.SiteUrl));
+            }
+
+            if (kind == SharePointKind.Online && s.Sites.Select(site => MicrosoftCloud.FromSiteHost(site.Host)?.Name).Distinct().Count() > 1)
+            {
+                yield return new ValidationMessage("These sites are in different Microsoft clouds (.sharepoint.com and .sharepoint.us), which one sign-in cannot reach: add a source for each.", nameof(SharePointSettings.SiteUrl));
+            }
         }
 
         if (!s.IsAutomatic && SharePointSettings.SignInFrom(s.SignInMethod) is null)
@@ -393,7 +455,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
                 yield return new ValidationMessage("The client ID is the app registration's Application (client) ID, a GUID.", nameof(SharePointSettings.ClientId));
             }
 
-            var siteHost = kind == SharePointKind.Online && SiteAddress.TryParse(s.SiteUrl, out var site, out _) ? site.Host : null;
+            var siteHost = kind == SharePointKind.Online && SiteAddress.TryParse(s.FirstSite, out var site, out _) ? site.Host : null;
             var embedded = kind == SharePointKind.Embedded;
             foreach (var message in CloudSettings.Check(s.Cloud, s.EffectiveCloud, s.Tenant, s.EffectiveClientId, siteHost,
                          embedded ? ContainerPermissions : SitePermissions, tenantRequired: embedded, embedded ? ContainerRegistrationExtra : ""))
@@ -456,7 +518,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         var s = (SharePointSettings)settings;
         if (s.Kind is not { } kind)
         {
-            return new TestResult(false, SiteAddress.TryParse(s.SiteUrl, out _, out var reason) ? "The address is not a SharePoint site or a container type id." : reason);
+            return new TestResult(false, SiteAddress.TryParse(s.FirstSite, out _, out var reason) ? "The address is not a SharePoint site or a container type id." : reason);
         }
 
         if (Mismatch(kind, s.EffectiveSignIn) is { } mismatch)
@@ -486,7 +548,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
     private static async Task<TestResult> TestGraphSiteAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
     {
-        SiteAddress.TryParse(s.SiteUrl, out var site, out _);
+        SiteAddress.TryParse(s.FirstSite, out var site, out _);
         var cloud = s.EffectiveCloud;
         if (CloudSettings.NeedsOwnRegistration(cloud, s.EffectiveClientId))
         {
@@ -496,12 +558,20 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         var signIn = MicrosoftSignIn(s, EntraSignIn.SiteScopes, progress.Report, prompt: null, loadCache: () => EntraSignIn.RecentCache(s.EffectiveClientId, s.EffectiveTenant, s.LoginHint), saveCache: _ => { });
         progress.Report(cloud.IsGlobal ? "Signing in" : $"Signing in to the {cloud.Name} cloud");
         await signIn.SignInAsync(ct).ConfigureAwait(false);
+
+        // the store is not disposed: it would dispose the client, which the using here does
         using var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), NullLogger.Instance, cloud: cloud);
+        if (s.IsMultiSite)
+        {
+            progress.Report($"Signed in as {signIn.Username}; looking up {s.Sites.Count} sites");
+            var (sites, failed) = await GraphDocumentStore.ConnectSitesAsync(graph, s.Sites, ct).ConfigureAwait(false);
+            return await SitesAsync($"Signed in as {signIn.Username}.", sites, failed, ct).ConfigureAwait(false);
+        }
+
         progress.Report($"Signed in as {signIn.Username}; looking up {site.Url}");
         var notFound = new TestResult(false, $"Signed in as {signIn.Username}, but {site.Url} was not found, or this account has no access to it.");
         try
         {
-            // the store is not disposed: it would dispose the client, which the using above does
             var store = await GraphDocumentStore.ConnectAsync(graph, site, ct).ConfigureAwait(false);
             return store is null ? notFound : await LibrariesAsync($"Signed in as {signIn.Username}. {store.Description}", s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
         }
@@ -513,7 +583,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
     private static async Task<TestResult> TestWebSessionAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
     {
-        SiteAddress.TryParse(s.SiteUrl, out var site, out _);
+        SiteAddress.TryParse(s.FirstSite, out var site, out _);
         var siteUri = new Uri(site.Url);
         var session = new BrowserSession(BrowserLocator.Find(s.Browser), ProfileDir(site.Host), NullLogger.Instance);
         if (!session.CanSignIn)
@@ -524,20 +594,32 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         var cookies = await session.SignInAsync(siteUri, interactive: true, progress.Report, ct).ConfigureAwait(false);
         using var handler = new BrowserSessionHandler(cookies, siteUri, c => session.SignInAsync(siteUri, interactive: false, progress.Report, c), NullLogger.Instance);
         using var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, NullLogger.Instance, handler: handler);
-        var store = await RestDocumentStore.ConnectAsync(rest, ct).ConfigureAwait(false);
+        if (s.IsMultiSite)
+        {
+            var (sites, failed) = await RestDocumentStore.ConnectSitesAsync(rest, s.Sites, ct).ConfigureAwait(false);
+            return await SitesAsync($"Signed in with {session.BrowserName}.", sites, failed, ct).ConfigureAwait(false);
+        }
+
+        var store = await RestDocumentStore.ConnectAsync(rest, site, ct).ConfigureAwait(false);
         progress.Report($"Signed in to {store.Description}; listing the libraries");
         return await LibrariesAsync($"Signed in with {session.BrowserName}. {store.Description}", s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
     }
 
     private static async Task<TestResult> TestWindowsAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
     {
-        SiteAddress.TryParse(s.SiteUrl, out var site, out _);
+        SiteAddress.TryParse(s.FirstSite, out var site, out _);
         var who = s.WindowsAccount;
-        progress.Report($"Connecting to {site.Url} as {who}");
+        progress.Report(s.IsMultiSite ? $"Connecting to {s.Sites.Count} sites as {who}" : $"Connecting to {site.Url} as {who}");
         using var rest = new SharePointRestClient(new Uri(site.Url), s.Credentials(), s.TrustAnyCertificate, NullLogger.Instance);
+        if (s.IsMultiSite)
+        {
+            var (sites, failed) = await RestDocumentStore.ConnectSitesAsync(rest, s.Sites, ct).ConfigureAwait(false);
+            return await SitesAsync($"Signed in as {who}.", sites, failed, ct).ConfigureAwait(false);
+        }
+
         try
         {
-            var store = await RestDocumentStore.ConnectAsync(rest, ct).ConfigureAwait(false);
+            var store = await RestDocumentStore.ConnectAsync(rest, site, ct).ConfigureAwait(false);
             progress.Report($"Connected to {store.Description}; listing the libraries");
             return await LibrariesAsync($"Signed in as {who}. {store.Description}", s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
         }
@@ -610,22 +692,58 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
             return new TestResult(false, $"{what} has no library named {pinned}; it has: {string.Join(", ", names)}.");
         }
 
-        List<string> subsites = [];
+        return new TestResult(true, $"{what} has {await SummaryAsync(store, null, names, pinned is null, rootSite, ct).ConfigureAwait(false)}.");
+    }
+
+    /// <summary>
+    /// The Test button's answer for several sites, a line each: what each site that answered has, then what each address
+    /// that did not answered. A success only when every site answered, since the source starts only then.
+    /// </summary>
+    private static async Task<TestResult> SitesAsync(string what, IDocumentStore store, IReadOnlyList<(SiteAddress Site, VfsException Error)> failed, CancellationToken ct)
+    {
+        var lines = new List<string> { what };
+        var ok = failed.Count == 0;
+        foreach (var web in store.Sites ?? [])
+        {
+            try
+            {
+                var names = (await store.ListLibrariesAsync(web, ct).ConfigureAwait(false)).Select(l => l.Name).ToList();
+                lines.Add($"{web.Name} ({web.Url}) has {await SummaryAsync(store, web, names, subsites: true, web.IsRoot, ct).ConfigureAwait(false)}.");
+            }
+            catch (VfsException ex)
+            {
+                ok = false;
+                lines.Add($"{web.Name} ({web.Url}): {ex.Message}");
+            }
+        }
+
+        foreach (var (site, error) in failed)
+        {
+            lines.Add($"{site.Url}: {error.Message.TrimEnd('.')}.");
+        }
+
+        return new TestResult(ok, string.Join("\n", lines));
+    }
+
+    /// <summary>"3 document libraries: a, b, c, and 2 subsites: x, y", and at a root site what search finds.</summary>
+    private static async Task<string> SummaryAsync(IDocumentStore store, WebInfo? web, IReadOnlyList<string> names, bool subsites, bool rootSite, CancellationToken ct)
+    {
+        List<string> found = [];
         try
         {
-            subsites = pinned is null ? (await store.ListSubsitesAsync(null, ct).ConfigureAwait(false)).Select(w => w.Name).ToList() : [];
+            found = subsites ? (await store.ListSubsitesAsync(web, ct).ConfigureAwait(false)).Select(w => w.Name).ToList() : [];
         }
         catch (VfsException ex) when (ex.Error == VfsError.AccessDenied)
         {
             // as the source: an account that may not list the subsites still has the libraries
         }
 
-        var also = subsites.Count == 0 ? "" : $", and {subsites.Count} subsite{(subsites.Count == 1 ? "" : "s")}: {string.Join(", ", subsites)}";
-        if (pinned is null && rootSite)
+        var also = found.Count == 0 ? "" : $", and {found.Count} subsite{(found.Count == 1 ? "" : "s")}: {string.Join(", ", found)}";
+        if (subsites && rootSite)
         {
             try
             {
-                var sites = (await store.ListSitesAsync(ct).ConfigureAwait(false)).Select(w => w.Name).ToList();
+                var sites = (await store.ListSitesAsync(web, ct).ConfigureAwait(false)).Select(w => w.Name).ToList();
                 if (sites.Count > 0)
                 {
                     var shown = string.Join(", ", sites.Take(10)) + (sites.Count > 10 ? $" and {sites.Count - 10} more" : "");
@@ -638,7 +756,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
             }
         }
 
-        return new TestResult(true, $"{what} has {names.Count} document librar{(names.Count == 1 ? "y" : "ies")}: {string.Join(", ", names)}{also}.");
+        return $"{names.Count} document librar{(names.Count == 1 ? "y" : "ies")}: {string.Join(", ", names)}{also}";
     }
 
     /// <summary>The Microsoft sign-in for an app sign-in, as the settings describe it.</summary>
@@ -665,7 +783,8 @@ public sealed class SharePointSiteSource : SharePointSource
 
     protected override long SpoolBelowBytes => (long)_settings.SpoolBelowMiB << 20;
 
-    protected override string Target => _settings.Kind == SharePointKind.Embedded ? $"container type {_settings.SiteUrl.Trim()}" : _settings.SiteUrl;
+    protected override string Target => _settings.Kind == SharePointKind.Embedded ? $"container type {_settings.FirstSite}"
+        : _settings.IsMultiSite ? string.Join(", ", _settings.Sites.Select(s => s.Url)) : _settings.FirstSite;
 
     /// <summary>The tenant's root site (https://contoso.sharepoint.com, http://intranet) shows the tenant's other sites in a Sites folder.</summary>
     protected override bool ShowsOtherSites => _settings.IsRootSite;
@@ -674,13 +793,19 @@ public sealed class SharePointSiteSource : SharePointSource
     {
         if (_settings.Kind is not { } kind)
         {
-            throw new SourceFailedException(SiteAddress.TryParse(_settings.SiteUrl, out _, out var reason) ? "The address is not a SharePoint site or a container type id." : reason, permanent: true);
+            throw new SourceFailedException(SiteAddress.TryParse(_settings.FirstSite, out _, out var reason) ? "The address is not a SharePoint site or a container type id." : reason, permanent: true);
         }
 
         var signIn = _settings.EffectiveSignIn;
         if (SharePointPlugin.Mismatch(kind, signIn) is { } mismatch)
         {
             throw new SourceFailedException(mismatch, permanent: true);
+        }
+
+        // the settings dialog checks this too, but a source edited by hand gets here unchecked
+        if (_settings.IsMultiSite && _settings.PinnedLibrary is not null)
+        {
+            throw new SourceFailedException("With several sites each shows all its libraries; name one library only with one site.", permanent: true);
         }
 
         return (kind, signIn) switch
@@ -734,13 +859,19 @@ public sealed class SharePointSiteSource : SharePointSource
 
     private async Task<IDocumentStore> ConnectGraphSiteAsync(CancellationToken ct)
     {
-        SiteAddress.TryParse(_settings.SiteUrl, out var site, out _);
+        SiteAddress.TryParse(_settings.FirstSite, out var site, out _);
         var cloud = _settings.EffectiveCloud;
         RefuseWithoutOwnRegistration(cloud, SharePointPlugin.SitePermissions);
         var signIn = MicrosoftSignIn(EntraSignIn.SiteScopes, ct);
         await SignInMicrosoftAsync(signIn, cloud, ct).ConfigureAwait(false);
 
         var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy, cloud: cloud);
+        if (_settings.IsMultiSite)
+        {
+            Progress($"Looking up {_settings.Sites.Count} sites");
+            return await AllSitesAsync(() => GraphDocumentStore.ConnectSitesAsync(graph, _settings.Sites, ct), graph, account: null).ConfigureAwait(false);
+        }
+
         Progress($"Looking up {site.Url}");
         GraphDocumentStore? store;
         try
@@ -808,17 +939,23 @@ public sealed class SharePointSiteSource : SharePointSource
 
     private async Task<IDocumentStore> ConnectWindowsAsync(CancellationToken ct)
     {
-        SiteAddress.TryParse(_settings.SiteUrl, out var site, out _);
+        SiteAddress.TryParse(_settings.FirstSite, out var site, out _);
         if (_settings.UsesCurrentLogon && !OperatingSystem.IsWindows())
         {
             throw new SourceFailedException("Give a user name and password: signing in as the current account works on Windows only.", permanent: true);
         }
 
-        Progress($"Connecting to {site.Url} as {_settings.WindowsAccount}");
         var rest = new SharePointRestClient(new Uri(site.Url), _settings.Credentials(), _settings.TrustAnyCertificate, Logger, MarkDegraded, MarkHealthy);
+        if (_settings.IsMultiSite)
+        {
+            Progress($"Connecting to {_settings.Sites.Count} sites as {_settings.WindowsAccount}");
+            return await AllSitesAsync(() => RestDocumentStore.ConnectSitesAsync(rest, _settings.Sites, ct), rest, _settings.WindowsAccount).ConfigureAwait(false);
+        }
+
+        Progress($"Connecting to {site.Url} as {_settings.WindowsAccount}");
         try
         {
-            return await RestDocumentStore.ConnectAsync(rest, ct).ConfigureAwait(false);
+            return await RestDocumentStore.ConnectAsync(rest, site, ct).ConfigureAwait(false);
         }
         catch (VfsException ex)
         {
@@ -835,7 +972,7 @@ public sealed class SharePointSiteSource : SharePointSource
 
     private async Task<IDocumentStore> ConnectWebSessionAsync(CancellationToken ct)
     {
-        SiteAddress.TryParse(_settings.SiteUrl, out var site, out _);
+        SiteAddress.TryParse(_settings.FirstSite, out var site, out _);
         var siteUri = new Uri(site.Url);
         var session = new BrowserSession(BrowserLocator.Find(_settings.Browser), SharePointPlugin.ProfileDir(site.Host), Logger);
         if (!session.CanSignIn)
@@ -856,9 +993,14 @@ public sealed class SharePointSiteSource : SharePointSource
 
         var handler = new BrowserSessionHandler(cookies, siteUri, c => session.SignInAsync(siteUri, interactive: false, Progress, c), Logger);
         var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, Logger, MarkDegraded, MarkHealthy, handler);
+        if (_settings.IsMultiSite)
+        {
+            return await AllSitesAsync(() => RestDocumentStore.ConnectSitesAsync(rest, _settings.Sites, ct), rest, account: null).ConfigureAwait(false);
+        }
+
         try
         {
-            var store = await RestDocumentStore.ConnectAsync(rest, ct).ConfigureAwait(false);
+            var store = await RestDocumentStore.ConnectAsync(rest, site, ct).ConfigureAwait(false);
             Progress($"Signed in to {site.Host}");
             return store;
         }
@@ -867,5 +1009,41 @@ public sealed class SharePointSiteSource : SharePointSource
             rest.Dispose();
             throw new SourceFailedException($"{site.Url}: {ex.Message}", permanent: ex.Error is VfsError.NotFound, ex);
         }
+    }
+
+    /// <summary>
+    /// A source of several sites starts when every one of them answers, as the Test button says; otherwise it says which
+    /// did not and why, for good when each was refused or is not there. <paramref name="client"/> is the connection the
+    /// store would have taken over, given back when there is no store.
+    /// </summary>
+    private static async Task<IDocumentStore> AllSitesAsync<TStore>(Func<Task<(TStore Store, IReadOnlyList<(SiteAddress Site, VfsException Error)> Failed)>> connect, IDisposable client, string? account)
+        where TStore : IDocumentStore
+    {
+        TStore store;
+        IReadOnlyList<(SiteAddress Site, VfsException Error)> failed;
+        try
+        {
+            (store, failed) = await connect().ConfigureAwait(false);
+        }
+        catch (SignInRequiredException ex)
+        {
+            client.Dispose();
+            throw new SourceFailedException(ex.Message, permanent: false, ex);
+        }
+        catch
+        {
+            client.Dispose();
+            throw;
+        }
+
+        if (failed.Count == 0)
+        {
+            return store;
+        }
+
+        store.Dispose();
+        var who = account is null ? "" : $" (signed in as {account})";
+        var permanent = failed.All(f => f.Error.Error is VfsError.AccessDenied or VfsError.NotFound);
+        throw new SourceFailedException($"{failed.Count} of the sites could not be opened{who}: " + string.Join("; ", failed.Select(f => $"{f.Site.Url}: {f.Error.Message.TrimEnd('.')}")), permanent, failed[0].Error);
     }
 }

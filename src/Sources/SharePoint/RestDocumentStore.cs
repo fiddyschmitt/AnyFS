@@ -11,13 +11,17 @@ namespace AnyFS.Sources.SharePoint;
 /// <summary>
 /// A site's document libraries through SharePoint's REST API, for SharePoint Server and the web session: libraries
 /// are the site's lists of the document-library kind, items are files and folders under each library's root folder,
-/// all addressed by server-relative URL. A subsite's are reached through that subsite's own API.
+/// all addressed by server-relative URL. A subsite's, another site's, and each of several sites a source was given are
+/// reached through that site's own API, by its address (they may be on other servers of a Windows sign-in).
 /// </summary>
 internal sealed class RestDocumentStore : IDocumentStore
 {
     private const string FileSelect = "Name,ServerRelativeUrl,Length,TimeCreated,TimeLastModified,UniqueId,ETag";
     private const string FolderSelect = "Name,ServerRelativeUrl,TimeCreated,TimeLastModified,UniqueId,ItemCount";
 
+    // the client that holds the connections and the sign-in, disposed last; and the source's own site's (with several
+    // sites, the first one's), which is that client or one for the address the site was found at
+    private readonly SharePointRestClient _owner;
     private readonly SharePointRestClient _rest;
     private readonly ConcurrentDictionary<string, SharePointRestClient> _subsites = new(StringComparer.OrdinalIgnoreCase);
     private readonly PageCache _pages = new();
@@ -25,36 +29,117 @@ internal sealed class RestDocumentStore : IDocumentStore
     // a SharePoint without modern pages has no CanvasContent1 to ask for; found out once, on the first page listing
     private volatile bool _noCanvas;
 
-    private RestDocumentStore(SharePointRestClient rest, string description)
+    private RestDocumentStore(SharePointRestClient owner, SharePointRestClient rest, string description, IReadOnlyList<WebInfo>? sites = null)
     {
+        _owner = owner;
         _rest = rest;
         Description = description;
+        Sites = sites;
     }
 
     public string Description { get; }
 
     public string LibraryNoun => "document library";
 
-    /// <summary>The client for the source's own site (for tests, which make their subsite through it).</summary>
+    public IReadOnlyList<WebInfo>? Sites { get; }
+
+    /// <summary>The client for the source's own site (for tests, which make their subsite and page through it).</summary>
     internal SharePointRestClient Rest => _rest;
 
-    /// <summary>Checks the site answers and names it.</summary>
-    public static async Task<RestDocumentStore> ConnectAsync(SharePointRestClient rest, CancellationToken ct)
+    /// <summary>Finds the site the address is in (<see cref="FindAsync"/>) and names it.</summary>
+    public static async Task<RestDocumentStore> ConnectAsync(SharePointRestClient rest, SiteAddress site, CancellationToken ct)
     {
-        using var doc = await rest.GetJsonAsync("web?$select=Title,Url,ServerRelativeUrl", rest.SiteUrl.ToString(), ct).ConfigureAwait(false);
-        var title = doc.RootElement.TryGetProperty("Title", out var t) ? t.GetString() : null;
-        var url = doc.RootElement.TryGetProperty("Url", out var u) ? u.GetString() : null;
-        return new RestDocumentStore(rest, $"{title ?? url ?? rest.SiteUrl.ToString()} ({url ?? rest.SiteUrl.ToString()})");
+        var (client, title) = await FindAsync(rest, site, ct).ConfigureAwait(false);
+        return new RestDocumentStore(rest, client, $"{title} ({Address(client)})");
     }
+
+    /// <summary>
+    /// The sites a source was given, each found as <see cref="ConnectAsync"/> finds one, all at once: the store holds those
+    /// that answered (its <see cref="Sites"/>, named by <see cref="WebInfo.Listed"/>), and what the others answered comes
+    /// back beside it, for the caller to judge.
+    /// </summary>
+    public static async Task<(RestDocumentStore Store, IReadOnlyList<(SiteAddress Site, VfsException Error)> Failed)> ConnectSitesAsync(SharePointRestClient rest, IReadOnlyList<SiteAddress> sites, CancellationToken ct)
+    {
+        var results = await Task.WhenAll(sites.Select(async site =>
+        {
+            try
+            {
+                var (client, _) = await FindAsync(rest, site, ct).ConfigureAwait(false);
+                return (Site: site, Client: client, Error: (VfsException?)null);
+            }
+            catch (VfsException ex)
+            {
+                return (Site: site, Client: (SharePointRestClient?)null, Error: ex);
+            }
+        })).ConfigureAwait(false);
+
+        // the same site given twice (two addresses in it) is one folder
+        var found = results.Where(r => r.Client is not null).DistinctBy(r => Address(r.Client!), StringComparer.OrdinalIgnoreCase).ToList();
+        var webs = WebInfo.Listed(found.Select(r => (Address(r.Client!), r.Client!.SiteUrl)));
+        var store = new RestDocumentStore(rest, found.FirstOrDefault().Client ?? rest, string.Join(", ", webs.Select(w => $"{w.Name} ({w.Url})")), webs);
+        foreach (var (web, result) in webs.Zip(found))
+        {
+            store._subsites[web.Key] = result.Client!;
+        }
+
+        foreach (var spare in results.Where(r => r.Client is not null && r.Client != rest && !store._subsites.Values.Contains(r.Client)))
+        {
+            spare.Client!.Dispose();
+        }
+
+        return (store, results.Where(r => r.Error is not null).Select(r => (r.Site, r.Error!)).ToList());
+    }
+
+    /// <summary>
+    /// The site an address is in, with its title: the address itself, else each shorter one (<see cref="SiteAddress.Candidates"/>),
+    /// since SharePoint answers a library's or a folder's address with 404; the address's own answer when none is a site.
+    /// </summary>
+    private static async Task<(SharePointRestClient Client, string Title)> FindAsync(SharePointRestClient rest, SiteAddress site, CancellationToken ct)
+    {
+        VfsException? first = null;
+        foreach (var candidate in site.Candidates())
+        {
+            var url = new Uri(candidate.Url.TrimEnd('/') + "/");
+            var client = url == rest.SiteUrl ? rest : rest.ForSite(url);
+            try
+            {
+                using var doc = await client.GetJsonAsync("web?$select=Title,Url", client.SiteUrl.ToString(), ct).ConfigureAwait(false);
+                var title = doc.RootElement.TryGetProperty("Title", out var t) ? t.GetString() : null;
+                return (client, string.IsNullOrEmpty(title) ? Address(client) : title);
+            }
+            catch (VfsException ex) when (ex.Error == VfsError.NotFound)
+            {
+                first ??= ex;
+                if (client != rest)
+                {
+                    client.Dispose();
+                }
+            }
+            catch
+            {
+                if (client != rest)
+                {
+                    client.Dispose();
+                }
+
+                throw;
+            }
+        }
+
+        throw first ?? VfsException.NotFound(site.Url);
+    }
+
+    /// <summary>A site's address as it is keyed and shown: the client's, without the trailing slash.</summary>
+    private static string Address(SharePointRestClient client) => client.SiteUrl.AbsoluteUri.TrimEnd('/');
 
     public void Dispose()
     {
-        foreach (var subsite in _subsites.Values)
+        foreach (var client in _subsites.Values.Append(_rest).Where(c => c != _owner).Distinct())
         {
-            subsite.Dispose();
+            client.Dispose();
         }
 
-        _rest.Dispose();
+        _owner.Dispose();
     }
 
     public async Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(WebInfo? web, CancellationToken ct)
@@ -76,17 +161,19 @@ internal sealed class RestDocumentStore : IDocumentStore
         return libraries;
     }
 
-    /// <summary>The subsites the account may open, as SharePoint filters them for the current user (-1: of every template and configuration).</summary>
+    /// <summary>The subsites the account may open, as SharePoint filters them for the current user (-1: of every template and configuration), each by its address.</summary>
     public async Task<IReadOnlyList<WebInfo>> ListSubsitesAsync(WebInfo? web, CancellationToken ct)
     {
-        using var doc = await Client(web).GetJsonAsync("web/getsubwebsfilteredforcurrentuser(nwebtemplatefilter=-1,nconfigurationfilter=-1)", web?.Key ?? Description, ct).ConfigureAwait(false);
+        var client = Client(web);
+        using var doc = await client.GetJsonAsync("web/getsubwebsfilteredforcurrentuser(nwebtemplatefilter=-1,nconfigurationfilter=-1)", web?.Key ?? Description, ct).ConfigureAwait(false);
         var subsites = new List<WebInfo>();
         foreach (var element in doc.RootElement.GetProperty("value").EnumerateArray())
         {
             var url = element.TryGetProperty("ServerRelativeUrl", out var u) ? u.GetString()?.TrimEnd('/') : null;
             if (!string.IsNullOrEmpty(url))
             {
-                subsites.Add(new WebInfo(url, url[(url.LastIndexOf('/') + 1)..]));
+                var address = client.AddressOf(url);
+                subsites.Add(new WebInfo(address, url[(url.LastIndexOf('/') + 1)..], address));
             }
         }
 
@@ -95,27 +182,29 @@ internal sealed class RestDocumentStore : IDocumentStore
 
     /// <summary>
     /// The site collections SharePoint's search finds for the account (contentclass STS_Site: what it may open, no
-    /// subsites), 500 at a time, on this site's host only, this site left out.
+    /// subsites), 500 at a time, on the site's server only, the site itself left out; asked through that site.
     /// </summary>
-    public async Task<IReadOnlyList<WebInfo>> ListSitesAsync(CancellationToken ct)
+    public async Task<IReadOnlyList<WebInfo>> ListSitesAsync(WebInfo? web, CancellationToken ct)
     {
         const int Page = 500;
-        var own = _rest.SiteUrl.AbsolutePath.TrimEnd('/');
-        var found = new List<(string, string)>();
+        var client = Client(web);
+        var own = client.SiteUrl.AbsolutePath.TrimEnd('/');
+        var found = new List<(string, string, string?)>();
         for (var start = 0; start < 100 * Page; start += Page)
         {
-            using var doc = await _rest.GetJsonAsync($"search/query?querytext='contentclass:STS_Site'&selectproperties='Path'&trimduplicates=false&rowlimit={Page}&startrow={start}", Description, ct).ConfigureAwait(false);
+            using var doc = await client.GetJsonAsync($"search/query?querytext='contentclass:STS_Site'&selectproperties='Path'&trimduplicates=false&rowlimit={Page}&startrow={start}", web?.Key ?? Description, ct).ConfigureAwait(false);
             var results = doc.RootElement.GetProperty("PrimaryQueryResult").GetProperty("RelevantResults");
             var rows = results.GetProperty("Table").GetProperty("Rows");
             foreach (var row in rows.EnumerateArray())
             {
                 var path = row.GetProperty("Cells").EnumerateArray().Where(c => c.GetProperty("Key").GetString() == "Path").Select(c => c.GetProperty("Value").GetString()).FirstOrDefault();
-                if (Uri.TryCreate(path, UriKind.Absolute, out var site) && string.Equals(site.Authority, _rest.SiteUrl.Authority, StringComparison.OrdinalIgnoreCase))
+                if (Uri.TryCreate(path, UriKind.Absolute, out var site) && string.Equals(site.Authority, client.SiteUrl.Authority, StringComparison.OrdinalIgnoreCase))
                 {
                     var serverRelative = Uri.UnescapeDataString(site.AbsolutePath).TrimEnd('/');
                     if (!string.Equals(serverRelative, own, StringComparison.OrdinalIgnoreCase))
                     {
-                        found.Add((serverRelative, serverRelative));
+                        var address = client.AddressOf(serverRelative);
+                        found.Add((address, serverRelative, address));
                     }
                 }
             }
@@ -403,8 +492,8 @@ internal sealed class RestDocumentStore : IDocumentStore
 
     private static string Display(LibraryInfo library, string itemPath) => itemPath.Length == 0 ? library.Shown : library.Shown + "/" + itemPath;
 
-    /// <summary>The client for the source's own site, or for a subsite (made the first time it is needed).</summary>
-    private SharePointRestClient Client(WebInfo? web) => web is null ? _rest : _subsites.GetOrAdd(web.Key, _rest.ForSite);
+    /// <summary>The client for the source's own site, or for another one by its address (made the first time it is needed).</summary>
+    private SharePointRestClient Client(WebInfo? web) => web is null ? _rest : _subsites.GetOrAdd(web.Key, key => _owner.ForSite(new Uri(key + "/")));
 
     private SharePointRestClient Client(LibraryInfo library) => Client(library.Web);
 

@@ -11,7 +11,8 @@ namespace AnyFS.Sources.SharePoint;
 /// are <c>library/folder/file</c>, with a site's subsites in a <c>Subsites</c> folder beside its libraries, each with
 /// its own inside it (<c>Subsites/subsite/library/folder/file</c>, and so on down), at the tenant's root site the
 /// tenant's other sites in a <c>Sites</c> folder the same way (<c>Sites/Axle/library/...</c>, found by search), or
-/// just <c>folder/file</c> when one library is pinned. The site's pages (a library of <see cref="LibraryInfo.Pages"/>)
+/// just <c>folder/file</c> when one library is pinned. A source given several sites has a folder per site first
+/// (<c>Axle/library/...</c>), each like a source's own. The site's pages (a library of <see cref="LibraryInfo.Pages"/>)
 /// are read-only Markdown files made by the store.
 /// Listings sit in a two-second <see cref="ListingCache"/> and stats are answered from it; a listing also remembers each item's
 /// ids (and download URL, where the flavour has one), so an open needs no extra round trip. Files below the
@@ -34,12 +35,14 @@ public abstract class SharePointSource : SourceBase
     // search finds a new site only minutes after it is made, so asking more often than this gains nothing
     private static readonly TimeSpan OtherSitesTtl = TimeSpan.FromMinutes(5);
 
-    // the source's own site; its subsites (and, at the tenant's root, the other sites) hang below it as they are listed
+    // the source's own site, or the sites it was given; their subsites (and, at a tenant's root, the other sites) hang
+    // below as they are listed
     private readonly WebNode _root = new(null, "");
     private readonly ConcurrentDictionary<string, ItemRef> _items = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _otherSitesGate = new(1, 1);
-    private IReadOnlyList<WebInfo> _otherSites = [];
-    private DateTimeOffset _otherSitesSearched = DateTimeOffset.MinValue;
+
+    // the other sites search found, by the root site they show under ("" for the source's own)
+    private readonly Dictionary<string, (IReadOnlyList<WebInfo> Sites, DateTimeOffset Searched)> _otherSites = new(StringComparer.OrdinalIgnoreCase);
 
     // files open for writing that SharePoint has not got yet (the upload comes when the handle closes): stats,
     // listings and times are answered here meanwhile, since the upstream knows nothing of them
@@ -104,6 +107,12 @@ public abstract class SharePointSource : SourceBase
             catch (IOException)
             {
             }
+        }
+
+        if (site.Sites is { } given)
+        {
+            Logger.LogInformation("sharepoint: serving {Count} sites: {Sites}", given.Count, store.Description);
+            return;
         }
 
         var subsites = site.Of(subsites: true) is { } s ? $", {s.Webs.Count} subsite{(s.Webs.Count == 1 ? "" : "s")}" : "";
@@ -171,6 +180,11 @@ public abstract class SharePointSource : SourceBase
             foreach (var webs in site.Folders)
             {
                 yield return VfsEntry.Directory(webs.Name);
+            }
+
+            foreach (var name in site.Sites?.Keys ?? [])
+            {
+                yield return VfsEntry.Directory(name);
             }
 
             yield break;
@@ -427,6 +441,7 @@ public abstract class SharePointSource : SourceBase
             {
                 { Folder.Subsites: true } => VfsException.NotSupported("creating a subsite"),
                 { Folder.Subsites: false } => VfsException.NotSupported("creating a site"),
+                { Library: null, Web.Contents.Sites: not null } => VfsException.NotSupported("creating a site (a source shows the sites its Site URLs name)"),
                 { Library: null } => VfsException.NotSupported($"creating a {Store.LibraryNoun} (create folders inside one)"),
                 _ => VfsException.NotFound(VfsPath.Parent(path)),
             };
@@ -647,10 +662,16 @@ public abstract class SharePointSource : SourceBase
         while (rest.Length > 0)
         {
             var name = Next(ref rest);
-            var site = await KnownAsync(web, s => s.Libraries.ContainsKey(name) || s.Folder(name) is not null, ct).ConfigureAwait(false);
+            var site = await KnownAsync(web, s => s.Libraries.ContainsKey(name) || s.Folder(name) is not null || s.Site(name) is not null, ct).ConfigureAwait(false);
             if (site.Libraries.TryGetValue(name, out var library))
             {
                 return new Place(web, library, rest);
+            }
+
+            if (site.Site(name) is { } given)
+            {
+                web = given;   // one of the sites the source was given, at its root
+                continue;
             }
 
             if (site.Folder(name) is not { } folder)
@@ -731,10 +752,22 @@ public abstract class SharePointSource : SourceBase
     /// </summary>
     private async Task<WebContents> LoadWebAsync(WebNode web, CancellationToken ct)
     {
+        if (web == _root && Store.Sites is { } given)
+        {
+            // a source of several sites: they are its top-level folders, as they were found at the start
+            var tops = web.Contents?.Sites ?? given.ToDictionary(s => s.Name, s => new WebNode(s, s.Name), StringComparer.OrdinalIgnoreCase);
+            var top = new WebContents(new Dictionary<string, LibraryInfo>(), [], tops);
+            web.Contents = top;
+            return top;
+        }
+
         IReadOnlyList<WebInfo> none = [];
         var librariesCall = Run(() => Store.ListLibrariesAsync(web.Info, ct));
         var subsitesCall = PinnedLibrary is null ? SubsitesAsync(web, ct) : Task.FromResult(none);
-        var sitesCall = PinnedLibrary is null && web.Info is null && ShowsOtherSites ? OtherSitesAsync(ct) : Task.FromResult(none);
+
+        // at a tenant's root site (the source's own, or one of the sites it was given) its other sites too
+        var showsSites = PinnedLibrary is null && (web.Info is null ? ShowsOtherSites : web.Info.IsRoot);
+        var sitesCall = showsSites ? OtherSitesAsync(web.Info, ct) : Task.FromResult(none);
         await Task.WhenAll(librariesCall, subsitesCall, sitesCall).ConfigureAwait(false);
 
         var libraries = new Dictionary<string, LibraryInfo>(StringComparer.OrdinalIgnoreCase);
@@ -775,37 +808,59 @@ public abstract class SharePointSource : SourceBase
     }
 
     /// <summary>
-    /// The tenant's other sites, from search: kept for five minutes and searched again when the root or its Sites folder
-    /// is listed after that. A search that fails (a farm without a search service, a refusal) keeps the last list, or
-    /// none, and leaves the source's health alone: the libraries still serve.
+    /// The tenant's other sites, from search, for a root site (the source's own, or one of the sites it was given): kept
+    /// for five minutes and searched again when that root or its Sites folder is listed after that. A search that fails (a
+    /// farm without a search service, a refusal) keeps the last list, or none, and leaves the source's health alone: the
+    /// libraries still serve.
     /// </summary>
-    private async Task<IReadOnlyList<WebInfo>> OtherSitesAsync(CancellationToken ct)
+    private async Task<IReadOnlyList<WebInfo>> OtherSitesAsync(WebInfo? root, CancellationToken ct)
     {
-        if (DateTimeOffset.UtcNow - _otherSitesSearched < OtherSitesTtl)
+        var key = root?.Key ?? "";
+        bool Fresh(out IReadOnlyList<WebInfo> sites)
         {
-            return _otherSites;
+            lock (_otherSites)
+            {
+                var known = _otherSites.TryGetValue(key, out var k);
+                sites = known ? k.Sites : [];
+                return known && DateTimeOffset.UtcNow - k.Searched < OtherSitesTtl;
+            }
+        }
+
+        if (Fresh(out var cached))
+        {
+            return cached;
         }
 
         await _otherSitesGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (DateTimeOffset.UtcNow - _otherSitesSearched < OtherSitesTtl)
+            if (Fresh(out cached))
             {
-                return _otherSites;
+                return cached;
             }
 
+            var sites = cached;
             try
             {
-                _otherSites = await Store.ListSitesAsync(ct).ConfigureAwait(false);
+                sites = await Store.ListSitesAsync(root, ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is VfsException or SignInRequiredException)
             {
-                var first = _otherSitesSearched == DateTimeOffset.MinValue;
+                bool first;
+                lock (_otherSites)
+                {
+                    first = !_otherSites.ContainsKey(key);
+                }
+
                 Logger.Log(first ? LogLevel.Information : LogLevel.Debug, "sharepoint: the tenant's other sites could not be listed through search: {Message}", ex.Message);
             }
 
-            _otherSitesSearched = DateTimeOffset.UtcNow;
-            return _otherSites;
+            lock (_otherSites)
+            {
+                _otherSites[key] = (sites, DateTimeOffset.UtcNow);
+            }
+
+            return sites;
         }
         finally
         {
@@ -850,6 +905,19 @@ public abstract class SharePointSource : SourceBase
             if (site.Libraries.TryGetValue(names[i], out var library))
             {
                 return library;
+            }
+
+            // one of the sites the source was given is one name down
+            if (site.Site(names[i]) is { } given)
+            {
+                if (given.Contents is not { } top)
+                {
+                    break;
+                }
+
+                site = top;
+                nearest = site.Libraries.Values.FirstOrDefault() ?? nearest;
+                continue;
             }
 
             // a site is two names down: its folder (Subsites or Sites), then the site
@@ -994,12 +1062,17 @@ public abstract class SharePointSource : SourceBase
     /// <param name="Subsites">True for the subsites' folder, false for the other sites'.</param>
     private sealed record WebFolder(string Name, IReadOnlyDictionary<string, WebNode> Webs, bool Subsites);
 
-    /// <summary>What is in a site's folder: its libraries by title and its folders of sites (only those with sites in them).</summary>
-    private sealed record WebContents(IReadOnlyDictionary<string, LibraryInfo> Libraries, IReadOnlyList<WebFolder> Folders)
+    /// <summary>
+    /// What is in a site's folder: its libraries by title and its folders of sites (only those with sites in them). The
+    /// root of a source given several sites holds those sites instead (<see cref="Sites"/>), and nothing else.
+    /// </summary>
+    private sealed record WebContents(IReadOnlyDictionary<string, LibraryInfo> Libraries, IReadOnlyList<WebFolder> Folders, IReadOnlyDictionary<string, WebNode>? Sites = null)
     {
         public WebFolder? Folder(string name) => Folders.FirstOrDefault(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase));
 
         public WebFolder? Of(bool subsites) => Folders.FirstOrDefault(f => f.Subsites == subsites);
+
+        public WebNode? Site(string name) => Sites?.GetValueOrDefault(name);
     }
 
     /// <summary>Where a source path leads (<see cref="ResolveAsync"/>).</summary>

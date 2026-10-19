@@ -90,6 +90,12 @@ internal sealed partial class SharePointRestClient : IDisposable
     /// </summary>
     public SharePointRestClient ForSite(string serverRelativeUrl) => new(this, new Uri(SiteUrl, SiteAddress.EscapePath(serverRelativeUrl)));
 
+    /// <summary>The same for a site by its address, which may be on another server (a Windows sign-in goes to any).</summary>
+    public SharePointRestClient ForSite(Uri siteUrl) => new(this, siteUrl);
+
+    /// <summary>A site's address from its server-relative URL, on this client's server: the key a subsite or another site goes by.</summary>
+    public string AddressOf(string serverRelativeUrl) => new Uri(SiteUrl, SiteAddress.EscapePath(serverRelativeUrl.TrimEnd('/'))).AbsoluteUri.TrimEnd('/');
+
     public void Dispose()
     {
         if (_ownsHttp)

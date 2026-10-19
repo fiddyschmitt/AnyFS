@@ -66,11 +66,29 @@ public class SiteAddressTests
     [DataRow("https://contoso.sharepoint.com/SitePages/Home.aspx", "contoso.sharepoint.com", "")]
     [DataRow("https://intranet.contoso.com/dept/hr", "intranet.contoso.com", "/dept/hr")]
     [DataRow("https://intranet.contoso.com/dept/hr/SitePages/Home.aspx", "intranet.contoso.com", "/dept/hr")]
+    [DataRow("https://contoso.sharepoint.com/sites/Team/Plans", "contoso.sharepoint.com", "/sites/Team/Plans")]
+    [DataRow("https://contoso.sharepoint.com/sites/Team/Plans/SitePages/News.aspx", "contoso.sharepoint.com", "/sites/Team/Plans")]
+    [DataRow("https://contoso.sharepoint.com/sites/Team/Shared%20Documents/Reports/2026", "contoso.sharepoint.com", "/sites/Team")]
+    [DataRow("https://contoso.sharepoint.com/sites/Team/Projects/Forms/AllItems.aspx", "contoso.sharepoint.com", "/sites/Team")]
+    [DataRow("https://contoso.sharepoint.com/sites/Team/Lists/Tasks/AllItems.aspx", "contoso.sharepoint.com", "/sites/Team")]
+    [DataRow("https://acme.sharepoint.us/_layouts/15/viewlsts.aspx?view=15", "acme.sharepoint.us", "")]
+    [DataRow("https://acme.sharepoint.us/FirstOne/default.aspx", "acme.sharepoint.us", "/FirstOne")]
+    [DataRow("http://192.168.0.92:8080/sites/anyfs/_api/web", "192.168.0.92:8080", "/sites/anyfs")]
     public void ParsesWhatPeoplePaste(string text, string host, string path)
     {
         Assert.IsTrue(SiteAddress.TryParse(text, out var address, out var reason), reason);
         Assert.AreEqual(host, address.Host);
         Assert.AreEqual(path, address.ServerRelativePath);
+    }
+
+    [TestMethod]
+    public void AnAddressThatGoesDeeperStepsBackToItsSite()
+    {
+        static List<string> Paths(string text) => SiteAddress.TryParse(text, out var a, out _) ? a.Candidates().Select(c => c.ServerRelativePath).ToList() : [];
+        CollectionAssert.AreEqual(new[] { "/sites/Team/Projects/2026", "/sites/Team/Projects", "/sites/Team" }, Paths("https://contoso.sharepoint.com/sites/Team/Projects/2026"));
+        CollectionAssert.AreEqual(new[] { "/sites/Team" }, Paths("https://contoso.sharepoint.com/sites/Team"));
+        CollectionAssert.AreEqual(new[] { "/dept/hr", "/dept" }, Paths("http://intranet/dept/hr"), "not past the first name to the root site, which is not what was asked for");
+        CollectionAssert.AreEqual(new[] { "" }, Paths("http://intranet"));
     }
 
     [TestMethod]
@@ -462,6 +480,25 @@ public class SharePointOnlineLiveTests
         await using var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings());
         var page = await SpoTestServer.EnsurePageAsync(source);
         await SpsTestServer.CheckPageAsync(source, page);
+    }
+
+    [TestMethod]
+    public async Task ARootSiteAmongSeveralShowsTheOtherSites()
+    {
+        SpoTestServer.Require();
+        await using (await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings()))
+        {
+            // the fixture is in place in the test site
+        }
+
+        var site = SpoTestServer.Site!;
+        var root = SpsTestServer.RootOf(site);
+        var host = new Uri(root).Host;
+        using var context = SpoTestServer.Context();
+        await using var source = await SpsTestServer.StartSitesAsync(SpoTestServer.Settings(), context, root, site);
+        CollectionAssert.AreEqual(new[] { host, SpsTestServer.LastName(site) }, await SpsTestServer.NamesAsync(source, ""));
+        await SpsTestServer.CheckReadmeAsync(source, SpsTestServer.LastName(site), SpoTestServer.Library, SpoTestServer.FixtureFolder, SpoTestServer.ReadmeBytes);
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, $"{host}/{SharePointSource.SitesFolder}"), SpsTestServer.LastName(site));
     }
 
     [TestMethod]

@@ -278,7 +278,7 @@ public class SharePointOtherSitesTests
     [TestMethod]
     public void SitesAreNamedAsTheirAddressesEnd()
     {
-        var names = WebInfo.Sites([("1", "/sites/Axle"), ("2", "/teams/Ops"), ("3", "/sites/Ops"), ("4", "/sites/axle/"), ("5", "/"), ("6", "/portals/Hub")]).Select(w => $"{w.Key}={w.Name}").ToList();
+        var names = WebInfo.Sites([("1", "/sites/Axle", null), ("2", "/teams/Ops", null), ("3", "/sites/Ops", null), ("4", "/sites/axle/", null), ("5", "/", null), ("6", "/portals/Hub", null)]).Select(w => $"{w.Key}={w.Name}").ToList();
         CollectionAssert.AreEquivalent(new[] { "1=Axle", "6=Hub", "3=Ops (sites)", "2=Ops (teams)" }, names, "the same address once, the root left out");
     }
 
@@ -387,6 +387,9 @@ internal sealed class MemoryDocumentStore : IDocumentStore
 
     public string LibraryNoun => "document library";
 
+    /// <summary>For a source given several sites: those sites (each a key AddSite or AddSubsite made), as the source's top-level folders.</summary>
+    public IReadOnlyList<WebInfo>? Sites { get; set; }
+
     /// <summary>How often a site's libraries were listed.</summary>
     public int Loads(string web) => _loads.GetValueOrDefault(web);
 
@@ -490,7 +493,7 @@ internal sealed class MemoryDocumentStore : IDocumentStore
         }
     }
 
-    public Task<IReadOnlyList<WebInfo>> ListSitesAsync(CancellationToken ct)
+    public Task<IReadOnlyList<WebInfo>> ListSitesAsync(WebInfo? web, CancellationToken ct)
     {
         Interlocked.Increment(ref _siteSearches);
         if (SearchFails)
@@ -500,7 +503,7 @@ internal sealed class MemoryDocumentStore : IDocumentStore
 
         lock (_gate)
         {
-            return Task.FromResult(WebInfo.Sites(_sites.Select(url => (url, url))));
+            return Task.FromResult(WebInfo.Sites(_sites.Where(url => url != web?.Key).Select(url => (url, url, (string?)$"https://contoso.sharepoint.com{url}"))));
         }
     }
 

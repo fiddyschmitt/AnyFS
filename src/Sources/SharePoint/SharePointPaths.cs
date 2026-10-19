@@ -13,11 +13,21 @@ public sealed record SiteAddress(string Host, string ServerRelativePath, string 
     /// <summary>The Graph address of the site: <c>/sites/{host}:{path}</c>, or <c>/sites/{host}</c> for the root site.</summary>
     public string GraphPath => ServerRelativePath.Length == 0 ? $"sites/{Host}" : $"sites/{Host}:{EscapePath(ServerRelativePath)}";
 
+    /// <summary>The root site of its host (the address has no path).</summary>
+    public bool IsRoot => ServerRelativePath.Length == 0;
+
+    /// <summary>What can follow a site in an address and is never a subsite: its lists, its well-known libraries, a library's views.</summary>
+    private static readonly HashSet<string> NotSites = new(StringComparer.OrdinalIgnoreCase) { "Lists", "Shared Documents", "SitePages", "Pages", "SiteAssets", "Style Library", "FormServerTemplates", "Forms" };
+
     /// <summary>
     /// Accepts the forms people paste: with or without a scheme, with a trailing slash, with a page or a
     /// library path after the site (<c>/sites/Team/Shared%20Documents/Forms/AllItems.aspx</c> is cut back
-    /// to <c>/sites/Team</c>). Anything that is not <c>/sites/x</c>, <c>/teams/x</c> or the root is kept
-    /// as given, for tenants with other managed paths.
+    /// to <c>/sites/Team</c>), and a subsite's address as it is (<c>/sites/Team/Plans</c>). What is cut is
+    /// a page (<c>.aspx</c>), SharePoint's own paths (<c>_layouts</c>, <c>_api</c>), a list, a well-known
+    /// library (<see cref="NotSites"/>) or a library before its <c>Forms</c>, and everything after it; a library
+    /// of another name, or a folder in one, cannot be told from a subsite without asking, so connecting steps
+    /// back from it to the site that answers (<see cref="Candidates"/>). Paths other than <c>/sites/x</c> and
+    /// <c>/teams/x</c> are kept as well, for other managed paths.
     /// </summary>
     public static bool TryParse(string? text, out SiteAddress address, out string reason)
     {
@@ -48,35 +58,43 @@ public sealed record SiteAddress(string Host, string ServerRelativePath, string 
         }
 
         var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.UnescapeDataString).ToList();
-        string path;
-        if (segments.Count >= 2 && (segments[0].Equals("sites", StringComparison.OrdinalIgnoreCase) || segments[0].Equals("teams", StringComparison.OrdinalIgnoreCase)))
+        var floor = Floor(segments);
+        var cut = segments.FindIndex(floor, s => s.EndsWith(".aspx", StringComparison.OrdinalIgnoreCase) || s.StartsWith('_') || NotSites.Contains(s));
+        if (cut >= 0)
         {
-            path = "/" + segments[0] + "/" + segments[1];
-        }
-        else
-        {
-            // the root site or another managed path, possibly with a page after it: a library view
-            // (<library>/Forms/<view>.aspx) or a site page (SitePages/<page>.aspx) is cut off
-            if (segments.Count > 0 && segments[^1].EndsWith(".aspx", StringComparison.OrdinalIgnoreCase))
+            // a library's view (<library>/Forms/<view>.aspx) goes with its library
+            if (segments[cut].Equals("Forms", StringComparison.OrdinalIgnoreCase) && cut > floor)
             {
-                segments.RemoveAt(segments.Count - 1);
-                if (segments.Count >= 2 && segments[^1].Equals("Forms", StringComparison.OrdinalIgnoreCase))
-                {
-                    segments.RemoveRange(segments.Count - 2, 2);
-                }
-                else if (segments.Count >= 1 && (segments[^1].Equals("SitePages", StringComparison.OrdinalIgnoreCase) || segments[^1].Equals("Pages", StringComparison.OrdinalIgnoreCase)))
-                {
-                    segments.RemoveAt(segments.Count - 1);
-                }
+                cut--;
             }
 
-            path = segments.Count == 0 ? "" : "/" + string.Join('/', segments);
+            segments.RemoveRange(cut, segments.Count - cut);
         }
 
+        var path = segments.Count == 0 ? "" : "/" + string.Join('/', segments);
         var host = uri.IsDefaultPort ? uri.Host.ToLowerInvariant() : $"{uri.Host.ToLowerInvariant()}:{uri.Port}";
         address = new SiteAddress(host, path, uri.Scheme.ToLowerInvariant());
         return true;
     }
+
+    /// <summary>
+    /// The address, then each shorter one down to the site it must at least be in: <c>/sites/x</c> (or <c>/teams/x</c>),
+    /// else the first name below the root, else the root. Connecting tries them in turn, since SharePoint answers a
+    /// library's or a folder's address with 404 rather than with the site it is in.
+    /// </summary>
+    public IEnumerable<SiteAddress> Candidates()
+    {
+        var segments = ServerRelativePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var floor = Math.Max(Floor(segments), Math.Min(1, segments.Length));
+        for (var n = segments.Length; n >= floor; n--)
+        {
+            yield return this with { ServerRelativePath = n == 0 ? "" : "/" + string.Join('/', segments[..n]) };
+        }
+    }
+
+    /// <summary>How many of an address's names are the site at least: two under a managed path (/sites/x), else none.</summary>
+    private static int Floor(IReadOnlyList<string> segments)
+        => segments.Count >= 2 && (segments[0].Equals("sites", StringComparison.OrdinalIgnoreCase) || segments[0].Equals("teams", StringComparison.OrdinalIgnoreCase)) ? 2 : 0;
 
     /// <summary>Percent-encodes a path's segments, leaving the slashes.</summary>
     public static string EscapePath(string path) => string.Join('/', path.Split('/').Select(Uri.EscapeDataString));

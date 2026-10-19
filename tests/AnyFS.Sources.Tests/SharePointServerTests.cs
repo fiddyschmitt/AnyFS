@@ -383,6 +383,31 @@ internal static class SpsTestServer
         Assert.AreEqual(VfsError.ReadOnly, ex.Error);
     }
 
+    /// <summary>A second site on another server for the several-sites test (the other lab farm's test site), or null.</summary>
+    public static string? OtherServerSite => Env("ANYFS_TEST_SPS_SITE2");
+
+    /// <summary>The name a site shows as among several: the last part of its address.</summary>
+    public static string LastName(string siteUrl) => new Uri(siteUrl).AbsolutePath.TrimEnd('/').Split('/')[^1];
+
+    /// <summary>Starts a source of the settings with these sites, one per line, in the context given (the test context, or one holding a Microsoft sign-in).</summary>
+    public static async Task<SharePointSiteSource> StartSitesAsync(SharePointSettings settings, TestSourceContext context, params string[] sites)
+    {
+        settings.SiteUrl = string.Join("\n", sites);
+        var source = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        await source.InitialiseAsync(context, timeout.Token);
+        return source;
+    }
+
+    /// <summary>The test site's fixture readme reads through its folder among several.</summary>
+    public static async Task CheckReadmeAsync(ISource source, string siteFolder, string library, string fixtureFolder, byte[] readme)
+    {
+        await using var file = await source.OpenAsync($"{siteFolder}/{library}/{fixtureFolder}/readme.txt", VfsOpenMode.Read, CancellationToken.None);
+        var back = new byte[readme.Length];
+        Assert.AreEqual(back.Length, await file.ReadFullyAsync(0, back, CancellationToken.None));
+        CollectionAssert.AreEqual(readme, back);
+    }
+
     /// <summary>The tenant's root site of a site's address: its scheme and host.</summary>
     public static string RootOf(string siteUrl)
     {
@@ -555,6 +580,91 @@ public class SharePointServerLiveTests
         await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
         var page = await SpsTestServer.EnsurePageAsync(source);
         await SpsTestServer.CheckPageAsync(source, page);
+    }
+
+    [TestMethod]
+    public async Task SeveralSitesAreTopLevelFolders()
+    {
+        SpsTestServer.Require();
+        await using (var single = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings()))
+        {
+            await SpsTestServer.EnsureSubsiteAsync(single);
+        }
+
+        // the test site, its subsite, and an address below the test site that is no site (found by stepping back: the test site again)
+        var site = SpsTestServer.Site!;
+        var sites = new[] { site, $"{site}/{SpsTestServer.Subsite}", $"{site}/anyfs-not-a-site" };
+        var settings = SpsTestServer.Settings();
+        settings.SiteUrl = string.Join("\n", sites);
+        var result = await new SharePointPlugin().TestAsync(settings, new Progress<string>(), None);
+        Assert.IsTrue(result.Success, result.Message);
+        StringAssert.Contains(result.Message, $"{SpsTestServer.Subsite} ({site}/{SpsTestServer.Subsite}) has ");
+
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, sites);
+        var top = SpsTestServer.LastName(site);
+        CollectionAssert.AreEqual(new[] { top, SpsTestServer.Subsite }, await SpsTestServer.NamesAsync(source, ""), "the same site given twice is one folder");
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, SpsTestServer.Subsite), "Documents");
+        await SpsTestServer.CheckReadmeAsync(source, top, SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
+    }
+
+    [TestMethod]
+    public async Task SitesOnTwoServersAreNamedByTheirServers()
+    {
+        SpsTestServer.Require();
+        var other = SpsTestServer.OtherServerSite;
+        if (other is null || SpsTestServer.WebSession)
+        {
+            Assert.Inconclusive("a Windows sign-in with a second farm's test site in ANYFS_TEST_SPS_SITE2");
+            return;
+        }
+
+        var site = SpsTestServer.Site!;
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, site, other);
+        var names = await SpsTestServer.NamesAsync(source, "");
+        var first = SpsTestServer.LastName(site) == SpsTestServer.LastName(other) ? $"{SpsTestServer.LastName(site)} ({new Uri(site).Host})" : SpsTestServer.LastName(site);
+        Assert.AreEqual(2, names.Count, string.Join(", ", names));
+        CollectionAssert.Contains(names, first);
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, names.Single(n => n != first)), SpsTestServer.Library, "the other server's site has its own libraries");
+        await SpsTestServer.CheckReadmeAsync(source, first, SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
+    }
+
+    [TestMethod]
+    public async Task ARootSiteAmongSeveralShowsTheOtherSites()
+    {
+        SpsTestServer.Require();
+        await using (await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings()))
+        {
+            // the fixture is in place in the test site
+        }
+
+        var site = SpsTestServer.Site!;
+        var root = SpsTestServer.RootOf(site);
+        using var context = new TestSourceContext("sharepoint");
+        SharePointSiteSource source;
+        try
+        {
+            source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, root, site);
+        }
+        catch (SourceFailedException ex) when (ex.InnerException is VfsException inner && SharePointRestClient.IsDenial(inner))
+        {
+            Assert.Inconclusive($"the test account may not open {root}: {ex.Message}");
+            return;
+        }
+
+        await using (source)
+        {
+            var host = new Uri(root).Host;
+            CollectionAssert.AreEqual(new[] { host, SpsTestServer.LastName(site) }, await SpsTestServer.NamesAsync(source, ""));
+            await SpsTestServer.CheckReadmeAsync(source, SpsTestServer.LastName(site), SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
+            if (!(await SpsTestServer.NamesAsync(source, host)).Contains(SharePointSource.SitesFolder))
+            {
+                Assert.Inconclusive($"search finds no other site from {root}");
+            }
+
+            CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, $"{host}/{SharePointSource.SitesFolder}"), SpsTestServer.LastName(site));
+        }
     }
 
     [TestMethod]

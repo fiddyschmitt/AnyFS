@@ -119,6 +119,14 @@ public class HeadlessDialogTests
                 site.Text = "https://contoso.sharepoint.com/sites/Team";
                 Assert.AreEqual("contoso.sharepoint.com Team", name.Text);
                 Assert.AreEqual("sharepoint/contoso.sharepoint.com Team", source.Path);
+
+                // several sites, one per line: the server they share, or no name where they share none
+                Assert.IsTrue(site.AcceptsReturn, "the box takes several lines");
+                site.Text = "https://acme.sharepoint.us/sites/Foo\r\nhttps://acme.sharepoint.us/Bar";
+                Assert.AreEqual("acme.sharepoint.us", name.Text);
+                Assert.AreEqual("sharepoint/acme.sharepoint.us", source.Path);
+                site.Text = "http://intranet/sites/a\r\nhttp://teams.corp/sites/b";
+                Assert.AreEqual("", name.Text, "a suggestion that lapses empties the box");
                 dialog.Close();
                 return true;
             }, CancellationToken.None);

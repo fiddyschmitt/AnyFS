@@ -14,22 +14,57 @@ internal sealed record LibraryInfo(string Key, string Name, long? QuotaTotal, lo
     public string Shown => Folder ?? Name;
 }
 
-/// <summary>A subsite, or another site of the tenant, shown as a folder.</summary>
-/// <param name="Key">What the store needs to address it: its server-relative URL, or its Graph site id.</param>
+/// <summary>A subsite, another site of the tenant, or one of the sites a source was given, shown as a folder.</summary>
+/// <param name="Key">What the store needs to address it: its URL, or its Graph site id.</param>
 /// <param name="Name">The folder name it shows as: the last part of its address, which is unique among its siblings where titles need not be.</param>
-internal sealed record WebInfo(string Key, string Name)
+/// <param name="Url">Its address, where the store knows it.</param>
+internal sealed record WebInfo(string Key, string Name, string? Url = null)
 {
+    /// <summary>The root site of its host (a tenant's or a farm's root site), which shows the other sites in a Sites folder.</summary>
+    public bool IsRoot => Url is not null && Uri.TryCreate(Url, UriKind.Absolute, out var url) && url.AbsolutePath.Trim('/').Length == 0;
+
+    /// <summary>
+    /// The sites a source was given, as its top-level folders: each by the last part of its address, a root site by its
+    /// host; where two would share a name, the rest of the path, or the host, follows in brackets ("Ops (sites)", "Ops
+    /// (intranet)"), and a number past that. In the order given.
+    /// </summary>
+    public static IReadOnlyList<WebInfo> Listed(IEnumerable<(string Key, Uri Url)> sites)
+    {
+        var found = sites.Select(s => (s.Key, s.Url, Path: Uri.UnescapeDataString(s.Url.AbsolutePath).Trim('/'))).ToList();
+        var lastCount = found.GroupBy(s => Last(s.Url, s.Path), StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
+        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new List<WebInfo>();
+        foreach (var (key, url, path) in found)
+        {
+            var last = Last(url, path);
+            var slash = path.LastIndexOf('/');
+            var name = lastCount[last] == 1 ? last
+                : slash > 0 && found.Count(s => string.Equals(Last(s.Url, s.Path), last, StringComparison.OrdinalIgnoreCase) && string.Equals(s.Path, path, StringComparison.OrdinalIgnoreCase)) == 1 ? $"{last} ({path[..slash]})"
+                : $"{last} ({url.Host})";
+            for (var n = 2; !taken.Add(name); n++)
+            {
+                name = $"{last} ({n})";
+            }
+
+            result.Add(new WebInfo(key, name, url.AbsoluteUri.TrimEnd('/')));
+        }
+
+        return result;
+
+        static string Last(Uri url, string path) => path.Length == 0 ? url.Host : path[(path.LastIndexOf('/') + 1)..];
+    }
+
     /// <summary>
     /// The tenant's other sites as folders: each by the last part of its address ("Axle" for /sites/Axle), with the
     /// rest of its path after it where two end alike ("Ops (teams)" beside "Ops (sites)"), and a number past that.
     /// </summary>
-    public static IReadOnlyList<WebInfo> Sites(IEnumerable<(string Key, string ServerRelativeUrl)> sites)
+    public static IReadOnlyList<WebInfo> Sites(IEnumerable<(string Key, string ServerRelativeUrl, string? Url)> sites)
     {
-        var found = sites.Select(s => (s.Key, Path: s.ServerRelativeUrl.Trim('/'))).Where(s => s.Path.Length > 0).DistinctBy(s => s.Path, StringComparer.OrdinalIgnoreCase).ToList();
+        var found = sites.Select(s => (s.Key, Path: s.ServerRelativeUrl.Trim('/'), s.Url)).Where(s => s.Path.Length > 0).DistinctBy(s => s.Path, StringComparer.OrdinalIgnoreCase).ToList();
         var lastCount = found.GroupBy(s => Last(s.Path), StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
         var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<WebInfo>();
-        foreach (var (key, path) in found.OrderBy(s => s.Path, StringComparer.OrdinalIgnoreCase))
+        foreach (var (key, path, url) in found.OrderBy(s => s.Path, StringComparer.OrdinalIgnoreCase))
         {
             var last = Last(path);
             var slash = path.LastIndexOf('/');
@@ -39,7 +74,7 @@ internal sealed record WebInfo(string Key, string Name)
                 name = $"{last} ({n})";
             }
 
-            result.Add(new WebInfo(key, name));
+            result.Add(new WebInfo(key, name, url));
         }
 
         return result;
@@ -70,6 +105,9 @@ internal interface IDocumentStore : IDisposable
     /// <summary>What a top-level folder is called in messages: "document library", or "container".</summary>
     string LibraryNoun { get; }
 
+    /// <summary>The sites a source of several shows as its top-level folders, in the order given; null for a source of one site (or of containers).</summary>
+    IReadOnlyList<WebInfo>? Sites { get; }
+
     /// <summary>The libraries of the source's site, or of one of its subsites.</summary>
     Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(WebInfo? web, CancellationToken ct);
 
@@ -77,11 +115,12 @@ internal interface IDocumentStore : IDisposable
     Task<IReadOnlyList<WebInfo>> ListSubsitesAsync(WebInfo? web, CancellationToken ct);
 
     /// <summary>
-    /// The tenant's other sites on the source's host (not subsites: site collections, such as /sites/Axle), those the
-    /// account may open, found by search; the source's own site is left out. None where there are no sites; throws
-    /// where there is no search to ask (a farm without a search service).
+    /// The tenant's other sites on a root site's host (not subsites: site collections, such as /sites/Axle), those the
+    /// account may open, found by search; that root site is left out. The root site is the source's own (null), or one of
+    /// the sites it was given. None where there are no sites; throws where there is no search to ask (a farm without a
+    /// search service).
     /// </summary>
-    Task<IReadOnlyList<WebInfo>> ListSitesAsync(CancellationToken ct);
+    Task<IReadOnlyList<WebInfo>> ListSitesAsync(WebInfo? web, CancellationToken ct);
 
     /// <summary>The children of a folder; throws NotFound for a missing folder. (The source checks for a file first.)</summary>
     IAsyncEnumerable<(VfsEntry Entry, ItemRef Item)> ListChildrenAsync(LibraryInfo library, string itemPath, CancellationToken ct);

@@ -21,7 +21,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
     private readonly Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> _listLibraries;
     private readonly SiteAddress? _site;
 
-    private GraphDocumentStore(GraphClient graph, string description, string libraryNoun, string siteId, Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> listLibraries, SiteAddress? site = null)
+    private GraphDocumentStore(GraphClient graph, string description, string libraryNoun, string siteId, Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> listLibraries, SiteAddress? site = null, IReadOnlyList<WebInfo>? sites = null)
     {
         _graph = graph;
         Description = description;
@@ -29,11 +29,14 @@ internal sealed class GraphDocumentStore : IDocumentStore
         SiteId = siteId;
         _listLibraries = listLibraries;
         _site = site;
+        Sites = sites;
     }
 
     public string Description { get; }
 
     public string LibraryNoun { get; }
+
+    public IReadOnlyList<WebInfo>? Sites { get; }
 
     /// <summary>The site's Graph id (for tests); empty for containers.</summary>
     public string SiteId { get; }
@@ -41,19 +44,66 @@ internal sealed class GraphDocumentStore : IDocumentStore
     /// <summary>The Graph client (for tests, which make their page through it).</summary>
     internal GraphClient Graph => _graph;
 
-    /// <summary>Resolves the site; null when Graph has no such site for this account.</summary>
+    /// <summary>Resolves the site the address is in (<see cref="FindAsync"/>); null when Graph has no such site for this account.</summary>
     public static async Task<GraphDocumentStore?> ConnectAsync(GraphClient graph, SiteAddress site, CancellationToken ct)
     {
-        using var doc = await graph.TryGetJsonAsync($"{site.GraphPath}?$select=id,displayName,webUrl", site.Url, ct).ConfigureAwait(false);
-        if (doc is null)
+        if (await FindAsync(graph, site, ct).ConfigureAwait(false) is not { } found)
         {
             return null;
         }
 
-        var id = doc.RootElement.GetProperty("id").GetString() ?? throw new VfsException(VfsError.IoError, "Graph returned a site without an id");
-        var name = doc.RootElement.TryGetProperty("displayName", out var dn) ? dn.GetString() ?? site.Url : site.Url;
-        var description = $"{name} ({site.Url})";
-        return new GraphDocumentStore(graph, description, "document library", id, ct2 => ListDrivesAsync(graph, id, null, description, ct2), site);
+        var description = $"{found.Title} ({found.Site.Url})";
+        return new GraphDocumentStore(graph, description, "document library", found.Id, ct2 => ListDrivesAsync(graph, found.Id, null, description, ct2), found.Site);
+    }
+
+    /// <summary>
+    /// The sites a source was given, each found as <see cref="ConnectAsync"/> finds one, all at once: the store holds those
+    /// that answered (its <see cref="Sites"/>, named by <see cref="WebInfo.Listed"/>), and the addresses Graph has no site
+    /// for (or that failed otherwise) come back beside it, for the caller to judge.
+    /// </summary>
+    public static async Task<(GraphDocumentStore Store, IReadOnlyList<(SiteAddress Site, VfsException Error)> Failed)> ConnectSitesAsync(GraphClient graph, IReadOnlyList<SiteAddress> sites, CancellationToken ct)
+    {
+        var results = await Task.WhenAll(sites.Select(async site =>
+        {
+            try
+            {
+                var found = await FindAsync(graph, site, ct).ConfigureAwait(false);
+                return (Site: site, Found: found, Error: found is null ? new VfsException(VfsError.NotFound, $"{site.Url} was not found, or the account has no access to it") : null);
+            }
+            catch (VfsException ex)
+            {
+                return (Site: site, Found: ((string Id, string Title, SiteAddress Site)?)null, Error: ex);
+            }
+        })).ConfigureAwait(false);
+
+        var found = results.Where(r => r.Found is not null).Select(r => r.Found!.Value).DistinctBy(f => f.Id, StringComparer.Ordinal).ToList();
+        var webs = WebInfo.Listed(found.Select(f => (f.Id, new Uri(f.Site.Url))));
+        var first = found.FirstOrDefault();
+        var store = new GraphDocumentStore(graph, string.Join(", ", webs.Select(w => $"{w.Name} ({w.Url})")), "document library", first.Id ?? "",
+            ct2 => Task.FromResult<IReadOnlyList<LibraryInfo>>([]), first.Site, webs);
+        return (store, results.Where(r => r.Error is not null).Select(r => (r.Site, r.Error!)).ToList());
+    }
+
+    /// <summary>
+    /// The site an address is in, with its id and title: the address itself, else each shorter one
+    /// (<see cref="SiteAddress.Candidates"/>), since Graph has no site at a library's or a folder's address. Null when none answers.
+    /// </summary>
+    private static async Task<(string Id, string Title, SiteAddress Site)?> FindAsync(GraphClient graph, SiteAddress site, CancellationToken ct)
+    {
+        foreach (var candidate in site.Candidates())
+        {
+            using var doc = await graph.TryGetJsonAsync($"{candidate.GraphPath}?$select=id,displayName,webUrl", candidate.Url, ct).ConfigureAwait(false);
+            if (doc is null)
+            {
+                continue;
+            }
+
+            var id = doc.RootElement.GetProperty("id").GetString() ?? throw new VfsException(VfsError.IoError, "Graph returned a site without an id");
+            var title = doc.RootElement.TryGetProperty("displayName", out var dn) ? dn.GetString() : null;
+            return (id, string.IsNullOrEmpty(title) ? candidate.Url : title, candidate);
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -119,7 +169,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
                 var name = address is null ? "" : Uri.UnescapeDataString(address.AbsolutePath.TrimEnd('/').Split('/')[^1]);
                 if (!string.IsNullOrEmpty(id) && name.Length > 0)
                 {
-                    subsites.Add(new WebInfo(id, name));
+                    subsites.Add(new WebInfo(id, name, address!.AbsoluteUri.TrimEnd('/')));
                 }
             }
 
@@ -130,18 +180,19 @@ internal sealed class GraphDocumentStore : IDocumentStore
     }
 
     /// <summary>
-    /// Graph's site search across the tenant (what the account may open), kept to site collections on this site's host:
-    /// SharePoint Online's are the root and /sites/x or /teams/x, so a deeper address is a subsite and is left out.
+    /// Graph's site search across the tenant (what the account may open), kept to site collections on the root site's
+    /// host: SharePoint Online's are the root and /sites/x or /teams/x, so a deeper address is a subsite and is left out.
     /// </summary>
-    public async Task<IReadOnlyList<WebInfo>> ListSitesAsync(CancellationToken ct)
+    public async Task<IReadOnlyList<WebInfo>> ListSitesAsync(WebInfo? web, CancellationToken ct)
     {
-        if (_site is null)
+        var root = web?.Url is { } address && SiteAddress.TryParse(address, out var parsed, out _) ? parsed : _site;
+        if (root is null)
         {
             return [];
         }
 
         var url = "sites?search=*&$select=id,webUrl";
-        var found = new List<(string, string)>();
+        var found = new List<(string, string, string?)>();
         while (url is not null)
         {
             using var doc = await _graph.GetJsonAsync(url, Description, ct).ConfigureAwait(false);
@@ -149,12 +200,12 @@ internal sealed class GraphDocumentStore : IDocumentStore
             {
                 var id = element.TryGetProperty("id", out var i) ? i.GetString() : null;
                 if (!string.IsNullOrEmpty(id) && element.TryGetProperty("webUrl", out var w) && Uri.TryCreate(w.GetString(), UriKind.Absolute, out var site)
-                    && string.Equals(site.Authority, _site.Host, StringComparison.OrdinalIgnoreCase))
+                    && string.Equals(site.Authority, root.Host, StringComparison.OrdinalIgnoreCase))
                 {
                     var path = Uri.UnescapeDataString(site.AbsolutePath).TrimEnd('/');
-                    if (path.Count(c => c == '/') == 2 && !string.Equals(path, _site.ServerRelativePath, StringComparison.OrdinalIgnoreCase))
+                    if (path.Count(c => c == '/') == 2 && !string.Equals(path, root.ServerRelativePath, StringComparison.OrdinalIgnoreCase))
                     {
-                        found.Add((id, path));
+                        found.Add((id, path, site.AbsoluteUri.TrimEnd('/')));
                     }
                 }
             }
