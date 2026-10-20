@@ -11,6 +11,8 @@ public static class LoggingSetup
 
     public const int KeepFiles = 5;
 
+    private static int _unhandledLogged;
+
     public static LogLevel ParseLevel(string? text) => text?.Trim().ToLowerInvariant() switch
     {
         "trace" => LogLevel.Trace,
@@ -50,6 +52,49 @@ public static class LoggingSetup
                 });
             }
         });
+    }
+
+    /// <summary>
+    /// Puts in the log what would otherwise leave no trace: an exception nothing caught (the process ends after it, so
+    /// the factory is disposed to flush the file first) and a failed background task nothing awaited (marked as seen,
+    /// so it stays a log line). Once per process; the host calls it when it opens the log.
+    /// </summary>
+    public static void LogUnhandledExceptions(ILoggerFactory factory)
+    {
+        ArgumentNullException.ThrowIfNull(factory);
+        if (Interlocked.Exchange(ref _unhandledLogged, 1) != 0)
+        {
+            return;
+        }
+
+        var logger = factory.CreateLogger("AnyFS");
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            try
+            {
+                logger.LogCritical(e.ExceptionObject as Exception, "unhandled exception; the process {Fate}", e.IsTerminating ? "ends" : "goes on");
+                if (e.IsTerminating)
+                {
+                    factory.Dispose();
+                }
+            }
+            catch (Exception)
+            {
+                // the log is gone already (the host is shutting down): nothing more to say it with
+            }
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            try
+            {
+                logger.LogWarning(e.Exception, "a background task failed and nothing awaited it");
+            }
+            catch (Exception)
+            {
+            }
+
+            e.SetObserved();
+        };
     }
 
     private static void ConfigureFormatter(PlainTextZLoggerFormatter formatter)

@@ -63,6 +63,7 @@ internal static class Commands
         var paths = SettingsPaths.Resolve(settingsDir);
         var level = LoggingSetup.ParseLevel(logLevel ?? ReadConfiguredLevel(paths));
         using var loggerFactory = LoggingSetup.Create(level, paths.LogFile, console: true);
+        LoggingSetup.LogUnhandledExceptions(loggerFactory);
         var logger = loggerFactory.CreateLogger("AnyFS");
         logger.LogInformation("AnyFS {Version} starting; settings in {Dir} ({Mode}); log at {Log}", AnyFsEngine.Version, paths.Settings, paths.Portable ? "portable" : "per user", paths.LogFile);
         BundleExtraction.CleanUpInBackground(logger);

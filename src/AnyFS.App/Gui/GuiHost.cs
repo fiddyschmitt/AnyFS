@@ -47,6 +47,7 @@ public sealed class GuiHost : IAsyncDisposable
         var paths = SettingsPaths.Resolve(options.SettingsDir);
         var level = LoggingSetup.ParseLevel(options.LogLevel ?? Commands.ReadConfiguredLevel(paths));
         var loggerFactory = LoggingSetup.Create(level, paths.LogFile, console: false);
+        LoggingSetup.LogUnhandledExceptions(loggerFactory);
         var logger = loggerFactory.CreateLogger("AnyFS");
         logger.LogInformation("AnyFS {Version} window starting; settings in {Dir} ({Mode}); log at {Log}", AnyFsEngine.Version, paths.Settings, paths.Portable ? "portable" : "per user", paths.LogFile);
         BundleExtraction.CleanUpInBackground(logger);
