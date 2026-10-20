@@ -133,7 +133,8 @@ public class SharePointSeveralSitesSettingsTests
         var plugin = new SharePointPlugin();
         string Messages(SharePointSettings s) => string.Join(" | ", plugin.Validate(s).Where(m => m.IsError).Select(m => m.Message));
 
-        Assert.AreEqual("", Messages(new SharePointSettings { SiteUrl = "http://intranet/sites/a\nhttp://teams.corp/sites/b" }), "a Windows sign-in reaches several servers");
+        // a user name and password, so the answer is the same off Windows, where signing in as yourself is refused
+        Assert.AreEqual("", Messages(new SharePointSettings { SiteUrl = "http://intranet/sites/a\nhttp://teams.corp/sites/b", Username = @"CORP\name", Password = "pw" }), "a Windows sign-in reaches several servers");
         StringAssert.Contains(Messages(new SharePointSettings { SiteUrl = "http://intranet/sites/a\nhttps://contoso.sharepoint.com/sites/b" }), "https://contoso.sharepoint.com/sites/b is SharePoint Online");
         StringAssert.Contains(Messages(new SharePointSettings { SiteUrl = "http://intranet/sites/a\n\nftp://intranet/b" }), "ftp://intranet/b: ");
         StringAssert.Contains(Messages(new SharePointSettings { SiteUrl = "http://intranet/sites/a\nhttp://intranet/sites/b", Library = "Documents" }), "one library only with one site");
