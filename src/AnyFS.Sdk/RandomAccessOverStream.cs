@@ -3,13 +3,15 @@ namespace AnyFS.Sdk;
 /// <summary>
 /// For upstreams that support ranged requests but hand back streams (SFTP, HTTP Range): keeps a few open
 /// streams positioned where recent reads ended, so sequential reads reuse a stream instead of reopening,
-/// while a read at a new offset opens one there. Read-only.
+/// while a read at a new offset opens one there. Read-only. A stream that sends nothing for a while fails the
+/// read and is dropped; the next read opens a new one.
 /// </summary>
 public sealed class RandomAccessOverStream : IVfsFile
 {
     private readonly Func<long, CancellationToken, Task<Stream>> _openAt;
     private readonly int _maxStreams;
     private readonly int _maxSkipBytes;
+    private readonly TimeSpan _stallLimit;
     private readonly SemaphoreSlim _slots;
     private readonly object _gate = new();
     private readonly List<Slot> _streams = [];
@@ -21,7 +23,8 @@ public sealed class RandomAccessOverStream : IVfsFile
     /// <param name="openAt">Opens the upstream positioned at an offset.</param>
     /// <param name="maxStreams">How many upstream streams to keep (and the read concurrency).</param>
     /// <param name="maxSkipBytes">A read this far ahead of a stream's position reads and discards the gap instead of reopening.</param>
-    public RandomAccessOverStream(long length, Func<long, CancellationToken, Task<Stream>> openAt, int maxStreams = 4, int maxSkipBytes = 256 * 1024)
+    /// <param name="stallLimit">How long a stream may send nothing before the read fails (a minute by default).</param>
+    public RandomAccessOverStream(long length, Func<long, CancellationToken, Task<Stream>> openAt, int maxStreams = 4, int maxSkipBytes = 256 * 1024, TimeSpan? stallLimit = null)
     {
         ArgumentNullException.ThrowIfNull(openAt);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxStreams, 1);
@@ -29,6 +32,7 @@ public sealed class RandomAccessOverStream : IVfsFile
         _openAt = openAt;
         _maxStreams = maxStreams;
         _maxSkipBytes = maxSkipBytes;
+        _stallLimit = stallLimit ?? StalledUpstream.DefaultLimit;
         _slots = new SemaphoreSlim(maxStreams, maxStreams);
     }
 
@@ -63,14 +67,14 @@ public sealed class RandomAccessOverStream : IVfsFile
             }
             else if (slot.Position < offset)
             {
-                await SkipAsync(slot, offset - slot.Position, ct).ConfigureAwait(false);
+                await SkipAsync(slot, offset - slot.Position, _stallLimit, ct).ConfigureAwait(false);
             }
 
             var want = (int)Math.Min(buffer.Length, Length - offset);
             var total = 0;
             while (total < want)
             {
-                var n = await slot.Stream.ReadAsync(buffer.Slice(total, want - total), ct).ConfigureAwait(false);
+                var n = await StalledUpstream.ReadAsync(slot.Stream, buffer.Slice(total, want - total), _stallLimit, ct).ConfigureAwait(false);
                 if (n <= 0)
                 {
                     break;
@@ -170,12 +174,12 @@ public sealed class RandomAccessOverStream : IVfsFile
         }
     }
 
-    private static async Task SkipAsync(Slot slot, long count, CancellationToken ct)
+    private static async Task SkipAsync(Slot slot, long count, TimeSpan stallLimit, CancellationToken ct)
     {
         var buffer = new byte[(int)Math.Min(count, 64 * 1024)];
         while (count > 0)
         {
-            var n = await slot.Stream!.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, count)), ct).ConfigureAwait(false);
+            var n = await StalledUpstream.ReadAsync(slot.Stream!, buffer.AsMemory(0, (int)Math.Min(buffer.Length, count)), stallLimit, ct).ConfigureAwait(false);
             if (n <= 0)
             {
                 throw new EndOfStreamException("the upstream ended while skipping ahead");

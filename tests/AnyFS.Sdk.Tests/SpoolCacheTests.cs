@@ -149,6 +149,19 @@ public class SpoolCacheTests
     }
 
     [TestMethod]
+    public async Task AnUpstreamThatGoesQuietFailsItsReaders()
+    {
+        await using var cache = new SpoolCache(_dir, time: _time, stallLimit: TimeSpan.FromMilliseconds(200));
+        await using var file = await cache.OpenAsync("k", 1000, _ => Task.FromResult<Stream>(new RandomAccessOverStreamTests.QuietStream()), CancellationToken.None);
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.ReadAsync(0, new byte[100], CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.AreEqual(VfsError.IoError, ex.Error);
+        StringAssert.Contains(ex.Message, "sent nothing");
+
+        await using var again = await cache.OpenAsync("k", 4, _ => Task.FromResult<Stream>(new MemoryStream([1, 2, 3, 4])), CancellationToken.None);
+        Assert.AreEqual(4, await again.ReadFullyAsync(0, new byte[4], CancellationToken.None), "the failed download is not handed to the next open");
+    }
+
+    [TestMethod]
     public async Task LeftoverSpoolFilesAreRemovedAtStart()
     {
         File.WriteAllText(Path.Combine(_dir, "stale.spool"), "x");

@@ -177,9 +177,11 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   misses, invalidate on writes.
 - `SpoolCache`: for upstreams that only stream sequentially. The first open starts the download
   into `Context.CacheDirectory`; any sub-range is served as soon as the file has reached it;
-  concurrent readers share one download; eviction by size and age.
+  concurrent readers share one download; eviction by size and age. An upstream that sends
+  nothing for a minute fails the download, so its readers get an error rather than wait.
 - `RandomAccessOverStream`: for upstreams that support ranged requests but hand back streams
-  (SFTP, HTTP Range): keeps a few streams positioned where recent reads ended.
+  (SFTP, HTTP Range): keeps a few streams positioned where recent reads ended. A stream that goes
+  quiet for a minute fails its read and is replaced.
 
 ## Testing
 

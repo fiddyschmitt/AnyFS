@@ -12,25 +12,30 @@ namespace AnyFS.Sdk;
 /// open of a key starts the download into a file under the cache directory; any sub-range is served as
 /// soon as the file has reached it, so a client reading the start doesn't wait for the end. Concurrent
 /// readers share one download. When the last reader closes an unfinished spool, the download stops and
-/// the partial file is deleted; finished spools stay until evicted by size or age.
+/// the partial file is deleted; finished spools stay until evicted by size or age. A download whose upstream
+/// sends nothing for a while fails like one that broke off, so its readers are not left waiting.
 /// </summary>
 public sealed class SpoolCache : IAsyncDisposable
 {
     private readonly string _directory;
     private readonly long _maxBytes;
     private readonly TimeSpan _maxAge;
+    private readonly TimeSpan _stallLimit;
     private readonly ILogger _logger;
     private readonly TimeProvider _time;
     private readonly ConcurrentDictionary<string, Spool> _spools = new(StringComparer.Ordinal);
     private readonly object _gate = new();
+    private long _serial;
     private bool _disposed;
 
-    public SpoolCache(string directory, long maxBytes = 2L << 30, TimeSpan? maxAge = null, ILogger? logger = null, TimeProvider? time = null)
+    /// <param name="stallLimit">How long the upstream may send nothing before the download fails (a minute by default).</param>
+    public SpoolCache(string directory, long maxBytes = 2L << 30, TimeSpan? maxAge = null, ILogger? logger = null, TimeProvider? time = null, TimeSpan? stallLimit = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(directory);
         _directory = directory;
         _maxBytes = maxBytes;
         _maxAge = maxAge ?? TimeSpan.FromDays(1);
+        _stallLimit = stallLimit ?? StalledUpstream.DefaultLimit;
         _logger = logger ?? NullLogger.Instance;
         _time = time ?? TimeProvider.System;
         Directory.CreateDirectory(directory);
@@ -60,9 +65,17 @@ public sealed class SpoolCache : IAsyncDisposable
         {
             if (!_spools.TryGetValue(key, out var existing) || existing.IsDead)
             {
+                if (existing is not null)
+                {
+                    // a failed download that readers may still hold: it goes when the last of them lets go
+                    _spools.TryRemove(new KeyValuePair<string, Spool>(key, existing));
+                    existing.Detach();
+                }
+
                 EvictLocked();
-                var path = Path.Combine(_directory, Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..32] + ".spool");
-                existing = new Spool(this, key, path, length, openUpstream, _logger, _time);
+                // a file of its own: a dead spool of the key may still be open
+                var path = Path.Combine(_directory, $"{Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..32]}-{Interlocked.Increment(ref _serial)}.spool");
+                existing = new Spool(this, key, path, length, openUpstream, _stallLimit, _logger, _time);
                 _spools[key] = existing;
                 existing.Start();
             }
@@ -106,9 +119,10 @@ public sealed class SpoolCache : IAsyncDisposable
     {
         lock (_gate)
         {
-            if (spool.ReleaseRef() == 0 && !spool.IsComplete)
+            if (spool.ReleaseRef() == 0 && (!spool.IsComplete || spool.IsDead))
             {
-                // nobody is reading and the download isn't done: stop it rather than pull the rest for nobody
+                // nobody is reading and the download isn't done: stop it rather than pull the rest for nobody; a
+                // failed or replaced one has nothing more to give, so its file goes
                 _spools.TryRemove(new KeyValuePair<string, Spool>(spool.Key, spool));
                 spool.Detach();
             }
@@ -165,6 +179,7 @@ public sealed class SpoolCache : IAsyncDisposable
     {
         private readonly SpoolCache _owner;
         private readonly Func<CancellationToken, Task<Stream>> _openUpstream;
+        private readonly TimeSpan _stallLimit;
         private readonly ILogger _logger;
         private readonly TimeProvider _time;
         private readonly CancellationTokenSource _cts = new();
@@ -177,13 +192,14 @@ public sealed class SpoolCache : IAsyncDisposable
         private bool _detached;
         private bool _disposed;
 
-        public Spool(SpoolCache owner, string key, string path, long length, Func<CancellationToken, Task<Stream>> openUpstream, ILogger logger, TimeProvider time)
+        public Spool(SpoolCache owner, string key, string path, long length, Func<CancellationToken, Task<Stream>> openUpstream, TimeSpan stallLimit, ILogger logger, TimeProvider time)
         {
             _owner = owner;
             Key = key;
             Path = path;
             Length = length;
             _openUpstream = openUpstream;
+            _stallLimit = stallLimit;
             _logger = logger;
             _time = time;
             _writeHandle = File.OpenHandle(path, FileMode.Create, FileAccess.Write, FileShare.Read | FileShare.Delete, FileOptions.Asynchronous);
@@ -308,7 +324,7 @@ public sealed class SpoolCache : IAsyncDisposable
                 long written = 0;
                 while (written < Length)
                 {
-                    var n = await upstream.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, Length - written)), ct).ConfigureAwait(false);
+                    var n = await StalledUpstream.ReadAsync(upstream, buffer.AsMemory(0, (int)Math.Min(buffer.Length, Length - written)), _stallLimit, ct).ConfigureAwait(false);
                     if (n <= 0)
                     {
                         break;
