@@ -18,7 +18,8 @@ internal sealed record LibraryInfo(string Key, string Name, long? QuotaTotal, lo
 /// <param name="Key">What the store needs to address it: its URL, or its Graph site id.</param>
 /// <param name="Name">The folder name it shows as: the last part of its address, which is unique among its siblings where titles need not be.</param>
 /// <param name="Url">Its address, where the store knows it.</param>
-internal sealed record WebInfo(string Key, string Name, string? Url = null)
+/// <param name="SiteCollection">Whether it is a site collection's own site (the root, /sites/x) rather than a subsite; null where the store does not say.</param>
+internal sealed record WebInfo(string Key, string Name, string? Url = null, bool? SiteCollection = null)
 {
     /// <summary>The root site of its host (a tenant's or a farm's root site), which shows the other sites in a Sites folder.</summary>
     public bool IsRoot => Url is not null && Uri.TryCreate(Url, UriKind.Absolute, out var url) && url.AbsolutePath.Trim('/').Length == 0;
@@ -28,13 +29,16 @@ internal sealed record WebInfo(string Key, string Name, string? Url = null)
     /// host; where two would share a name, the rest of the path, or the host, follows in brackets ("Ops (sites)", "Ops
     /// (intranet)"), and a number past that. In the order given.
     /// </summary>
-    public static IReadOnlyList<WebInfo> Listed(IEnumerable<(string Key, Uri Url)> sites)
+    public static IReadOnlyList<WebInfo> Listed(IEnumerable<(string Key, Uri Url)> sites) => Listed(sites.Select(s => new WebInfo(s.Key, "", s.Url.AbsoluteUri)));
+
+    /// <summary>The same for sites the store found (each with its address), keeping what else it knows of them.</summary>
+    public static IReadOnlyList<WebInfo> Listed(IEnumerable<WebInfo> sites)
     {
-        var found = sites.Select(s => (s.Key, s.Url, Path: PathOf(s.Url))).ToList();
+        var found = sites.Select(s => (Site: s, Url: new Uri(s.Url!), Path: PathOf(new Uri(s.Url!)))).ToList();
         var lastCount = found.GroupBy(s => Last(s.Url, s.Path), StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
         var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<WebInfo>();
-        foreach (var (key, url, path) in found)
+        foreach (var (site, url, path) in found)
         {
             var last = Last(url, path);
             var slash = path.LastIndexOf('/');
@@ -46,11 +50,16 @@ internal sealed record WebInfo(string Key, string Name, string? Url = null)
                 name = $"{last} ({n})";
             }
 
-            result.Add(new WebInfo(key, name, url.AbsoluteUri.TrimEnd('/')));
+            result.Add(site with { Name = name, Url = url.AbsoluteUri.TrimEnd('/') });
         }
 
         return result;
     }
+
+    /// <summary>Whether two of these are the same site: the same key, or the same address.</summary>
+    public bool IsSameSite(WebInfo other)
+        => string.Equals(Key, other.Key, StringComparison.OrdinalIgnoreCase)
+            || (Url is not null && other.Url is not null && string.Equals(Url.TrimEnd('/'), other.Url.TrimEnd('/'), StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// A site that joins those already shown (one left out at first that answers later), named as <see cref="Listed"/>

@@ -400,6 +400,19 @@ internal static class SpsTestServer
         return source;
     }
 
+    /// <summary>
+    /// A source of the tenant's root site and the test site: the root site is the source's own (no folder named after the
+    /// server), and the test site, a site collection, is in its Sites folder, where the fixture's readme reads.
+    /// </summary>
+    public static async Task CheckRootAmongSitesAsync(ISource source, string root, string siteUrl, string library, string fixtureFolder, byte[] readme)
+    {
+        var names = await NamesAsync(source, "");
+        CollectionAssert.DoesNotContain(names, new Uri(root).Host, "no folder named after the server");
+        CollectionAssert.Contains(names, SharePointSource.SitesFolder, string.Join(", ", names));
+        CollectionAssert.Contains(await NamesAsync(source, SharePointSource.SitesFolder), LastName(siteUrl), "the test site, a site collection, in the root site's Sites folder");
+        await CheckReadmeAsync(source, $"{SharePointSource.SitesFolder}/{LastName(siteUrl)}", library, fixtureFolder, readme);
+    }
+
     /// <summary>The test site's fixture readme reads through its folder among several.</summary>
     public static async Task CheckReadmeAsync(ISource source, string siteFolder, string library, string fixtureFolder, byte[] readme)
     {
@@ -693,23 +706,38 @@ public class SharePointServerLiveTests
         var root = SpsTestServer.RootOf(site);
         using var context = new TestSourceContext("sharepoint");
         await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, root, site);
-        var host = new Uri(root).Host;
         var names = await SpsTestServer.NamesAsync(source, "");
-        if (!names.Contains(host))
+        if (names.SequenceEqual([SpsTestServer.LastName(site)]))
         {
             // the lab farms: the test account may open its test site but not the farm's root site, which is left out
-            CollectionAssert.AreEqual(new[] { SpsTestServer.LastName(site) }, names);
             Assert.Inconclusive($"the test account may not open {root}, so it is left out (ARootSiteTheAccountMayNotOpenSaysSo)");
         }
 
-        CollectionAssert.AreEqual(new[] { host, SpsTestServer.LastName(site) }, names);
-        await SpsTestServer.CheckReadmeAsync(source, SpsTestServer.LastName(site), SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
-        if (!(await SpsTestServer.NamesAsync(source, host)).Contains(SharePointSource.SitesFolder))
+        await SpsTestServer.CheckRootAmongSitesAsync(source, root, site, SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
+    }
+
+    [TestMethod]
+    public async Task ASiteGivenIsKnownAsASiteCollectionOrASubsite()
+    {
+        SpsTestServer.Require();
+        bool subsite;
+        await using (var single = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings()))
         {
-            Assert.Inconclusive($"search finds no other site from {root}");
+            subsite = await SpsTestServer.HasSubsiteAsync(single);
         }
 
-        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, $"{host}/{SharePointSource.SitesFolder}"), SpsTestServer.LastName(site));
+        var site = SpsTestServer.Site!;
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, site, $"{site}/{SpsTestServer.Subsite}");
+        Assert.IsTrue(SiteAddress.TryParse(site, out var address, out _));
+        Assert.IsTrue((await source.Store.FindSiteAsync(address, None)).SiteCollection, "the test site is a site collection's own");
+        if (!subsite)
+        {
+            Assert.Inconclusive($"no subsite {SpsTestServer.Subsite} here (SharePoint Online makes none)");
+        }
+
+        Assert.IsTrue(SiteAddress.TryParse($"{site}/{SpsTestServer.Subsite}", out var below, out _));
+        Assert.IsFalse((await source.Store.FindSiteAsync(below, None)).SiteCollection, "its subsite is not");
     }
 
     [TestMethod]

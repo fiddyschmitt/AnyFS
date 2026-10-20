@@ -493,12 +493,13 @@ public class SharePointOnlineLiveTests
 
         var site = SpoTestServer.Site!;
         var root = SpsTestServer.RootOf(site);
-        var host = new Uri(root).Host;
         using var context = SpoTestServer.Context();
         await using var source = await SpsTestServer.StartSitesAsync(SpoTestServer.Settings(), context, root, site, $"{root}/sites/anyfs-no-such-site");
-        CollectionAssert.AreEqual(new[] { host, SpsTestServer.LastName(site) }, await SpsTestServer.NamesAsync(source, ""), "the site not there is left out");
-        await SpsTestServer.CheckReadmeAsync(source, SpsTestServer.LastName(site), SpoTestServer.Library, SpoTestServer.FixtureFolder, SpoTestServer.ReadmeBytes);
-        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, $"{host}/{SharePointSource.SitesFolder}"), SpsTestServer.LastName(site));
+        await SpsTestServer.CheckRootAmongSitesAsync(source, root, site, SpoTestServer.Library, SpoTestServer.FixtureFolder, SpoTestServer.ReadmeBytes);
+        CollectionAssert.DoesNotContain(await SpsTestServer.NamesAsync(source, SharePointSource.SitesFolder), "anyfs-no-such-site", "the site not there is left out");
+
+        Assert.IsTrue(SiteAddress.TryParse(site, out var address, out _));
+        Assert.IsTrue((await source.Store.FindSiteAsync(address, None)).SiteCollection, "Graph says the test site is a site collection's own");
     }
 
     [TestMethod]

@@ -743,12 +743,17 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
         var lines = new List<string> { what };
         var shown = 0;
-        foreach (var web in WebInfo.Listed(opened.Select(w => (w.Key, new Uri(w.Url!)))))
+        var webs = WebInfo.Listed(opened);
+
+        // as the source shows them: the root site of the one server they are all on is the source's own, the others in it
+        var root = sites.Select(s => (s.Scheme, s.Host)).Distinct().Count() == 1 ? webs.FirstOrDefault(w => w.IsRoot) : null;
+        foreach (var web in webs)
         {
             try
             {
                 var names = (await store.ListLibrariesAsync(web, ct).ConfigureAwait(false)).Select(l => l.Name).ToList();
-                lines.Add($"{web.Name} ({web.Url}) has {await SummaryAsync(store, web, names, subsites: true, web.IsRoot, ct).ConfigureAwait(false)}.");
+                var where = root is null || web == root ? "" : $" It shows in the root site's {(web.SiteCollection == true ? SharePointSource.SitesFolder : SharePointSource.SubsitesFolder)} folder.";
+                lines.Add($"{web.Name} ({web.Url}) has {await SummaryAsync(store, web, names, subsites: true, web.IsRoot, ct).ConfigureAwait(false)}.{where}");
                 shown++;
             }
             catch (VfsException ex)

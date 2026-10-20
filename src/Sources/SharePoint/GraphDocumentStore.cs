@@ -62,18 +62,20 @@ internal sealed class GraphDocumentStore : IDocumentStore
     {
         var found = await FindAsync(_graph, site, ct).ConfigureAwait(false)
             ?? throw new VfsException(VfsError.NotFound, $"{site.Url} was not found, or the account has no access to it");
-        return new WebInfo(found.Id, WebInfo.NameOf(new Uri(found.Site.Url)), found.Site.Url);
+        return new WebInfo(found.Id, WebInfo.NameOf(new Uri(found.Site.Url)), found.Site.Url, found.SiteCollection);
     }
 
     /// <summary>
     /// The site an address is in, with its id and title: the address itself, else each shorter one
-    /// (<see cref="SiteAddress.Candidates"/>), since Graph has no site at a library's or a folder's address. Null when none answers.
+    /// (<see cref="SiteAddress.Candidates"/>), since Graph has no site at a library's or a folder's address. Null when none
+    /// answers. A site collection's own site carries Graph's siteCollection facet; one at a site collection's address in
+    /// SharePoint Online (<see cref="SiteAddress.IsSiteCollectionAddress"/>) is taken as one too.
     /// </summary>
-    private static async Task<(string Id, string Title, SiteAddress Site)?> FindAsync(GraphClient graph, SiteAddress site, CancellationToken ct)
+    private static async Task<(string Id, string Title, SiteAddress Site, bool SiteCollection)?> FindAsync(GraphClient graph, SiteAddress site, CancellationToken ct)
     {
         foreach (var candidate in site.Candidates())
         {
-            using var doc = await graph.TryGetJsonAsync($"{candidate.GraphPath}?$select=id,displayName,webUrl", candidate.Url, ct).ConfigureAwait(false);
+            using var doc = await graph.TryGetJsonAsync($"{candidate.GraphPath}?$select=id,displayName,webUrl,siteCollection", candidate.Url, ct).ConfigureAwait(false);
             if (doc is null)
             {
                 continue;
@@ -81,7 +83,8 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
             var id = doc.RootElement.GetProperty("id").GetString() ?? throw new VfsException(VfsError.IoError, "Graph returned a site without an id");
             var title = doc.RootElement.TryGetProperty("displayName", out var dn) ? dn.GetString() : null;
-            return (id, string.IsNullOrEmpty(title) ? candidate.Url : title, candidate);
+            var collection = doc.RootElement.TryGetProperty("siteCollection", out var facet) && facet.ValueKind == JsonValueKind.Object || candidate.IsSiteCollectionAddress;
+            return (id, string.IsNullOrEmpty(title) ? candidate.Url : title, candidate, collection);
         }
 
         return null;

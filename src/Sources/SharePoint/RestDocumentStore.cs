@@ -63,12 +63,33 @@ internal sealed class RestDocumentStore : IDocumentStore
         using var probe = _owner.Probe();
         var (found, _) = await FindAsync(probe, site, ct).ConfigureAwait(false);
         var key = Address(found);
-        if (found != probe)
+        try
         {
-            found.Dispose();
+            return new WebInfo(key, WebInfo.NameOf(new Uri(key)), key, await IsSiteCollectionAsync(found, key, ct).ConfigureAwait(false));
         }
+        finally
+        {
+            if (found != probe)
+            {
+                found.Dispose();
+            }
+        }
+    }
 
-        return new WebInfo(key, WebInfo.NameOf(new Uri(key)), key);
+    /// <summary>Whether a site is its site collection's own (the site collection's address is the site's), rather than a subsite; null when SharePoint does not say.</summary>
+    private static async Task<bool?> IsSiteCollectionAsync(SharePointRestClient client, string address, CancellationToken ct)
+    {
+        try
+        {
+            using var doc = await client.GetJsonAsync("site?$select=Url", address, ct).ConfigureAwait(false);
+            return doc.RootElement.TryGetProperty("Url", out var url) && url.GetString() is { } collection
+                ? string.Equals(collection.TrimEnd('/'), address, StringComparison.OrdinalIgnoreCase)
+                : null;
+        }
+        catch (VfsException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

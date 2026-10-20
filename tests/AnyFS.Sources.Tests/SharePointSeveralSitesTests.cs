@@ -54,14 +54,55 @@ public class SharePointSeveralSitesTests
     }
 
     [TestMethod]
-    public async Task ARootSiteAmongThemShowsTheOtherSites()
+    public async Task ARootSiteAmongThemIsTheSourcesOwnSite()
     {
         var store = SharePointOtherSitesTests.Tenant();
         await using var source = await MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com", "https://contoso.sharepoint.com/sites/Axle"));
-        CollectionAssert.AreEqual(new[] { "contoso.sharepoint.com", "Axle" }, await SpsTestServer.NamesAsync(source, ""));
-        CollectionAssert.AreEqual(new[] { "Documents", "Site Assets", "Subsites", "Sites" }, await SpsTestServer.NamesAsync(source, "contoso.sharepoint.com"));
-        CollectionAssert.AreEqual(new[] { "Axle", "Ops (sites)", "Ops (teams)" }, await SpsTestServer.NamesAsync(source, "contoso.sharepoint.com/Sites"));
-        CollectionAssert.DoesNotContain(await SpsTestServer.NamesAsync(source, "Axle"), "Sites", "only a root site shows them");
+        CollectionAssert.AreEqual(new[] { "Documents", "Site Assets", "Subsites", "Sites" }, await SpsTestServer.NamesAsync(source, ""), "no folder named after the server: the root site's own folders are the source's");
+        CollectionAssert.AreEqual(new[] { "Axle", "Ops (sites)", "Ops (teams)" }, await SpsTestServer.NamesAsync(source, "Sites"), "Axle, given and found by search, once");
+        CollectionAssert.DoesNotContain(await SpsTestServer.NamesAsync(source, "Sites/Axle"), "Sites", "only a root site shows them");
+        CollectionAssert.AreEqual(new[] { "Documents", "Subsites" }, await SpsTestServer.NamesAsync(source, "Sites/Axle"));
+    }
+
+    [TestMethod]
+    public async Task TheSitesGivenBesideTheRootGoWhereTheyBelong()
+    {
+        var store = SharePointOtherSitesTests.Tenant();
+        store.AddSite("/sites/Hidden");
+        store.AddLibrary("/sites/Hidden", "/sites/Hidden/Shared Documents", "Documents");
+        store.HideFromSearch("/sites/Hidden");
+
+        // a site collection search does not find, a subsite of a subsite (not among the root's subsites) and one of the root's own
+        await using var source = await MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com", "https://contoso.sharepoint.com/sites/Hidden", "https://contoso.sharepoint.com/Foo/Bar", "https://contoso.sharepoint.com/hr"));
+        CollectionAssert.AreEqual(new[] { "Documents", "Site Assets", "Subsites", "Sites" }, await SpsTestServer.NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "Axle", "Hidden", "Ops (sites)", "Ops (teams)" }, await SpsTestServer.NamesAsync(source, "Sites"), "the site collection with the others");
+        CollectionAssert.AreEqual(new[] { "Bar", "Foo", "hr" }, await SpsTestServer.NamesAsync(source, "Subsites"), "the subsites with the root's own, hr once");
+        CollectionAssert.AreEqual(new[] { "Documents" }, await SpsTestServer.NamesAsync(source, "Sites/Hidden"));
+        CollectionAssert.AreEqual(new[] { "Shared" }, await SpsTestServer.NamesAsync(source, "Subsites/Bar"));
+    }
+
+    [TestMethod]
+    public async Task ASiteThatOpensLaterJoinsTheRootSitesFolders()
+    {
+        var store = SharePointOtherSitesTests.Tenant();
+        store.AddSite("/sites/Hidden");
+        store.AddLibrary("/sites/Hidden", "/sites/Hidden/Shared Documents", "Documents");
+        store.HideFromSearch("/sites/Hidden");
+        store.Refuse("/sites/Hidden", VfsError.Unavailable);
+        await using var source = await MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com", "https://contoso.sharepoint.com/sites/Hidden"), retry: TimeSpan.Zero);
+        CollectionAssert.DoesNotContain(await SpsTestServer.NamesAsync(source, "Sites"), "Hidden");
+
+        store.Allow("/sites/Hidden");
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        List<string> names;
+        while (!(names = await SpsTestServer.NamesAsync(source, "Sites")).Contains("Hidden") && DateTime.UtcNow < deadline)
+        {
+            await SpsTestServer.NamesAsync(source, "");   // a listing of the root is what starts the try
+            await Task.Delay(50);
+        }
+
+        CollectionAssert.Contains(names, "Hidden");
+        CollectionAssert.AreEqual(new[] { "Documents", "Site Assets", "Subsites", "Sites" }, await SpsTestServer.NamesAsync(source, ""));
     }
 
     [TestMethod]

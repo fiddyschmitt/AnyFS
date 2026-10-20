@@ -16,6 +16,22 @@ public sealed record SiteAddress(string Host, string ServerRelativePath, string 
     /// <summary>The root site of its host (the address has no path).</summary>
     public bool IsRoot => ServerRelativePath.Length == 0;
 
+    /// <summary>
+    /// Where SharePoint Online keeps a site collection: its root, or a name under a managed path (/sites/x, /teams/x, and
+    /// the older /portals/x and /personal/x); anything else is a subsite there. SharePoint Server may have other managed
+    /// paths, so its stores ask the server instead.
+    /// </summary>
+    public bool IsSiteCollectionAddress
+    {
+        get
+        {
+            var segments = ServerRelativePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            return segments.Length == 0 || (segments.Length == 2 && SiteCollectionPaths.Contains(segments[0]));
+        }
+    }
+
+    private static readonly HashSet<string> SiteCollectionPaths = new(StringComparer.OrdinalIgnoreCase) { "sites", "teams", "portals", "personal" };
+
     /// <summary>What can follow a site in an address and is never a subsite: its lists, its well-known libraries, a library's views.</summary>
     private static readonly HashSet<string> NotSites = new(StringComparer.OrdinalIgnoreCase) { "Lists", "Shared Documents", "SitePages", "Pages", "SiteAssets", "Style Library", "FormServerTemplates", "Forms" };
 

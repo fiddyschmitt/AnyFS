@@ -15,8 +15,9 @@ namespace AnyFS.Sources.SharePoint;
 /// its own inside it (<c>Subsites/subsite/library/folder/file</c>, and so on down), at the tenant's root site the
 /// tenant's other sites in a <c>Sites</c> folder the same way (<c>Sites/Axle/library/...</c>, found by search), or
 /// just <c>folder/file</c> when one library is pinned. A source given several sites has a folder per site first
-/// (<c>Axle/library/...</c>), each like a source's own. The site's pages (a library of <see cref="LibraryInfo.Pages"/>)
-/// are read-only Markdown files made by the store.
+/// (<c>Axle/library/...</c>), each like a source's own; given the root site of the one server they are on with them, the
+/// root site is the source's own and the others are in its Sites and Subsites folders. The site's pages (a library of
+/// <see cref="LibraryInfo.Pages"/>) are read-only Markdown files made by the store.
 /// Listings sit in a <see cref="ListingCache"/>, for two seconds or, with <see cref="KeepListings"/>, until listed afresh
 /// (refresh pressed, or the walk of the whole tree every <see cref="WalkEvery"/>), and stats are answered from it; a
 /// listing also remembers each item's ids (and download URL, where the flavour has one), so an open needs no extra round trip. Files below the
@@ -50,7 +51,11 @@ public abstract class SharePointSource : SourceBase, ICountable
 
     // the source's own site, or the sites it was given; their subsites (and, at a tenant's root, the other sites) hang
     // below as they are listed
-    private readonly WebNode _root = new(null, "");
+    private WebNode _root = new(null, "");
+
+    // a source given the root site of the one server its sites are on, among others: those others, which show in the root
+    // site's Sites folder (site collections) or Subsites folder (subsites); null otherwise. Guarded by _leftOut.
+    private List<WebInfo>? _extras;
     private readonly ConcurrentDictionary<string, ItemRef> _items = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _otherSitesGate = new(1, 1);
 
@@ -185,7 +190,7 @@ public abstract class SharePointSource : SourceBase, ICountable
 
         var subsites = site.Of(subsites: true) is { } s ? $", {s.Webs.Count} subsite{(s.Webs.Count == 1 ? "" : "s")}" : "";
         var others = site.Of(subsites: false) is { } o ? $", {o.Webs.Count} other site{(o.Webs.Count == 1 ? "" : "s")}" : "";
-        Logger.LogInformation("sharepoint: serving {Site} ({Count} librar{Plural}{Subsites}{Others}){Pinned}", store.Description, site.Libraries.Count, site.Libraries.Count == 1 ? "y" : "ies", subsites, others, PinnedLibrary is { } p ? $", pinned to {p}" : "");
+        Logger.LogInformation("sharepoint: serving {Site} ({Count} librar{Plural}{Subsites}{Others}){Pinned}", _root.Info?.Url ?? store.Description, site.Libraries.Count, site.Libraries.Count == 1 ? "y" : "ies", subsites, others, PinnedLibrary is { } p ? $", pinned to {p}" : "");
     }
 
     // --- listing and stat --------------------------------------------------------------------------------------
@@ -1031,10 +1036,13 @@ public abstract class SharePointSource : SourceBase, ICountable
     {
         if (web == _root && GivenSites is { Count: > 1 })
         {
-            // a source of several sites: those that opened are its top-level folders (OpenSitesAsync); the others are
-            // looked up again now and then, in the background, so a listing never waits on a site that does not answer
+            // a source of several sites: the sites that did not open are looked up again now and then, in the background,
+            // so a listing never waits on a site that does not answer
             RetryLeftOutWhenDue();
-            return web.Contents!;
+            if (web.Contents?.Sites is not null)
+            {
+                return web.Contents;   // each site that opened is a top-level folder (OpenSitesAsync)
+            }
         }
 
         IReadOnlyList<WebInfo> none = [];
@@ -1052,9 +1060,18 @@ public abstract class SharePointSource : SourceBase, ICountable
             libraries[library.Name] = web.Info is null ? library : library with { Folder = VfsPath.Join(web.Path, library.Name) };
         }
 
+        var foundSubsites = await subsitesCall.ConfigureAwait(false);
+        var foundSites = await sitesCall.ConfigureAwait(false);
+        if (web == _root && Extras() is { Count: > 0 } extras)
+        {
+            // the root site among the sites given: the others join what it finds, each where it belongs
+            foundSubsites = WithExtras(foundSubsites, extras.Where(e => e.SiteCollection != true));
+            foundSites = WithExtras(foundSites, extras.Where(e => e.SiteCollection == true));
+        }
+
         var taken = new HashSet<string>(libraries.Keys, StringComparer.OrdinalIgnoreCase);
         var folders = new List<WebFolder>();
-        foreach (var (baseName, found, subsites) in new[] { (SubsitesFolder, await subsitesCall.ConfigureAwait(false), true), (SitesFolder, await sitesCall.ConfigureAwait(false), false) })
+        foreach (var (baseName, found, subsites) in new[] { (SubsitesFolder, foundSubsites, true), (SitesFolder, foundSites, false) })
         {
             if (found.Count == 0)
             {
@@ -1081,6 +1098,30 @@ public abstract class SharePointSource : SourceBase, ICountable
         var site = new WebContents(libraries, folders);
         web.Contents = site;
         return site;
+    }
+
+    /// <summary>The sites given besides the root site, when it is the source's own (<see cref="OpenSitesAsync"/>); null otherwise.</summary>
+    private List<WebInfo>? Extras()
+    {
+        lock (_leftOut)
+        {
+            return _extras is null ? null : [.. _extras];
+        }
+    }
+
+    /// <summary>What a site's listing found, with the sites given that it did not find added under names clear of the rest (<see cref="WebInfo.Joining"/>).</summary>
+    private static IReadOnlyList<WebInfo> WithExtras(IReadOnlyList<WebInfo> found, IEnumerable<WebInfo> extras)
+    {
+        var shown = found.ToList();
+        foreach (var extra in extras)
+        {
+            if (!shown.Any(s => s.IsSameSite(extra)))
+            {
+                shown.Add(WebInfo.Joining(extra, shown));
+            }
+        }
+
+        return shown;
     }
 
     /// <summary>
@@ -1183,10 +1224,22 @@ public abstract class SharePointSource : SourceBase, ICountable
         }
 
         var slow = lookups.Where(l => !l.Lookup.IsCompleted).ToList();
-        var webs = WebInfo.Listed(opened.Select(w => (w.Key, new Uri(w.Url!))));
-        _root.Contents = new WebContents(new Dictionary<string, LibraryInfo>(), [], webs.ToDictionary(w => w.Name, w => new WebNode(w, w.Name), StringComparer.OrdinalIgnoreCase));
+        var webs = WebInfo.Listed(opened);
+        var root = given.Select(s => (s.Scheme, s.Host)).Distinct().Count() == 1 ? webs.FirstOrDefault(w => w.IsRoot) : null;
+        if (root is not null)
+        {
+            // the root site of the one server they are all on: it is the source's own site, and the others show in its
+            // Sites folder (site collections) or Subsites folder (subsites) with what it finds there
+            _root = new WebNode(root, "");
+        }
+        else
+        {
+            _root.Contents = new WebContents(new Dictionary<string, LibraryInfo>(), [], webs.ToDictionary(w => w.Name, w => new WebNode(w, w.Name), StringComparer.OrdinalIgnoreCase));
+        }
+
         lock (_leftOut)
         {
+            _extras = root is null ? null : [.. webs.Where(w => w != root)];
             _leftOut.AddRange(failed.Select(f => (f.Site, f.Problem.Message)));
             _leftOut.AddRange(slow.Select(s => (s.Site, "no answer yet")));
             _leftOutTried = DateTimeOffset.UtcNow;
@@ -1290,22 +1343,40 @@ public abstract class SharePointSource : SourceBase, ICountable
         lock (_leftOut)
         {
             _leftOut.RemoveAll(l => l.Site == site);
-            var tops = _root.Contents!.Sites!;
             if (web is null)
             {
                 _leftOut.Add((site, problem?.Message ?? "no answer"));
             }
-            else if (!tops.Values.Any(t => string.Equals(t.Info!.Key, web.Key, StringComparison.OrdinalIgnoreCase)))
+            else if (_extras is { } extras)
             {
-                joined = WebInfo.Joining(web, [.. tops.Values.Select(t => t.Info!)]);
-                _root.Contents = _root.Contents! with { Sites = new Dictionary<string, WebNode>(tops, StringComparer.OrdinalIgnoreCase) { [joined.Name] = new WebNode(joined, joined.Name) } };
+                // into the root site's Sites or Subsites folder, when the root is listed next
+                if (!web.IsSameSite(_root.Info!) && !extras.Any(e => e.IsSameSite(web)))
+                {
+                    extras.Add(web);
+                    joined = web;
+                }
+            }
+            else
+            {
+                var tops = _root.Contents!.Sites!;
+                if (!tops.Values.Any(t => t.Info!.IsSameSite(web)))
+                {
+                    joined = WebInfo.Joining(web, [.. tops.Values.Select(t => t.Info!)]);
+                    _root.Contents = _root.Contents! with { Sites = new Dictionary<string, WebNode>(tops, StringComparer.OrdinalIgnoreCase) { [joined.Name] = new WebNode(joined, joined.Name) } };
+                }
             }
         }
 
         if (joined is not null)
         {
             Logger.LogInformation("sharepoint: {Url} opens now and shows as {Name}", site.Url, joined.Name);
-            _listings?.Invalidate("");   // none yet when the lookup ended as the source was starting
+
+            // none yet when the lookup ended as the source was starting
+            _listings?.Invalidate("");
+            foreach (var folder in _root.Contents?.Folders ?? [])
+            {
+                _listings?.Invalidate(folder.Name);
+            }
         }
     }
 

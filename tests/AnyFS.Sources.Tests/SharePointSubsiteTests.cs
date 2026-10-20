@@ -407,6 +407,8 @@ internal sealed class MemoryDocumentStore : IDocumentStore
     private readonly List<string> _sites = [];
     private readonly Dictionary<string, VfsError> _refused = [];
     private readonly Dictionary<string, TaskCompletionSource> _held = [];
+    private readonly HashSet<string> _subsiteKeys = [];
+    private readonly HashSet<string> _unsearchable = [];
     private readonly ConcurrentDictionary<string, int> _inFlight = new();
     private readonly Dictionary<string, int> _mostAtOnce = [];
     private int _inFlightAll;
@@ -508,6 +510,16 @@ internal sealed class MemoryDocumentStore : IDocumentStore
             _subsites[parent].Add(new WebInfo(key, name));
             _libraries[key] = [];
             _subsites[key] = [];
+            _subsiteKeys.Add(key);
+        }
+    }
+
+    /// <summary>Keeps a site (AddSite) out of what the search for other sites finds, as a tenant's search may.</summary>
+    public void HideFromSearch(string site)
+    {
+        lock (_gate)
+        {
+            _unsearchable.Add(site);
         }
     }
 
@@ -565,9 +577,9 @@ internal sealed class MemoryDocumentStore : IDocumentStore
             {
                 throw VfsException.NotFound(site.Url);
             }
-        }
 
-        return new WebInfo(key, WebInfo.NameOf(new Uri(site.Url)), site.Url);
+            return new WebInfo(key, WebInfo.NameOf(new Uri(site.Url)), site.Url, SiteCollection: !_subsiteKeys.Contains(key));
+        }
     }
 
     public Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(WebInfo? web, CancellationToken ct)
@@ -599,7 +611,7 @@ internal sealed class MemoryDocumentStore : IDocumentStore
 
         lock (_gate)
         {
-            return Task.FromResult(WebInfo.Sites(_sites.Where(url => url != web?.Key).Select(url => (url, url, (string?)$"https://contoso.sharepoint.com{url}"))));
+            return Task.FromResult(WebInfo.Sites(_sites.Where(url => url != web?.Key && !_unsearchable.Contains(url)).Select(url => (url, url, (string?)$"https://contoso.sharepoint.com{url}"))));
         }
     }
 
