@@ -22,9 +22,11 @@ public class SharePointPagesTests
     private static string Text(byte[] markdown) => Encoding.UTF8.GetString(markdown);
 
     [TestMethod]
-    public void AModernPageIsItsTitleThenItsTextAsMarkdown()
+    public void AModernPageIsItsAddressItsTitleThenItsTextAsMarkdown()
     {
         Assert.AreEqual("""
+            https://contoso.sharepoint.com/sites/Team/SitePages/News.aspx
+
             # AnyFS test page
 
             ## Heading two
@@ -60,24 +62,36 @@ public class SharePointPagesTests
     }
 
     [TestMethod]
-    public void TheCanvasWinsOverAWikiFieldAndAnEmptyPageIsItsTitle()
+    public void TheCanvasWinsOverAWikiFieldAndAnEmptyPageIsItsAddressAndTitle()
     {
         StringAssert.Contains(Text(SharePointPages.Markdown("News", ModernCanvas, WikiField, Page)), "Heading two");
-        Assert.AreEqual("# Home\n", Text(SharePointPages.Markdown("Home", null, null, Page)));
-        Assert.AreEqual("# Home\n", Text(SharePointPages.Markdown("  Home  ", "", "  ", Page)));
-        Assert.AreEqual("", Text(SharePointPages.Markdown(null, null, null, Page)));
+        Assert.AreEqual($"{Page.AbsoluteUri}\n\n# Home\n", Text(SharePointPages.Markdown("Home", null, null, Page)));
+        Assert.AreEqual($"{Page.AbsoluteUri}\n\n# Home\n", Text(SharePointPages.Markdown("  Home  ", "", "  ", Page)));
+        Assert.AreEqual($"{Page.AbsoluteUri}\n", Text(SharePointPages.Markdown(null, null, null, Page)));
+        Assert.AreEqual("# Home\n", Text(SharePointPages.Markdown("Home", null, null, null)), "no address where the store has none");
+        Assert.AreEqual("", Text(SharePointPages.Markdown(null, null, null, null)));
     }
 
     [TestMethod]
-    public void PagesShowAsMarkdownFiles()
+    public void TheFirstLineIsThePagesFullAddress()
+    {
+        var markdown = Text(SharePointPages.Markdown("Plans", ModernCanvas, null, new Uri("https://contoso.sharepoint.com/sites/Team/SitePages/Our plans.aspx")));
+        Assert.AreEqual("https://contoso.sharepoint.com/sites/Team/SitePages/Our%20plans.aspx", markdown.Split('\n')[0], "escaped, so it opens as it is");
+        StringAssert.StartsWith(markdown.Split('\n', 3)[2], "# Plans\n");
+    }
+
+    [TestMethod]
+    public void PagesShowAsMarkdownFilesNamedAfterThem()
     {
         Assert.IsTrue(SharePointPages.IsPage("News.aspx"));
         Assert.IsTrue(SharePointPages.IsPage("Old.ASPX"));
         Assert.IsFalse(SharePointPages.IsPage(".aspx"));
         Assert.IsFalse(SharePointPages.IsPage("picture.png"));
-        Assert.AreEqual("News.md", SharePointPages.Shown("News.aspx"));
-        Assert.AreEqual("Templates/Plan.aspx", SharePointPages.Upstream("Templates/Plan.md"));
-        Assert.AreEqual("News.aspx", SharePointPages.Upstream("News.MD"));
+        Assert.AreEqual("News.aspx.md", SharePointPages.Shown("News.aspx"));
+        Assert.AreEqual("Templates/Plan.aspx", SharePointPages.Upstream("Templates/Plan.aspx.md"));
+        Assert.AreEqual("News.ASPX", SharePointPages.Upstream("News.ASPX.MD"));
+        Assert.IsNull(SharePointPages.Upstream("Templates/Plan.md"), "a page's name keeps its .aspx");
+        Assert.IsNull(SharePointPages.Upstream(".aspx.md"));
         Assert.IsNull(SharePointPages.Upstream("Templates"), "a folder");
         Assert.IsNull(SharePointPages.Upstream("picture.png"), "nothing but a page shows as a file there");
     }
@@ -125,10 +139,10 @@ public class SharePointPagesTests
         """;
 
     [TestMethod]
-    public void AClassicPageIsItsTitleThenItsMainArea()
+    public void AClassicPageIsItsAddressItsTitleThenItsMainArea()
     {
         var markdown = Text(SharePointPages.MarkdownFromPage(ClassicPage, new Uri("https://acme.sharepoint.us/Foo/default.aspx")));
-        StringAssert.StartsWith(markdown, "# Home\n\n");
+        StringAssert.StartsWith(markdown, "https://acme.sharepoint.us/Foo/default.aspx\n\n# Home\n\n");
         StringAssert.Contains(markdown, "Welcome");
         StringAssert.Contains(markdown, "The team's [plan](https://acme.sharepoint.us/Foo/Shared%20Documents/Plan.docx) is ready.", "addresses made absolute");
         StringAssert.Contains(markdown, "- one");
@@ -158,8 +172,8 @@ public class SharePointPageLibraryTests
         var store = new MemoryDocumentStore();
         store.AddLibrary("", "/Shared Documents", "Documents");
         store.AddLibrary("", "/SitePages", "Site Pages", pages: true);
-        store.Seed("/SitePages", "Home.md", Home);
-        store.Seed("/SitePages", "Templates/Plan.md", "# Plan\n"u8.ToArray());
+        store.Seed("/SitePages", "Home.aspx.md", Home);
+        store.Seed("/SitePages", "Templates/Plan.aspx.md", "# Plan\n"u8.ToArray());
         return store;
     }
 
@@ -169,7 +183,7 @@ public class SharePointPageLibraryTests
         await using var source = await MemorySharePointSource.StartAsync(Store());
         var none = CancellationToken.None;
         CollectionAssert.AreEquivalent(new[] { "Documents", "Site Pages" }, await SpsTestServer.NamesAsync(source, ""));
-        await using (var file = await source.OpenAsync("Site Pages/Home.md", VfsOpenMode.Read, none))
+        await using (var file = await source.OpenAsync("Site Pages/Home.aspx.md", VfsOpenMode.Read, none))
         {
             var back = new byte[Home.Length];
             Assert.AreEqual(Home.Length, await file.ReadFullyAsync(0, back, none));
@@ -183,40 +197,41 @@ public class SharePointPageLibraryTests
             StringAssert.Contains(ex.Message, "Markdown");
         }
 
-        await ReadOnly(() => source.OpenAsync("Site Pages/Home.md", VfsOpenMode.ReadWrite, none), "opening a page to write");
-        await ReadOnly(() => source.OpenAsync("Site Pages/New.md", VfsOpenMode.CreateNew, none), "making a page");
+        await ReadOnly(() => source.OpenAsync("Site Pages/Home.aspx.md", VfsOpenMode.ReadWrite, none), "opening a page to write");
+        await ReadOnly(() => source.OpenAsync("Site Pages/New.aspx.md", VfsOpenMode.CreateNew, none), "making a page");
         await ReadOnly(() => source.CreateDirectoryAsync("Site Pages/Folder", none), "making a folder");
-        await ReadOnly(() => source.DeleteAsync("Site Pages/Home.md", none), "deleting a page");
-        await ReadOnly(() => source.RenameAsync("Site Pages/Home.md", "Site Pages/Start.md", false, none), "renaming a page");
-        await ReadOnly(() => source.RenameAsync("Site Pages/Templates/Plan.md", "Documents/Plan.md", false, none), "moving a page out");
-        await ReadOnly(() => source.SetTimesAsync("Site Pages/Home.md", DateTimeOffset.UtcNow, null, none), "setting a page's times");
-        Assert.IsNotNull(await source.StatAsync("Site Pages/Home.md", none), "and the page is still there");
+        await ReadOnly(() => source.DeleteAsync("Site Pages/Home.aspx.md", none), "deleting a page");
+        await ReadOnly(() => source.RenameAsync("Site Pages/Home.aspx.md", "Site Pages/Start.aspx.md", false, none), "renaming a page");
+        await ReadOnly(() => source.RenameAsync("Site Pages/Templates/Plan.aspx.md", "Documents/Plan.aspx.md", false, none), "moving a page out");
+        await ReadOnly(() => source.SetTimesAsync("Site Pages/Home.aspx.md", DateTimeOffset.UtcNow, null, none), "setting a page's times");
+        Assert.IsNotNull(await source.StatAsync("Site Pages/Home.aspx.md", none), "and the page is still there");
     }
 
     [TestMethod]
     public async Task APageInTheSitesOwnFolderShowsBesideItsLibraries()
     {
         var store = MemoryDocumentStore.Sample();
-        store.AddSitePage("", "default.md", "# Home\n\nWelcome.\n");
-        store.AddSitePage("/Foo", "default.md", "# Foo\n");
+        const string home = "https://contoso.sharepoint.com/default.aspx\n\n# Home\n\nWelcome.\n";
+        store.AddSitePage("", "default.aspx.md", home);
+        store.AddSitePage("/Foo", "default.aspx.md", "https://contoso.sharepoint.com/Foo/default.aspx\n\n# Foo\n");
         await using var source = await MemorySharePointSource.StartAsync(store);
         var none = CancellationToken.None;
-        CollectionAssert.AreEquivalent(new[] { "Documents", "Site Assets", "Subsites", "default.md" }, await SpsTestServer.NamesAsync(source, ""));
-        var entry = await source.StatAsync("default.md", none);
+        CollectionAssert.AreEquivalent(new[] { "Documents", "Site Assets", "Subsites", "default.aspx.md" }, await SpsTestServer.NamesAsync(source, ""));
+        var entry = await source.StatAsync("default.aspx.md", none);
         Assert.IsNotNull(entry);
         Assert.IsFalse(entry.IsDirectory);
         Assert.IsTrue(entry.Attributes.HasFlag(VfsAttributes.ReadOnly));
-        Assert.AreEqual(Encoding.UTF8.GetByteCount("# Home\n\nWelcome.\n"), entry.Length);
-        await using (var file = await source.OpenAsync("default.md", VfsOpenMode.Read, none))
+        Assert.AreEqual(Encoding.UTF8.GetByteCount(home), entry.Length);
+        await using (var file = await source.OpenAsync("default.aspx.md", VfsOpenMode.Read, none))
         {
             var back = new byte[entry.Length];
             Assert.AreEqual(back.Length, await file.ReadFullyAsync(0, back, none));
-            Assert.AreEqual("# Home\n\nWelcome.\n", Encoding.UTF8.GetString(back));
+            Assert.AreEqual(home, Encoding.UTF8.GetString(back));
         }
 
-        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, "Subsites/Foo"), "default.md", "a subsite's too");
-        Assert.AreEqual(VfsError.ReadOnly, (await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync("default.md", VfsOpenMode.ReadWrite, none))).Error);
-        Assert.AreEqual(VfsError.AccessDenied, (await Assert.ThrowsExactlyAsync<VfsException>(() => source.DeleteAsync("default.md", none))).Error);
-        Assert.IsNull(await source.StatAsync("default.md/x", none));
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, "Subsites/Foo"), "default.aspx.md", "a subsite's too");
+        Assert.AreEqual(VfsError.ReadOnly, (await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync("default.aspx.md", VfsOpenMode.ReadWrite, none))).Error);
+        Assert.AreEqual(VfsError.AccessDenied, (await Assert.ThrowsExactlyAsync<VfsException>(() => source.DeleteAsync("default.aspx.md", none))).Error);
+        Assert.IsNull(await source.StatAsync("default.aspx.md/x", none));
     }
 }

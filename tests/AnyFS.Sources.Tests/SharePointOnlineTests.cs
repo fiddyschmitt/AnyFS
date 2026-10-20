@@ -316,8 +316,8 @@ internal static class SpoTestServer
 
     /// <summary>
     /// The test page (<see cref="SpsTestServer.PageTitle"/>) made through Graph's pages API when the site has none with
-    /// its title: one text web part, published. Either suite may have made it; it reads the same. Returns the name it
-    /// shows as.
+    /// its title: one text web part, published. Either suite may have made it; it reads the same. Returns its file name
+    /// (AnyFS-test-page.aspx).
     /// </summary>
     public static async Task<string> EnsurePageAsync(SharePointSiteSource source)
     {
@@ -329,7 +329,7 @@ internal static class SpoTestServer
             {
                 if (page.TryGetProperty("title", out var title) && title.GetString() == SpsTestServer.PageTitle)
                 {
-                    return SharePointPages.Shown(page.GetProperty("name").GetString()!);
+                    return page.GetProperty("name").GetString()!;
                 }
             }
         }
@@ -343,7 +343,7 @@ internal static class SpoTestServer
         {
         }
 
-        return SharePointPages.Shown(created.RootElement.GetProperty("name").GetString()!);
+        return created.RootElement.GetProperty("name").GetString()!;
     }
 
     /// <summary>50,000 bytes that are the same every run (so a stale fixture is still right).</summary>
@@ -479,7 +479,7 @@ public class SharePointOnlineLiveTests
         SpoTestServer.Require();
         await using var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings());
         var page = await SpoTestServer.EnsurePageAsync(source);
-        await SpsTestServer.CheckPageAsync(source, page);
+        await SpsTestServer.CheckPageAsync(source, SpoTestServer.Site!, page);
     }
 
     [TestMethod]

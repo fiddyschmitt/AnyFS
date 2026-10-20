@@ -320,15 +320,15 @@ internal static class SpsTestServer
     /// <summary>The test page's title; its file name SharePoint makes from it (AnyFS-test-page.aspx).</summary>
     public const string PageTitle = "AnyFS test page";
 
-    /// <summary>The test page's one text web part, and the Markdown the page reads as.</summary>
+    /// <summary>The test page's one text web part, and the Markdown the page reads as: its address first.</summary>
     public const string PageText = "<h2>Heading two</h2><p>Hello <strong>world</strong> from <a href=\"https://example.com/x\">AnyFS</a>.</p><ul><li>one</li><li>two</li></ul>";
 
-    public static readonly byte[] PageMarkdown = Encoding.UTF8.GetBytes($"# {PageTitle}\n\n## Heading two\n\nHello **world** from [AnyFS](https://example.com/x).\n\n- one\n- two\n");
+    public static string PageMarkdown(string pageUrl) => $"{pageUrl}\n\n# {PageTitle}\n\n## Heading two\n\nHello **world** from [AnyFS](https://example.com/x).\n\n- one\n- two\n";
 
     /// <summary>The classic page put in the test site's own folder (<see cref="EnsureClassicPageAsync"/>), and the Markdown file it shows as.</summary>
     public const string ClassicPage = "anyfs-classic-page.aspx";
 
-    public const string ClassicPageShown = "anyfs-classic-page.md";
+    public const string ClassicPageShown = "anyfs-classic-page.aspx.md";
 
     /// <summary>
     /// Puts a classic page in the test site's own folder (not a library), as a classic site keeps its default.aspx: the
@@ -351,7 +351,7 @@ internal static class SpsTestServer
     /// <summary>
     /// The test page in the site's pages, made through the site pages API when there is none with its title: created,
     /// saved with a canvas of one text web part (the API takes the canvas as JSON), published. The source shows pages
-    /// read-only, so the test makes it beside it, as it makes the subsite. Returns the name it shows as.
+    /// read-only, so the test makes it beside it, as it makes the subsite. Returns its file name (AnyFS-test-page.aspx).
     /// </summary>
     public static async Task<string> EnsurePageAsync(SharePointSiteSource source)
     {
@@ -363,7 +363,7 @@ internal static class SpsTestServer
             {
                 if (page.GetProperty("Title").GetString() == PageTitle)
                 {
-                    return SharePointPages.Shown(page.GetProperty("FileName").GetString()!);
+                    return page.GetProperty("FileName").GetString()!;
                 }
             }
         }
@@ -380,31 +380,44 @@ internal static class SpsTestServer
         using (await rest.PostJsonAsync($"sitepages/pages({id})/publish", null, "the new page", none))
         using (var saved = await rest.GetJsonAsync($"sitepages/pages({id})?$select=FileName", "the new page", none))
         {
-            return SharePointPages.Shown(saved.RootElement.GetProperty("FileName").GetString()!);
+            return saved.RootElement.GetProperty("FileName").GetString()!;
         }
     }
 
-    /// <summary>The test page reads as its Markdown, is read-only, and only pages show there (as .md, no .aspx).</summary>
-    public static async Task CheckPageAsync(ISource source, string page)
+    /// <summary>
+    /// The test page (<paramref name="fileName"/>, in the Site Pages of <paramref name="siteUrl"/>) shows as its name with
+    /// .md after it and reads as its Markdown, its address first; it is read-only, and only pages show there.
+    /// </summary>
+    public static async Task CheckPageAsync(ISource source, string siteUrl, string fileName)
     {
         var none = CancellationToken.None;
         var names = await NamesAsync(source, PagesLibrary);
-        CollectionAssert.Contains(names, page);
+        var page = fileName + ".md";
+        CollectionAssert.Contains(names, page, string.Join(", ", names));
         Assert.IsFalse(names.Any(n => n.EndsWith(".aspx", StringComparison.OrdinalIgnoreCase)), string.Join(", ", names));
         var path = VfsPath.Join(PagesLibrary, page);
         var entry = await source.StatAsync(path, none);
         Assert.IsNotNull(entry);
-        Assert.AreEqual(PageMarkdown.Length, entry.Length, "the size a listing gives is the Markdown's");
         Assert.IsTrue(entry.Attributes.HasFlag(VfsAttributes.ReadOnly));
         await using (var file = await source.OpenAsync(path, VfsOpenMode.Read, none))
         {
-            var back = new byte[PageMarkdown.Length];
+            // the whole of the size a listing gives, and that is the whole Markdown
+            var back = new byte[entry.Length];
             Assert.AreEqual(back.Length, await file.ReadFullyAsync(0, back, none));
-            Assert.AreEqual(Encoding.UTF8.GetString(PageMarkdown), Encoding.UTF8.GetString(back));
+            CheckMarkdown(PageMarkdown($"{siteUrl.TrimEnd('/')}/SitePages/{fileName}"), Encoding.UTF8.GetString(back));
         }
 
         var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync(path, VfsOpenMode.ReadWrite, none));
         Assert.AreEqual(VfsError.ReadOnly, ex.Error);
+    }
+
+    /// <summary>A page's Markdown as expected: its address on the first line (as the server spells it, so case aside), the rest exactly.</summary>
+    public static void CheckMarkdown(string expected, string actual)
+    {
+        var expectedLines = expected.Split('\n', 2);
+        var actualLines = actual.Split('\n', 2);
+        Assert.AreEqual(expectedLines[0], actualLines[0], true, "the page's address on the first line: " + actual);
+        Assert.AreEqual(expectedLines.ElementAtOrDefault(1), actualLines.ElementAtOrDefault(1), actual);
     }
 
     /// <summary>A second site on another server for the several-sites test (the other lab farm's test site), or null.</summary>
@@ -616,7 +629,7 @@ public class SharePointServerLiveTests
         SpsTestServer.Require();
         await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
         var page = await SpsTestServer.EnsurePageAsync(source);
-        await SpsTestServer.CheckPageAsync(source, page);
+        await SpsTestServer.CheckPageAsync(source, SpsTestServer.Site!, page);
     }
 
     [TestMethod]
@@ -645,7 +658,9 @@ public class SharePointServerLiveTests
         var back = new byte[entry.Length];
         Assert.AreEqual(back.Length, await file.ReadFullyAsync(0, back, None));
         var markdown = Encoding.UTF8.GetString(back);
-        StringAssert.StartsWith(markdown, "# AnyFS classic page\n", markdown);
+        var lines = markdown.Split('\n', 3);
+        Assert.AreEqual($"{SpsTestServer.Site!.TrimEnd('/')}/{SpsTestServer.ClassicPage}", lines[0], true, "the page's address on the first line: " + markdown);
+        StringAssert.StartsWith(lines.ElementAtOrDefault(2), "# AnyFS classic page\n", markdown);
         StringAssert.Contains(markdown, "## A classic page");
         StringAssert.Contains(markdown, $"[link]({SpsTestServer.Site}/Lists/anyfs-nowhere)", "an address made absolute");
         Assert.IsFalse(markdown.Contains("__VIEWSTATE", StringComparison.Ordinal), markdown);

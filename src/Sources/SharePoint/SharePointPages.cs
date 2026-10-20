@@ -10,12 +10,13 @@ using ReverseMarkdown;
 namespace AnyFS.Sources.SharePoint;
 
 /// <summary>
-/// A site's pages (the Site Pages library's .aspx files) as Markdown files: Page.aspx shows as Page.md, read-only, its
-/// content the page's title as a heading and then its body, converted from the HTML SharePoint keeps it in: a modern
-/// page's CanvasContent1, a wiki page's WikiField. A modern page holds each text web part as HTML and, for the other
-/// web parts, the server's searchable rendering of them (captions, the addresses of images and links) beside their
-/// data; that rendering stays, the web parts' type ids go. Addresses become absolute, so links and images work away
-/// from SharePoint. The conversion is ReverseMarkdown's (MarkItDown converts HTML with its Python counterpart).
+/// A site's pages (the Site Pages library's .aspx files) as Markdown files: Page.aspx shows as Page.aspx.md, read-only,
+/// its content the page's address on the first line, its title as a heading and then its body, converted from the HTML
+/// SharePoint keeps it in: a modern page's CanvasContent1, a wiki page's WikiField. A modern page holds each text web
+/// part as HTML and, for the other web parts, the server's searchable rendering of them (captions, the addresses of
+/// images and links) beside their data; that rendering stays, the web parts' type ids go. Addresses become absolute,
+/// so links and images work away from SharePoint. The conversion is ReverseMarkdown's (MarkItDown converts HTML with
+/// its Python counterpart).
 /// </summary>
 internal static partial class SharePointPages
 {
@@ -46,25 +47,25 @@ internal static partial class SharePointPages
     /// <summary>A page upstream: an .aspx file (anything else in a page library is left out).</summary>
     public static bool IsPage(string upstreamName) => upstreamName.Length > PageExtension.Length && upstreamName.EndsWith(PageExtension, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The name a page shows as: Page.aspx is Page.md.</summary>
-    public static string Shown(string upstreamName) => upstreamName[..^PageExtension.Length] + ShownExtension;
+    /// <summary>The name a page shows as: its own with .md after it, Page.aspx as Page.aspx.md.</summary>
+    public static string Shown(string upstreamName) => upstreamName + ShownExtension;
 
-    /// <summary>The page a path in a page library means (a/Page.md is a/Page.aspx); a folder's path as it is. Null for a file that cannot be a page.</summary>
+    /// <summary>The page a path in a page library means (a/Page.aspx.md is a/Page.aspx). Null for anything else: a folder, or a file that cannot be a page.</summary>
     public static string? Upstream(string itemPath)
     {
         var name = itemPath[(itemPath.LastIndexOf('/') + 1)..];
-        if (name.EndsWith(ShownExtension, StringComparison.OrdinalIgnoreCase) && name.Length > ShownExtension.Length)
-        {
-            return itemPath[..^ShownExtension.Length] + PageExtension;
-        }
-
-        return null;
+        return name.EndsWith(ShownExtension, StringComparison.OrdinalIgnoreCase) && IsPage(name[..^ShownExtension.Length]) ? itemPath[..^ShownExtension.Length] : null;
     }
 
-    /// <summary>The page as Markdown, UTF-8 without a byte order mark: "# Title", then the body.</summary>
+    /// <summary>The page as Markdown, UTF-8 without a byte order mark: its full address on the first line (where known), "# Title", then the body.</summary>
     public static byte[] Markdown(string? title, string? canvasHtml, string? wikiHtml, Uri? pageUrl)
     {
         var text = new StringBuilder();
+        if (pageUrl is not null)
+        {
+            text.Append(pageUrl.AbsoluteUri).Append("\n\n");
+        }
+
         if (!string.IsNullOrWhiteSpace(title))
         {
             text.Append("# ").Append(WhiteSpace().Replace(title.Trim(), " ")).Append("\n\n");
@@ -92,8 +93,8 @@ internal static partial class SharePointPages
 
     /// <summary>
     /// A page that is in no pages library (a classic site's default.aspx, its web parts rendered by the server) as Markdown:
-    /// its title, then the page's main content area as SharePoint renders it, without the ribbon, the navigation, the forms'
-    /// fields and what is hidden. Through the same clean-up and conversion as a page in Site Pages.
+    /// its address and title, then the page's main content area as SharePoint renders it, without the ribbon, the
+    /// navigation, the forms' fields and what is hidden. Through the same clean-up and conversion as a page in Site Pages.
     /// </summary>
     public static byte[] MarkdownFromPage(string html, Uri pageUrl)
     {

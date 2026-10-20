@@ -128,7 +128,7 @@ internal sealed record WebInfo(string Key, string Name, string? Url = null, bool
 }
 
 /// <summary>A page in a site's own folder rather than in a library (a classic site's default.aspx), as the read-only Markdown file it shows as.</summary>
-/// <param name="Name">The file's name: default.aspx shows as default.md, as a page in Site Pages does.</param>
+/// <param name="Name">The file's name: default.aspx shows as default.aspx.md, as a page in Site Pages does.</param>
 internal sealed record SitePage(string Name, byte[] Markdown, DateTimeOffset? Created, DateTimeOffset? Modified)
 {
     public VfsEntry Entry => VfsEntry.File(Name, Markdown.Length, Modified, Created, VfsAttributes.ReadOnly, SharePointPages.Version(Markdown));
