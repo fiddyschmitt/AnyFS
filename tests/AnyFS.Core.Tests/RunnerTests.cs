@@ -76,6 +76,43 @@ public class SourceRunnerTests
     }
 
     [TestMethod]
+    public async Task AStopBeforeTheStartHasAThreadStopsCleanly()
+    {
+        // the loop read the runner's token source when it got a thread, which a stop in between had cleared: a source
+        // edited straight after it was added failed with a NullReferenceException (the macOS CI runner, 20-Oct-2026)
+        await using var runner = Runner(new MemoryPluginSettings());
+        using var gate = new ManualResetEventSlim();
+        var held = new List<Task>();
+        for (var i = ThreadPool.ThreadCount + 8; i > 0; i--)
+        {
+            held.Add(Task.Factory.StartNew(() => gate.Wait(TimeSpan.FromSeconds(10)), CancellationToken.None, TaskCreationOptions.PreferFairness, TaskScheduler.Default));
+        }
+
+        // every thread of the pool held, with work queued behind them, so the start's loop waits behind it
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (ThreadPool.PendingWorkItemCount < 4 && DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(1);
+        }
+
+        Task stopping;
+        try
+        {
+            runner.Start();
+            stopping = runner.StopAsync();
+        }
+        finally
+        {
+            gate.Set();
+        }
+
+        await Task.WhenAll(held);   // every one of them past the gate before it is disposed
+        await stopping;
+        Assert.AreEqual(ComponentState.Disabled, runner.Handle.Status.State);
+        Assert.IsNull(runner.Handle.Current);
+    }
+
+    [TestMethod]
     public async Task RetriesWithBackoffUntilItWorks()
     {
         await using var runner = Runner(new MemoryPluginSettings { FailTimes = 2 });

@@ -122,7 +122,10 @@ public sealed class SourceRunner : IAsyncDisposable
             // collection's circle and text leave out, so a collection could look green one source short
             Handle.Status = new ComponentStatus(ComponentState.Starting, "Starting");
             _cts = new CancellationTokenSource();
-            _loop = Task.Run(() => RunAsync(_cts.Token));
+
+            // the token taken now: a stop before the loop gets a thread clears _cts (and a start after it sets another)
+            var ct = _cts.Token;
+            _loop = Task.Run(() => RunAsync(ct));
         }
     }
 
