@@ -95,6 +95,14 @@ public sealed class SharePointSettings
         Hint = "Files this small are downloaded whole when opened and kept in the cache; larger ones are read in ranges as the client asks.")]
     public int SpoolBelowMiB { get; set; } = 8;
 
+    [Setting("Keep folder listings", Advanced = true, Order = 22,
+        Hint = "Answer from what AnyFS last saw of each folder instead of asking SharePoint every time, so folders open at once. A folder listed twice within five seconds (refresh pressed) is asked afresh, and every site and folder is walked again in the background (below), so changes made outside AnyFS show then. Off: listings are kept for two seconds.")]
+    public bool KeepListings { get; set; } = true;
+
+    [Setting("Walk every folder every (minutes)", Advanced = true, Order = 23,
+        Hint = "With folder listings kept: how long after one walk of every site and folder the next begins (the first is at the start). 0 walks at the start only.")]
+    public int WalkMinutes { get; set; } = 30;
+
     /// <summary>The lines of <see cref="SiteUrl"/> that hold something, trimmed: one site's address, several, or a container type's id.</summary>
     internal IReadOnlyList<string> SiteLines => (SiteUrl ?? "").Split('\n').Select(line => line.Trim()).Where(line => line.Length > 0).ToList();
 
@@ -829,6 +837,10 @@ public sealed class SharePointSiteSource : SharePointSource
     protected override IReadOnlyList<SiteAddress>? GivenSites => _settings.IsMultiSite ? _settings.Sites : null;
 
     protected override string? SignedInAs => _account;
+
+    protected override bool KeepListings => _settings.KeepListings;
+
+    protected override TimeSpan WalkEvery => TimeSpan.FromMinutes(Math.Max(0, _settings.WalkMinutes));
 
     private protected override Task<IDocumentStore> ConnectAsync(CancellationToken ct)
     {

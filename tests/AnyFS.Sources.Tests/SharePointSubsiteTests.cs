@@ -335,7 +335,7 @@ public class SharePointSubsiteContractTests : SourceContractTests
 }
 
 /// <summary>The SharePoint source over a <see cref="MemoryDocumentStore"/>, with a test context of its own.</summary>
-internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? pinned, bool otherSites, IReadOnlyList<SiteAddress>? given, TimeSpan? retry, TimeSpan? wait) : SharePointSource
+internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? pinned, bool otherSites, IReadOnlyList<SiteAddress>? given, TimeSpan? retry, TimeSpan? wait, TimeSpan? walkEvery) : SharePointSource
 {
     private readonly TestSourceContext _context = new("sharepoint");
 
@@ -357,13 +357,18 @@ internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? 
 
     protected override TimeSpan OpenWait => wait ?? base.OpenWait;
 
+    protected override bool KeepListings => walkEvery is not null;
+
+    protected override TimeSpan WalkEvery => walkEvery ?? base.WalkEvery;
+
     /// <param name="otherSites">As for the tenant's root site: the store's other sites show in a Sites folder.</param>
     /// <param name="given">For a source given several sites: those sites, found in the store by their paths.</param>
     /// <param name="retry">How soon a site left out is tried again, when not the source's own five minutes.</param>
     /// <param name="wait">How long the start waits for every site given, when not the source's own fifteen seconds.</param>
-    public static async Task<MemorySharePointSource> StartAsync(MemoryDocumentStore store, string? pinned = null, bool otherSites = false, IReadOnlyList<SiteAddress>? given = null, TimeSpan? retry = null, TimeSpan? wait = null)
+    /// <param name="walkEvery">With listings kept (the plugin's default), the time between walks; null for listings kept two seconds (the source's own default).</param>
+    public static async Task<MemorySharePointSource> StartAsync(MemoryDocumentStore store, string? pinned = null, bool otherSites = false, IReadOnlyList<SiteAddress>? given = null, TimeSpan? retry = null, TimeSpan? wait = null, TimeSpan? walkEvery = null)
     {
-        var source = new MemorySharePointSource(store, pinned, otherSites, given, retry, wait);
+        var source = new MemorySharePointSource(store, pinned, otherSites, given, retry, wait, walkEvery);
         try
         {
             await source.InitialiseAsync(source._context, CancellationToken.None);
@@ -402,6 +407,12 @@ internal sealed class MemoryDocumentStore : IDocumentStore
     private readonly List<string> _sites = [];
     private readonly Dictionary<string, VfsError> _refused = [];
     private readonly Dictionary<string, TaskCompletionSource> _held = [];
+    private readonly ConcurrentDictionary<string, int> _inFlight = new();
+    private readonly Dictionary<string, int> _mostAtOnce = [];
+    private int _inFlightAll;
+    private int _mostAtOnceAll;
+    private int _sitesAtOnce;
+    private int _folderListings;
     private int _subsiteListings;
     private int _siteSearches;
     private int _siteFinds;
@@ -604,12 +615,87 @@ internal sealed class MemoryDocumentStore : IDocumentStore
             }
 
             children = _items.Where(kv => kv.Key.Library == library.Key && VfsPath.Parent(kv.Key.Path) == itemPath).Select(kv => Describe(library, kv.Key.Path, kv.Value)).ToList();
+            _folderListings++;
         }
 
-        await Task.Yield();
+        var site = library.Web?.Key ?? "";
+        var now = _inFlight.AddOrUpdate(site, 1, (_, n) => n + 1);
+        var all = Interlocked.Increment(ref _inFlightAll);
+        lock (_gate)
+        {
+            _mostAtOnce[site] = Math.Max(_mostAtOnce.GetValueOrDefault(site), now);
+            _mostAtOnceAll = Math.Max(_mostAtOnceAll, all);
+            _sitesAtOnce = Math.Max(_sitesAtOnce, _inFlight.Count(p => p.Value > 0));
+        }
+
+        try
+        {
+            if (ListingDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(ListingDelay, ct);
+            }
+            else
+            {
+                await Task.Yield();
+            }
+        }
+        finally
+        {
+            _inFlight.AddOrUpdate(site, 0, (_, n) => n - 1);
+            Interlocked.Decrement(ref _inFlightAll);
+        }
+
         foreach (var child in children)
         {
             yield return child;
+        }
+    }
+
+    /// <summary>How long a folder's listing takes, so listings overlap.</summary>
+    public TimeSpan ListingDelay { get; set; }
+
+    /// <summary>How many folders were listed (inside libraries).</summary>
+    public int FolderListings
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _folderListings;
+            }
+        }
+    }
+
+    /// <summary>The most folder listings of one site (by its key, "" for the source's own) in flight at once.</summary>
+    public int MostAtOnce(string site)
+    {
+        lock (_gate)
+        {
+            return _mostAtOnce.GetValueOrDefault(site);
+        }
+    }
+
+    /// <summary>The most folder listings in flight at once, of any sites.</summary>
+    public int MostAtOnceInAll
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _mostAtOnceAll;
+            }
+        }
+    }
+
+    /// <summary>The most sites with a folder listing in flight at the same time.</summary>
+    public int MostSitesAtOnce
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _sitesAtOnce;
+            }
         }
     }
 
