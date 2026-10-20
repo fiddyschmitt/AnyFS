@@ -17,7 +17,8 @@ namespace AnyFS.Sources.SharePoint;
 /// just <c>folder/file</c> when one library is pinned. A source given several sites has a folder per site first
 /// (<c>Axle/library/...</c>), each like a source's own; given the root site of the one server they are on with them, the
 /// root site is the source's own and the others are in its Sites and Subsites folders. The site's pages (a library of
-/// <see cref="LibraryInfo.Pages"/>) are read-only Markdown files made by the store.
+/// <see cref="LibraryInfo.Pages"/>) are read-only Markdown files made by the store, as are the pages in a site's own
+/// folder (a classic site's default.aspx).
 /// Listings sit in a <see cref="ListingCache"/>, for two seconds or, with <see cref="KeepListings"/>, until listed afresh
 /// (refresh pressed, or the walk of the whole tree every <see cref="WalkEvery"/>), and stats are answered from it; a
 /// listing also remembers each item's ids (and download URL, where the flavour has one), so an open needs no extra round trip. Files below the
@@ -212,6 +213,7 @@ public abstract class SharePointSource : SourceBase, ICountable
         return await ResolveAsync(path, ct).ConfigureAwait(false) switch
         {
             null => null,
+            { Page: { } page } => page.Entry,
             { Folder: { } folder } => VfsEntry.Directory(folder.Name),
             { Library: null } place => VfsEntry.Directory(place.Web.Name),
             { Library: { } library, ItemPath.Length: 0 } => VfsEntry.Directory(library.Name),
@@ -459,6 +461,11 @@ public abstract class SharePointSource : SourceBase, ICountable
                 yield return VfsEntry.Directory(name);
             }
 
+            foreach (var page in site.Pages?.Values ?? [])
+            {
+                yield return page.Entry;
+            }
+
             yield break;
         }
 
@@ -559,7 +566,14 @@ public abstract class SharePointSource : SourceBase, ICountable
             throw VfsException.NotFound(path);
         }
 
-        if (await ResolveAsync(path, ct).ConfigureAwait(false) is not { Library: { } library } place)
+        var resolved = await ResolveAsync(path, ct).ConfigureAwait(false);
+        if (resolved is { Page: { } page })
+        {
+            // a page in a site's own folder: its Markdown, made when the site was listed; read-only like Site Pages'
+            return mode == VfsOpenMode.Read ? new MarkdownFile(page.Markdown) : throw VfsException.ReadOnly(path, "the site's page shows as Markdown, for reading");
+        }
+
+        if (resolved is not { Library: { } library } place)
         {
             // a new name beside a site's libraries and subsites, or one under a site or library that is not there
             if (await ResolveAsync(VfsPath.Parent(path), ct).ConfigureAwait(false) is { Library: null })
@@ -944,10 +958,15 @@ public abstract class SharePointSource : SourceBase, ICountable
         while (rest.Length > 0)
         {
             var name = Next(ref rest);
-            var site = await KnownAsync(web, s => s.Libraries.ContainsKey(name) || s.Folder(name) is not null || s.Site(name) is not null, ct).ConfigureAwait(false);
+            var site = await KnownAsync(web, s => s.Libraries.ContainsKey(name) || s.Folder(name) is not null || s.Site(name) is not null || s.Page(name) is not null, ct).ConfigureAwait(false);
             if (site.Libraries.TryGetValue(name, out var library))
             {
                 return new Place(web, library, rest);
+            }
+
+            if (site.Page(name) is { } page)
+            {
+                return rest.Length == 0 ? new Place(web, null, "", Page: page) : null;   // a page in the site's own folder
             }
 
             if (site.Site(name) is { } given)
@@ -1052,7 +1071,8 @@ public abstract class SharePointSource : SourceBase, ICountable
         // at a tenant's root site (the source's own, or one of the sites it was given) its other sites too
         var showsSites = PinnedLibrary is null && (web.Info is null ? ShowsOtherSites : web.Info.IsRoot);
         var sitesCall = showsSites ? OtherSitesAsync(web.Info, ct) : Task.FromResult(none);
-        await Task.WhenAll(librariesCall, subsitesCall, sitesCall).ConfigureAwait(false);
+        var pagesCall = PinnedLibrary is null ? SitePagesAsync(web, ct) : Task.FromResult<IReadOnlyList<SitePage>>([]);
+        await Task.WhenAll(librariesCall, subsitesCall, sitesCall, pagesCall).ConfigureAwait(false);
 
         var libraries = new Dictionary<string, LibraryInfo>(StringComparer.OrdinalIgnoreCase);
         foreach (var library in await librariesCall.ConfigureAwait(false))
@@ -1095,9 +1115,32 @@ public abstract class SharePointSource : SourceBase, ICountable
             folders.Add(new WebFolder(name, webs, subsites));
         }
 
-        var site = new WebContents(libraries, folders);
+        var pages = new Dictionary<string, SitePage>(StringComparer.OrdinalIgnoreCase);
+        foreach (var page in await pagesCall.ConfigureAwait(false))
+        {
+            if (taken.Add(page.Name))
+            {
+                pages[page.Name] = page;
+            }
+        }
+
+        var site = new WebContents(libraries, folders, Pages: pages.Count == 0 ? null : pages);
         web.Contents = site;
         return site;
+    }
+
+    /// <summary>The pages in a site's own folder (<see cref="IDocumentStore.ListSitePagesAsync"/>); none when they cannot be had, which leaves the site's libraries to it.</summary>
+    private async Task<IReadOnlyList<SitePage>> SitePagesAsync(WebNode web, CancellationToken ct)
+    {
+        try
+        {
+            return await Store.ListSitePagesAsync(web.Info, ct).ConfigureAwait(false);
+        }
+        catch (VfsException ex)
+        {
+            Logger.LogDebug("sharepoint: the pages in the folder of '{Site}' could not be listed: {Message}", web.Path.Length == 0 ? Store.Description : web.Path, ex.Message);
+            return [];
+        }
     }
 
     /// <summary>The sites given besides the root site, when it is the source's own (<see cref="OpenSitesAsync"/>); null otherwise.</summary>
@@ -1578,8 +1621,10 @@ public abstract class SharePointSource : SourceBase, ICountable
     /// What is in a site's folder: its libraries by title and its folders of sites (only those with sites in them). The
     /// root of a source given several sites holds those sites instead (<see cref="Sites"/>), and nothing else.
     /// </summary>
-    private sealed record WebContents(IReadOnlyDictionary<string, LibraryInfo> Libraries, IReadOnlyList<WebFolder> Folders, IReadOnlyDictionary<string, WebNode>? Sites = null)
+    private sealed record WebContents(IReadOnlyDictionary<string, LibraryInfo> Libraries, IReadOnlyList<WebFolder> Folders, IReadOnlyDictionary<string, WebNode>? Sites = null, IReadOnlyDictionary<string, SitePage>? Pages = null)
     {
+        public SitePage? Page(string name) => Pages?.GetValueOrDefault(name);
+
         public WebFolder? Folder(string name) => Folders.FirstOrDefault(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase));
 
         public WebFolder? Of(bool subsites) => Folders.FirstOrDefault(f => f.Subsites == subsites);
@@ -1590,7 +1635,34 @@ public abstract class SharePointSource : SourceBase, ICountable
     /// <summary>Where a source path leads (<see cref="ResolveAsync"/>).</summary>
     /// <param name="Library">The library, for a place in one ("" for its own folder); null for a site's own folder or one of its folders of sites.</param>
     /// <param name="Folder">The folder of sites when that is the place; null otherwise.</param>
-    private sealed record Place(WebNode Web, LibraryInfo? Library, string ItemPath, WebFolder? Folder = null);
+    /// <param name="Page">The page when the place is one in the site's own folder (a classic site's default.aspx as Markdown).</param>
+    private sealed record Place(WebNode Web, LibraryInfo? Library, string ItemPath, WebFolder? Folder = null, SitePage? Page = null);
+
+    /// <summary>A page's Markdown held in memory, read-only.</summary>
+    private sealed class MarkdownFile(byte[] markdown) : IVfsFile
+    {
+        public long Length => markdown.Length;
+
+        public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct)
+        {
+            if (offset >= markdown.Length)
+            {
+                return ValueTask.FromResult(0);
+            }
+
+            var n = (int)Math.Min(buffer.Length, markdown.Length - offset);
+            markdown.AsMemory((int)offset, n).CopyTo(buffer);
+            return ValueTask.FromResult(n);
+        }
+
+        public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct) => throw VfsException.NotSupported("writing a page");
+
+        public ValueTask SetLengthAsync(long length, CancellationToken ct) => throw VfsException.NotSupported("writing a page");
+
+        public ValueTask FlushAsync(CancellationToken ct) => ValueTask.CompletedTask;
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
 
     /// <summary>A response body stream that disposes its response with it.</summary>
     private sealed class ResponseStream(HttpResponseMessage response, Stream body) : Stream

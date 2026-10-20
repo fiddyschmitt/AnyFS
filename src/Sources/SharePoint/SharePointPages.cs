@@ -90,6 +90,29 @@ internal static partial class SharePointPages
         return Encoding.UTF8.GetBytes(text.ToString().TrimEnd('\n') + (text.Length > 0 ? "\n" : ""));
     }
 
+    /// <summary>
+    /// A page that is in no pages library (a classic site's default.aspx, its web parts rendered by the server) as Markdown:
+    /// its title, then the page's main content area as SharePoint renders it, without the ribbon, the navigation, the forms'
+    /// fields and what is hidden. Through the same clean-up and conversion as a page in Site Pages.
+    /// </summary>
+    public static byte[] MarkdownFromPage(string html, Uri pageUrl)
+    {
+        var document = new HtmlParser().ParseDocument(html);
+        var title = document.QuerySelector("#DeltaPlaceHolderPageTitleInTitleArea")?.TextContent is { } heading && !string.IsNullOrWhiteSpace(heading) ? heading : document.Title;
+        var main = document.QuerySelector("#DeltaPlaceHolderMain") ?? document.QuerySelector("#contentBox") ?? document.QuerySelector("[role=main]") ?? document.Body;
+        if (main is null)
+        {
+            return Markdown(title, null, null, pageUrl);
+        }
+
+        foreach (var element in main.QuerySelectorAll("input, select, button, textarea, .ms-hide, .ms-hidden, [style*='display:none'], [style*='display: none'], .ms-webpart-menuLink, .ms-wpTdSpace, .ms-qcb-root, .ms-list-addnew, .ms-csrlistview-controldiv").ToList())
+        {
+            element.Remove();
+        }
+
+        return Markdown(title, main.InnerHtml, null, pageUrl);
+    }
+
     /// <summary>A text field of a list item's fields (REST's ListItemAllFields, Graph's listItem.fields); null when absent or empty.</summary>
     public static string? Field(JsonElement fields, string name)
         => fields.ValueKind == JsonValueKind.Object && fields.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;

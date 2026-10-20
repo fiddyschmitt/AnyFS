@@ -26,6 +26,9 @@ internal sealed class RestDocumentStore : IDocumentStore
     private readonly ConcurrentDictionary<string, SharePointRestClient> _subsites = new(StringComparer.OrdinalIgnoreCase);
     private readonly PageCache _pages = new();
 
+    // the Markdown of the pages in sites' own folders, by address and version: rendering one is a page load on the server
+    private readonly PageCache _sitePages = new();
+
     // a SharePoint without modern pages has no CanvasContent1 to ask for; found out once, on the first page listing
     private volatile bool _noCanvas;
 
@@ -219,6 +222,43 @@ internal sealed class RestDocumentStore : IDocumentStore
         }
 
         return WebInfo.Sites(found);
+    }
+
+    /// <summary>
+    /// The .aspx files in the site's own folder (its root folder, not a list's), each rendered by SharePoint and made
+    /// Markdown (<see cref="SharePointPages.MarkdownFromPage"/>), again only when the file changed. One that forwards the
+    /// browser elsewhere (a modern site's default.aspx) is left out.
+    /// </summary>
+    public async Task<IReadOnlyList<SitePage>> ListSitePagesAsync(WebInfo? web, CancellationToken ct)
+    {
+        var client = Client(web);
+        using var doc = await client.GetJsonAsync($"web/RootFolder/Files?$select={FileSelect}", web?.Key ?? Description, ct).ConfigureAwait(false);
+        var pages = new List<SitePage>();
+        foreach (var file in doc.RootElement.GetProperty("value").EnumerateArray())
+        {
+            var (entry, item) = ParseFile(file);
+            if (!SharePointPages.IsPage(entry.Name) || !file.TryGetProperty("ServerRelativeUrl", out var u) || u.GetString() is not { } serverRelative)
+            {
+                continue;
+            }
+
+            var address = new Uri(client.AddressOf(serverRelative));
+            var markdown = _sitePages.Find(address.AbsoluteUri, item.Version);
+            if (markdown is null)
+            {
+                if (await client.GetPageAsync(address, ct).ConfigureAwait(false) is not { } html)
+                {
+                    continue;
+                }
+
+                markdown = SharePointPages.MarkdownFromPage(html, address);
+                _sitePages.Remember(address.AbsoluteUri, item.Version ?? "", markdown);
+            }
+
+            pages.Add(new SitePage(SharePointPages.Shown(entry.Name), markdown, entry.Created, entry.Modified));
+        }
+
+        return pages;
     }
 
     public async IAsyncEnumerable<(VfsEntry Entry, ItemRef Item)> ListChildrenAsync(LibraryInfo library, string itemPath, [EnumeratorCancellation] CancellationToken ct)

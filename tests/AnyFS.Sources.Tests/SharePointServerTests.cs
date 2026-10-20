@@ -325,6 +325,29 @@ internal static class SpsTestServer
 
     public static readonly byte[] PageMarkdown = Encoding.UTF8.GetBytes($"# {PageTitle}\n\n## Heading two\n\nHello **world** from [AnyFS](https://example.com/x).\n\n- one\n- two\n");
 
+    /// <summary>The classic page put in the test site's own folder (<see cref="EnsureClassicPageAsync"/>), and the Markdown file it shows as.</summary>
+    public const string ClassicPage = "anyfs-classic-page.aspx";
+
+    public const string ClassicPageShown = "anyfs-classic-page.md";
+
+    /// <summary>
+    /// Puts a classic page in the test site's own folder (not a library), as a classic site keeps its default.aspx: the
+    /// site's master page around a title and a main area of plain HTML, no server code. SharePoint Online refuses it on a
+    /// site that does not allow custom script (its modern sites).
+    /// </summary>
+    public static async Task EnsureClassicPageAsync(SharePointSiteSource source)
+    {
+        var rest = ((RestDocumentStore)source.Store).Rest;
+        var page = Encoding.UTF8.GetBytes("""
+            <%@ Page language="C#" MasterPageFile="~masterurl/default.master" Inherits="Microsoft.SharePoint.WebPartPages.WebPartPage,Microsoft.SharePoint,Version=16.0.0.0,Culture=neutral,PublicKeyToken=71e9bce111e9429c" %>
+            <asp:Content ContentPlaceHolderId="PlaceHolderPageTitleInTitleArea" runat="server">AnyFS classic page</asp:Content>
+            <asp:Content ContentPlaceHolderId="PlaceHolderMain" runat="server"><div><h2>A classic page</h2><p>Text in the page's main area, with a <a href="Lists/anyfs-nowhere">link</a>.</p></div></asp:Content>
+            """);
+        using (await rest.PostBinaryAsync($"web/RootFolder/Files/add(url='{ClassicPage}',overwrite=true)", () => new MemoryStream(page), page.Length, ClassicPage, CancellationToken.None))
+        {
+        }
+    }
+
     /// <summary>
     /// The test page in the site's pages, made through the site pages API when there is none with its title: created,
     /// saved with a canvas of one text web part (the API takes the canvas as JSON), published. The source shows pages
@@ -594,6 +617,38 @@ public class SharePointServerLiveTests
         await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
         var page = await SpsTestServer.EnsurePageAsync(source);
         await SpsTestServer.CheckPageAsync(source, page);
+    }
+
+    [TestMethod]
+    public async Task APageInTheSitesOwnFolderShowsAsMarkdown()
+    {
+        SpsTestServer.Require();
+        await using (var single = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings()))
+        {
+            try
+            {
+                await SpsTestServer.EnsureClassicPageAsync(single);
+            }
+            catch (VfsException ex) when (SpsTestServer.WebSession)
+            {
+                Assert.Inconclusive($"SharePoint Online took no classic page in the site's own folder: {ex.Message}");
+            }
+        }
+
+        // a source started now lists the site's folder with the page in it
+        await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
+        var names = await SpsTestServer.NamesAsync(source, "");
+        CollectionAssert.Contains(names, SpsTestServer.ClassicPageShown, string.Join(", ", names));
+        var entry = await source.StatAsync(SpsTestServer.ClassicPageShown, None);
+        Assert.IsTrue(entry!.Attributes.HasFlag(VfsAttributes.ReadOnly));
+        await using var file = await source.OpenAsync(SpsTestServer.ClassicPageShown, VfsOpenMode.Read, None);
+        var back = new byte[entry.Length];
+        Assert.AreEqual(back.Length, await file.ReadFullyAsync(0, back, None));
+        var markdown = Encoding.UTF8.GetString(back);
+        StringAssert.StartsWith(markdown, "# AnyFS classic page\n", markdown);
+        StringAssert.Contains(markdown, "## A classic page");
+        StringAssert.Contains(markdown, $"[link]({SpsTestServer.Site}/Lists/anyfs-nowhere)", "an address made absolute");
+        Assert.IsFalse(markdown.Contains("__VIEWSTATE", StringComparison.Ordinal), markdown);
     }
 
     [TestMethod]

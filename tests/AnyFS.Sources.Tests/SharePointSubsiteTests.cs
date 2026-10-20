@@ -409,6 +409,7 @@ internal sealed class MemoryDocumentStore : IDocumentStore
     private readonly Dictionary<string, TaskCompletionSource> _held = [];
     private readonly HashSet<string> _subsiteKeys = [];
     private readonly HashSet<string> _unsearchable = [];
+    private readonly Dictionary<string, List<SitePage>> _sitePages = [];
     private readonly ConcurrentDictionary<string, int> _inFlight = new();
     private readonly Dictionary<string, int> _mostAtOnce = [];
     private int _inFlightAll;
@@ -511,6 +512,28 @@ internal sealed class MemoryDocumentStore : IDocumentStore
             _libraries[key] = [];
             _subsites[key] = [];
             _subsiteKeys.Add(key);
+        }
+    }
+
+    /// <summary>A page in a site's own folder (a classic site's default.aspx), already as the Markdown file it shows as.</summary>
+    public void AddSitePage(string web, string name, string markdown)
+    {
+        lock (_gate)
+        {
+            if (!_sitePages.TryGetValue(web, out var pages))
+            {
+                _sitePages[web] = pages = [];
+            }
+
+            pages.Add(new SitePage(name, Encoding.UTF8.GetBytes(markdown), DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
+        }
+    }
+
+    public Task<IReadOnlyList<SitePage>> ListSitePagesAsync(WebInfo? web, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            return Task.FromResult<IReadOnlyList<SitePage>>(_sitePages.TryGetValue(web?.Key ?? "", out var pages) ? [.. pages] : []);
         }
     }
 

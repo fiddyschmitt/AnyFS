@@ -133,6 +133,9 @@ internal sealed class GraphDocumentStore : IDocumentStore
     public Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(WebInfo? web, CancellationToken ct)
         => web is null ? _listLibraries(ct) : ListDrivesAsync(_graph, web.Key, web, web.Name, ct);
 
+    /// <summary>None: Graph reaches the files in lists and drives only, not those in a site's own folder.</summary>
+    public Task<IReadOnlyList<SitePage>> ListSitePagesAsync(WebInfo? web, CancellationToken ct) => Task.FromResult<IReadOnlyList<SitePage>>([]);
+
     /// <summary>A site's subsites, each named by the last part of its address; containers have none.</summary>
     public async Task<IReadOnlyList<WebInfo>> ListSubsitesAsync(WebInfo? web, CancellationToken ct)
     {

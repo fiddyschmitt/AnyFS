@@ -333,6 +333,32 @@ internal sealed partial class SharePointRestClient : IDisposable
             : null;
     }
 
+    /// <summary>
+    /// A page of the site as a browser gets it: its HTML as SharePoint renders it, web parts and all. Null when SharePoint
+    /// sends the browser to another address instead (a modern site's default.aspx forwards to its home page in Site Pages).
+    /// </summary>
+    public async Task<string?> GetPageAsync(Uri page, CancellationToken ct)
+    {
+        using var response = await SendAsync(() =>
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, page);
+            request.Headers.Accept.ParseAdd("text/html");
+            return request;
+        }, HttpCompletionOption.ResponseContentRead, idempotent: true, ct).ConfigureAwait(false);
+        if ((int)response.StatusCode is >= 300 and < 400)
+        {
+            return null;
+        }
+
+        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw MapError(response.StatusCode, body, page.AbsoluteUri, Challenge(response));
+        }
+
+        return body;
+    }
+
     /// <summary>Whether SharePoint refused the account itself (signed in, but without access), not the sign-in: see <see cref="MapError"/>.</summary>
     public static bool IsDenial(VfsException ex) => ex.Error == VfsError.AccessDenied && ex.InnerException is UnauthorizedAccessException;
 
