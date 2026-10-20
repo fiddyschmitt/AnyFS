@@ -219,6 +219,18 @@ public class SharePointSeveralSitesSettingsTests
     }
 
     [TestMethod]
+    public void TheSitesAreStoredInAlphabeticalOrder()
+    {
+        var settings = new SharePointSettings { SiteUrl = " https://acme.sharepoint.us/sites/Foo\r\n\nhttps://acme.sharepoint.us\nhttps://acme.sharepoint.us/Bar \nhttps://ACME.sharepoint.us/sites/foo\n" };
+        new SharePointPlugin().NormaliseSettings(settings);
+        Assert.AreEqual("https://acme.sharepoint.us\nhttps://acme.sharepoint.us/Bar\nhttps://acme.sharepoint.us/sites/Foo", settings.SiteUrl, "trimmed, blank lines and a line given twice dropped");
+
+        settings.SiteUrl = "http://intranet/sites/a";
+        new SharePointPlugin().NormaliseSettings(settings);
+        Assert.AreEqual("http://intranet/sites/a", settings.SiteUrl, "one site as it was");
+    }
+
+    [TestMethod]
     public void SeveralSitesAreNamedByTheServerTheyShare()
     {
         var plugin = new SharePointPlugin();

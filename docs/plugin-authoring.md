@@ -140,6 +140,11 @@ person types a name of their own, and does the same when a source whose name is 
 edited later. Return something that is valid as a path segment (no
 `\ / : * ? " < > |`, no leading or trailing dot or space), or null while there is nothing to go on.
 
+To tidy settings before they are stored, implement `NormaliseSettings(settings)` (another optional
+`ISourcePlugin` member) and change the object in place: the host calls it when a source is added
+and when it is edited, then stores what it leaves and starts the source from that. SharePoint sorts
+its site addresses there.
+
 ## Prompts
 
 When a source needs something only the user has (a PIN, a one-time code, a passphrase that

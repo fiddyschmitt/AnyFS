@@ -46,6 +46,13 @@ public sealed class MemoryPlugin : ISourcePlugin
 
     public object CreateDefaultSettings() => new MemoryPluginSettings();
 
+    /// <summary>The files are stored without blanks around or between them.</summary>
+    public void NormaliseSettings(object settings)
+    {
+        var s = (MemoryPluginSettings)settings;
+        s.Files = string.Join(';', s.Files.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+    }
+
     public ISource CreateSource(object settings)
     {
         var s = (MemoryPluginSettings)settings;

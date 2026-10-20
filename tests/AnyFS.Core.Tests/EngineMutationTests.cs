@@ -108,6 +108,17 @@ public class EngineMutationTests
     }
 
     [TestMethod]
+    public async Task ThePluginTidiesTheSettingsBeforeTheyAreStored()
+    {
+        await using var engine = await StartedAsync();
+        var alpha = await engine.AddSourceAsync("alpha", "memory", true, false, new MemoryPluginSettings { Files = " a.txt=A ; ;b.txt=B" });
+        Assert.AreEqual("a.txt=A;b.txt=B", Reload().Sources.Single().Settings!["files"]!.GetValue<string>(), "when added");
+
+        await engine.UpdateSourceAsync(alpha.Id, "alpha", true, false, new MemoryPluginSettings { Files = "c.txt=C ;" });
+        Assert.AreEqual("c.txt=C", Reload().Sources.Single().Settings!["files"]!.GetValue<string>(), "and when edited");
+    }
+
+    [TestMethod]
     public async Task EditingASourceRestartsItOnlyWhenItsSettingsChanged()
     {
         await using var engine = await StartedAsync();

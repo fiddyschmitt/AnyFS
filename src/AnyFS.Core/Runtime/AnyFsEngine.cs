@@ -357,6 +357,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
             RequireUniqueSourceName(name, null);
             var plugin = Registry.FindSource(typeId) ?? throw new ArgumentException($"There is no source type '{typeId}'.");
             var definition = new SourceDefinition { Name = name, Type = plugin.TypeId, Enabled = enabled, CountFilesOnStart = countFilesOnStart };
+            plugin.NormaliseSettings(settings);
             definition.Settings = PluginSettingsBinder.Serialise(plugin.SettingsType, settings, (property, value) => Secrets.Set(definition.Id, property, value));
             Settings.Sources.Add(definition);
             Settings.SaveSources();
@@ -391,6 +392,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
             var plugin = Registry.FindSource(definition.Type) ?? throw new ArgumentException($"The source type '{definition.Type}' is not available, so its settings can't be edited.");
 
             var secretsChanged = false;
+            plugin.NormaliseSettings(settings);
             var json = PluginSettingsBinder.Serialise(plugin.SettingsType, settings, (property, value) =>
             {
                 secretsChanged |= !string.Equals(Secrets.Get(id, property), string.IsNullOrEmpty(value) ? null : value, StringComparison.Ordinal);

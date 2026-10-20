@@ -46,6 +46,15 @@ public interface ISourcePlugin
     /// default suggests nothing.
     /// </summary>
     string? SuggestName(object settings) => null;
+
+    /// <summary>
+    /// Tidies the settings before they are stored, when a source is added and when it is edited: change the object in
+    /// place (the SharePoint source sorts its site addresses). The source is then created from what was stored, so it
+    /// sees the same. Optional: the default leaves the settings as they are.
+    /// </summary>
+    void NormaliseSettings(object settings)
+    {
+    }
 }
 
 /// <summary>

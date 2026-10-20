@@ -293,6 +293,13 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         return SafeName(siteName is null ? HostName(one) : $"{HostName(one)} {siteName}");
     }
 
+    /// <summary>The site addresses are stored one per line, trimmed, in alphabetical order, each once.</summary>
+    public void NormaliseSettings(object settings)
+    {
+        var s = (SharePointSettings)settings;
+        s.SiteUrl = string.Join("\n", s.SiteLines.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase));
+    }
+
     /// <summary>A site's host as a name: without its port.</summary>
     private static string HostName(SiteAddress site) => site.Host.StartsWith('[') ? site.Host[..(site.Host.IndexOf(']') + 1)] : site.Host.Split(':')[0];
 
