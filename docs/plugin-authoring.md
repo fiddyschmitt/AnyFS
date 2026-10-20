@@ -174,7 +174,11 @@ dialog show its button while `UnavailableReason` is set, and retry the mount aft
 Caching is the source's business; the SDK makes the common strategies one-liners:
 
 - `ListingCache`: memoises listings for a TTL, shares one upstream call between concurrent
-  misses, invalidate on writes.
+  misses, invalidate on writes (`Update` changes one name in place, also in a listing still on
+  its way). For a source that is slow to list, `ListingCache.Kept` keeps each listing until it is
+  listed afresh: answer clients with `ListAsync`, and a folder a client lists twice within the
+  `refreshOnRepeat` window is listed again (the person pressed refresh); call `RefreshAsync` from
+  a walk of your tree now and then. SharePoint keeps its listings so and walks every 30 minutes.
 - `SpoolCache`: for upstreams that only stream sequentially. The first open starts the download
   into `Context.CacheDirectory`; any sub-range is served as soon as the file has reached it;
   concurrent readers share one download; eviction by size and age. An upstream that sends

@@ -150,6 +150,104 @@ public class ListingCacheTests
     }
 
     [TestMethod]
+    public async Task AKeptListingStaysUntilListedAfresh()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
+        await cache.GetAsync("docs", CancellationToken.None);
+        _time.Advance(TimeSpan.FromHours(5));
+        await cache.GetAsync("docs", CancellationToken.None);
+        Assert.AreEqual(1, _calls, "no expiry");
+
+        _tree["docs"].Add(VfsEntry.File("new.txt", 4));
+        var fresh = await cache.RefreshAsync("docs", CancellationToken.None);
+        Assert.AreEqual(2, _calls);
+        CollectionAssert.Contains(fresh.Select(e => e.Name).ToList(), "new.txt");
+        CollectionAssert.Contains((await cache.GetAsync("docs", CancellationToken.None)).Select(e => e.Name).ToList(), "new.txt", "the fresh listing replaced the old");
+        Assert.AreEqual(2, _calls);
+    }
+
+    [TestMethod]
+    public async Task AClientListingAFolderTwiceWithinTheWindowGetsItAfresh()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time, refreshOnRepeat: TimeSpan.FromSeconds(5));
+        await cache.ListAsync("docs", CancellationToken.None);
+        Assert.AreEqual(1, _calls);
+
+        _time.Advance(TimeSpan.FromSeconds(30));
+        await cache.ListAsync("docs", CancellationToken.None);
+        Assert.AreEqual(1, _calls, "long after the last: from the cache");
+
+        _time.Advance(TimeSpan.FromSeconds(3));
+        await cache.ListAsync("docs", CancellationToken.None);
+        Assert.AreEqual(2, _calls, "again within five seconds: refresh pressed");
+
+        await cache.GetAsync("docs", CancellationToken.None);
+        await cache.StatAsync("docs/a.txt", CancellationToken.None);
+        Assert.AreEqual(2, _calls, "lookups are not a client listing");
+    }
+
+    [TestMethod]
+    public async Task AFailedRefreshKeepsWhatWasHeld()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
+        await cache.GetAsync("docs", CancellationToken.None);
+        var held = _tree["docs"];
+        _tree.Remove("docs");
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.RefreshAsync("docs", CancellationToken.None));
+        Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count, "the old listing still answers");
+        Assert.AreEqual(2, _calls);
+        _tree["docs"] = held;
+    }
+
+    [TestMethod]
+    public async Task AWriteWhileTheFolderIsBeingListedIsInTheListingThatLands()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
+        await cache.GetAsync("docs", CancellationToken.None);
+        _gate = new TaskCompletionSource();
+        var refresh = cache.RefreshAsync("docs", CancellationToken.None).AsTask();
+        await Task.Delay(50);
+
+        // written through the source while the upstream's answer (from before the write) is on its way
+        cache.Update("docs/made.txt", VfsEntry.File("made.txt", 5));
+        cache.Update("docs/b.txt", null);
+        _gate.SetResult();
+        var landed = await refresh;
+        CollectionAssert.AreEquivalent(new[] { "a.txt", "made.txt" }, landed.Select(e => e.Name).ToArray());
+        CollectionAssert.AreEquivalent(new[] { "a.txt", "made.txt" }, (await cache.GetAsync("docs", CancellationToken.None)).Select(e => e.Name).ToArray(), "and that is what is kept");
+    }
+
+    [TestMethod]
+    public async Task AListingInvalidatedOnItsWayIsHandedOverButNotKept()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
+        _gate = new TaskCompletionSource();
+        var waiting = cache.GetAsync("docs", CancellationToken.None).AsTask();
+        await Task.Delay(50);
+        cache.Invalidate("docs");
+        _gate.SetResult();
+        Assert.AreEqual(2, (await waiting).Count);
+        Assert.AreEqual(0, cache.Count);
+        _gate = null;
+        await cache.GetAsync("docs", CancellationToken.None);
+        Assert.AreEqual(2, _calls, "listed again");
+    }
+
+    [TestMethod]
+    public async Task ATimedListingIsGoodForItsTimeFromWhenItArrived()
+    {
+        var cache = new ListingCache(TimeSpan.FromSeconds(2), ListAsync, time: _time);
+        _gate = new TaskCompletionSource();
+        var slow = cache.GetAsync("docs", CancellationToken.None).AsTask();
+        await Task.Delay(50);
+        _time.Advance(TimeSpan.FromSeconds(3));   // the upstream took longer than the listing's whole life
+        _gate.SetResult();
+        await slow;
+        await cache.GetAsync("docs", CancellationToken.None);
+        Assert.AreEqual(1, _calls, "not stale on arrival");
+    }
+
+    [TestMethod]
     public async Task TrimsWhenOverTheDirectoryLimit()
     {
         for (var i = 0; i < 40; i++)
