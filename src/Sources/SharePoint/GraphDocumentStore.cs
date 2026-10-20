@@ -21,7 +21,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
     private readonly Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> _listLibraries;
     private readonly SiteAddress? _site;
 
-    private GraphDocumentStore(GraphClient graph, string description, string libraryNoun, string siteId, Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> listLibraries, SiteAddress? site = null, IReadOnlyList<WebInfo>? sites = null)
+    private GraphDocumentStore(GraphClient graph, string description, string libraryNoun, string siteId, Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> listLibraries, SiteAddress? site = null)
     {
         _graph = graph;
         Description = description;
@@ -29,14 +29,11 @@ internal sealed class GraphDocumentStore : IDocumentStore
         SiteId = siteId;
         _listLibraries = listLibraries;
         _site = site;
-        Sites = sites;
     }
 
     public string Description { get; }
 
     public string LibraryNoun { get; }
-
-    public IReadOnlyList<WebInfo>? Sites { get; }
 
     /// <summary>The site's Graph id (for tests); empty for containers.</summary>
     public string SiteId { get; }
@@ -56,32 +53,16 @@ internal sealed class GraphDocumentStore : IDocumentStore
         return new GraphDocumentStore(graph, description, "document library", found.Id, ct2 => ListDrivesAsync(graph, found.Id, null, description, ct2), found.Site);
     }
 
-    /// <summary>
-    /// The sites a source was given, each found as <see cref="ConnectAsync"/> finds one, all at once: the store holds those
-    /// that answered (its <see cref="Sites"/>, named by <see cref="WebInfo.Listed"/>), and the addresses Graph has no site
-    /// for (or that failed otherwise) come back beside it, for the caller to judge.
-    /// </summary>
-    public static async Task<(GraphDocumentStore Store, IReadOnlyList<(SiteAddress Site, VfsException Error)> Failed)> ConnectSitesAsync(GraphClient graph, IReadOnlyList<SiteAddress> sites, CancellationToken ct)
-    {
-        var results = await Task.WhenAll(sites.Select(async site =>
-        {
-            try
-            {
-                var found = await FindAsync(graph, site, ct).ConfigureAwait(false);
-                return (Site: site, Found: found, Error: found is null ? new VfsException(VfsError.NotFound, $"{site.Url} was not found, or the account has no access to it") : null);
-            }
-            catch (VfsException ex)
-            {
-                return (Site: site, Found: ((string Id, string Title, SiteAddress Site)?)null, Error: ex);
-            }
-        })).ConfigureAwait(false);
+    /// <summary>A store for a source of several sites: the source finds them (<see cref="FindSiteAsync"/>).</summary>
+    public static GraphDocumentStore ForSites(GraphClient graph)
+        => new(graph, "the sites given", "document library", "", _ => Task.FromResult<IReadOnlyList<LibraryInfo>>([]));
 
-        var found = results.Where(r => r.Found is not null).Select(r => r.Found!.Value).DistinctBy(f => f.Id, StringComparer.Ordinal).ToList();
-        var webs = WebInfo.Listed(found.Select(f => (f.Id, new Uri(f.Site.Url))));
-        var first = found.FirstOrDefault();
-        var store = new GraphDocumentStore(graph, string.Join(", ", webs.Select(w => $"{w.Name} ({w.Url})")), "document library", first.Id ?? "",
-            ct2 => Task.FromResult<IReadOnlyList<LibraryInfo>>([]), first.Site, webs);
-        return (store, results.Where(r => r.Error is not null).Select(r => (r.Site, r.Error!)).ToList());
+    /// <summary>One of several sites, found as <see cref="ConnectAsync"/> finds a site.</summary>
+    public async Task<WebInfo> FindSiteAsync(SiteAddress site, CancellationToken ct)
+    {
+        var found = await FindAsync(_graph, site, ct).ConfigureAwait(false)
+            ?? throw new VfsException(VfsError.NotFound, $"{site.Url} was not found, or the account has no access to it");
+        return new WebInfo(found.Id, WebInfo.NameOf(new Uri(found.Site.Url)), found.Site.Url);
     }
 
     /// <summary>
@@ -152,9 +133,9 @@ internal sealed class GraphDocumentStore : IDocumentStore
     /// <summary>A site's subsites, each named by the last part of its address; containers have none.</summary>
     public async Task<IReadOnlyList<WebInfo>> ListSubsitesAsync(WebInfo? web, CancellationToken ct)
     {
-        if (SiteId.Length == 0)
+        if (web is null && SiteId.Length == 0)
         {
-            return [];
+            return [];   // containers, or the several sites' store, which has no site of its own
         }
 
         var url = $"sites/{web?.Key ?? SiteId}/sites?$select=id,webUrl";

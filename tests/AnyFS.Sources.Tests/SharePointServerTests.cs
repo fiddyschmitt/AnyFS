@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -586,26 +587,75 @@ public class SharePointServerLiveTests
     public async Task SeveralSitesAreTopLevelFolders()
     {
         SpsTestServer.Require();
+        bool subsite;
         await using (var single = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings()))
         {
-            await SpsTestServer.EnsureSubsiteAsync(single);
+            // SharePoint Online makes no new subsites (EnsureSubsiteAsync); the rest holds without one
+            subsite = await SpsTestServer.HasSubsiteAsync(single);
+            if (!subsite && !SpsTestServer.WebSession)
+            {
+                await SpsTestServer.EnsureSubsiteAsync(single);
+                subsite = true;
+            }
         }
 
-        // the test site, its subsite, and an address below the test site that is no site (found by stepping back: the test site again)
+        // the test site, its subsite, an address below the test site that is no site (found by stepping back: the test site
+        // again), and a site that is not there, which is left out
         var site = SpsTestServer.Site!;
-        var sites = new[] { site, $"{site}/{SpsTestServer.Subsite}", $"{site}/anyfs-not-a-site" };
+        var missing = $"{SpsTestServer.RootOf(site)}/sites/anyfs-no-such-site";
+        string[] sites = subsite ? [site, $"{site}/{SpsTestServer.Subsite}", $"{site}/anyfs-not-a-site", missing] : [site, $"{site}/anyfs-not-a-site", missing];
         var settings = SpsTestServer.Settings();
         settings.SiteUrl = string.Join("\n", sites);
         var result = await new SharePointPlugin().TestAsync(settings, new Progress<string>(), None);
         Assert.IsTrue(result.Success, result.Message);
-        StringAssert.Contains(result.Message, $"{SpsTestServer.Subsite} ({site}/{SpsTestServer.Subsite}) has ");
+        if (subsite)
+        {
+            StringAssert.Contains(result.Message, $"{SpsTestServer.Subsite} ({site}/{SpsTestServer.Subsite}) has ");
+        }
+
+        StringAssert.Contains(result.Message, "\nLeft out, as SharePoint does not open it (tried again every few minutes):\n");
+        StringAssert.Contains(result.Message[result.Message.IndexOf("\nLeft out", StringComparison.Ordinal)..], missing);
 
         using var context = new TestSourceContext("sharepoint");
         await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, sites);
         var top = SpsTestServer.LastName(site);
-        CollectionAssert.AreEqual(new[] { top, SpsTestServer.Subsite }, await SpsTestServer.NamesAsync(source, ""), "the same site given twice is one folder");
-        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, SpsTestServer.Subsite), "Documents");
+        CollectionAssert.AreEqual(subsite ? new[] { top, SpsTestServer.Subsite } : new[] { top }, await SpsTestServer.NamesAsync(source, ""), "the same site given twice is one folder; the site not there is left out");
+        if (subsite)
+        {
+            CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, SpsTestServer.Subsite), "Documents");
+        }
+
         await SpsTestServer.CheckReadmeAsync(source, top, SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
+    }
+
+    [TestMethod]
+    public async Task ASiteWhoseServerDoesNotAnswerIsLeftOut()
+    {
+        SpsTestServer.Require();
+        if (SpsTestServer.WebSession)
+        {
+            Assert.Inconclusive("a Windows sign-in, which reaches sites on several servers");
+        }
+
+        // 192.0.2.1 is TEST-NET-1 (RFC 5737), which nothing answers: neither Test nor the start waits on it for long, and
+        // the source's health is none of its business
+        var site = SpsTestServer.Site!;
+        const string silent = "http://192.0.2.1/sites/anyfs";
+        var settings = SpsTestServer.Settings();
+        settings.SiteUrl = $"{site}\n{silent}";
+        var watch = Stopwatch.StartNew();
+        var result = await new SharePointPlugin().TestAsync(settings, new Progress<string>(), None);
+        Assert.IsTrue(result.Success, result.Message);
+        StringAssert.Contains(result.Message[result.Message.IndexOf("\nLeft out", StringComparison.Ordinal)..], silent);
+        Assert.IsTrue(watch.Elapsed < TimeSpan.FromSeconds(45), $"Test took {watch.Elapsed}");
+
+        using var context = new TestSourceContext("sharepoint");
+        watch.Restart();
+        await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, site, silent);
+        Assert.IsTrue(watch.Elapsed < TimeSpan.FromSeconds(45), $"the start took {watch.Elapsed}");
+        CollectionAssert.AreEqual(new[] { SpsTestServer.LastName(site) }, await SpsTestServer.NamesAsync(source, ""));
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, SpsTestServer.LastName(site)), SpsTestServer.Library);
+        Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth, string.Join("; ", context.HealthReports));
     }
 
     [TestMethod]
@@ -642,29 +692,24 @@ public class SharePointServerLiveTests
         var site = SpsTestServer.Site!;
         var root = SpsTestServer.RootOf(site);
         using var context = new TestSourceContext("sharepoint");
-        SharePointSiteSource source;
-        try
+        await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, root, site);
+        var host = new Uri(root).Host;
+        var names = await SpsTestServer.NamesAsync(source, "");
+        if (!names.Contains(host))
         {
-            source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, root, site);
-        }
-        catch (SourceFailedException ex) when (ex.InnerException is VfsException inner && SharePointRestClient.IsDenial(inner))
-        {
-            Assert.Inconclusive($"the test account may not open {root}: {ex.Message}");
-            return;
+            // the lab farms: the test account may open its test site but not the farm's root site, which is left out
+            CollectionAssert.AreEqual(new[] { SpsTestServer.LastName(site) }, names);
+            Assert.Inconclusive($"the test account may not open {root}, so it is left out (ARootSiteTheAccountMayNotOpenSaysSo)");
         }
 
-        await using (source)
+        CollectionAssert.AreEqual(new[] { host, SpsTestServer.LastName(site) }, names);
+        await SpsTestServer.CheckReadmeAsync(source, SpsTestServer.LastName(site), SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
+        if (!(await SpsTestServer.NamesAsync(source, host)).Contains(SharePointSource.SitesFolder))
         {
-            var host = new Uri(root).Host;
-            CollectionAssert.AreEqual(new[] { host, SpsTestServer.LastName(site) }, await SpsTestServer.NamesAsync(source, ""));
-            await SpsTestServer.CheckReadmeAsync(source, SpsTestServer.LastName(site), SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
-            if (!(await SpsTestServer.NamesAsync(source, host)).Contains(SharePointSource.SitesFolder))
-            {
-                Assert.Inconclusive($"search finds no other site from {root}");
-            }
-
-            CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, $"{host}/{SharePointSource.SitesFolder}"), SpsTestServer.LastName(site));
+            Assert.Inconclusive($"search finds no other site from {root}");
         }
+
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, $"{host}/{SharePointSource.SitesFolder}"), SpsTestServer.LastName(site));
     }
 
     [TestMethod]
@@ -720,6 +765,19 @@ public class SharePointServerLiveTests
         var failed = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => root.InitialiseAsync(context, None));
         Assert.AreEqual(result.Message, failed.Message, "the source says what Test said");
         Assert.IsTrue(failed.Permanent, "no point retrying until someone changes the site's permissions or the address");
+
+        // among several sites it is left out, and the others serve
+        var site = SpsTestServer.Site!;
+        var several = SpsTestServer.Settings();
+        several.SiteUrl = $"{settings.SiteUrl}\n{site}";
+        result = await new SharePointPlugin().TestAsync(several, new Progress<string>(), None);
+        Assert.IsTrue(result.Success, result.Message);
+        StringAssert.Contains(result.Message, "\nLeft out, as SharePoint does not open it (tried again every few minutes):\n");
+        StringAssert.Contains(result.Message[result.Message.IndexOf("\nLeft out", StringComparison.Ordinal)..], settings.SiteUrl);
+        using var context2 = new TestSourceContext("sharepoint");
+        await using var both = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context2, settings.SiteUrl, site);
+        CollectionAssert.AreEqual(new[] { SpsTestServer.LastName(site) }, await SpsTestServer.NamesAsync(both, ""));
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(both, SpsTestServer.LastName(site)), SpsTestServer.Library);
     }
 
     [TestMethod]

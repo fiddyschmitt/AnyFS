@@ -11,19 +11,17 @@ public class SharePointSeveralSitesTests
 {
     private static readonly CancellationToken None = CancellationToken.None;
 
-    /// <summary>The tenant of <see cref="SharePointOtherSitesTests.Tenant"/>, given /sites/Axle and /teams/Ops as the source's sites.</summary>
-    internal static MemoryDocumentStore TwoSites()
-    {
-        var store = SharePointOtherSitesTests.Tenant();
-        store.Sites = [new WebInfo("/sites/Axle", "Axle", "https://contoso.sharepoint.com/sites/Axle"), new WebInfo("/teams/Ops", "Ops", "https://contoso.sharepoint.com/teams/Ops")];
-        return store;
-    }
+    /// <summary>/sites/Axle and /teams/Ops of the tenant of <see cref="SharePointOtherSitesTests.Tenant"/>, as a source's sites.</summary>
+    internal static readonly IReadOnlyList<SiteAddress> TwoSites = Given("https://contoso.sharepoint.com/sites/Axle", "https://contoso.sharepoint.com/teams/Ops");
+
+    internal static IReadOnlyList<SiteAddress> Given(params string[] urls)
+        => urls.Select(u => SiteAddress.TryParse(u, out var site, out var reason) ? site : throw new ArgumentException(reason, nameof(urls))).ToList();
 
     [TestMethod]
     public async Task EachSiteIsAFolderWithItsLibrariesAndSubsites()
     {
-        var store = TwoSites();
-        await using var source = await MemorySharePointSource.StartAsync(store);
+        var store = SharePointOtherSitesTests.Tenant();
+        await using var source = await MemorySharePointSource.StartAsync(store, given: TwoSites);
         CollectionAssert.AreEqual(new[] { "Axle", "Ops" }, await SpsTestServer.NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "Documents", "Subsites" }, await SpsTestServer.NamesAsync(source, "Axle"));
         CollectionAssert.AreEqual(new[] { "Documents" }, await SpsTestServer.NamesAsync(source, "Axle/Subsites/Plan"));
@@ -44,7 +42,7 @@ public class SharePointSeveralSitesTests
     [TestMethod]
     public async Task TheSitesAreTheSourcesToChoose()
     {
-        await using var source = await MemorySharePointSource.StartAsync(TwoSites());
+        await using var source = await MemorySharePointSource.StartAsync(SharePointOtherSitesTests.Tenant(), given: TwoSites);
         var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.CreateDirectoryAsync("New site", None));
         Assert.AreEqual(VfsError.NotSupported, ex.Error);
         StringAssert.Contains(ex.Message, "creating a site");
@@ -59,12 +57,106 @@ public class SharePointSeveralSitesTests
     public async Task ARootSiteAmongThemShowsTheOtherSites()
     {
         var store = SharePointOtherSitesTests.Tenant();
-        store.Sites = [new WebInfo("", "contoso.sharepoint.com", "https://contoso.sharepoint.com"), new WebInfo("/sites/Axle", "Axle", "https://contoso.sharepoint.com/sites/Axle")];
-        await using var source = await MemorySharePointSource.StartAsync(store);
+        await using var source = await MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com", "https://contoso.sharepoint.com/sites/Axle"));
         CollectionAssert.AreEqual(new[] { "contoso.sharepoint.com", "Axle" }, await SpsTestServer.NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "Documents", "Site Assets", "Subsites", "Sites" }, await SpsTestServer.NamesAsync(source, "contoso.sharepoint.com"));
         CollectionAssert.AreEqual(new[] { "Axle", "Ops (sites)", "Ops (teams)" }, await SpsTestServer.NamesAsync(source, "contoso.sharepoint.com/Sites"));
         CollectionAssert.DoesNotContain(await SpsTestServer.NamesAsync(source, "Axle"), "Sites", "only a root site shows them");
+    }
+
+    [TestMethod]
+    public async Task SitesThatDoNotOpenAreLeftOut()
+    {
+        var store = SharePointOtherSitesTests.Tenant();
+        store.Refuse("/sites/Ops");
+        await using var source = await MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com/sites/Axle", "https://contoso.sharepoint.com/sites/Ops", "https://contoso.sharepoint.com/sites/Gone"));
+        CollectionAssert.AreEqual(new[] { "Axle" }, await SpsTestServer.NamesAsync(source, ""), "the site that opens, alone");
+        Assert.IsNull(await source.StatAsync("Ops", None), "refused");
+        Assert.IsNull(await source.StatAsync("Gone", None), "not there");
+        CollectionAssert.AreEqual(new[] { "Documents", "Subsites" }, await SpsTestServer.NamesAsync(source, "Axle"));
+        Assert.AreEqual(3, store.SiteFinds, "the others are not tried again before their time");
+        Assert.AreNotEqual(ComponentHealth.Degraded, source.TestContext.LastHealth, "what serves, serves");
+    }
+
+    [TestMethod]
+    public async Task NoSiteOpeningIsNoSource()
+    {
+        var store = SharePointOtherSitesTests.Tenant();
+        store.Refuse("/sites/Ops");
+        var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com/sites/Ops", "https://contoso.sharepoint.com/sites/Gone")));
+        Assert.IsTrue(ex.Permanent, "one refused, the other not there: trying again unchanged would only fail again");
+        StringAssert.Contains(ex.Message, "None of the 2 sites");
+        StringAssert.Contains(ex.Message, "https://contoso.sharepoint.com/sites/Gone");
+
+        store.Refuse("/sites/Ops", VfsError.Unavailable);
+        ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com/sites/Ops", "https://contoso.sharepoint.com/sites/Gone")));
+        Assert.IsFalse(ex.Permanent, "a server that does not answer may answer later");
+    }
+
+    [TestMethod]
+    public void WhyASiteIsLeftOutNamesItOnce()
+    {
+        var site = Given("https://contoso.sharepoint.com/sites/Gone")[0];
+        Assert.AreEqual("'https://contoso.sharepoint.com/sites/Gone/' was not found", SharePointSource.WhyNot(site, "'https://contoso.sharepoint.com/sites/Gone/' was not found."));
+        Assert.AreEqual("https://contoso.sharepoint.com/sites/Gone: Access denied", SharePointSource.WhyNot(site, "Access denied."));
+        Assert.AreEqual("Access to 'https://contoso.sharepoint.com/sites/Gone/' was denied: Access denied", SharePointSource.WhyNot(site, "access to 'https://contoso.sharepoint.com/sites/Gone/' was denied: Access denied."));
+    }
+
+    [TestMethod]
+    public async Task ALeftOutSiteJoinsWhenItOpens()
+    {
+        var store = SharePointOtherSitesTests.Tenant();
+        store.Refuse("/teams/Ops", VfsError.Unavailable);
+        await using var source = await MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com/sites/Ops", "https://contoso.sharepoint.com/teams/Ops"), retry: TimeSpan.Zero);
+        CollectionAssert.AreEqual(new[] { "Ops" }, await SpsTestServer.NamesAsync(source, ""));
+
+        // a listing of the root starts the try in the background, and the root is listed afresh once the site has joined
+        store.Allow("/teams/Ops");
+        var names = await ListedWithinAsync(source, 2);
+        CollectionAssert.AreEqual(new[] { "Ops", "Ops (teams)" }, names, "it joins under a name clear of the one shown, which keeps its own");
+        CollectionAssert.AreEqual(new[] { "Documents" }, await SpsTestServer.NamesAsync(source, "Ops (teams)"));
+    }
+
+    [TestMethod]
+    public async Task ASiteSlowToAnswerShowsWhenItDoes()
+    {
+        var store = SharePointOtherSitesTests.Tenant();
+        var answer = store.Hold("/teams/Ops");
+        await using var source = await MemorySharePointSource.StartAsync(store, given: TwoSites, wait: TimeSpan.FromMilliseconds(200));
+        CollectionAssert.AreEqual(new[] { "Axle" }, await SpsTestServer.NamesAsync(source, ""), "the start waits so long for every site, then starts with those that opened");
+
+        answer.SetResult();
+        var names = await ListedWithinAsync(source, 2);
+        CollectionAssert.AreEqual(new[] { "Axle", "Ops" }, names, "it shows once it answers, with no try of the left out needed");
+        CollectionAssert.AreEqual(new[] { "Documents" }, await SpsTestServer.NamesAsync(source, "Ops"));
+    }
+
+    [TestMethod]
+    public async Task PastTheWaitTheStartWaitsForTheFirstSiteToOpen()
+    {
+        var store = SharePointOtherSitesTests.Tenant();
+        var answer = store.Hold("/sites/Axle");
+        store.Refuse("/teams/Ops");
+        var starting = MemorySharePointSource.StartAsync(store, given: TwoSites, wait: TimeSpan.FromMilliseconds(50));
+        await Task.Delay(300);
+        Assert.IsFalse(starting.IsCompleted, "no site has opened yet, and one is still to answer");
+
+        answer.SetResult();
+        await using var source = await starting;
+        CollectionAssert.AreEqual(new[] { "Axle" }, await SpsTestServer.NamesAsync(source, ""));
+    }
+
+    /// <summary>The source's root once it lists this many sites, or as it is after a while.</summary>
+    private static async Task<List<string>> ListedWithinAsync(ISource source, int count)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        List<string> names;
+        while ((names = await SpsTestServer.NamesAsync(source, "")).Count < count && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+        }
+
+        return names;
     }
 
     [TestMethod]
@@ -78,6 +170,16 @@ public class SharePointSeveralSitesTests
         Assert.IsTrue(WebInfo.Listed([("k", new Uri("https://acme.sharepoint.us/"))])[0].IsRoot);
         Assert.IsFalse(WebInfo.Listed([("k", new Uri("https://acme.sharepoint.us/sites/x"))])[0].IsRoot);
     }
+
+    [TestMethod]
+    public void ASiteJoiningLaterIsNamedAsTheListWouldNameIt()
+    {
+        static string Joining(string url, params (string Name, string Url)[] shown) => WebInfo.Joining(new WebInfo("new", WebInfo.NameOf(new Uri(url)), url), [.. shown.Select(s => new WebInfo(s.Url, s.Name, s.Url))]).Name;
+        Assert.AreEqual("Axle", Joining("https://contoso.sharepoint.com/sites/Axle", ("Ops", "https://contoso.sharepoint.com/sites/Ops")));
+        Assert.AreEqual("Ops (teams)", Joining("https://contoso.sharepoint.com/teams/Ops", ("Ops", "https://contoso.sharepoint.com/sites/Ops")));
+        Assert.AreEqual("anyfs (192.168.0.90)", Joining("http://192.168.0.90/sites/anyfs", ("anyfs", "http://192.168.0.92/sites/anyfs")), "the same path on another server");
+        Assert.AreEqual("Ops (2)", Joining("https://contoso.sharepoint.com/teams/Ops", ("Ops", "https://contoso.sharepoint.com/sites/Ops"), ("Ops (teams)", "https://fabrikam.sharepoint.com/teams/Ops"), ("Ops (contoso.sharepoint.com)", "https://contoso.sharepoint.com/x/Ops")), "never a name shown already");
+    }
 }
 
 /// <summary>The SDK's contract inside a library of one of the sites a source was given.</summary>
@@ -88,10 +190,10 @@ public class SharePointSeveralSitesContractTests : SourceContractTests
 
     protected override async Task<SourceContractSetup> SetUpAsync()
     {
-        var store = SharePointSeveralSitesTests.TwoSites();
+        var store = SharePointOtherSitesTests.Tenant();
         store.Seed("/teams/Ops/Shared Documents", "fixture/readme.txt", Readme);
         store.Seed("/teams/Ops/Shared Documents", "fixture/scratch", null);
-        var source = await MemorySharePointSource.StartAsync(store);
+        var source = await MemorySharePointSource.StartAsync(store, given: SharePointSeveralSitesTests.TwoSites);
         const string fixture = "Ops/Documents/fixture";
         return new SourceContractSetup(source, fixture, fixture + "/readme.txt", Readme, WritableDirectory: fixture + "/scratch");
     }

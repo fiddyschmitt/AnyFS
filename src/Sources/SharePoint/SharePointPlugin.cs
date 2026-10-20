@@ -1,5 +1,6 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Net;
+using System.Runtime.ExceptionServices;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -44,7 +45,7 @@ public sealed class SharePointSettings
     public const string Windows = "Windows account";
 
     [Setting("Site URLs (one per line)", Required = true, Primary = true, Order = 0, Kind = SettingKind.Multiline, Placeholder = "https://contoso.sharepoint.com/sites/Team\nhttps://contoso.sharepoint.com/sites/Sales",
-        Hint = "The site's address: SharePoint Online (contoso.sharepoint.com, or .sharepoint.us in GCC High) or SharePoint Server on your own network (http://intranet/sites/Team). A subsite's address, or a library or page pasted after the site, is fine. Several sites, one per line, each show as a folder of their own, under the one sign-in. For SharePoint Embedded, the container type's id instead.")]
+        Hint = "The site's address: SharePoint Online (contoso.sharepoint.com, or .sharepoint.us in GCC High) or SharePoint Server on your own network (http://intranet/sites/Team). A subsite's address, or a library or page pasted after the site, is fine. Several sites, one per line, each show as a folder of their own, under the one sign-in; one that does not open is left out until it does. For SharePoint Embedded, the container type's id instead.")]
     public string SiteUrl { get; set; } = "";
 
     [Setting("Library", Order = 1, Placeholder = "Documents",
@@ -564,8 +565,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         if (s.IsMultiSite)
         {
             progress.Report($"Signed in as {signIn.Username}; looking up {s.Sites.Count} sites");
-            var (sites, failed) = await GraphDocumentStore.ConnectSitesAsync(graph, s.Sites, ct).ConfigureAwait(false);
-            return await SitesAsync($"Signed in as {signIn.Username}.", sites, failed, ct).ConfigureAwait(false);
+            return await SitesAsync($"Signed in as {signIn.Username}.", GraphDocumentStore.ForSites(graph), s.Sites, ct).ConfigureAwait(false);
         }
 
         progress.Report($"Signed in as {signIn.Username}; looking up {site.Url}");
@@ -596,8 +596,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         using var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, NullLogger.Instance, handler: handler);
         if (s.IsMultiSite)
         {
-            var (sites, failed) = await RestDocumentStore.ConnectSitesAsync(rest, s.Sites, ct).ConfigureAwait(false);
-            return await SitesAsync($"Signed in with {session.BrowserName}.", sites, failed, ct).ConfigureAwait(false);
+            return await SitesAsync($"Signed in with {session.BrowserName}.", RestDocumentStore.ForSites(rest), s.Sites, ct).ConfigureAwait(false);
         }
 
         var store = await RestDocumentStore.ConnectAsync(rest, site, ct).ConfigureAwait(false);
@@ -613,8 +612,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         using var rest = new SharePointRestClient(new Uri(site.Url), s.Credentials(), s.TrustAnyCertificate, NullLogger.Instance);
         if (s.IsMultiSite)
         {
-            var (sites, failed) = await RestDocumentStore.ConnectSitesAsync(rest, s.Sites, ct).ConfigureAwait(false);
-            return await SitesAsync($"Signed in as {who}.", sites, failed, ct).ConfigureAwait(false);
+            return await SitesAsync($"Signed in as {who}.", RestDocumentStore.ForSites(rest), s.Sites, ct).ConfigureAwait(false);
         }
 
         try
@@ -696,33 +694,62 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     }
 
     /// <summary>
-    /// The Test button's answer for several sites, a line each: what each site that answered has, then what each address
-    /// that did not answered. A success only when every site answered, since the source starts only then.
+    /// The Test button's answer for several sites, a line each: what each site that opens has, then the addresses that
+    /// do not, with what SharePoint answered, as the source leaves them out (and tries them again now and then). It waits
+    /// for them as the source's start does (<see cref="SharePointSource.WaitForLookupsAsync"/>). A success when at least
+    /// one site opens, since the source then starts with it.
     /// </summary>
-    private static async Task<TestResult> SitesAsync(string what, IDocumentStore store, IReadOnlyList<(SiteAddress Site, VfsException Error)> failed, CancellationToken ct)
+    private static async Task<TestResult> SitesAsync(string what, IDocumentStore store, IReadOnlyList<SiteAddress> sites, CancellationToken ct)
     {
+        // a lookup still going when the answer is ready is called off
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        try
+        {
+            return await SitesAsync(what, store, sites, stop.Token, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            await stop.CancelAsync().ConfigureAwait(false);
+        }
+    }
+
+    private static async Task<TestResult> SitesAsync(string what, IDocumentStore store, IReadOnlyList<SiteAddress> sites, CancellationToken lookupsCt, CancellationToken ct)
+    {
+        var lookups = sites.Select(site => (Site: site, Lookup: SharePointSource.LookUpAsync(store, site, lookupsCt))).ToList();
+        await SharePointSource.WaitForLookupsAsync([.. lookups.Select(l => l.Lookup)], SharePointSource.DefaultOpenWait, ct).ConfigureAwait(false);
+        var results = lookups.Select(l => l.Lookup.IsCompleted
+            ? (l.Site, l.Lookup.Result.Web, Problem: l.Lookup.Result.Problem?.Message)
+            : (l.Site, Web: (WebInfo?)null, Problem: $"no answer in {SharePointSource.DefaultOpenWait.TotalSeconds:0} seconds (the source shows it when it answers)")).ToList();
+        var opened = results.Where(r => r.Web is not null).Select(r => r.Web!).DistinctBy(w => w.Key, StringComparer.OrdinalIgnoreCase).ToList();
+        if (opened.Count == 0 && lookups.Select(l => l.Lookup.Result.Problem).OfType<SignInRequiredException>().FirstOrDefault() is { } signIn)
+        {
+            ExceptionDispatchInfo.Throw(signIn);   // as for one site: the sign-in's own answer
+        }
+
         var lines = new List<string> { what };
-        var ok = failed.Count == 0;
-        foreach (var web in store.Sites ?? [])
+        var shown = 0;
+        foreach (var web in WebInfo.Listed(opened.Select(w => (w.Key, new Uri(w.Url!)))))
         {
             try
             {
                 var names = (await store.ListLibrariesAsync(web, ct).ConfigureAwait(false)).Select(l => l.Name).ToList();
                 lines.Add($"{web.Name} ({web.Url}) has {await SummaryAsync(store, web, names, subsites: true, web.IsRoot, ct).ConfigureAwait(false)}.");
+                shown++;
             }
             catch (VfsException ex)
             {
-                ok = false;
                 lines.Add($"{web.Name} ({web.Url}): {ex.Message}");
             }
         }
 
-        foreach (var (site, error) in failed)
+        var left = results.Where(r => r.Problem is not null).ToList();
+        if (left.Count > 0)
         {
-            lines.Add($"{site.Url}: {error.Message.TrimEnd('.')}.");
+            lines.Add(shown == 0 ? "None of the sites opens:" : $"Left out, as SharePoint does not open {(left.Count == 1 ? "it" : "them")} (tried again every few minutes):");
+            lines.AddRange(left.Select(r => $"{SharePointSource.WhyNot(r.Site, r.Problem!)}."));
         }
 
-        return new TestResult(ok, string.Join("\n", lines));
+        return new TestResult(shown > 0, string.Join("\n", lines));
     }
 
     /// <summary>"3 document libraries: a, b, c, and 2 subsites: x, y", and at a root site what search finds.</summary>
@@ -769,6 +796,9 @@ public sealed class SharePointSiteSource : SharePointSource
 {
     private readonly SharePointSettings _settings;
 
+    // who a source of several sites signed in as, where that is known, for what it says of the sites it could not open
+    private string? _account;
+
     public SharePointSiteSource(SharePointSettings settings)
     {
         _settings = settings;
@@ -788,6 +818,10 @@ public sealed class SharePointSiteSource : SharePointSource
 
     /// <summary>The tenant's root site (https://contoso.sharepoint.com, http://intranet) shows the tenant's other sites in a Sites folder.</summary>
     protected override bool ShowsOtherSites => _settings.IsRootSite;
+
+    protected override IReadOnlyList<SiteAddress>? GivenSites => _settings.IsMultiSite ? _settings.Sites : null;
+
+    protected override string? SignedInAs => _account;
 
     private protected override Task<IDocumentStore> ConnectAsync(CancellationToken ct)
     {
@@ -868,8 +902,9 @@ public sealed class SharePointSiteSource : SharePointSource
         var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy, cloud: cloud);
         if (_settings.IsMultiSite)
         {
-            Progress($"Looking up {_settings.Sites.Count} sites");
-            return await AllSitesAsync(() => GraphDocumentStore.ConnectSitesAsync(graph, _settings.Sites, ct), graph, account: null).ConfigureAwait(false);
+            // the source opens the sites itself, and leaves out those that do not open
+            _account = signIn.Username;
+            return GraphDocumentStore.ForSites(graph);
         }
 
         Progress($"Looking up {site.Url}");
@@ -948,8 +983,8 @@ public sealed class SharePointSiteSource : SharePointSource
         var rest = new SharePointRestClient(new Uri(site.Url), _settings.Credentials(), _settings.TrustAnyCertificate, Logger, MarkDegraded, MarkHealthy);
         if (_settings.IsMultiSite)
         {
-            Progress($"Connecting to {_settings.Sites.Count} sites as {_settings.WindowsAccount}");
-            return await AllSitesAsync(() => RestDocumentStore.ConnectSitesAsync(rest, _settings.Sites, ct), rest, _settings.WindowsAccount).ConfigureAwait(false);
+            _account = _settings.WindowsAccount;
+            return RestDocumentStore.ForSites(rest);
         }
 
         Progress($"Connecting to {site.Url} as {_settings.WindowsAccount}");
@@ -995,7 +1030,8 @@ public sealed class SharePointSiteSource : SharePointSource
         var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, Logger, MarkDegraded, MarkHealthy, handler);
         if (_settings.IsMultiSite)
         {
-            return await AllSitesAsync(() => RestDocumentStore.ConnectSitesAsync(rest, _settings.Sites, ct), rest, account: null).ConfigureAwait(false);
+            Progress($"Signed in to {site.Host}");
+            return RestDocumentStore.ForSites(rest);
         }
 
         try
@@ -1009,41 +1045,5 @@ public sealed class SharePointSiteSource : SharePointSource
             rest.Dispose();
             throw new SourceFailedException($"{site.Url}: {ex.Message}", permanent: ex.Error is VfsError.NotFound, ex);
         }
-    }
-
-    /// <summary>
-    /// A source of several sites starts when every one of them answers, as the Test button says; otherwise it says which
-    /// did not and why, for good when each was refused or is not there. <paramref name="client"/> is the connection the
-    /// store would have taken over, given back when there is no store.
-    /// </summary>
-    private static async Task<IDocumentStore> AllSitesAsync<TStore>(Func<Task<(TStore Store, IReadOnlyList<(SiteAddress Site, VfsException Error)> Failed)>> connect, IDisposable client, string? account)
-        where TStore : IDocumentStore
-    {
-        TStore store;
-        IReadOnlyList<(SiteAddress Site, VfsException Error)> failed;
-        try
-        {
-            (store, failed) = await connect().ConfigureAwait(false);
-        }
-        catch (SignInRequiredException ex)
-        {
-            client.Dispose();
-            throw new SourceFailedException(ex.Message, permanent: false, ex);
-        }
-        catch
-        {
-            client.Dispose();
-            throw;
-        }
-
-        if (failed.Count == 0)
-        {
-            return store;
-        }
-
-        store.Dispose();
-        var who = account is null ? "" : $" (signed in as {account})";
-        var permanent = failed.All(f => f.Error.Error is VfsError.AccessDenied or VfsError.NotFound);
-        throw new SourceFailedException($"{failed.Count} of the sites could not be opened{who}: " + string.Join("; ", failed.Select(f => $"{f.Site.Url}: {f.Error.Message.TrimEnd('.')}")), permanent, failed[0].Error);
     }
 }

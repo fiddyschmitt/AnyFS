@@ -30,7 +30,7 @@ internal sealed record WebInfo(string Key, string Name, string? Url = null)
     /// </summary>
     public static IReadOnlyList<WebInfo> Listed(IEnumerable<(string Key, Uri Url)> sites)
     {
-        var found = sites.Select(s => (s.Key, s.Url, Path: Uri.UnescapeDataString(s.Url.AbsolutePath).Trim('/'))).ToList();
+        var found = sites.Select(s => (s.Key, s.Url, Path: PathOf(s.Url))).ToList();
         var lastCount = found.GroupBy(s => Last(s.Url, s.Path), StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.Count(), StringComparer.OrdinalIgnoreCase);
         var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var result = new List<WebInfo>();
@@ -50,9 +50,44 @@ internal sealed record WebInfo(string Key, string Name, string? Url = null)
         }
 
         return result;
-
-        static string Last(Uri url, string path) => path.Length == 0 ? url.Host : path[(path.LastIndexOf('/') + 1)..];
     }
+
+    /// <summary>
+    /// A site that joins those already shown (one left out at first that answers later), named as <see cref="Listed"/>
+    /// names: as its address ends, else with the rest of its path after it (its server where a site shown has the same
+    /// path), else a number; never a name shown already, so no folder already shown is renamed.
+    /// </summary>
+    public static WebInfo Joining(WebInfo site, IReadOnlyCollection<WebInfo> shown)
+    {
+        var url = new Uri(site.Url!);
+        var path = PathOf(url);
+        var last = Last(url, path);
+        var slash = path.LastIndexOf('/');
+        var samePath = shown.Any(w => w.Url is not null && string.Equals(PathOf(new Uri(w.Url)), path, StringComparison.OrdinalIgnoreCase));
+        bool Free(string name) => !shown.Any(w => string.Equals(w.Name, name, StringComparison.OrdinalIgnoreCase));
+        foreach (var name in new[] { last, slash > 0 && !samePath ? $"{last} ({path[..slash]})" : $"{last} ({url.Host})", $"{last} ({url.Host})" })
+        {
+            if (Free(name))
+            {
+                return site with { Name = name };
+            }
+        }
+
+        for (var n = 2; ; n++)
+        {
+            if (Free($"{last} ({n})"))
+            {
+                return site with { Name = $"{last} ({n})" };
+            }
+        }
+    }
+
+    /// <summary>The name a site's address gives it alone: its last part, or a root site's host.</summary>
+    public static string NameOf(Uri url) => Last(url, PathOf(url));
+
+    private static string PathOf(Uri url) => Uri.UnescapeDataString(url.AbsolutePath).Trim('/');
+
+    private static string Last(Uri url, string path) => path.Length == 0 ? url.Host : path[(path.LastIndexOf('/') + 1)..];
 
     /// <summary>
     /// The tenant's other sites as folders: each by the last part of its address ("Axle" for /sites/Axle), with the
@@ -105,8 +140,13 @@ internal interface IDocumentStore : IDisposable
     /// <summary>What a top-level folder is called in messages: "document library", or "container".</summary>
     string LibraryNoun { get; }
 
-    /// <summary>The sites a source of several shows as its top-level folders, in the order given; null for a source of one site (or of containers).</summary>
-    IReadOnlyList<WebInfo>? Sites { get; }
+    /// <summary>
+    /// One of the sites a source of several was given, by its address: the site the address is in (stepping back from
+    /// a library's or a folder's address), with its key, its address and the last part of its address as its name (the
+    /// source keeps the names apart). Throws what SharePoint answered for an address that is no site the account may
+    /// open: NotFound, AccessDenied, Unavailable.
+    /// </summary>
+    Task<WebInfo> FindSiteAsync(SiteAddress site, CancellationToken ct);
 
     /// <summary>The libraries of the source's site, or of one of its subsites.</summary>
     Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(WebInfo? web, CancellationToken ct);

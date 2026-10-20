@@ -335,9 +335,11 @@ public class SharePointSubsiteContractTests : SourceContractTests
 }
 
 /// <summary>The SharePoint source over a <see cref="MemoryDocumentStore"/>, with a test context of its own.</summary>
-internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? pinned, bool otherSites) : SharePointSource
+internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? pinned, bool otherSites, IReadOnlyList<SiteAddress>? given, TimeSpan? retry, TimeSpan? wait) : SharePointSource
 {
     private readonly TestSourceContext _context = new("sharepoint");
+
+    public TestSourceContext TestContext => _context;
 
     protected override string? PinnedLibrary => pinned;
 
@@ -349,11 +351,29 @@ internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? 
 
     protected override bool ShowsOtherSites => otherSites;
 
+    protected override IReadOnlyList<SiteAddress>? GivenSites => given;
+
+    protected override TimeSpan LeftOutRetry => retry ?? base.LeftOutRetry;
+
+    protected override TimeSpan OpenWait => wait ?? base.OpenWait;
+
     /// <param name="otherSites">As for the tenant's root site: the store's other sites show in a Sites folder.</param>
-    public static async Task<MemorySharePointSource> StartAsync(MemoryDocumentStore store, string? pinned = null, bool otherSites = false)
+    /// <param name="given">For a source given several sites: those sites, found in the store by their paths.</param>
+    /// <param name="retry">How soon a site left out is tried again, when not the source's own five minutes.</param>
+    /// <param name="wait">How long the start waits for every site given, when not the source's own fifteen seconds.</param>
+    public static async Task<MemorySharePointSource> StartAsync(MemoryDocumentStore store, string? pinned = null, bool otherSites = false, IReadOnlyList<SiteAddress>? given = null, TimeSpan? retry = null, TimeSpan? wait = null)
     {
-        var source = new MemorySharePointSource(store, pinned, otherSites);
-        await source.InitialiseAsync(source._context, CancellationToken.None);
+        var source = new MemorySharePointSource(store, pinned, otherSites, given, retry, wait);
+        try
+        {
+            await source.InitialiseAsync(source._context, CancellationToken.None);
+        }
+        catch
+        {
+            await source.DisposeAsync();
+            throw;
+        }
+
         return source;
     }
 
@@ -380,15 +400,48 @@ internal sealed class MemoryDocumentStore : IDocumentStore
     private readonly Dictionary<(string Library, string Path), Item> _items = [];
     private readonly ConcurrentDictionary<string, int> _loads = new();
     private readonly List<string> _sites = [];
+    private readonly Dictionary<string, VfsError> _refused = [];
+    private readonly Dictionary<string, TaskCompletionSource> _held = [];
     private int _subsiteListings;
     private int _siteSearches;
+    private int _siteFinds;
 
     public string Description => "the memory site";
 
     public string LibraryNoun => "document library";
 
-    /// <summary>For a source given several sites: those sites (each a key AddSite or AddSubsite made), as the source's top-level folders.</summary>
-    public IReadOnlyList<WebInfo>? Sites { get; set; }
+    /// <summary>How often one of the sites a source was given was looked up.</summary>
+    public int SiteFinds => Volatile.Read(ref _siteFinds);
+
+    /// <summary>Makes looking up a site (by its server-relative path) fail as SharePoint would: refused, or (Unavailable) not answering.</summary>
+    public void Refuse(string site, VfsError error = VfsError.AccessDenied)
+    {
+        lock (_gate)
+        {
+            _refused[site] = error;
+        }
+    }
+
+    /// <summary>Lets a site <see cref="Refuse"/> made fail be looked up again.</summary>
+    public void Allow(string site)
+    {
+        lock (_gate)
+        {
+            _refused.Remove(site);
+        }
+    }
+
+    /// <summary>Makes the next lookup of a site wait until the answer given back is set, as a server slow to answer would.</summary>
+    public TaskCompletionSource Hold(string site)
+    {
+        var answer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_gate)
+        {
+            _held[site] = answer;
+        }
+
+        return answer;
+    }
 
     /// <summary>How often a site's libraries were listed.</summary>
     public int Loads(string web) => _loads.GetValueOrDefault(web);
@@ -472,6 +525,38 @@ internal sealed class MemoryDocumentStore : IDocumentStore
 
     public void Dispose()
     {
+    }
+
+    /// <summary>A site by its server-relative path, which is its key ("" for the root site, else one AddSite or AddSubsite made).</summary>
+    public async Task<WebInfo> FindSiteAsync(SiteAddress site, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _siteFinds);
+        var key = site.ServerRelativePath;
+        TaskCompletionSource? held;
+        lock (_gate)
+        {
+            _held.Remove(key, out held);
+        }
+
+        if (held is not null)
+        {
+            await held.Task.WaitAsync(ct);
+        }
+
+        lock (_gate)
+        {
+            if (_refused.TryGetValue(key, out var error))
+            {
+                throw new VfsException(error, error == VfsError.AccessDenied ? "Access denied." : "The server is not answering.");
+            }
+
+            if (!_libraries.ContainsKey(key))
+            {
+                throw VfsException.NotFound(site.Url);
+            }
+        }
+
+        return new WebInfo(key, WebInfo.NameOf(new Uri(site.Url)), site.Url);
     }
 
     public Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(WebInfo? web, CancellationToken ct)

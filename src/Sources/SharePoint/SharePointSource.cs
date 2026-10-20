@@ -44,6 +44,14 @@ public abstract class SharePointSource : SourceBase
     // the other sites search found, by the root site they show under ("" for the source's own)
     private readonly Dictionary<string, (IReadOnlyList<WebInfo> Sites, DateTimeOffset Searched)> _otherSites = new(StringComparer.OrdinalIgnoreCase);
 
+    // a source of several sites: those of them SharePoint did not open, with what it answered, looked up again now and
+    // then in the background (a server down for a while, or a site the account is given access to later), and the
+    // lookups still going (those slow to answer at the start, or the latest try)
+    private readonly List<(SiteAddress Site, string Problem)> _leftOut = [];
+    private readonly CancellationTokenSource _stopping = new();
+    private DateTimeOffset _leftOutTried;
+    private Task _retrying = Task.CompletedTask;
+
     // files open for writing that SharePoint has not got yet (the upload comes when the handle closes): stats,
     // listings and times are answered here meanwhile, since the upstream knows nothing of them
     private readonly ConcurrentDictionary<string, PendingUploadFile> _pending = new(StringComparer.OrdinalIgnoreCase);
@@ -70,6 +78,27 @@ public abstract class SharePointSource : SourceBase
     /// <summary>Whether the source's root shows the tenant's other sites in a Sites folder: true for the tenant's root site.</summary>
     protected virtual bool ShowsOtherSites => false;
 
+    /// <summary>
+    /// The sites a source of several was given, each to be a folder at its root once it opens; null for a source of one
+    /// site. The store is then one for several sites (<see cref="IDocumentStore.FindSiteAsync"/>).
+    /// </summary>
+    protected virtual IReadOnlyList<SiteAddress>? GivenSites => null;
+
+    /// <summary>The account the store signs in as, where messages about sites it could not open should name it.</summary>
+    protected virtual string? SignedInAs => null;
+
+    /// <summary>How long a site the source was given but could not open waits before it is tried again.</summary>
+    protected virtual TimeSpan LeftOutRetry => TimeSpan.FromMinutes(5);
+
+    /// <summary>How long a source of several sites waits at the start for every one of them to answer (<see cref="OpenWait"/>).</summary>
+    internal static readonly TimeSpan DefaultOpenWait = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// How long the start waits for every site a source of several was given; past that it starts once one has opened, and
+    /// the rest show as they answer.
+    /// </summary>
+    protected virtual TimeSpan OpenWait => DefaultOpenWait;
+
     /// <summary>Signs in and connects; throw <see cref="SourceFailedException"/> for a reason the user must act on.</summary>
     private protected abstract Task<IDocumentStore> ConnectAsync(CancellationToken ct);
 
@@ -80,6 +109,11 @@ public abstract class SharePointSource : SourceBase
     {
         var store = await ConnectAsync(ct).ConfigureAwait(false);
         _store = store;
+        if (GivenSites is { Count: > 1 } given)
+        {
+            await OpenSitesAsync(given, ct).ConfigureAwait(false);
+        }
+
         WebContents site;
         try
         {
@@ -109,9 +143,9 @@ public abstract class SharePointSource : SourceBase
             }
         }
 
-        if (site.Sites is { } given)
+        if (site.Sites is { } opened)
         {
-            Logger.LogInformation("sharepoint: serving {Count} sites: {Sites}", given.Count, store.Description);
+            Logger.LogInformation("sharepoint: serving {Count} sites: {Sites}", opened.Count, string.Join(", ", opened.Values.Select(w => $"{w.Name} ({w.Info!.Url})")));
             return;
         }
 
@@ -631,6 +665,15 @@ public abstract class SharePointSource : SourceBase
 
     public override async ValueTask DisposeAsync()
     {
+        // a lookup of the sites left out stops before the store goes
+        await _stopping.CancelAsync().ConfigureAwait(false);
+        Task retrying;
+        lock (_leftOut)
+        {
+            retrying = _retrying;
+        }
+
+        await retrying.ConfigureAwait(false);
         if (_spool is { } spool)
         {
             _spool = null;
@@ -752,13 +795,12 @@ public abstract class SharePointSource : SourceBase
     /// </summary>
     private async Task<WebContents> LoadWebAsync(WebNode web, CancellationToken ct)
     {
-        if (web == _root && Store.Sites is { } given)
+        if (web == _root && GivenSites is { Count: > 1 })
         {
-            // a source of several sites: they are its top-level folders, as they were found at the start
-            var tops = web.Contents?.Sites ?? given.ToDictionary(s => s.Name, s => new WebNode(s, s.Name), StringComparer.OrdinalIgnoreCase);
-            var top = new WebContents(new Dictionary<string, LibraryInfo>(), [], tops);
-            web.Contents = top;
-            return top;
+            // a source of several sites: those that opened are its top-level folders (OpenSitesAsync); the others are
+            // looked up again now and then, in the background, so a listing never waits on a site that does not answer
+            RetryLeftOutWhenDue();
+            return web.Contents!;
         }
 
         IReadOnlyList<WebInfo> none = [];
@@ -865,6 +907,171 @@ public abstract class SharePointSource : SourceBase
         finally
         {
             _otherSitesGate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Opens the sites a source of several was given, all at once (<see cref="WaitForLookupsAsync"/>: each for up to
+    /// <see cref="OpenWait"/>, past that only until one has opened). Those that opened are its top-level folders (named by
+    /// <see cref="WebInfo.Listed"/>; two addresses in one site are one folder). The others are left out, said in the log:
+    /// one still being looked up joins when it answers, one SharePoint did not open is tried again now and then
+    /// (<see cref="RetryLeftOutWhenDue"/>). The source fails only when none opens: for good when each was refused or is
+    /// not there.
+    /// </summary>
+    private async Task OpenSitesAsync(IReadOnlyList<SiteAddress> given, CancellationToken ct)
+    {
+        var account = SignedInAs;
+        Context.ReportProgress(account is null ? $"Opening {given.Count} sites" : $"Opening {given.Count} sites as {account}");
+
+        // the lookups go on the source's own token: one that outlasts the start (a server slow to answer) ends with the source
+        var stopping = _stopping.Token;
+        var lookups = given.Select(site => (Site: site, Lookup: LookUpAsync(Store, site, stopping))).ToList();
+        lock (_leftOut)
+        {
+            _retrying = Task.WhenAll(lookups.Select(l => l.Lookup));
+        }
+
+        await WaitForLookupsAsync([.. lookups.Select(l => l.Lookup)], OpenWait, ct).ConfigureAwait(false);
+        var answered = lookups.Where(l => l.Lookup.IsCompleted).Select(l => (l.Site, l.Lookup.Result.Web, l.Lookup.Result.Problem)).ToList();
+        var opened = answered.Where(a => a.Web is not null).Select(a => a.Web!).DistinctBy(w => w.Key, StringComparer.OrdinalIgnoreCase).ToList();
+        var failed = answered.Where(a => a.Problem is not null).Select(a => (a.Site, Problem: a.Problem!)).ToList();
+        if (opened.Count == 0)
+        {
+            // every lookup has ended: the wait goes on until one opens
+            if (failed.Select(f => f.Problem).OfType<SignInRequiredException>().FirstOrDefault() is { } signIn)
+            {
+                throw new SourceFailedException(signIn.Message, permanent: signIn.Permanent, signIn);
+            }
+
+            var who = account is null ? "" : $" (signed in as {account})";
+            throw new SourceFailedException($"None of the {given.Count} sites could be opened{who}: {string.Join("; ", failed.Select(f => WhyNot(f.Site, f.Problem.Message)))}",
+                permanent: failed.All(f => f.Problem is VfsException { Error: VfsError.AccessDenied or VfsError.NotFound }), failed[0].Problem);
+        }
+
+        var slow = lookups.Where(l => !l.Lookup.IsCompleted).ToList();
+        var webs = WebInfo.Listed(opened.Select(w => (w.Key, new Uri(w.Url!))));
+        _root.Contents = new WebContents(new Dictionary<string, LibraryInfo>(), [], webs.ToDictionary(w => w.Name, w => new WebNode(w, w.Name), StringComparer.OrdinalIgnoreCase));
+        lock (_leftOut)
+        {
+            _leftOut.AddRange(failed.Select(f => (f.Site, f.Problem.Message)));
+            _leftOut.AddRange(slow.Select(s => (s.Site, "no answer yet")));
+            _leftOutTried = DateTimeOffset.UtcNow;
+            _retrying = slow.Count == 0 ? Task.CompletedTask : SettleAsync(slow);
+        }
+
+        if (failed.Count > 0)
+        {
+            Logger.LogWarning("sharepoint: {Count} of the {Total} sites are left out, as SharePoint did not open them, and are tried again every {Minutes} minutes: {Problems}",
+                failed.Count, given.Count, LeftOutRetry.TotalMinutes, string.Join("; ", failed.Select(f => WhyNot(f.Site, f.Problem.Message))));
+        }
+
+        if (slow.Count > 0)
+        {
+            Logger.LogWarning("sharepoint: {Count} of the {Total} sites did not answer in {Seconds} seconds and show when they do: {Sites}",
+                slow.Count, given.Count, OpenWait.TotalSeconds, string.Join(", ", slow.Select(s => s.Site.Url)));
+        }
+    }
+
+    /// <summary>One of the sites given, looked up: the site, or what SharePoint answered instead (or how the lookup ended, when called off).</summary>
+    internal static async Task<(WebInfo? Web, Exception? Problem)> LookUpAsync(IDocumentStore store, SiteAddress site, CancellationToken ct)
+    {
+        try
+        {
+            return (await store.FindSiteAsync(site, ct).ConfigureAwait(false), null);
+        }
+        catch (Exception ex)
+        {
+            return (null, ex);
+        }
+    }
+
+    /// <summary>
+    /// Waits for the lookups of the sites given: for every one up to <paramref name="wait"/>, past that only until one has
+    /// opened, or every one has ended. Those still going are left to answer later.
+    /// </summary>
+    internal static async Task WaitForLookupsAsync(IReadOnlyList<Task<(WebInfo? Web, Exception? Problem)>> lookups, TimeSpan wait, CancellationToken ct)
+    {
+        var waited = Task.Delay(wait, CancellationToken.None);
+        while (lookups.Any(l => !l.IsCompleted))
+        {
+            if (waited.IsCompleted && lookups.Any(l => l.IsCompleted && l.Result.Web is not null))
+            {
+                return;
+            }
+
+            var going = lookups.Where(l => !l.IsCompleted).Cast<Task>();
+            await Task.WhenAny(waited.IsCompleted ? going : going.Append(waited)).WaitAsync(ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>What SharePoint answered for a site that did not open, naming the site once: its answer alone (as a sentence) where that names it already.</summary>
+    internal static string WhyNot(SiteAddress site, string problem)
+    {
+        problem = problem.TrimEnd('.');
+        return !problem.Contains(site.Url, StringComparison.OrdinalIgnoreCase) ? $"{site.Url}: {problem}"
+            : problem.Length > 0 ? char.ToUpperInvariant(problem[0]) + problem[1..] : problem;
+    }
+
+    /// <summary>Looks the sites left out up again when that is due and no lookup of them is still going.</summary>
+    private void RetryLeftOutWhenDue()
+    {
+        lock (_leftOut)
+        {
+            if (_leftOut.Count == 0 || !_retrying.IsCompleted || _stopping.IsCancellationRequested || DateTimeOffset.UtcNow - _leftOutTried < LeftOutRetry)
+            {
+                return;
+            }
+
+            _leftOutTried = DateTimeOffset.UtcNow;
+            var stopping = _stopping.Token;
+            var sites = _leftOut.Select(l => l.Site).ToList();
+            _retrying = Task.Run(() => SettleAsync([.. sites.Select(s => (s, LookUpAsync(Store, s, stopping)))]), CancellationToken.None);
+        }
+    }
+
+    /// <summary>Takes in the lookups of sites left out, each as it ends (<see cref="Settle"/>).</summary>
+    private async Task SettleAsync(IReadOnlyList<(SiteAddress Site, Task<(WebInfo? Web, Exception? Problem)> Lookup)> lookups)
+    {
+        try
+        {
+            await Task.WhenAll(lookups.Select(async l =>
+            {
+                var (web, problem) = await l.Lookup.ConfigureAwait(false);
+                Settle(l.Site, web, problem);
+            })).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "sharepoint: looking the sites left out up again failed");
+        }
+    }
+
+    /// <summary>
+    /// What a lookup of a site left out found. A site that opens joins the top-level folders, under a name clear of those
+    /// shown (<see cref="WebInfo.Joining"/>), and the root is listed afresh; one that does not waits for the next try.
+    /// </summary>
+    private void Settle(SiteAddress site, WebInfo? web, Exception? problem)
+    {
+        WebInfo? joined = null;
+        lock (_leftOut)
+        {
+            _leftOut.RemoveAll(l => l.Site == site);
+            var tops = _root.Contents!.Sites!;
+            if (web is null)
+            {
+                _leftOut.Add((site, problem?.Message ?? "no answer"));
+            }
+            else if (!tops.Values.Any(t => string.Equals(t.Info!.Key, web.Key, StringComparison.OrdinalIgnoreCase)))
+            {
+                joined = WebInfo.Joining(web, [.. tops.Values.Select(t => t.Info!)]);
+                _root.Contents = _root.Contents! with { Sites = new Dictionary<string, WebNode>(tops, StringComparer.OrdinalIgnoreCase) { [joined.Name] = new WebNode(joined, joined.Name) } };
+            }
+        }
+
+        if (joined is not null)
+        {
+            Logger.LogInformation("sharepoint: {Url} opens now and shows as {Name}", site.Url, joined.Name);
+            _listings?.Invalidate("");   // none yet when the lookup ended as the source was starting
         }
     }
 

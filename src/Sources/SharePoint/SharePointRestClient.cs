@@ -21,6 +21,9 @@ internal sealed partial class SharePointRestClient : IDisposable
 {
     public const int MaxAttempts = 6;
 
+    /// <summary>The attempts a probe makes at a request (<see cref="Probe"/>).</summary>
+    public const int ProbeAttempts = 2;
+
     /// <summary>Files above this go up in pieces (StartUpload, ContinueUpload, FinishUpload); below, in one request.</summary>
     public const long SimpleUploadLimit = 8 * 1024 * 1024;
 
@@ -34,6 +37,7 @@ internal sealed partial class SharePointRestClient : IDisposable
     private readonly ILogger _logger;
     private readonly Action<string>? _onTrouble;
     private readonly Action? _onSuccess;
+    private readonly bool _probe;
     private readonly SemaphoreSlim _digestGate = new(1, 1);
     private string? _digest;
     private DateTimeOffset _digestExpires;
@@ -70,18 +74,27 @@ internal sealed partial class SharePointRestClient : IDisposable
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(SharePointRestClient).Assembly.GetName().Version?.ToString(3) ?? "0"}");
     }
 
-    private SharePointRestClient(SharePointRestClient parent, Uri siteUrl)
+    private SharePointRestClient(SharePointRestClient parent, Uri siteUrl, bool probe = false)
     {
         SiteUrl = new Uri(siteUrl.AbsoluteUri.TrimEnd('/') + "/");
         _http = parent._http;
         _ownsHttp = false;
         _logger = parent._logger;
-        _onTrouble = parent._onTrouble;
-        _onSuccess = parent._onSuccess;
+        _probe = probe || parent._probe;
+        _onTrouble = _probe ? null : parent._onTrouble;
+        _onSuccess = _probe ? null : parent._onSuccess;
     }
 
     /// <summary>The site's URL with a trailing slash; <c>_api/...</c> is relative to it.</summary>
     public Uri SiteUrl { get; }
+
+    /// <summary>
+    /// A client for looking sites up, as are those it makes for other sites: <see cref="ProbeAttempts"/> attempts at a
+    /// request, and nothing said of the source's health. For the sites a source of several is given, where a server that is
+    /// down should leave its site out, not keep the source waiting or show it all as degraded. It shares this client's
+    /// connections and sign-in; dispose it before this one.
+    /// </summary>
+    public SharePointRestClient Probe() => new(this, SiteUrl, probe: true);
 
     /// <summary>
     /// A client for another site on the same server (a subsite), by its server-relative URL: SharePoint answers for a
@@ -429,6 +442,8 @@ internal sealed partial class SharePointRestClient : IDisposable
 
     private async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, HttpCompletionOption completion, bool idempotent, CancellationToken ct)
     {
+        var attempts = _probe ? ProbeAttempts : MaxAttempts;
+        var retrying = _probe ? LogLevel.Debug : LogLevel.Warning;
         for (var attempt = 1; ; attempt++)
         {
             var request = make();
@@ -441,10 +456,10 @@ internal sealed partial class SharePointRestClient : IDisposable
             catch (Exception ex) when (ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested)
             {
                 request.Dispose();
-                if (attempt < MaxAttempts && idempotent)
+                if (attempt < attempts && idempotent)
                 {
                     var delay = Backoff(attempt);
-                    _logger.LogWarning("sharepoint: {Method} {Url} failed ({Error}); retrying in {Delay}s", request.Method, request.RequestUri?.AbsolutePath, ex.Message, delay.TotalSeconds);
+                    _logger.Log(retrying, "sharepoint: {Method} {Url} failed ({Error}); retrying in {Delay}s", request.Method, request.RequestUri?.AbsolutePath, ex.Message, delay.TotalSeconds);
                     _onTrouble?.Invoke(ex.Message);
                     await Task.Delay(delay, ct).ConfigureAwait(false);
                     continue;
@@ -460,7 +475,7 @@ internal sealed partial class SharePointRestClient : IDisposable
                 _logger.LogDebug("sharepoint: {Method} {Url} -> {Status} in {Ms} ms", request.Method, request.RequestUri?.PathAndQuery, (int)status, Stopwatch.GetElapsedTime(started).TotalMilliseconds.ToString("F0", CultureInfo.InvariantCulture));
             }
 
-            if (status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout && attempt < MaxAttempts)
+            if (status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout && attempt < attempts)
             {
                 var retryAfter = response.Headers.RetryAfter?.Delta ?? (response.Headers.RetryAfter?.Date is { } at ? at - DateTimeOffset.UtcNow : null);
                 var delay = retryAfter is { } ra && ra > TimeSpan.Zero ? ra : Backoff(attempt);
@@ -469,7 +484,7 @@ internal sealed partial class SharePointRestClient : IDisposable
                     delay = TimeSpan.FromMinutes(2);
                 }
 
-                _logger.LogWarning("sharepoint: {Method} {Url} answered {Status}; retrying in {Delay}s", request.Method, request.RequestUri?.AbsolutePath, (int)status, delay.TotalSeconds);
+                _logger.Log(retrying, "sharepoint: {Method} {Url} answered {Status}; retrying in {Delay}s", request.Method, request.RequestUri?.AbsolutePath, (int)status, delay.TotalSeconds);
                 _onTrouble?.Invoke($"SharePoint answered {(int)status}");
                 response.Dispose();
                 await Task.Delay(delay, ct).ConfigureAwait(false);
