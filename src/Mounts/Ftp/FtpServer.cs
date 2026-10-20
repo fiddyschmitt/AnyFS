@@ -132,6 +132,14 @@ internal sealed class FtpServer : IAsyncDisposable
         {
             await session.RunAsync(_stopping.Token).ConfigureAwait(false);
         }
+        catch (Exception ex) when (!_stopping.IsCancellationRequested)
+        {
+            // the session ends; the server and its other sessions go on
+            _logger.LogWarning(ex, "ftp session on {Address}:{Port} failed", Address, Port);
+        }
+        catch (Exception)
+        {
+        }
         finally
         {
             _sessions.TryRemove(session, out _);

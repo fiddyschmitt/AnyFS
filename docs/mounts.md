@@ -50,6 +50,12 @@ gets 1 MiB from the source at a time and is served from that until it runs out, 
 Nothing outlives the handle. On the development PC that takes 4 KB reads from about 60 MiB/s to
 the source's own speed; a program that reads 64 KB or more at a time was already there.
 
+WinFsp hands requests to a pool of threads, and each request holds its thread until the source
+answers (for SharePoint, a round trip over the network). WinFsp's own default is one thread per
+logical processor, so a search running 24 threads of its own queued behind the few in progress;
+anyfs runs 64. A request that fails fails alone: what goes wrong is answered as an error status and
+logged, and a download that goes quiet for a minute is given up rather than waited on.
+
 The WinFsp driver is a separate install with no reboot. Without it the tile is red ("The WinFsp
 driver is not installed.") and shows **Install WinFsp driver**: the WinFsp 2026 Beta 5 (2.2.26286)
 installer that Windows builds of anyfs carry runs silently (`msiexec /i winfsp.msi /qn /norestart`, so the

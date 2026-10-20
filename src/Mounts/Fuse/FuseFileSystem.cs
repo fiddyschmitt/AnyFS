@@ -319,8 +319,10 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
         {
             space = Wait(fs.GetSpaceAsync("", CancellationToken.None));
         }
-        catch (Exception ex) when (ex is VfsException or IOException)
+        catch (Exception ex)
         {
+            // no space known: the defaults below; an exception leaving a FUSE callback would end the process
+            logger.LogDebug(ex, "fuse: statfs failed");
         }
 
         const ulong block = 4096;

@@ -218,9 +218,22 @@ internal sealed class VfsEndpoint : IAsyncDisposable
                     // the handle outlives this request (ReadHandles): the server reads a file in many pieces
                     using var lease = await _reads.LeaseAsync(fs, path, ct).ConfigureAwait(false);
                     var buffer = ArrayPool<byte>.Shared.Rent(length);
+                    int n;
                     try
                     {
-                        var n = length == 0 ? 0 : await lease.File.ReadFullyAsync(offset, buffer.AsMemory(0, length), ct).ConfigureAwait(false);
+                        n = length == 0 ? 0 : await lease.File.ReadFullyAsync(offset, buffer.AsMemory(0, length), ct).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (!(ex is OperationCanceledException && ct.IsCancellationRequested))
+                    {
+                        // a handle that failed a read (a download that broke off) may fail every read after it: the next
+                        // request opens the file afresh rather than reuse it, however soon it comes
+                        ArrayPool<byte>.Shared.Return(buffer);
+                        _reads.Invalidate(fs, path);
+                        throw;
+                    }
+
+                    try
+                    {
                         ctx.Response.ContentType = "application/octet-stream";
                         ctx.Response.ContentLength = n;
                         if (n > 0)
@@ -339,6 +352,12 @@ internal sealed class VfsEndpoint : IAsyncDisposable
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+        }
+        catch (Exception ex) when (!ctx.Response.HasStarted)
+        {
+            // anything else fails this request alone, with a reason the server can pass on
+            _logger.LogWarning(ex, "VFS {Method} /{Collection}/{Endpoint} failed", method, registration.Name, endpoint);
+            await ErrorAsync(ctx, StatusCodes.Status500InternalServerError, ex.Message, ct).ConfigureAwait(false);
         }
         finally
         {

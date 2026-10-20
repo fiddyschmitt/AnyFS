@@ -140,6 +140,14 @@ public sealed class WinFspMountProvider : IMountProviderPlugin, IValidatable, II
 
 internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo collection) : IMount
 {
+    /// <summary>
+    /// The threads WinFsp hands requests to. Its default is one per logical processor, and every callback here holds its
+    /// thread until the source answers (a round trip to SharePoint, an SSH server), so on an 8-thread PC eight requests
+    /// were in progress and the rest queued: a search with 24 threads of its own (FileLocator Pro, 20-Oct-2026) waited
+    /// minutes for files a moment's work away. The threads mostly wait, so many cost little.
+    /// </summary>
+    internal const uint DispatcherThreads = 64;
+
     private FileSystemHost? _host;
 
     public IReadOnlyList<AccessPath> AccessPaths { get; private set; } = [];
@@ -193,7 +201,7 @@ internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo 
         int result;
         try
         {
-            result = letter is null ? PrefixOnlyMount.Mount(host) : host.Mount(letter + ":", null, false, 0);
+            result = letter is null ? PrefixOnlyMount.Mount(host, DispatcherThreads) : host.MountEx(letter + ":", DispatcherThreads, null, false, 0);
         }
         catch (Exception ex) when (ex is DllNotFoundException or TypeInitializationException or EntryPointNotFoundException or TargetInvocationException)
         {
@@ -391,7 +399,7 @@ internal static class PrefixOnlyMount
     [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = Rooted)]
     [UnconditionalSuppressMessage("Trimming", "IL2072", Justification = Rooted)]
     [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = Rooted)]
-    public static int Mount(FileSystemHost host)
+    public static int Mount(FileSystemHost host, uint threads)
     {
         var hostType = typeof(FileSystemHost);
         var api = hostType.Assembly.GetType("Fsp.Interop.Api", throwOnError: false) ?? throw Changed("Fsp.Interop.Api");
@@ -429,7 +437,7 @@ internal static class PrefixOnlyMount
             return result;
         }
 
-        result = (int)dispatcher.DynamicInvoke(pointer, 0u)!;
+        result = (int)dispatcher.DynamicInvoke(pointer, threads)!;
         if (result < 0)
         {
             return result;

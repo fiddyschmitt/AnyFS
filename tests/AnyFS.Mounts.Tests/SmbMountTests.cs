@@ -143,6 +143,26 @@ public class SmbMountTests
         Assert.IsFalse(source.Exists("readme.txt"));
     }
 
+    /// <summary>A handle that failed a read (a download that broke off) would fail every read after it while requests keep it in use.</summary>
+    [TestMethod]
+    public async Task AReadThatFailsDropsTheKeptHandle()
+    {
+        var source = new MemorySource().AddFile("readme.txt", "hello readme");
+        await source.InitialiseAsync(new TestSourceContext("work"), CancellationToken.None);
+        var endpoint = await VfsEndpoint.StartAsync(NullLogger.Instance, CancellationToken.None);
+        _cleanup.Add(endpoint);
+        var flaky = new FirstOpenFailsReads(new SingleSourceVfs(source, "work", false));
+        endpoint.Register("work", flaky, new TestMountContext("work", "smb").Stats);
+        using var client = new HttpClient { BaseAddress = new Uri(endpoint.BaseUrlFor("work") + "/") };
+        client.DefaultRequestHeaders.Add(VfsEndpoint.TokenHeader, endpoint.Token);
+
+        var failed = await client.GetAsync("read?path=readme.txt&offset=0&length=5");
+        Assert.AreEqual(HttpStatusCode.InternalServerError, failed.StatusCode);
+        StringAssert.Contains(await failed.Content.ReadAsStringAsync(), "the download broke off");
+        Assert.AreEqual("hello", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=0&length=5")), "the next read opens the file again at once");
+        Assert.AreEqual(2, flaky.Opens);
+    }
+
     [TestMethod]
     public async Task EndpointReportsReadOnlyThroughCapabilitiesAndPerFile()
     {
@@ -406,6 +426,55 @@ public class SmbMountTests
         {
             client.Dispose();
             return ValueTask.CompletedTask;
+        }
+    }
+
+    /// <summary>A collection whose first opened file fails every read, as a source whose download broke off would; later opens are fine.</summary>
+    private sealed class FirstOpenFailsReads(IVirtualFileSystem inner) : IVirtualFileSystem
+    {
+        private int _opens;
+
+        public int Opens => _opens;
+
+        public string CollectionName => inner.CollectionName;
+
+        public bool ReadOnly => inner.ReadOnly;
+
+        public bool CanWrite(string path) => inner.CanWrite(path);
+
+        public Task<VfsEntry?> StatAsync(string path, CancellationToken ct) => inner.StatAsync(path, ct);
+
+        public IAsyncEnumerable<VfsEntry> ListAsync(string path, CancellationToken ct) => inner.ListAsync(path, ct);
+
+        public async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct)
+        {
+            var file = await inner.OpenAsync(path, mode, ct);
+            return Interlocked.Increment(ref _opens) == 1 ? new Broken(file) : file;
+        }
+
+        public Task CreateDirectoryAsync(string path, CancellationToken ct) => inner.CreateDirectoryAsync(path, ct);
+
+        public Task DeleteAsync(string path, CancellationToken ct) => inner.DeleteAsync(path, ct);
+
+        public Task RenameAsync(string fromPath, string toPath, bool replace, CancellationToken ct) => inner.RenameAsync(fromPath, toPath, replace, ct);
+
+        public Task SetTimesAsync(string path, DateTimeOffset? created, DateTimeOffset? modified, CancellationToken ct) => inner.SetTimesAsync(path, created, modified, ct);
+
+        public Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct) => inner.GetSpaceAsync(path, ct);
+
+        private sealed class Broken(IVfsFile file) : IVfsFile
+        {
+            public long Length => file.Length;
+
+            public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct) => throw new IOException("the download broke off");
+
+            public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct) => file.WriteAsync(offset, data, ct);
+
+            public ValueTask SetLengthAsync(long length, CancellationToken ct) => file.SetLengthAsync(length, ct);
+
+            public ValueTask FlushAsync(CancellationToken ct) => file.FlushAsync(ct);
+
+            public ValueTask DisposeAsync() => file.DisposeAsync();
         }
     }
 }

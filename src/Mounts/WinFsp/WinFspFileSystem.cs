@@ -13,8 +13,10 @@ namespace AnyFS.Mounts.WinFsp;
 /// <summary>
 /// The WinFsp callbacks (spec 8.1) over a collection's <see cref="IVirtualFileSystem"/>: case-insensitive, preserving,
 /// no reparse points, streams or security (a fixed descriptor granting everyone everything; the read-only layers
-/// decide what writes succeed and show as FILE_ATTRIBUTE_READONLY). WinFsp calls these on its dispatcher threads,
-/// so each one waits for the asynchronous VFS call.
+/// decide what writes succeed and show as FILE_ATTRIBUTE_READONLY). WinFsp calls these on its dispatcher threads
+/// (<see cref="WinFspMount.DispatcherThreads"/>), so each one waits for the asynchronous VFS call. A failure is the
+/// request's alone: each callback answers it with a status, and whatever still escapes one is logged and answered
+/// by <see cref="ExceptionHandler"/>, so the volume serves on.
 /// </summary>
 [SupportedOSPlatform("windows")]
 internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, string prefix, ILogger logger) : FileSystemBase
@@ -221,6 +223,10 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         {
             logger.LogDebug("winfsp: delete on close of '{Path}' refused: {Error}", desc.Path, ex.Message);
         }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "winfsp: delete on close of '{Path}' failed", desc.Path);
+        }
     }
 
     public override void Close(object fileNode, object fileDesc)
@@ -241,6 +247,10 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             catch (VfsException ex)
             {
                 logger.LogDebug("winfsp: close of '{Path}': {Error}", desc.Path, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "winfsp: close of '{Path}' failed", desc.Path);
             }
         }
     }
@@ -379,6 +389,13 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
 
     public override int GetFileInfo(object fileNode, object fileDesc, out FileInfo fileInfo) => InfoFor((Desc)fileDesc, out fileInfo);
 
+    /// <summary>What winfsp.net calls with an exception that left a callback: logged (it would otherwise leave no trace) and answered as an I/O error, so only that request fails.</summary>
+    public override int ExceptionHandler(Exception ex)
+    {
+        logger.LogWarning(ex, "winfsp: a request failed");
+        return STATUS_UNEXPECTED_IO_ERROR;
+    }
+
     public override int SetBasicInfo(object fileNode, object fileDesc, uint fileAttributes, ulong creationTime, ulong lastAccessTime, ulong lastWriteTime, ulong changeTime, out FileInfo fileInfo)
     {
         var desc = (Desc)fileDesc;
@@ -510,6 +527,10 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             catch (VfsException ex)
             {
                 logger.LogDebug("winfsp: listing '{Path}': {Error}", desc.Path, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "winfsp: listing '{Path}' failed", desc.Path);
             }
 
             list.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
