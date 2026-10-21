@@ -50,6 +50,22 @@ public class SharePointNamesTests
         Assert.AreEqual(VfsError.InvalidPath, ex.Error);
         SharePointNames.Require("docs/fine.txt");
     }
+
+    [TestMethod]
+    [DataRow("Documents", "Documents")]
+    [DataRow("Health / Safety", "Health ／ Safety")]
+    [DataRow("Q&A: what? *now*", "Q&A： what？ ＊now＊")]
+    [DataRow("a\\b|c\"d<e>f", "a＼b｜c＂d＜e＞f")]
+    [DataRow("Archive. ", "Archive．")]
+    [DataRow("Notes...", "Notes．．．")]
+    [DataRow("tab\there", "tabhere")]
+    [DataRow("über straße", "über straße")]
+    [DataRow("   ", "")]
+    public void ATitleShowsAsAFolderNameAPathCanHold(string title, string expected)
+    {
+        Assert.AreEqual(expected, SharePointNames.FolderName(title));
+        Assert.IsTrue(expected.Length == 0 || SharePointNames.Problem(expected) is null, $"{expected}: {SharePointNames.Problem(expected)}");
+    }
 }
 
 [TestClass]

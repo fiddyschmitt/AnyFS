@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Text;
 using AnyFS.Sdk;
 
 namespace AnyFS.Sources.SharePoint;
@@ -72,6 +73,48 @@ public static class SharePointNames
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// A title as a folder's name, for what shows by its title (a library, a container): a title may hold what a name
+    /// cannot ("Health / Safety"), so each of <c>" * : &lt; &gt; ? / \ |</c> shows as its full-width look-alike
+    /// (Health ／ Safety), control characters are left out, and at the end, where Windows drops them, spaces are left off
+    /// and a dot shows as its look-alike. A title that is already a name stays as it is; empty when nothing is left.
+    /// </summary>
+    public static string FolderName(string title)
+    {
+        var name = new StringBuilder(title.Length);
+        foreach (var c in title)
+        {
+            if (!char.IsControl(c))
+            {
+                name.Append(c switch
+                {
+                    '"' => '＂',
+                    '*' => '＊',
+                    ':' => '：',
+                    '<' => '＜',
+                    '>' => '＞',
+                    '?' => '？',
+                    '/' => '／',
+                    '\\' => '＼',
+                    '|' => '｜',
+                    _ => c,
+                });
+            }
+        }
+
+        while (name.Length > 0 && name[^1] == ' ')
+        {
+            name.Length--;
+        }
+
+        for (var i = name.Length - 1; i >= 0 && name[i] == '.'; i--)
+        {
+            name[i] = '．';
+        }
+
+        return name.ToString();
     }
 
     /// <summary>Throws <see cref="VfsError.InvalidPath"/> when the last segment of <paramref name="path"/> or the whole path is not acceptable.</summary>

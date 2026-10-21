@@ -1074,10 +1074,25 @@ public abstract class SharePointSource : SourceBase, ICountable
         var pagesCall = PinnedLibrary is null ? SitePagesAsync(web, ct) : Task.FromResult<IReadOnlyList<SitePage>>([]);
         await Task.WhenAll(librariesCall, subsitesCall, sitesCall, pagesCall).ConfigureAwait(false);
 
+        // a library shows by its title, as a name a path can hold (SharePointNames.FolderName: "Health / Safety" as
+        // "Health ／ Safety"); one that had to change takes a number where its new name is another's
+        var listed = await librariesCall.ConfigureAwait(false);
+        var titles = new HashSet<string>(listed.Select(l => l.Name).Where(title => SharePointNames.FolderName(title) == title), StringComparer.OrdinalIgnoreCase);
         var libraries = new Dictionary<string, LibraryInfo>(StringComparer.OrdinalIgnoreCase);
-        foreach (var library in await librariesCall.ConfigureAwait(false))
+        foreach (var library in listed)
         {
-            libraries[library.Name] = web.Info is null ? library : library with { Folder = VfsPath.Join(web.Path, library.Name) };
+            var name = SharePointNames.FolderName(library.Name) is { Length: > 0 } folderName ? folderName : "_";
+            if (name != library.Name)
+            {
+                var stem = name;
+                for (var n = 2; titles.Contains(name) || libraries.ContainsKey(name); n++)
+                {
+                    name = $"{stem} ({n})";
+                }
+            }
+
+            var shown = library with { Name = name };
+            libraries[name] = web.Info is null ? shown : shown with { Folder = VfsPath.Join(web.Path, name) };
         }
 
         var foundSubsites = await subsitesCall.ConfigureAwait(false);

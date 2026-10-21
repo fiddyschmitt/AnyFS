@@ -42,6 +42,37 @@ public class SharePointSubsiteTests
     }
 
     [TestMethod]
+    public async Task ALibraryWhoseTitleIsNoNameShowsAsItsLookAlike()
+    {
+        // a title may hold a '/' (the user's "Health / Safety"), which as a name would be two folders
+        var store = MemoryDocumentStore.Sample();
+        store.AddLibrary("", "/HealthSafety", "Health / Safety");
+        store.AddLibrary("", "/Lookalike", "Health ／ Safety");
+        store.AddLibrary("/Foo", "/Foo/Archive", "Archive.");
+        store.Seed("/HealthSafety", "plans/drill.md", "# Fire drill\n"u8.ToArray());
+        await using var source = await MemorySharePointSource.StartAsync(store);
+        var top = await NamesAsync(source, "");
+        CollectionAssert.AreEqual(new[] { "Documents", "Health ／ Safety", "Health ／ Safety (2)", "Site Assets", "Subsites" }, top, "the title that is a name keeps it: " + string.Join(", ", top));
+        CollectionAssert.AreEqual(new[] { "Archive．", "Documents", "Subsites" }, await NamesAsync(source, "Subsites/Foo"));
+
+        CollectionAssert.AreEqual(new[] { "plans" }, await NamesAsync(source, "Health ／ Safety (2)"));
+        await using (var file = await source.OpenAsync("Health ／ Safety (2)/plans/drill.md", VfsOpenMode.Read, None))
+        {
+            var back = new byte[13];
+            Assert.AreEqual(13, await file.ReadFullyAsync(0, back, None));
+            Assert.AreEqual("# Fire drill\n", Encoding.UTF8.GetString(back));
+        }
+
+        await using (var file = await source.OpenAsync("Health ／ Safety (2)/plans/evacuation.md", VfsOpenMode.CreateNew, None))
+        {
+            await file.WriteAsync(0, "# Evacuation\n"u8.ToArray(), None);
+        }
+
+        Assert.IsTrue(store.Has("/HealthSafety", "plans/evacuation.md"), "written to the library the name stands for");
+        Assert.IsNull(await source.StatAsync("Health / Safety", None), "the title itself is two names, neither of them there");
+    }
+
+    [TestMethod]
     public async Task ASubsitesFilesGoToItsOwnLibraries()
     {
         var store = MemoryDocumentStore.Sample();
