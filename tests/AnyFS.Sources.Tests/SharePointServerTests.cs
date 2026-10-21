@@ -446,6 +446,10 @@ internal static class SpsTestServer
         CollectionAssert.DoesNotContain(names, new Uri(root).Host, "no folder named after the server");
         CollectionAssert.Contains(names, SharePointSource.SitesFolder, string.Join(", ", names));
         CollectionAssert.Contains(await NamesAsync(source, SharePointSource.SitesFolder), LastName(siteUrl), "the test site, a site collection, in the root site's Sites folder");
+        if (names.Contains(SharePointSource.SubsitesFolder))
+        {
+            CollectionAssert.DoesNotContain(await NamesAsync(source, SharePointSource.SubsitesFolder), LastName(siteUrl), "once: given, and found by the root's search");
+        }
         await CheckReadmeAsync(source, $"{SharePointSource.SitesFolder}/{LastName(siteUrl)}", library, fixtureFolder, readme);
     }
 
@@ -703,10 +707,12 @@ public class SharePointServerLiveTests
         using var context = new TestSourceContext("sharepoint");
         await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, sites);
         var top = SpsTestServer.LastName(site);
-        CollectionAssert.AreEqual(subsite ? new[] { top, SpsTestServer.Subsite } : new[] { top }, await SpsTestServer.NamesAsync(source, ""), "the same site given twice is one folder; the site not there is left out");
+        CollectionAssert.AreEqual(new[] { top }, await SpsTestServer.NamesAsync(source, ""), "the same site given twice is one folder, the subsite given shows among the site's subsites, and the site not there is left out");
         if (subsite)
         {
-            CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, SpsTestServer.Subsite), "Documents");
+            StringAssert.Contains(result.Message, $"It shows below {top}, among its subsites.");
+            var below = $"{top}/{SharePointSource.SubsitesFolder}/{SpsTestServer.Subsite}";
+            CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, below), "Documents", "the subsite once, where its site lists it");
         }
 
         await SpsTestServer.CheckReadmeAsync(source, top, SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);

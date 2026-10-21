@@ -539,7 +539,7 @@ internal sealed class MemoryDocumentStore : IDocumentStore
     {
         lock (_gate)
         {
-            _subsites[parent].Add(new WebInfo(key, name));
+            _subsites[parent].Add(new WebInfo(key, name, $"https://contoso.sharepoint.com{key}"));
             _libraries[key] = [];
             _subsites[key] = [];
             _subsiteKeys.Add(key);
@@ -651,7 +651,13 @@ internal sealed class MemoryDocumentStore : IDocumentStore
         Interlocked.Increment(ref _subsiteListings);
         lock (_gate)
         {
-            return Task.FromResult<IReadOnlyList<WebInfo>>(_subsites[web?.Key ?? ""].ToList());
+            // as SharePoint's getsubwebsfilteredforcurrentuser: only the subsites the account may open, of a site it may
+            if (_refused.TryGetValue(web?.Key ?? "", out var error))
+            {
+                throw new VfsException(error, "Access denied.");
+            }
+
+            return Task.FromResult<IReadOnlyList<WebInfo>>(_subsites[web?.Key ?? ""].Where(s => !_refused.ContainsKey(s.Key)).ToList());
         }
     }
 

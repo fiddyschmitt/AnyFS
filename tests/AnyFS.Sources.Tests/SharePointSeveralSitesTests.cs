@@ -40,6 +40,22 @@ public class SharePointSeveralSitesTests
     }
 
     [TestMethod]
+    public async Task EverySiteGivenIsListedAndWalkedToItsDeepestSubsite()
+    {
+        var store = SharePointOtherSitesTests.Tenant();
+        store.AddSubsite("/sites/Axle/Plan", "/sites/Axle/Plan/Phase", "Phase");
+        store.AddLibrary("/sites/Axle/Plan/Phase", "/sites/Axle/Plan/Phase/Shared Documents", "Documents");
+        store.Seed("/sites/Axle/Plan/Phase/Shared Documents", "deep.txt", "deep"u8.ToArray());
+        store.Seed("/teams/Ops/Shared Documents", "ops.txt", "ops"u8.ToArray());
+        await using var source = await MemorySharePointSource.StartAsync(store, given: TwoSites);
+        CollectionAssert.AreEqual(new[] { "deep.txt" }, await SpsTestServer.NamesAsync(source, "Axle/Subsites/Plan/Subsites/Phase/Documents"));
+
+        var counters = new SourceCounters();
+        await source.WalkAsync(counters, None);
+        Assert.AreEqual(2, counters.FilesKnown, "every file of every site given, a subsite's subsite's too");
+    }
+
+    [TestMethod]
     public async Task TheSitesAreTheSourcesToChoose()
     {
         await using var source = await MemorySharePointSource.StartAsync(SharePointOtherSitesTests.Tenant(), given: TwoSites);
@@ -76,9 +92,87 @@ public class SharePointSeveralSitesTests
         await using var source = await MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com", "https://contoso.sharepoint.com/sites/Hidden", "https://contoso.sharepoint.com/Foo/Bar", "https://contoso.sharepoint.com/hr"));
         CollectionAssert.AreEqual(new[] { "Documents", "Site Assets", "Subsites", "Sites" }, await SpsTestServer.NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "Axle", "Hidden", "Ops (sites)", "Ops (teams)" }, await SpsTestServer.NamesAsync(source, "Sites"), "the site collection with the others");
-        CollectionAssert.AreEqual(new[] { "Bar", "Foo", "hr" }, await SpsTestServer.NamesAsync(source, "Subsites"), "the subsites with the root's own, hr once");
+        CollectionAssert.AreEqual(new[] { "Foo", "hr" }, await SpsTestServer.NamesAsync(source, "Subsites"), "the root's own subsites, hr once");
+        CollectionAssert.AreEqual(new[] { "Bar" }, await SpsTestServer.NamesAsync(source, "Subsites/Foo/Subsites"), "a subsite of a subsite where it is, not beside it as well");
         CollectionAssert.AreEqual(new[] { "Documents" }, await SpsTestServer.NamesAsync(source, "Sites/Hidden"));
-        CollectionAssert.AreEqual(new[] { "Shared" }, await SpsTestServer.NamesAsync(source, "Subsites/Bar"));
+        CollectionAssert.AreEqual(new[] { "Shared" }, await SpsTestServer.NamesAsync(source, "Subsites/Foo/Subsites/Bar"));
+    }
+
+    [TestMethod]
+    public async Task ASiteTheRootShowsAnywayShowsOnce()
+    {
+        // the root, a site its search finds, and a subsite of that site: each where the root's own listing puts it
+        var store = SharePointOtherSitesTests.Tenant();
+        await using var source = await MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com", "https://contoso.sharepoint.com/sites/Axle", "https://contoso.sharepoint.com/sites/Axle/Plan"));
+        CollectionAssert.AreEqual(new[] { "Axle", "Ops (sites)", "Ops (teams)" }, await SpsTestServer.NamesAsync(source, "Sites"));
+        CollectionAssert.AreEqual(new[] { "Foo", "hr" }, await SpsTestServer.NamesAsync(source, "Subsites"), "no Plan beside the root's own subsites");
+        CollectionAssert.AreEqual(new[] { "Plan" }, await SpsTestServer.NamesAsync(source, "Sites/Axle/Subsites"));
+    }
+
+    [TestMethod]
+    public async Task ASubsiteBelowOneTheAccountMayNotListStaysInSight()
+    {
+        // its site is not among the root's subsites (SharePoint lists only those the account may open): it shows beside them
+        var store = SharePointOtherSitesTests.Tenant();
+        store.AddSubsite("", "/Secret", "Secret");
+        store.AddSubsite("/Secret", "/Secret/Open", "Open");
+        store.AddLibrary("/Secret/Open", "/Secret/Open/Shared Documents", "Documents");
+        store.Refuse("/Secret");
+        await using var source = await MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com", "https://contoso.sharepoint.com/Secret/Open"));
+        CollectionAssert.AreEqual(new[] { "Foo", "hr", "Open" }, await SpsTestServer.NamesAsync(source, "Subsites"));
+        CollectionAssert.AreEqual(new[] { "Documents" }, await SpsTestServer.NamesAsync(source, "Subsites/Open"));
+    }
+
+    [TestMethod]
+    public async Task ASiteBelowAnotherGivenIsNoFolderOfItsOwn()
+    {
+        var store = SharePointOtherSitesTests.Tenant();
+        await using var source = await MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com/sites/Axle", "https://contoso.sharepoint.com/sites/Axle/Plan", "https://contoso.sharepoint.com/teams/Ops"));
+        CollectionAssert.AreEqual(new[] { "Axle", "Ops" }, await SpsTestServer.NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "Plan" }, await SpsTestServer.NamesAsync(source, "Axle/Subsites"));
+        Assert.IsNull(await source.StatAsync("Plan", None));
+    }
+
+    [TestMethod]
+    public void TheTestSaysWhereEachSiteShows()
+    {
+        static WebInfo Site(string path, bool collection) => new(path, WebInfo.NameOf(new Uri($"https://contoso.sharepoint.com{path}")), $"https://contoso.sharepoint.com{path}", collection);
+        var root = Site("", true);
+        var axle = Site("/sites/Axle", true);
+        var plan = Site("/sites/Axle/Plan", false);
+        var hr = Site("/hr", false);
+        var bar = Site("/Foo/Bar", false);
+        WebInfo[] all = [root, axle, plan, hr, bar];
+        Assert.AreEqual("", SharePointPlugin.WhereItShows(root, all, root));
+        Assert.AreEqual(" It shows in the root site's Sites folder.", SharePointPlugin.WhereItShows(axle, all, root));
+        Assert.AreEqual(" It shows below Axle, among its subsites.", SharePointPlugin.WhereItShows(plan, all, root), "below the nearest site given above it");
+        Assert.AreEqual(" It shows in the root site's Subsites folder.", SharePointPlugin.WhereItShows(hr, all, root));
+        Assert.AreEqual(" It shows below Foo, among its subsites.", SharePointPlugin.WhereItShows(bar, all, root), "below the site its address is in");
+
+        WebInfo[] two = [axle, plan];
+        Assert.AreEqual("", SharePointPlugin.WhereItShows(axle, two, null), "a top-level folder");
+        Assert.AreEqual(" It shows below Axle, among its subsites.", SharePointPlugin.WhereItShows(plan, two, null));
+    }
+
+    [TestMethod]
+    public async Task ASiteSlowToOpenTakesInASubsiteShownOnItsOwn()
+    {
+        // the subsite opens first and shows on its own; its site, slow to answer, takes it in once it opens
+        var store = SharePointOtherSitesTests.Tenant();
+        var answer = store.Hold("/sites/Axle");
+        await using var source = await MemorySharePointSource.StartAsync(store, given: Given("https://contoso.sharepoint.com/sites/Axle", "https://contoso.sharepoint.com/sites/Axle/Plan"), wait: TimeSpan.FromMilliseconds(200));
+        CollectionAssert.AreEqual(new[] { "Plan" }, await SpsTestServer.NamesAsync(source, ""));
+
+        answer.SetResult();
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        List<string> names;
+        while (!(names = await SpsTestServer.NamesAsync(source, "")).SequenceEqual(["Axle"]) && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+        }
+
+        CollectionAssert.AreEqual(new[] { "Axle" }, names);
+        CollectionAssert.AreEqual(new[] { "Plan" }, await SpsTestServer.NamesAsync(source, "Axle/Subsites"));
     }
 
     [TestMethod]

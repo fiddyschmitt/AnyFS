@@ -301,6 +301,40 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         return SafeName(siteName is null ? HostName(one) : $"{HostName(one)} {siteName}");
     }
 
+    /// <summary>
+    /// Where a site given shows, for the Test's line, as the source places it by the addresses: a subsite among its own
+    /// site's subsites (the nearest site given above it, else the site its address is in); with the root site of their
+    /// server among them, a site collection in the root site's Sites folder. Empty for a top-level folder.
+    /// </summary>
+    internal static string WhereItShows(WebInfo web, IReadOnlyList<WebInfo> webs, WebInfo? root)
+    {
+        if (web == root || web.Url is not { } url)
+        {
+            return "";
+        }
+
+        if (web.SiteCollection == true)
+        {
+            return root is null ? "" : $" It shows in the root site's {SharePointSource.SitesFolder} folder.";
+        }
+
+        if (webs.Where(w => w != web && w != root && w.Url is { } above && SharePointSource.IsBelow(url, above)).MaxBy(w => w.Url!.Length) is { } site)
+        {
+            return $" It shows below {site.Name}, among its subsites.";
+        }
+
+        if (root is null)
+        {
+            return "";
+        }
+
+        var path = new Uri(url).AbsolutePath.TrimEnd('/');
+        var parent = path[..Math.Max(0, path.LastIndexOf('/'))];
+        return parent.Length == 0
+            ? $" It shows in the root site's {SharePointSource.SubsitesFolder} folder."
+            : $" It shows below {Uri.UnescapeDataString(parent[(parent.LastIndexOf('/') + 1)..])}, among its subsites.";
+    }
+
     /// <summary>The site addresses are stored one per line, trimmed, in alphabetical order, each once.</summary>
     public void NormaliseSettings(object settings)
     {
@@ -752,8 +786,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
             try
             {
                 var names = (await store.ListLibrariesAsync(web, ct).ConfigureAwait(false)).Select(l => l.Name).ToList();
-                var where = root is null || web == root ? "" : $" It shows in the root site's {(web.SiteCollection == true ? SharePointSource.SitesFolder : SharePointSource.SubsitesFolder)} folder.";
-                lines.Add($"{web.Name} ({web.Url}) has {await SummaryAsync(store, web, names, subsites: true, web.IsRoot, ct).ConfigureAwait(false)}.{where}");
+                lines.Add($"{web.Name} ({web.Url}) has {await SummaryAsync(store, web, names, subsites: true, web.IsRoot, ct).ConfigureAwait(false)}.{WhereItShows(web, webs, root)}");
                 shown++;
             }
             catch (VfsException ex)

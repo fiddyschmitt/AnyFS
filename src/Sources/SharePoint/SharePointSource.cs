@@ -57,6 +57,11 @@ public abstract class SharePointSource : SourceBase, ICountable
     // a source given the root site of the one server its sites are on, among others: those others, which show in the root
     // site's Sites folder (site collections) or Subsites folder (subsites); null otherwise. Guarded by _leftOut.
     private List<WebInfo>? _extras;
+
+    // a source of several sites, none of them the root: whether a site has joined the top-level folders since they were
+    // last sorted out (PruneTopsAsync); and the sites given that show below another, said once each
+    private volatile bool _topsToPrune = true;
+    private readonly ConcurrentDictionary<string, bool> _saidBelow = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, ItemRef> _items = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _otherSitesGate = new(1, 1);
 
@@ -1060,7 +1065,14 @@ public abstract class SharePointSource : SourceBase, ICountable
             RetryLeftOutWhenDue();
             if (web.Contents?.Sites is not null)
             {
-                return web.Contents;   // each site that opened is a top-level folder (OpenSitesAsync)
+                // each site that opened is a top-level folder (OpenSitesAsync), but for one that shows below another anyway
+                if (_topsToPrune)
+                {
+                    _topsToPrune = false;
+                    await PruneTopsAsync(ct).ConfigureAwait(false);
+                }
+
+                return web.Contents;
             }
         }
 
@@ -1099,9 +1111,30 @@ public abstract class SharePointSource : SourceBase, ICountable
         var foundSites = await sitesCall.ConfigureAwait(false);
         if (web == _root && Extras() is { Count: > 0 } extras)
         {
-            // the root site among the sites given: the others join what it finds, each where it belongs
-            foundSubsites = WithExtras(foundSubsites, extras.Where(e => e.SiteCollection != true));
-            foundSites = WithExtras(foundSites, extras.Where(e => e.SiteCollection == true));
+            // the root site among the sites given: the others join what it finds, each where it belongs, unless it shows
+            // them anyway, in either folder or below a site that shows (a subsite of a site search found, say)
+            var found = foundSubsites.Concat(foundSites).ToList();
+            var shown = found.Append(web.Info!).Concat(extras).ToList();
+            var listedBelow = new Dictionary<string, IReadOnlyList<WebInfo>>(StringComparer.OrdinalIgnoreCase) { [web.Info!.Key] = foundSubsites };
+            var joining = new List<WebInfo>();
+            foreach (var extra in extras)
+            {
+                if (found.Any(f => f.IsSameSite(extra)))
+                {
+                    continue;
+                }
+
+                if (await FoundBelowAsync(extra, shown.Where(s => !s.IsSameSite(extra)), listedBelow, ct).ConfigureAwait(false) is { } parent)
+                {
+                    SayBelow(extra, parent);
+                    continue;
+                }
+
+                joining.Add(extra);
+            }
+
+            foundSubsites = WithExtras(foundSubsites, joining.Where(e => e.SiteCollection != true));
+            foundSites = WithExtras(foundSites, joining.Where(e => e.SiteCollection == true));
         }
 
         var taken = new HashSet<string>(libraries.Keys, StringComparer.OrdinalIgnoreCase);
@@ -1164,6 +1197,102 @@ public abstract class SharePointSource : SourceBase, ICountable
         lock (_leftOut)
         {
             return _extras is null ? null : [.. _extras];
+        }
+    }
+
+    /// <summary>
+    /// The site among <paramref name="shown"/> that <paramref name="site"/> shows below anyway, or null: one whose address
+    /// is above its own, from which each site on the way down is among its parent's subsites (SharePoint lists only those
+    /// the account may open), one listing a level. A site collection is no site's subsite. <paramref name="listed"/> keeps
+    /// the subsites listed (by site key), so none is asked twice.
+    /// </summary>
+    private async Task<WebInfo?> FoundBelowAsync(WebInfo site, IEnumerable<WebInfo> shown, Dictionary<string, IReadOnlyList<WebInfo>> listed, CancellationToken ct)
+    {
+        if (site.SiteCollection == true || site.Url is not { } url)
+        {
+            return null;
+        }
+
+        foreach (var top in shown)
+        {
+            if (top.Url is not { } topUrl || !IsBelow(url, topUrl))
+            {
+                continue;
+            }
+
+            var at = top;
+            try
+            {
+                while (!at.IsSameSite(site))
+                {
+                    if (!listed.TryGetValue(at.Key, out var subsites))
+                    {
+                        listed[at.Key] = subsites = await Store.ListSubsitesAsync(at, ct).ConfigureAwait(false);
+                    }
+
+                    if (subsites.FirstOrDefault(s => s.IsSameSite(site) || s.Url is { } below && IsBelow(url, below)) is not { } next)
+                    {
+                        break;
+                    }
+
+                    at = next;
+                }
+            }
+            catch (VfsException)
+            {
+                continue;   // a site on the way the account may not list: not this way
+            }
+
+            if (at.IsSameSite(site))
+            {
+                return top;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Whether an address is below another, as a subsite's is below its parent's.</summary>
+    internal static bool IsBelow(string url, string above) => url.StartsWith(above.TrimEnd('/') + "/", StringComparison.OrdinalIgnoreCase);
+
+    private void SayBelow(WebInfo site, WebInfo parent)
+    {
+        if (_saidBelow.TryAdd(site.Key, true))
+        {
+            Logger.LogInformation("sharepoint: {Url} shows below {Parent}, among its subsites, rather than as a folder of its own", site.Url, parent.Url);
+        }
+    }
+
+    /// <summary>
+    /// A source of several sites, none of them the root: leaves out of the top-level folders each site that shows below
+    /// another of them anyway (<see cref="FoundBelowAsync"/>), so that a site shows once.
+    /// </summary>
+    private async Task PruneTopsAsync(CancellationToken ct)
+    {
+        if (_root.Contents?.Sites is not { Count: > 1 } tops)
+        {
+            return;
+        }
+
+        var listed = new Dictionary<string, IReadOnlyList<WebInfo>>(StringComparer.OrdinalIgnoreCase);
+        var below = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, node) in tops)
+        {
+            if (await FoundBelowAsync(node.Info!, tops.Values.Where(n => n != node).Select(n => n.Info!), listed, ct).ConfigureAwait(false) is { } parent)
+            {
+                SayBelow(node.Info!, parent);
+                below.Add(name);
+            }
+        }
+
+        if (below.Count > 0)
+        {
+            lock (_leftOut)
+            {
+                // a site may have joined meanwhile: it stays, and is sorted out at the next listing
+                var current = _root.Contents!.Sites!;
+                _root.Contents = _root.Contents! with { Sites = current.Where(kv => !below.Contains(kv.Key)).ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase) };
+            }
         }
     }
 
@@ -1421,6 +1550,9 @@ public abstract class SharePointSource : SourceBase, ICountable
                 {
                     joined = WebInfo.Joining(web, [.. tops.Values.Select(t => t.Info!)]);
                     _root.Contents = _root.Contents! with { Sites = new Dictionary<string, WebNode>(tops, StringComparer.OrdinalIgnoreCase) { [joined.Name] = new WebNode(joined, joined.Name) } };
+
+                    // below another, or above one: sorted out at the root's next listing
+                    _topsToPrune = true;
                 }
             }
         }
