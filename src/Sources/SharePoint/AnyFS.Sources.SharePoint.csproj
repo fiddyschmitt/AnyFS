@@ -16,6 +16,8 @@
          .NET ports carry cloud SDKs and image libraries for other formats; HTML is all a page is. -->
     <PackageReference Include="ReverseMarkdown" />
     <PackageReference Include="AngleSharp" />
+    <!-- System.Threading.RateLimiting (MIT, the .NET runtime's own): the pace of requests to SharePoint Online (RequestPace) -->
+    <PackageReference Include="System.Threading.RateLimiting" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />

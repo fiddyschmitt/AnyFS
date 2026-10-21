@@ -34,17 +34,20 @@ internal sealed class GraphClient : IDisposable
     private readonly ILogger _logger;
     private readonly Action<string>? _onTrouble;
     private readonly Action? _onSuccess;
+    private readonly RequestPace? _pace;
 
     /// <param name="token">(cancellation, forceRefresh) → a bearer token for Graph.</param>
     /// <param name="onTrouble">Called with a reason when the upstream misbehaves (throttling, outages), for the source's health.</param>
     /// <param name="onSuccess">Called after a request succeeded, so the source can turn healthy again.</param>
     /// <param name="cloud">Whose Graph to call (the token must be for the same cloud); null: the global cloud.</param>
-    public GraphClient(Func<CancellationToken, bool, Task<string>> token, ILogger logger, Action<string>? onTrouble = null, Action? onSuccess = null, HttpMessageHandler? handler = null, MicrosoftCloud? cloud = null)
+    /// <param name="pace">The tenant's pace the requests go at (<see cref="RequestPace"/>); null for none.</param>
+    public GraphClient(Func<CancellationToken, bool, Task<string>> token, ILogger logger, Action<string>? onTrouble = null, Action? onSuccess = null, HttpMessageHandler? handler = null, MicrosoftCloud? cloud = null, RequestPace? pace = null)
     {
         _token = token;
         _logger = logger;
         _onTrouble = onTrouble;
         _onSuccess = onSuccess;
+        _pace = pace;
         BaseUrl = (cloud ?? MicrosoftCloud.Global).GraphBaseUrl;
         handler ??= new SocketsHttpHandler
         {
@@ -347,6 +350,11 @@ internal sealed class GraphClient : IDisposable
         var renewedToken = false;
         for (var attempt = 1; ; attempt++)
         {
+            if (_pace is not null)
+            {
+                await _pace.WaitAsync(ct).ConfigureAwait(false);
+            }
+
             var request = make();
             if (authenticated)
             {
@@ -376,6 +384,11 @@ internal sealed class GraphClient : IDisposable
             }
 
             var status = response.StatusCode;
+            if (_pace?.Hold(response) is { } hold)
+            {
+                _logger.LogInformation("sharepoint: SharePoint is throttling ({Status}); no requests to it for {Seconds:F0} s", (int)status, hold.TotalSeconds);
+            }
+
             if (status == HttpStatusCode.Unauthorized && authenticated && attempt < MaxAttempts && !renewedToken)
             {
                 response.Dispose();

@@ -19,6 +19,7 @@
          the version ReverseMarkdown is built against) -->
     <PackageVersion Include="ReverseMarkdown" Version="6.2.1" />
     <PackageVersion Include="AngleSharp" Version="1.5.2" />
+    <PackageVersion Include="System.Threading.RateLimiting" Version="10.0.13" />
     <!-- the E2E tests read provisioning/settings.yml -->
     <PackageVersion Include="YamlDotNet" Version="18.1.0" />
     <!-- the SharePoint live tests keep a sign-in on disk, DPAPI-protected on Windows (tests/fixtures/SharePointSignIn) -->

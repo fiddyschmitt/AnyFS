@@ -923,7 +923,7 @@ public sealed class SharePointSiteSource : SharePointSource
         var signIn = MicrosoftSignIn(EntraSignIn.SiteScopes, ct);
         await SignInMicrosoftAsync(signIn, cloud, ct).ConfigureAwait(false);
 
-        var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy, cloud: cloud);
+        var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy, cloud: cloud, pace: RequestPace.ForHost(site.Host));
         if (_settings.IsMultiSite)
         {
             // the source opens the sites itself, and leaves out those that do not open
@@ -971,7 +971,8 @@ public sealed class SharePointSiteSource : SharePointSource
         var signIn = MicrosoftSignIn(EntraSignIn.ContainerScopes, ct);
         await SignInMicrosoftAsync(signIn, cloud, ct).ConfigureAwait(false);
 
-        var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy, cloud: cloud);
+        // containers have no site host to go by: their pace is the account's
+        var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy, cloud: cloud, pace: RequestPace.For(signIn.Username ?? containerType.ToString()));
         Progress($"Listing the containers of type {containerType}");
         try
         {

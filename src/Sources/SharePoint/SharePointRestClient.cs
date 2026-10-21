@@ -14,8 +14,8 @@ namespace AnyFS.Sources.SharePoint;
 /// SharePoint's own REST API (<c>/_api</c>), the one surface SharePoint Server and SharePoint Online share:
 /// files and folders by server-relative path, JSON with <c>odata=nometadata</c>, a request digest for
 /// writes, Windows authentication from the handler's credentials (NTLM, or Kerberos where the machine is
-/// joined). Throttling (429, 503) is retried with Retry-After or a short backoff; SharePoint's error codes
-/// become <see cref="VfsException"/>s.
+/// joined). Requests to SharePoint Online go at its <see cref="RequestPace"/>; throttling (429, 503) is retried with
+/// Retry-After or a short backoff; SharePoint's error codes become <see cref="VfsException"/>s.
 /// </summary>
 internal sealed partial class SharePointRestClient : IDisposable
 {
@@ -38,6 +38,7 @@ internal sealed partial class SharePointRestClient : IDisposable
     private readonly Action<string>? _onTrouble;
     private readonly Action? _onSuccess;
     private readonly bool _probe;
+    private readonly RequestPace? _pace;
     private readonly SemaphoreSlim _digestGate = new(1, 1);
     private string? _digest;
     private DateTimeOffset _digestExpires;
@@ -50,6 +51,7 @@ internal sealed partial class SharePointRestClient : IDisposable
         _logger = logger;
         _onTrouble = onTrouble;
         _onSuccess = onSuccess;
+        _pace = RequestPace.ForHost(SiteUrl.Host);
         if (handler is null)
         {
             var sockets = new SocketsHttpHandler
@@ -80,6 +82,7 @@ internal sealed partial class SharePointRestClient : IDisposable
         _http = parent._http;
         _ownsHttp = false;
         _logger = parent._logger;
+        _pace = RequestPace.ForHost(SiteUrl.Host);
         _probe = probe || parent._probe;
         _onTrouble = _probe ? null : parent._onTrouble;
         _onSuccess = _probe ? null : parent._onSuccess;
@@ -472,6 +475,11 @@ internal sealed partial class SharePointRestClient : IDisposable
         var retrying = _probe ? LogLevel.Debug : LogLevel.Warning;
         for (var attempt = 1; ; attempt++)
         {
+            if (_pace is not null)
+            {
+                await _pace.WaitAsync(ct).ConfigureAwait(false);
+            }
+
             var request = make();
             HttpResponseMessage response;
             var started = Stopwatch.GetTimestamp();
@@ -499,6 +507,11 @@ internal sealed partial class SharePointRestClient : IDisposable
             if (_logger.IsEnabled(LogLevel.Debug))
             {
                 _logger.LogDebug("sharepoint: {Method} {Url} -> {Status} in {Ms} ms", request.Method, request.RequestUri?.PathAndQuery, (int)status, Stopwatch.GetElapsedTime(started).TotalMilliseconds.ToString("F0", CultureInfo.InvariantCulture));
+            }
+
+            if (_pace?.Hold(response) is { } hold)
+            {
+                _logger.LogInformation("sharepoint: {Host} is throttling ({Status}); no requests to it for {Seconds:F0} s", SiteUrl.Host, (int)status, hold.TotalSeconds);
             }
 
             if (status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout && attempt < attempts)
