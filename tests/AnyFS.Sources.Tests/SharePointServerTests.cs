@@ -599,7 +599,8 @@ public class SharePointServerLiveTests
         var names = new List<string>();
         await foreach (var entry in source.ListAsync("", None))
         {
-            Assert.IsTrue(entry.IsDirectory, $"{entry.Name} should be a folder");
+            // the libraries are folders; beside them only the pages in the site's own folder, as Markdown (the classic test page)
+            Assert.IsTrue(entry.IsDirectory || entry.Name.EndsWith(".aspx.md", StringComparison.OrdinalIgnoreCase), $"{entry.Name} should be a folder, or a page");
             names.Add(entry.Name);
         }
 

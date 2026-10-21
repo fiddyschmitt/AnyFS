@@ -29,6 +29,9 @@ internal sealed class RestDocumentStore : IDocumentStore
     // the Markdown of the pages in sites' own folders, by address and version: rendering one is a page load on the server
     private readonly PageCache _sitePages = new();
 
+    // the sites (by key, "" for the source's own) whose own folder the account may not list: one it may only read
+    private readonly ConcurrentDictionary<string, bool> _ownFolderRefused = new(StringComparer.OrdinalIgnoreCase);
+
     // a SharePoint without modern pages has no CanvasContent1 to ask for; found out once, on the first page listing
     private volatile bool _noCanvas;
 
@@ -227,12 +230,31 @@ internal sealed class RestDocumentStore : IDocumentStore
     /// <summary>
     /// The .aspx files in the site's own folder (its root folder, not a list's), each rendered by SharePoint and made
     /// Markdown (<see cref="SharePointPages.MarkdownFromPage"/>), again only when the file changed. One that forwards the
-    /// browser elsewhere (a modern site's default.aspx) is left out.
+    /// browser elsewhere (a modern site's default.aspx) is left out. An account that may only read the site may not list
+    /// that folder (SharePoint's Browse Directories), though it may open the pages in it: for such a site, remembered after
+    /// the first refusal, the landing page is looked for by its usual name, default.aspx.
     /// </summary>
     public async Task<IReadOnlyList<SitePage>> ListSitePagesAsync(WebInfo? web, CancellationToken ct)
     {
         var client = Client(web);
-        using var doc = await client.GetJsonAsync($"web/RootFolder/Files?$select={FileSelect}", web?.Key ?? Description, ct).ConfigureAwait(false);
+        var key = web?.Key ?? "";
+        if (_ownFolderRefused.ContainsKey(key))
+        {
+            return await LandingPageAsync(client, ct).ConfigureAwait(false);
+        }
+
+        JsonDocument doc;
+        try
+        {
+            doc = await client.GetJsonAsync($"web/RootFolder/Files?$select={FileSelect}", web?.Key ?? Description, ct).ConfigureAwait(false);
+        }
+        catch (VfsException ex) when (SharePointRestClient.IsDenial(ex))
+        {
+            _ownFolderRefused[key] = true;
+            return await LandingPageAsync(client, ct).ConfigureAwait(false);
+        }
+
+        using var _ = doc;
         var pages = new List<SitePage>();
         foreach (var file in doc.RootElement.GetProperty("value").EnumerateArray())
         {
@@ -259,6 +281,23 @@ internal sealed class RestDocumentStore : IDocumentStore
         }
 
         return pages;
+    }
+
+    /// <summary>A site's default.aspx, for an account that may not list the site's own folder: none where it is not there or forwards elsewhere.</summary>
+    private static async Task<IReadOnlyList<SitePage>> LandingPageAsync(SharePointRestClient client, CancellationToken ct)
+    {
+        const string Name = "default.aspx";
+        var address = new Uri(client.SiteUrl, Name);
+        try
+        {
+            return await client.GetPageAsync(address, ct).ConfigureAwait(false) is { } html
+                ? [new SitePage(SharePointPages.Shown(Name), SharePointPages.MarkdownFromPage(html, address), null, null)]
+                : [];
+        }
+        catch (VfsException ex) when (ex.Error is VfsError.NotFound || SharePointRestClient.IsDenial(ex))
+        {
+            return [];
+        }
     }
 
     public async IAsyncEnumerable<(VfsEntry Entry, ItemRef Item)> ListChildrenAsync(LibraryInfo library, string itemPath, [EnumeratorCancellation] CancellationToken ct)

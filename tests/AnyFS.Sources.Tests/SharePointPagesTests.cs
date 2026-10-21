@@ -161,6 +161,56 @@ public class SharePointPagesTests
     }
 }
 
+/// <summary>The pages in a site's own folder over REST, against a stand-in for SharePoint.</summary>
+[TestClass]
+public class SharePointRestSitePagesTests
+{
+    /// <summary>SharePoint as an account that may only read the site meets it (the SE farm, 20-Oct-2026): the site's own folder may not be listed, its default.aspx opens.</summary>
+    private sealed class ReaderServer : HttpMessageHandler
+    {
+        public List<string> Asked { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            lock (Asked)
+            {
+                Asked.Add(path);
+            }
+
+            if (path.EndsWith("/_api/web/RootFolder/Files", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized)
+                {
+                    Content = new StringContent("""{"odata.error":{"code":"-2147024891, System.UnauthorizedAccessException","message":{"lang":"en-US","value":"Access denied. You do not have permission to perform this action or access this resource."}}}"""),
+                });
+            }
+
+            return Task.FromResult(path.EndsWith("/default.aspx", StringComparison.OrdinalIgnoreCase)
+                ? new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("""<html><head><title>Team - Home</title></head><body><span id="DeltaPlaceHolderPageTitleInTitleArea">Home</span><div id="DeltaPlaceHolderMain"><p>Welcome.</p></div></body></html>""") }
+                : new HttpResponseMessage(HttpStatusCode.NotFound));
+        }
+    }
+
+    [TestMethod]
+    public async Task AReaderStillSeesTheLandingPageOfAFolderItMayNotList()
+    {
+        var server = new ReaderServer();
+        using var rest = new SharePointRestClient(new Uri("http://farm/sites/team"), null, false, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, handler: server);
+        using var store = RestDocumentStore.ForSites(rest);
+        var web = new WebInfo("http://farm/sites/team", "team", "http://farm/sites/team");
+        foreach (var time in new[] { "first", "second" })
+        {
+            var pages = await store.ListSitePagesAsync(web, CancellationToken.None);
+            Assert.AreEqual(1, pages.Count, time);
+            Assert.AreEqual("default.aspx.md", pages[0].Name);
+            Assert.AreEqual("http://farm/sites/team/default.aspx\n\n# Home\n\nWelcome.\n", Encoding.UTF8.GetString(pages[0].Markdown), time);
+        }
+
+        Assert.AreEqual(1, server.Asked.Count(p => p.EndsWith("/RootFolder/Files", StringComparison.Ordinal)), "the refusal remembered: " + string.Join(", ", server.Asked));
+    }
+}
+
 /// <summary>The site's pages in the source: read, never written.</summary>
 [TestClass]
 public class SharePointPageLibraryTests
