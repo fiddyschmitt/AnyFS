@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using AnyFS.Sdk;
@@ -244,12 +246,51 @@ public class ThreeDXPluginTests
     }
 
     [TestMethod]
-    public void BadgePagesAreKnownByTheirResumeParameters()
+    public void TheBadgeSignInsAddressIsMount3DXs()
     {
-        Assert.IsTrue(BadgeSignIn.Applies(new Uri("https://gas.contoso.com/?resumeUrl=https%3A%2F%2Fsso&resumePath=%2Fidp%2FAbc%2Fresume&instanceId=x&assuranceLevel=2")));
-        Assert.IsFalse(BadgeSignIn.Applies(new Uri("https://gas.contoso.com/?resumePath=%2Fx")));
-        Assert.AreEqual("/idp/Abc/resume", BadgeSignIn.Query(new Uri("https://g/?resumePath=%2Fidp%2FAbc%2Fresume&a=b+c"))["resumePath"]);
-        Assert.AreEqual("b c", BadgeSignIn.Query(new Uri("https://g/?resumePath=%2Fidp&a=b+c"))["a"]);
+        var page = new Uri("https://gas.contoso.com/gas/?resumeUrl=https%3A%2F%2Fsso.contoso.com%2Fidp%2Fresume&resumePath=%2Fidp%2FAbc%2Fresume&instanceId=x&assuranceLevel=2&a=b+c");
+        var query = SingleSignOn.Query(page);
+        Assert.AreEqual("/idp/Abc/resume", query["resumePath"]);
+        Assert.AreEqual("b c", query["a"]);
+        CollectionAssert.AreEqual(new[] { "https://gas.contoso.com/gas/" }, SingleSignOn.Bases(page).ToArray());
+        CollectionAssert.AreEqual(new[] { "https://gas.contoso.com/gas/", "https://gas.contoso.com:9031/gas/" }, SingleSignOn.Bases(new Uri("https://gas.contoso.com:9031/gas/?a=b")).ToArray(),
+            "Mount3DX's address of the page has no port; a port of the page's own is asked too");
+        Assert.AreEqual(
+            "https://gas.contoso.com:50123/badge/auth?resumeUrl=https%3A%2F%2Fsso.contoso.com%2Fidp%2Fresume&resumePath=%2Fidp%2FAbc%2Fresume&instanceId=x&pingfedDropoff=true&assuranceLevel=2"
+                + "&errorUrl=https%3A%2F%2Fgas.contoso.com%2Fgas%2F&gasWebClient=true&coordinates=null&countryCodeRequested=false&usaItarGeoRequested=false",
+            SingleSignOn.Address(page, 50123, "/badge/auth", query, "https://gas.contoso.com/gas/").AbsoluteUri);
+        StringAssert.StartsWith(SingleSignOn.Address(page, null, "badge/auth", query, "x").AbsoluteUri, "https://gas.contoso.com/badge/auth?resumeUrl=", "no port configured: the scheme's own, as Mount3DX's address has it");
+        StringAssert.StartsWith(SingleSignOn.Address(page, 443, "/b?k=v", query, "x").AbsoluteUri, "https://gas.contoso.com/b?k=v&resumeUrl=");
+    }
+
+    [TestMethod]
+    public void TheCertificatesOfferedAreMount3DXsBadgeFirst()
+    {
+        var now = DateTime.Now;
+        X509Certificate2 Make(string subject, bool smartcard, int days = 30)
+        {
+            using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            var request = new CertificateRequest(subject, key, HashAlgorithmName.SHA256);
+            var usages = new OidCollection { new("1.3.6.1.5.5.7.3.2") };
+            if (smartcard)
+            {
+                usages.Add(new Oid("1.3.6.1.4.1.311.20.2.2"));
+            }
+
+            request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(usages, critical: false));
+            return request.CreateSelfSigned(now.AddDays(days - 60), now.AddDays(days));
+        }
+
+        // self-signed, so each is its own issuer
+        using var badge = Make("CN=Contoso Hardware Issuing CA 01", smartcard: true);
+        using var hello = Make("CN=Windows Hello", smartcard: true);
+        using var vpn = Make("CN=VPN", smartcard: false);
+        using var expired = Make("CN=Contoso Hardware Issuing CA 00", smartcard: true, days: -1);
+        using var keyless = X509CertificateLoader.LoadCertificate(badge.RawData);
+        CollectionAssert.AreEqual(new[] { badge }, ClientCertificates.Choose([hello, vpn, keyless, expired, badge], now).ToArray(), "the badge: Mount3DX's issuer, with its key, valid now");
+        CollectionAssert.AreEqual(new[] { hello }, ClientCertificates.Choose([vpn, hello, expired], now).ToArray(), "else a smartcard's");
+        CollectionAssert.AreEqual(new[] { vpn }, ClientCertificates.Choose([vpn, keyless], now).ToArray(), "else any for client authentication");
+        Assert.AreEqual(0, ClientCertificates.Choose([expired, keyless], now).Count);
     }
 
     [TestMethod]
@@ -389,7 +430,82 @@ public class ThreeDXSignInTests
         using (session)
         {
             Assert.IsTrue(signedIn, problem + "\n" + log);
+            Assert.AreEqual("by single sign-on", session.How);
+            Assert.AreEqual(1, fake.BadgeAttempts);
             Assert.AreEqual(1, fake.SignIns, "the badge's SAML answer signed in to 3DPassport");
+
+            // Mount3DX's requests: its first (3DSpace's page) with Firefox's user agent, which the redirects it follows carry;
+            // none after it with a user agent; the SAML request posted, the badge asked for, its answer posted back
+            var requests = fake.Requests.ToList();
+            var signOn = requests.TakeWhile(r => r.Path != "/3dspace/resources/v1/application/CSRF").ToList();
+            var first = signOn.TakeWhile(r => r.UserAgent is not null).ToList();
+            var trail = string.Join("\n", signOn.Select(r => $"{r.Method} {r.Path} {r.UserAgent}"));
+            Assert.AreEqual("GET /3dspace", $"{first[0].Method} {first[0].Path}", trail);
+            Assert.IsTrue(first.Count >= 2 && first.All(r => r.Method == "GET" && r.UserAgent == SingleSignOn.FirefoxUserAgent), trail);
+            Assert.IsTrue(signOn.Skip(first.Count).All(r => r.UserAgent is null), trail);
+            var steps = signOn.Skip(first.Count).Select(r => $"{r.Method} {r.Path}").ToList();
+            CollectionAssert.IsSubsetOf(new[] { "POST /idp/sso", "GET /gas/", "GET /gas/js/app.js", "GET /gas/configuration/internal", $"GET :{fake.BadgePort}/badge/auth", "POST /3dpassport/saml/acs" }, steps, trail);
+        }
+    }
+
+    [TestMethod]
+    public async Task TheBadgesPathInAnInlineScriptAndItsPortAsTextAreFoundToo()
+    {
+        using var fake = new Fake3DX(Fake3DX.Passport.Saml, Fake3DX.Idp.Badge) { BadgePathInline = true, BadgePortAsText = true };
+        var log = new LineLogger();
+        var (signedIn, problem, session) = await SignInAsync(Settings(fake, ThreeDXSettings.WebSession), log);
+        using (session)
+        {
+            Assert.IsTrue(signedIn, problem + "\n" + log);
+            Assert.AreEqual(1, fake.BadgeAttempts);
+        }
+    }
+
+    [TestMethod]
+    public async Task ASingleSignOnThatEndsAt3DPassportOpens3DSpaceThroughIt()
+    {
+        using var fake = new Fake3DX(Fake3DX.Passport.Saml, Fake3DX.Idp.Badge) { StaysWithoutRelayState = true };
+        var log = new LineLogger();
+        var (signedIn, problem, session) = await SignInAsync(Settings(fake, ThreeDXSettings.WebSession), log);
+        using (session)
+        {
+            Assert.IsTrue(signedIn, problem + "\n" + log);
+            Assert.AreEqual("by single sign-on", session.How);
+            Assert.AreEqual(1, fake.BadgeAttempts);
+            Assert.AreEqual(1, fake.SignIns, "3DSpace opened through 3DPassport's new sign-in, as Mount3DX's client is sent there");
+        }
+    }
+
+    [TestMethod]
+    public async Task AKeptSessionOpens3DSpaceWithoutAPinWhile3DPassportHoldsItAndTheSingleSignOnStartsAfresh()
+    {
+        using var fake = new Fake3DX(Fake3DX.Passport.Saml, Fake3DX.Idp.Badge);
+        var settings = Settings(fake, ThreeDXSettings.WebSession);
+        var (signedIn, problem, first) = await SignInAsync(settings);
+        first.Dispose();
+        Assert.IsTrue(signedIn, problem);
+        Assert.AreEqual(1, fake.BadgeAttempts);
+
+        // 3DSpace's session timed out, 3DPassport's sign-in stands: the cookies kept open 3DSpace again, no PIN
+        fake.ExpireSessions();
+        var (again, why, second) = await SignInAsync(settings);
+        second.Dispose();
+        Assert.IsTrue(again, why);
+        Assert.AreEqual(1, fake.BadgeAttempts, "no PIN while 3DPassport's sign-in stands");
+
+        // everything gone: Mount3DX's single sign-on, on a client of its own that starts without the cookies of before
+        fake.ExpireAll();
+        fake.Requests.Clear();
+        var log = new LineLogger();
+        var (third, whyNot, session) = await SignInAsync(settings, log);
+        using (session)
+        {
+            Assert.IsTrue(third, whyNot + "\n" + log);
+            Assert.AreEqual(2, fake.BadgeAttempts);
+            var start = fake.Requests.First(r => r.UserAgent == SingleSignOn.FirefoxUserAgent);
+            Assert.AreEqual("/3dspace", start.Path);
+            Assert.IsFalse(start.HadCookies, "the single sign-on starts with an empty cookie jar, as Mount3DX's");
+            Assert.IsTrue(fake.Requests.Any(r => r.HadCookies && r.UserAgent != SingleSignOn.FirefoxUserAgent && r.Path.StartsWith("/3dspace", StringComparison.Ordinal)), "the kept cookies were tried first");
         }
     }
 

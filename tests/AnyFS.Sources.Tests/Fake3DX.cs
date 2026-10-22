@@ -56,6 +56,7 @@ internal sealed class Fake3DX : IDisposable
     private readonly ConcurrentDictionary<string, bool> _loginTickets = new();
     private readonly ConcurrentDictionary<string, bool> _samlResponses = new();
     private readonly ConcurrentDictionary<string, string> _relays = new();
+    private readonly ConcurrentDictionary<string, string> _pendingSignIns = new();
     private readonly ConcurrentDictionary<string, (FakeDocument Document, FakeFile File)> _downloads = new();
     private int _counter;
 
@@ -101,6 +102,18 @@ internal sealed class Fake3DX : IDisposable
 
     /// <summary>Whether the badge sign-in refuses (a PIN nobody gave).</summary>
     public bool BadgeRefuses { get; set; }
+
+    /// <summary>Whether the identity provider's page names the badge sign-in's path in an inline script of its own, rather than in a script file.</summary>
+    public bool BadgePathInline { get; set; }
+
+    /// <summary>Whether the page's configuration gives the badge sign-in's port as text ("50123") rather than as a number.</summary>
+    public bool BadgePortAsText { get; set; }
+
+    /// <summary>Whether 3DPassport, given a SAML response without a relay state, shows its own page (signed in) rather than sending the client on to the service.</summary>
+    public bool StaysWithoutRelayState { get; set; }
+
+    /// <summary>Every request, in order: its method, path (the badge port's prefixed with its port), user agent and whether it carried cookies.</summary>
+    public ConcurrentQueue<(string Method, string Path, string? UserAgent, bool HadCookies)> Requests { get; } = new();
 
     /// <summary>How many badge sign-ins were asked for: each one a PIN prompt on the person's screen.</summary>
     public int BadgeAttempts => _badgeAttempts;
@@ -231,6 +244,7 @@ internal sealed class Fake3DX : IDisposable
     {
         var request = context.Request;
         var path = request.Url!.AbsolutePath;
+        Requests.Enqueue((request.HttpMethod, (badge ? $":{BadgePort}" : "") + path, request.UserAgent, request.Headers["Cookie"] is not null));
         if (badge)
         {
             await BadgeAsync(context);
@@ -306,10 +320,14 @@ internal sealed class Fake3DX : IDisposable
                     SignedIn(response, service);
                     return;
                 case Passport.Saml:
-                    var relay = service;
+                    // the sign-in on its way is remembered in 3DPassport's own session too, so an answer without the relay
+                    // state (Mount3DX posts the request alone) still finds its service
+                    var pending = Next("PS");
+                    _pendingSignIns[pending] = service;
+                    response.AppendHeader("Set-Cookie", $"PSESSION={pending}; Path=/3dpassport; HttpOnly");
                     await HtmlAsync(response, 200, $"""
                         <html><head><title>Redirecting</title></head><body onload="document.forms[0].submit()">
-                        <form method="post" action="/idp/sso"><input type="hidden" name="SAMLRequest" value="{Convert.ToBase64String(Encoding.UTF8.GetBytes(Next("AuthnRequest")))}"/><input type="hidden" name="RelayState" value="{WebUtility.HtmlEncode(relay)}"/><noscript><input type="submit" value="Continue"/></noscript></form>
+                        <form method="post" action="{Origin}/idp/sso"><input type="hidden" name="SAMLRequest" value="{Convert.ToBase64String(Encoding.UTF8.GetBytes(Next("AuthnRequest")))}"/><input type="hidden" name="RelayState" value="{WebUtility.HtmlEncode(service)}"/><noscript><input type="submit" value="Continue"/></noscript></form>
                         </body></html>
                         """);
                     return;
@@ -336,13 +354,21 @@ internal sealed class Fake3DX : IDisposable
         if (path == "/3dpassport/saml/acs" && request.HttpMethod == "POST")
         {
             var form = await FormAsync(request);
-            if (form.TryGetValue("SAMLResponse", out var answer) && _samlResponses.TryRemove(answer, out _) && form.TryGetValue("RelayState", out var relay))
+            var given = form.GetValueOrDefault("RelayState") is { Length: > 0 } relay ? relay : null;
+            var remembered = request.Cookies["PSESSION"] is { } session && _pendingSignIns.TryGetValue(session.Value, out var pending) ? pending : null;
+            if (!form.TryGetValue("SAMLResponse", out var answer) || !_samlResponses.TryRemove(answer, out _) || given is null && remembered is null)
             {
-                SignedIn(response, relay);
+                response.StatusCode = 403;
                 return;
             }
 
-            response.StatusCode = 403;
+            if (given is null && StaysWithoutRelayState)
+            {
+                await SignedInHereAsync(response);
+                return;
+            }
+
+            SignedIn(response, given ?? remembered!);
             return;
         }
 
@@ -358,11 +384,23 @@ internal sealed class Fake3DX : IDisposable
     /// <summary>3DPassport's own sign-in done: its cookie set, and the browser sent back to the service with a ticket.</summary>
     private void SignedIn(HttpListenerResponse response, string service)
     {
+        SetTicketGrantingTicket(response);
+        Redirect(response, WithTicket(service));
+    }
+
+    /// <summary>3DPassport's own sign-in done, and its own page shown: a service opens through its cookie at the next request.</summary>
+    private Task SignedInHereAsync(HttpListenerResponse response)
+    {
+        SetTicketGrantingTicket(response);
+        return HtmlAsync(response, 200, "<html><head><title>3DEXPERIENCE platform</title></head><body>You are signed in.</body></html>");
+    }
+
+    private void SetTicketGrantingTicket(HttpListenerResponse response)
+    {
         Interlocked.Increment(ref _signIns);
         var tgt = Next("TGC");
         _ticketGrantingTickets[tgt] = User;
         response.AppendHeader("Set-Cookie", $"CASTGC={tgt}; Path=/3dpassport; HttpOnly");
-        Redirect(response, WithTicket(service));
     }
 
     private string WithTicket(string service)
@@ -720,9 +758,11 @@ internal sealed class Fake3DX : IDisposable
     {
         var response = context.Response;
         var path = context.Request.Url!.AbsolutePath;
+        const string BadgePath = "window.Tn_INTERNAL_SECURE_BADGE_AUTH=\"/old\";var _INTERNAL_SECURE_BADGE_AUTH=\"/badge/auth\";";
         if (path == "/gas/")
         {
-            await HtmlAsync(response, 200, "<html><head><title>Sign in</title><script src=\"js/vendor.js\"></script><script src=\"js/app.js\"></script></head><body><div id=\"root\"></div></body></html>");
+            var inline = BadgePathInline ? $"<script>var a=1;{BadgePath}</script>" : "";
+            await HtmlAsync(response, 200, $"<html><head><title>Sign in</title>{inline}<script src=\"js/vendor.js\"></script><script src=\"js/app.js\"></script></head><body><div id=\"root\"></div></body></html>");
         }
         else if (path == "/gas/js/vendor.js")
         {
@@ -730,11 +770,12 @@ internal sealed class Fake3DX : IDisposable
         }
         else if (path == "/gas/js/app.js")
         {
-            await TextAsync(response, 200, "application/javascript", "var a=1;window.Tn_INTERNAL_SECURE_BADGE_AUTH=\"/old\";var _INTERNAL_SECURE_BADGE_AUTH=\"/badge/auth\";");
+            await TextAsync(response, 200, "application/javascript", "var a=1;" + (BadgePathInline ? "" : BadgePath));
         }
         else if (path == "/gas/configuration/internal")
         {
-            await JsonAsync(response, 200, new JsonObject { ["configuration"] = new JsonObject { ["internal.secure_badge_auth_port"] = BadgePort } });
+            var port = BadgePortAsText ? JsonValue.Create(BadgePort.ToString(System.Globalization.CultureInfo.InvariantCulture)) : JsonValue.Create(BadgePort);
+            await JsonAsync(response, 200, new JsonObject { ["configuration"] = new JsonObject { ["internal.secure_badge_auth_port"] = port } });
         }
         else
         {
@@ -753,9 +794,11 @@ internal sealed class Fake3DX : IDisposable
             return;
         }
 
+        // the error page's address as Mount3DX writes it: the sign-in page's scheme, host and path, no port
         var q = context.Request.QueryString;
         if (context.Request.Url!.AbsolutePath != "/badge/auth" || q["pingfedDropoff"] != "true" || q["instanceId"] != "inst7" || q["assuranceLevel"] != "2"
-            || q["gasWebClient"] != "true" || q["errorUrl"] != $"{Origin}/gas/" || q["resumeUrl"] != Origin + "/idp/resume" || q["resumePath"] is not { } resume || !_relays.TryRemove(resume, out var relay))
+            || q["gasWebClient"] != "true" || q["errorUrl"] != "http://127.0.0.1/gas/" || q["coordinates"] != "null" || q["countryCodeRequested"] != "false"
+            || q["usaItarGeoRequested"] != "false" || q["resumeUrl"] != Origin + "/idp/resume" || q["resumePath"] is not { } resume || !_relays.TryRemove(resume, out var relay))
         {
             context.Response.StatusCode = 400;
             return;

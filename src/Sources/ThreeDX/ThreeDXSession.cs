@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json;
 using AnyFS.Sdk;
@@ -19,13 +20,14 @@ internal sealed record SessionOptions(HttpMessageHandler? Handler = null, bool B
 /// has lapsed (<see cref="IsLapsed"/>), and <see cref="RenewAsync"/> goes through the sign-in for that service again, once
 /// for everything that was waiting on it.
 ///
-/// How it signs in is the settings' to say: Windows account (as yourself, or a user name and password) through
-/// <see cref="SignInFlow"/>, answering Windows sign-ins and 3DPassport's own; the web session tries single sign-on the same
-/// way first (as the person is signed in to Windows, for the organisation's own servers; their smartcard where the badge
-/// sign-in asks for it), as Mount3DX does, and failing that opens a browser of AnyFS's own (<see cref="BrowserSession"/>,
-/// over DevTools or Selenium WebDriver) for the person to sign in, and takes its cookies. The cookies are kept in the
-/// source's secret store, so a restart starts with them while they last, and are handed from the settings dialog's Test to
-/// the source it starts.
+/// How it signs in is the settings' to say. Cookies kept from before come first (3DPassport's among them open 3DSpace again
+/// by themselves while they last). Then the web session and as yourself sign on as Mount3DX does, step for step, on a client
+/// made afresh as Mount3DX makes it (<see cref="SingleSignOn"/>: the smartcard badge, Windows asking for the PIN); then all
+/// three go through <see cref="SignInFlow"/>, answering a Windows sign-in (as the person, for the web session only to the
+/// organisation's own servers), SAML hand-overs and 3DPassport's own sign-in; the web session last opens a browser of
+/// AnyFS's own (<see cref="BrowserSession"/>, over DevTools or Selenium WebDriver) for the person to sign in, and takes its
+/// cookies. The cookies are kept in the source's secret store, so a restart starts with them while they last, and are handed
+/// from the settings dialog's Test to the source it starts.
 /// </summary>
 internal sealed class ThreeDXSession : IDisposable
 {
@@ -44,8 +46,7 @@ internal sealed class ThreeDXSession : IDisposable
     private readonly ISecretStore? _secrets;
     private readonly SocketsHttpHandler _handler;
     private readonly HttpClient _flowHttp;
-    private readonly HttpMessageHandler? _badgeHandler;
-    private readonly HttpClient? _badgeHttp;
+    private readonly bool _singleSignOn;
     private readonly SemaphoreSlim _renewGate = new(1, 1);
     private readonly ConcurrentDictionary<string, int> _generations = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _renewedAt = new(StringComparer.OrdinalIgnoreCase);
@@ -100,53 +101,38 @@ internal sealed class ThreeDXSession : IDisposable
         _flowHttp = new HttpClient(send, disposeHandler: false) { Timeout = FlowTimeout };
         Browserlike(_flowHttp);
 
-        // a smartcard is for the person's own sign-in: the web session and as yourself, never a user name and password; the
-        // person's certificates are looked at only when a badge sign-in comes
-        if (Method != ThreeDXSignIn.Windows)
-        {
-            _badgeHandler = handler is null ? new LazyHandler(() => BadgeHandler(settings.TrustAnyCertificate)) : null;
-            _badgeHttp = new HttpClient(handler ?? _badgeHandler!, disposeHandler: false) { Timeout = FlowTimeout };
-            Browserlike(_badgeHttp);
-        }
+        // Mount3DX's single sign-on is the person's own sign-in: the web session's and as yourself, never a user name and password's
+        _singleSignOn = Method != ThreeDXSignIn.Windows;
     }
 
-    /// <summary>The badge sign-in's connections: the session's cookies, and the person's smartcard for a server that asks for a certificate.</summary>
-    private SocketsHttpHandler BadgeHandler(bool trustAnyCertificate)
+    /// <summary>
+    /// Mount3DX's client for its single sign-on (3dxServer.cs, <c>CreateHttpClient</c>, and the certificates
+    /// <c>LogInUsingHttpClient</c> gives it), made afresh for each sign-in as Mount3DX makes it: an
+    /// <see cref="HttpClientHandler"/> with its own cookie jar, empty (Mount3DX found cookies left from before get in the
+    /// sign-in's way), redirects followed, compressed answers taken, the person's smartcard certificates for any server that
+    /// asks for one, no Windows credentials, no user agent but the one its first request carries.
+    /// </summary>
+    private (HttpClient Client, CookieContainer Jar) SignOnClient()
     {
-        var badge = new SocketsHttpHandler
+        var handler = new HttpClientHandler { AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli };
+        var certificates = ClientCertificates.Load();
+        handler.ClientCertificates.AddRange(certificates);
+        _logger.LogInformation("3dx: single sign-on: {Count} certificate(s) of yours to offer a server that asks for one{Certificates}", certificates.Count,
+            string.Concat(certificates.Select(c => $"; {c.GetNameInfo(X509NameType.SimpleName, false)} from {c.GetNameInfo(X509NameType.SimpleName, true)}")));
+        if (_settings.TrustAnyCertificate)
         {
-            CookieContainer = Cookies,
-            UseCookies = true,
-            AllowAutoRedirect = false,
-            AutomaticDecompression = DecompressionMethods.All,
-        };
-        badge.SslOptions.ClientCertificates = ClientCertificates.Load();
-        _logger.LogInformation("3dx: {Count} certificate(s) of yours can sign in to a server (a smartcard's first)", badge.SslOptions.ClientCertificates.Count);
-        if (trustAnyCertificate)
-        {
-            badge.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+            handler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
         }
 
-        return badge;
+        var client = new HttpClient(handler, disposeHandler: true) { Timeout = FlowTimeout };
+        client.DefaultRequestHeaders.AcceptEncoding.ParseAdd("gzip");
+        client.DefaultRequestHeaders.AcceptEncoding.ParseAdd("deflate");
+        client.DefaultRequestHeaders.AcceptEncoding.ParseAdd("br");
+        return (client, handler.CookieContainer);
     }
 
-    /// <summary>A handler made when the first request comes: the badge sign-in's, which reads the person's certificates.</summary>
-    private sealed class LazyHandler(Func<HttpMessageHandler> make) : HttpMessageHandler
-    {
-        private readonly Lazy<HttpMessageInvoker> _inner = new(() => new HttpMessageInvoker(make(), disposeHandler: true));
-
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => _inner.Value.SendAsync(request, cancellationToken);
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing && _inner.IsValueCreated)
-            {
-                _inner.Value.Dispose();
-            }
-
-            base.Dispose(disposing);
-        }
-    }
+    /// <summary>3DSpace's address as given (Mount3DX's ServerUrl), where its single sign-on starts.</summary>
+    private Uri LoginUrl => new(Space.AbsoluteUri.TrimEnd('/'));
 
     /// <summary>The 3DSpace service, with a slash at the end.</summary>
     public Uri Space { get; }
@@ -193,8 +179,56 @@ internal sealed class ThreeDXSession : IDisposable
             return;
         }
 
-        // through the sign-in without a browser: 3DPassport with a sign-in kept from before, a Windows sign-in where a server
-        // asks for one, 3DPassport's own sign-in with a user name and password, the web session's single sign-on
+        // a session kept from before may hold 3DPassport's own sign-in, which opens 3DSpace again by itself (no PIN)
+        FlowResult? result = null;
+        if (hadKept)
+        {
+            result = await FlowSignInAsync(hadKept, ct).ConfigureAwait(false);
+            if (result.SignedIn)
+            {
+                return;
+            }
+        }
+
+        // the web session's and as yourself's: Mount3DX's single sign-on, as it signs in
+        var signOn = await SignOnAsync(renewal: false, progress, ct).ConfigureAwait(false);
+        if (signOn is { SignedIn: true })
+        {
+            How = "by single sign-on";
+            Save();
+            return;
+        }
+
+        // the other ways without a browser: a Windows sign-in where a server asks for one, a SAML hand-over, 3DPassport's own
+        // sign-in with a user name and password
+        if (result is null)
+        {
+            result = await FlowSignInAsync(hadKept, ct).ConfigureAwait(false);
+            if (result.SignedIn)
+            {
+                return;
+            }
+        }
+
+        var problems = signOn is { Problem: { } sso } ? $"single sign-on: {sso}; then {result.Problem}" : result.Problem;
+        if (Method != ThreeDXSignIn.WebSession)
+        {
+            _logger.LogInformation("3dx: the sign-in to {Host} as {Who} did not get through: {Route}", Space.Host, _settings.Who, result.Route);
+            throw new SignInRequiredException($"Signing in to {Space.Host} as {_settings.Who}: {problems}.{Advice(result)}", permanent: result.Refused);
+        }
+
+        if (!_allowBrowser)
+        {
+            throw new SignInRequiredException($"Single sign-on to {Space.Host} did not get through: {problems}");
+        }
+
+        _logger.LogInformation("3dx: the sign-in to {Host} without a browser did not get through ({Problem}); signing in with a browser. Route: {Route}", Space.Host, result.Problem, result.Route);
+        await BrowserSignInAsync(interactive, progress, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>The start's sign-in without a browser (<see cref="FlowAsync"/>); when it gets through, how is noted and the cookies kept.</summary>
+    private async Task<FlowResult> FlowSignInAsync(bool hadKept, CancellationToken ct)
+    {
         var result = await FlowAsync(Space, ct).ConfigureAwait(false);
         if (result.SignedIn)
         {
@@ -205,22 +239,60 @@ internal sealed class ThreeDXSession : IDisposable
             };
             _logger.LogInformation("3dx: signed in to {Host} {How}{Kept}: {Route}", Space.Host, How, hadKept ? " (the sign-in kept from before)" : "", result.Route);
             Save();
-            return;
         }
 
-        if (Method != ThreeDXSignIn.WebSession)
+        return result;
+    }
+
+    /// <summary>
+    /// Mount3DX's single sign-on (<see cref="SingleSignOn"/>), for the web session and as yourself, on a client of its own
+    /// (<see cref="SignOnClient"/>); once through, its cookies replace the session's and 3DSpace is asked whether it takes
+    /// them (through 3DPassport's new sign-in if 3DSpace's own session did not come with them, as Mount3DX's client follows
+    /// it there). Null when it is not for this sign-in, or held. In the background (<paramref name="renewal"/>) the badge,
+    /// and the PIN Windows asks for with it, comes at most once until a sign-in succeeds: a PIN prompt nobody answers
+    /// (overnight, after 3DX restarted) is not joined by another at every keep-alive; the source shows Degraded and waits for
+    /// a Retry.
+    /// </summary>
+    private async Task<SignOnResult?> SignOnAsync(bool renewal, Action<string> progress, CancellationToken ct)
+    {
+        if (!_singleSignOn || renewal && _badgeHeld)
         {
-            _logger.LogInformation("3dx: the sign-in to {Host} as {Who} did not get through: {Route}", Space.Host, _settings.Who, result.Route);
-            throw new SignInRequiredException($"Signing in to {Space.Host} as {_settings.Who}: {result.Problem}.{Advice(result)}", permanent: result.Refused);
+            return null;
         }
 
-        if (!_allowBrowser)
+        progress($"Signing in to {Space.Host} (single sign-on)");
+        var (client, jar) = SignOnClient();
+        SignOnResult result;
+        using (client)
         {
-            throw new SignInRequiredException($"Single sign-on to {Space.Host} did not get through: {result.Problem}");
+            result = await SingleSignOn.RunAsync(client, LoginUrl, _logger, ct).ConfigureAwait(false);
         }
 
-        _logger.LogInformation("3dx: single sign-on to {Host} did not get through ({Problem}); signing in with a browser. Route: {Route}", Space.Host, result.Problem, result.Route);
-        await BrowserSignInAsync(interactive, progress, ct).ConfigureAwait(false);
+        if (result.SignedIn)
+        {
+            Replace(Cookies, jar);
+            if (!await AnswersAsync(Space, ct).ConfigureAwait(false) && await FlowAsync(Space, ct).ConfigureAwait(false) is { SignedIn: false } handOver)
+            {
+                result = result with { SignedIn = false, Problem = $"the single sign-on went through, but 3DSpace does not take the session it made ({handOver.Problem})" };
+            }
+        }
+
+        if (result.SignedIn)
+        {
+            _badgeHeld = false;
+            _logger.LogInformation("3dx: signed in to {Host} by single sign-on, as Mount3DX signs in: {Route}", Space.Host, result.Route);
+        }
+        else
+        {
+            _logger.LogInformation("3dx: single sign-on to {Host}, as Mount3DX signs in, did not get through: {Problem}. Route: {Route}", Space.Host, result.Problem, result.Route);
+            if (renewal && result.BadgeTaken)
+            {
+                _badgeHeld = true;
+                _logger.LogInformation("3dx: the badge sign-in did not get through in the background; it is not tried again before a sign-in succeeds (Retry the source)");
+            }
+        }
+
+        return result;
     }
 
     private static string Advice(FlowResult result)
@@ -254,19 +326,16 @@ internal sealed class ThreeDXSession : IDisposable
     /// <summary>
     /// The sign-in without a browser, from <paramref name="service"/>'s probe until the service answers. Once a server has
     /// refused the Windows account, it is not tried again until the source starts afresh: renewals giving a wrong password
-    /// every few seconds would lock the account. In the background (<paramref name="renewal"/>) the badge sign-in, and the
-    /// PIN Windows asks for with it, comes at most once until a sign-in succeeds: a PIN prompt nobody answers (overnight) is
-    /// not joined by another every few minutes; the source shows Degraded and waits for a Retry.
+    /// every few seconds would lock the account.
     /// </summary>
-    private async Task<FlowResult> FlowAsync(Uri service, CancellationToken ct, bool renewal = false)
+    private async Task<FlowResult> FlowAsync(Uri service, CancellationToken ct)
     {
         if (_refused is { } why)
         {
             return new FlowResult(false, "", $"{why} (not tried again until the source is restarted)", Refused: true);
         }
 
-        var badge = renewal && _badgeHeld ? null : _badgeHttp;
-        var flow = new SignInFlow(_flowHttp, _logger, _settings.FormCredentials(), badge);
+        var flow = new SignInFlow(_flowHttp, _logger, _settings.FormCredentials());
         FlowResult result;
         try
         {
@@ -285,23 +354,13 @@ internal sealed class ThreeDXSession : IDisposable
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException or SignInRequiredException or System.Text.Json.JsonException || ex is TaskCanceledException && !ct.IsCancellationRequested)
         {
-            // a server in the sign-in that did not answer, or a badge sign-in that went wrong (a PIN nobody gave)
+            // a server in the sign-in that did not answer
             result = new FlowResult(false, "", $"the sign-in did not get through: {ex.Message}");
         }
 
         if (result.Refused && Method != ThreeDXSignIn.WebSession)
         {
             _refused = result.Problem;
-        }
-
-        if (result.SignedIn)
-        {
-            _badgeHeld = false;
-        }
-        else if (renewal && flow.BadgeTaken)
-        {
-            _badgeHeld = true;
-            _logger.LogInformation("3dx: the badge sign-in did not get through in the background ({Problem}); it is not tried again before a sign-in succeeds (Retry the source)", result.Problem);
         }
 
         return result;
@@ -344,8 +403,9 @@ internal sealed class ThreeDXSession : IDisposable
     /// <summary>
     /// After a request to <paramref name="service"/> lapsed (seen at <paramref name="seen"/>, its <see cref="GenerationOf"/>):
     /// the sign-in again for that service, once for every request that lapsed with it. Through 3DPassport with the cookies
-    /// held, or the settings' own sign-in; for the web session, a headless browser on its profile last. False when the
-    /// service was renewed just before (3DX keeps refusing the session: no use renewing again at once); throws
+    /// held, or the settings' own sign-in; then, for the web session and as yourself, Mount3DX's single sign-on (from 3DSpace's
+    /// page; the service then through 3DPassport's new cookie); for the web session, a headless browser on its profile last.
+    /// False when the service was renewed just before (3DX keeps refusing the session: no use renewing again at once); throws
     /// <see cref="SignInRequiredException"/> when the sign-in needs a person.
     /// </summary>
     public async Task<bool> RenewAsync(Uri service, int seen, CancellationToken ct)
@@ -367,12 +427,17 @@ internal sealed class ThreeDXSession : IDisposable
 
             _renewedAt[key] = Stopwatch.GetTimestamp();
             _logger.LogInformation("3dx: the session for {Host}{Path} has lapsed; signing in to it again", service.Host, service.AbsolutePath);
-            var result = await FlowAsync(service, ct, renewal: true).ConfigureAwait(false);
+            var result = await FlowAsync(service, ct).ConfigureAwait(false);
+            if (!result.SignedIn && await SignOnAsync(renewal: true, _ => { }, ct).ConfigureAwait(false) is { SignedIn: true })
+            {
+                result = await FlowAsync(service, ct).ConfigureAwait(false);
+            }
+
             if (!result.SignedIn && Method == ThreeDXSignIn.WebSession && _allowBrowser && Browser().CanSignIn)
             {
                 _logger.LogInformation("3dx: {Path} could not be signed in to again without a browser ({Problem}); renewing the web session headless", service.AbsolutePath, result.Problem);
                 Add(Cookies, await Browser().SignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false));
-                result = await FlowAsync(service, ct, renewal: true).ConfigureAwait(false);
+                result = await FlowAsync(service, ct).ConfigureAwait(false);
             }
 
             if (!result.SignedIn)
@@ -469,6 +534,27 @@ internal sealed class ThreeDXSession : IDisposable
         }
     }
 
+    /// <summary>The cookies of <paramref name="from"/> in place of all of <paramref name="into"/>'s: a new sign-in's, which those of before would only get in the way of.</summary>
+    internal static void Replace(CookieContainer into, CookieContainer from)
+    {
+        foreach (Cookie old in into.GetAllCookies())
+        {
+            old.Expired = true;
+        }
+
+        foreach (Cookie c in from.GetAllCookies())
+        {
+            try
+            {
+                into.Add(c);
+            }
+            catch (CookieException)
+            {
+                // a cookie the session's jar will not hold: the session goes without it
+            }
+        }
+    }
+
     internal static string Export(CookieContainer jar)
     {
         using var buffer = new MemoryStream();
@@ -550,8 +636,6 @@ internal sealed class ThreeDXSession : IDisposable
     {
         Http.Dispose();
         _flowHttp.Dispose();
-        _badgeHttp?.Dispose();
-        _badgeHandler?.Dispose();
         _handler.Dispose();
         _renewGate.Dispose();
     }

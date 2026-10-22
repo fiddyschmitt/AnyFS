@@ -18,10 +18,11 @@ internal sealed record FlowResult(bool SignedIn, string Route, string? Problem =
 /// A sign-in without a browser (spec 7.6.2): from a page of the service, the redirects a browser would follow to the sign-in
 /// and back, with the session's cookies throughout. A server that asks for a Windows sign-in (401 Negotiate or NTLM) gets
 /// the credentials the handler holds; a page that hands the sign-in on by a form posting itself (a SAML request or answer, a
-/// WS-Federation result) is posted on; a smartcard badge sign-in like the one Mount3DX takes (<see cref="BadgeSignIn"/>) is
-/// taken when the session may present a smartcard; 3DPassport's own sign-in, or a plain user name and password page, gets
-/// the user name and password when the source has them. It stops at anything else (a page asking for something it has no
-/// answer to: the web session then opens a browser) and after <see cref="MaxSteps"/> steps.
+/// WS-Federation result) is posted on; 3DPassport's own sign-in, or a plain user name and password page, gets the user name
+/// and password when the source has them. It stops at anything else (a page asking for something it has no answer to: the
+/// web session then opens a browser) and after <see cref="MaxSteps"/> steps. Mount3DX's smartcard badge sign-in is not
+/// here but in <see cref="SingleSignOn"/>, its own steps on a client of its own, which the web session and as yourself try
+/// as well.
 /// </summary>
 internal sealed partial class SignInFlow
 {
@@ -41,23 +42,17 @@ internal sealed partial class SignInFlow
     private static readonly string[] VisibleTypes = ["text", "email", "password", "tel", "number", "search", "url"];
 
     private readonly HttpClient _http;
-    private readonly HttpClient? _badge;
     private readonly NetworkCredential? _password;
     private readonly ILogger _logger;
 
     /// <param name="http">A client over the session's handler (its cookies and Windows credentials), following no redirects itself.</param>
     /// <param name="password">The user name and password for a sign-in page that asks for them; null when the source has none.</param>
-    /// <param name="badge">A client whose connections may present the person's smartcard, for <see cref="BadgeSignIn"/>; null when the sign-in may not.</param>
-    public SignInFlow(HttpClient http, ILogger logger, NetworkCredential? password = null, HttpClient? badge = null)
+    public SignInFlow(HttpClient http, ILogger logger, NetworkCredential? password = null)
     {
         _http = http;
         _logger = logger;
         _password = password;
-        _badge = badge;
     }
-
-    /// <summary>Whether the badge sign-in was begun (Windows may have asked for the smartcard's PIN), even when the flow then failed.</summary>
-    public bool BadgeTaken { get; private set; }
 
     /// <summary>
     /// Goes from <paramref name="start"/> until <paramref name="done"/> says the service answered (the response, its body),
@@ -69,14 +64,11 @@ internal sealed partial class SignInFlow
         var posted = new HashSet<string>(StringComparer.Ordinal);
         var passwordGiven = false;
         var passportGiven = false;
-        var badgeTaken = false;
-        HttpRequestMessage? request = Get(start);
-        HttpResponseMessage? pending = null;
+        var request = Get(start);
         for (var step = 1; step <= MaxSteps; step++)
         {
-            using var response = pending ?? await _http.SendAsync(request!, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-            pending = null;
-            var url = response.RequestMessage?.RequestUri ?? request!.RequestUri!;
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            var url = response.RequestMessage?.RequestUri ?? request.RequestUri!;
             route.Add($"{url.Host}{url.AbsolutePath} {(int)response.StatusCode}{Challenge(response)}");
             _logger.LogDebug("3dx: sign-in step {Step}: {Method} {Host}{Path} -> {Status}", step, response.RequestMessage?.Method, url.Host, url.AbsolutePath, (int)response.StatusCode);
 
@@ -111,15 +103,6 @@ internal sealed partial class SignInFlow
             }
 
             var page = await new HtmlParser().ParseDocumentAsync(body, ct).ConfigureAwait(false);
-            // the badge sign-in once: its answer comes from an address with the same resume parameters
-            if (_badge is not null && !badgeTaken && BadgeSignIn.Applies(url))
-            {
-                _logger.LogInformation("3dx: {Host} offers a badge sign-in; presenting the smartcard", url.Host);
-                badgeTaken = BadgeTaken = true;
-                pending = await BadgeSignIn.RunAsync(_http, _badge, url, page, _logger, ct).ConfigureAwait(false);
-                continue;
-            }
-
             var next = HandOver(url, page, posted);
             if (next is null && _password is not null)
             {
