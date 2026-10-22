@@ -2,10 +2,10 @@ using System.Runtime.Versioning;
 using System.Text.Json;
 using Microsoft.Win32;
 
-namespace AnyFS.Sources.SharePoint;
+namespace AnyFS.Sources.Common;
 
 /// <summary>The browsers the web session can sign in through: Chromium ones over DevTools or WebDriver, Firefox over WebDriver.</summary>
-internal enum BrowserKind
+public enum BrowserKind
 {
     Edge,
     Chrome,
@@ -16,15 +16,18 @@ internal enum BrowserKind
 /// <summary>
 /// Finds the browsers the web session signs in through (spec 7.3.2). <see cref="Find"/> picks the Chromium-based one
 /// (Edge, Chrome or Chromium) that <see cref="BrowserSession"/> drives over the DevTools protocol: Edge first on Windows
-/// (always present), then Chrome, then Chromium; a settings path overrides the search, and <c>ANYFS_SHAREPOINT_BROWSER</c>
-/// overrides that (for tests). <see cref="FindKind"/> and <see cref="DefaultBrowser"/> serve the WebDriver fallback, which
-/// can use Firefox too. The person's own browser profile is never touched: every launch uses a profile of AnyFS's own.
+/// (always present), then Chrome, then Chromium; a settings path overrides the search, and the source's own variable
+/// (<c>ANYFS_SHAREPOINT_BROWSER</c>, <c>ANYFS_3DX_BROWSER</c>) overrides that (for tests). <see cref="FindKind"/> and
+/// <see cref="DefaultBrowser"/> serve the WebDriver fallback, which can use Firefox too. The person's own browser profile is
+/// never touched: every launch uses a profile of AnyFS's own.
 /// </summary>
-internal static class BrowserLocator
+public static class BrowserLocator
 {
-    public static string? Find(string? configuredPath = null)
+    /// <param name="configuredPath">The browser the settings name, if any.</param>
+    /// <param name="overrideVariable">The environment variable whose path wins over both (tests).</param>
+    public static string? Find(string? configuredPath = null, string? overrideVariable = null)
     {
-        var overridePath = Environment.GetEnvironmentVariable("ANYFS_SHAREPOINT_BROWSER");
+        var overridePath = overrideVariable is null ? null : Environment.GetEnvironmentVariable(overrideVariable);
         if (!string.IsNullOrWhiteSpace(overridePath))
         {
             return File.Exists(overridePath) ? overridePath : null;

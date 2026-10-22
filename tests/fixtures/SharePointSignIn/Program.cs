@@ -18,6 +18,7 @@
 
 using System.Security.Cryptography;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 using AnyFS.Sources.SharePoint;
 using Microsoft.Extensions.Logging.Abstractions;
 

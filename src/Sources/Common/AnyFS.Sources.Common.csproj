@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sources.Common</AssemblyName>
+    <RootNamespace>AnyFS.Sources.Common</RootNamespace>
+  </PropertyGroup>
+  <!-- What more than one built-in source needs (spec 7.0): the web session's sign-in in a browser of AnyFS's own, over
+       DevTools or Selenium WebDriver; Windows account credentials; an HTTP body as a stream and a file held in memory.
+       Not part of the SDK: its dependencies (Selenium) are no plugin's business. -->
+  <ItemGroup>
+    <!-- Selenium (Apache-2.0): the web session's fallback where AnyFS cannot reach the browser's DevTools port itself
+         (a policy, or a profile the browser will not take). Selenium Manager, a native helper in the package, finds or
+         downloads the driver that matches the browser; the single-file publish carries it (spec 7.3.2). -->
+    <PackageReference Include="Selenium.WebDriver" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
+  </ItemGroup>
+</Project>

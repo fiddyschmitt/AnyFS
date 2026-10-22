@@ -25,6 +25,9 @@
     <Project Path="src/Mounts/WinFsp/AnyFS.Mounts.WinFsp.csproj" />
   </Folder>
   <Folder Name="/src/Sources/" />
+  <Folder Name="/src/Sources/Common/">
+    <Project Path="src/Sources/Common/AnyFS.Sources.Common.csproj" />
+  </Folder>
   <Folder Name="/src/Sources/Mirror/">
     <Project Path="src/Sources/Mirror/AnyFS.Sources.Mirror.csproj" />
   </Folder>

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using AnyFS.Sources.Common;
 using AnyFS.Sources.SharePoint;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -85,7 +86,7 @@ public class BrowserSessionLiveTests
             Assert.Inconclusive("the browser's live tests run with the web session: ANYFS_TEST_SPS_SIGNIN=web");
         }
 
-        var browser = BrowserLocator.Find() ?? throw new AssertInconclusiveException("no Edge, Chrome or Chromium on this machine");
+        var browser = BrowserLocator.Find(null, SharePointPlugin.BrowserVariable) ?? throw new AssertInconclusiveException("no Edge, Chrome or Chromium on this machine");
         SiteAddress.TryParse(SpsTestServer.Site, out var site, out _);
         return (browser, new Uri(site.Url));
     }
@@ -138,7 +139,7 @@ public class BrowserSessionLiveTests
             }
 
             Assert.IsTrue(File.Exists(portFile), "the browser left open is listening");
-            var cookies = await new BrowserSession(browser, profile, NullLogger.Instance).SignInAsync(site, interactive: false, _ => { }, CancellationToken.None);
+            var cookies = await new BrowserSession(browser, new SharePointSignInTarget(site, profile), NullLogger.Instance).SignInAsync(interactive: false, _ => { }, CancellationToken.None);
             Assert.IsTrue(cookies.Any(c => c.Name == "FedAuth"), "the profile's sign-in was read");
             Assert.IsTrue(leftover.WaitForExit(15000), "the browser left open was closed first");
         }
@@ -159,8 +160,8 @@ public class BrowserSessionLiveTests
         {
             await Task.Delay(4000);
             Assert.IsFalse(leftover.HasExited, "the browser holds the profile");
-            var session = new BrowserSession(browser, profile, log);
-            var ex = await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => session.SignInAsync(site, interactive: false, _ => { }, CancellationToken.None));
+            var session = new BrowserSession(browser, new SharePointSignInTarget(site, profile), log);
+            var ex = await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => session.SignInAsync(interactive: false, _ => { }, CancellationToken.None));
             Assert.IsTrue(log.Lines.Any(l => l.Contains("through WebDriver", StringComparison.Ordinal)), "it fell back to WebDriver:\n" + string.Join("\n", log.Lines));
             Assert.IsTrue(log.Lines.Any(l => l.Contains("WebDriver opened", StringComparison.Ordinal)), "and WebDriver started a browser:\n" + string.Join("\n", log.Lines));
             StringAssert.Contains(ex.Message, "lapsed", "WebDriver's own profile has no sign-in yet, and no window may be shown");

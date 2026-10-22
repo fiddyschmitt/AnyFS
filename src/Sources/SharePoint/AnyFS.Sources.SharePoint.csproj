@@ -8,10 +8,6 @@
          Microsoft Graph and SharePoint's REST API are spoken with HttpClient and System.Text.Json directly: the
          handful of calls a file system needs is not worth the Graph SDK's size under the trimmed single-file publish. -->
     <PackageReference Include="Microsoft.Identity.Client" />
-    <!-- Selenium (Apache-2.0): the web session's fallback where AnyFS cannot reach the browser's DevTools port itself
-         (a policy, or a profile the browser will not take). Selenium Manager, a native helper in the package, finds or
-         downloads the driver that matches the browser; the single-file publish carries it (spec 7.3.2). -->
-    <PackageReference Include="Selenium.WebDriver" />
     <!-- ReverseMarkdown (MIT) over AngleSharp (MIT): a site's pages show as Markdown (SharePointPages). MarkItDown's
          .NET ports carry cloud SDKs and image libraries for other formats; HTML is all a page is. -->
     <PackageReference Include="ReverseMarkdown" />
@@ -21,6 +17,11 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <!-- the web session (with its Selenium WebDriver fallback), Windows account credentials, ResponseStream, MemoryFile -->
+    <ProjectReference Include="..\Common\AnyFS.Sources.Common.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="AnyFS.Sources.Common" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="AnyFS.Sources.Tests" />

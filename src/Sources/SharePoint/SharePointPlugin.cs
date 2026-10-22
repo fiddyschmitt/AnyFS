@@ -41,8 +41,8 @@ public sealed class SharePointSettings
     public const string AppBrowser = "App sign-in, browser";
     public const string AppDeviceCode = "App sign-in, device code";
     public const string WebSession = "Web session, no app registration";
-    public const string WindowsCurrent = "Windows account, as yourself";
-    public const string Windows = "Windows account";
+    public const string WindowsCurrent = Common.WindowsAccount.AsYourself;
+    public const string Windows = Common.WindowsAccount.WithPassword;
 
     [Setting("Site URLs (one per line)", Required = true, Primary = true, Order = 0, Kind = SettingKind.Multiline, Placeholder = "https://contoso.sharepoint.com/sites/Team\nhttps://contoso.sharepoint.com/sites/Sales",
         Hint = "The site's address: SharePoint Online (contoso.sharepoint.com, or .sharepoint.us in GCC High) or SharePoint Server on your own network (http://intranet/sites/Team). A subsite's address, or a library or page pasted after the site, is fine. Several sites, one per line, each show as a folder of their own, under the one sign-in; one that does not open is left out until it does. For SharePoint Embedded, the container type's id instead.")]
@@ -194,27 +194,15 @@ public sealed class SharePointSettings
     internal bool IsWindowsCurrent => string.Equals((SignInMethod ?? "").Trim(), WindowsCurrent, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The Windows sign-in AnyFS runs as, not a user name and password: chosen outright, or no user name given.</summary>
-    internal bool UsesCurrentLogon => IsWindowsCurrent || string.IsNullOrWhiteSpace(Username);
+    internal bool UsesCurrentLogon => Common.WindowsAccount.UsesCurrentLogon(IsWindowsCurrent, Username);
 
     /// <summary>The Windows account a Windows sign-in goes as, for messages.</summary>
-    internal string WindowsAccount => UsesCurrentLogon ? $@"{Environment.UserDomainName}\{Environment.UserName} (your Windows sign-in)" : Username!.Trim();
+    internal string WindowsAccount => Common.WindowsAccount.Name(IsWindowsCurrent, Username);
 
     internal bool TryGetContainerType(out Guid id) => Guid.TryParse(FirstSite, out id);
 
     /// <summary>The credentials for the Windows sign-in: DOMAIN\name is split, name@domain is passed as a user principal name, none means the account AnyFS runs as.</summary>
-    internal ICredentials Credentials()
-    {
-        if (UsesCurrentLogon)
-        {
-            return CredentialCache.DefaultNetworkCredentials;
-        }
-
-        var user = Username!.Trim();
-        var slash = user.IndexOf('\\');
-        return slash > 0
-            ? new NetworkCredential(user[(slash + 1)..], Password ?? "", user[..slash])
-            : new NetworkCredential(user, Password ?? "");
-    }
+    internal ICredentials Credentials() => Common.WindowsAccount.Credentials(IsWindowsCurrent, Username, Password);
 
     private bool IsShippedClientId => string.Equals(EffectiveClientId, SharePointPlugin.DefaultClientId, StringComparison.OrdinalIgnoreCase);
 
@@ -357,16 +345,14 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     /// site and by the Test button. It lives in the user's app data rather than the portable settings because a
     /// browser profile is bound to the machine; <c>ANYFS_SHAREPOINT_PROFILES</c> moves the root (tests).
     /// </summary>
-    internal static string ProfileDir(string host)
-    {
-        var root = Environment.GetEnvironmentVariable("ANYFS_SHAREPOINT_PROFILES");
-        if (string.IsNullOrWhiteSpace(root))
-        {
-            root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AnyFS", "sharepoint-browser");
-        }
+    internal static string ProfileDir(string host) => WebSignInTarget.ProfileFor("sharepoint-browser", host, "ANYFS_SHAREPOINT_PROFILES");
 
-        return Path.Combine(root, host);
-    }
+    /// <summary>The variable whose browser path wins over the settings' (tests).</summary>
+    internal const string BrowserVariable = "ANYFS_SHAREPOINT_BROWSER";
+
+    /// <summary>The web session for a site: the browser the settings name or the one found, and the site's profile.</summary>
+    internal static BrowserSession WebSession(SharePointSettings s, Uri site, Microsoft.Extensions.Logging.ILogger logger)
+        => new(BrowserLocator.Find(s.Browser, BrowserVariable), new SharePointSignInTarget(site), logger);
 
     /// <summary>The web session's message when there is no browser to sign in with at all.</summary>
     internal const string NoBrowser = "No Edge, Chrome, Chromium or Firefox was found for the web session's sign-in. Install one, or set the Browser path under Advanced.";
@@ -516,29 +502,9 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
         if (signIn == SharePointSignIn.Windows)
         {
-            if (s.IsWindowsCurrent)
+            foreach (var problem in Common.WindowsAccount.Problems(s.IsWindowsCurrent, s.Username, s.Password, nameof(SharePointSettings.SignInMethod), nameof(SharePointSettings.Username)))
             {
-                // the user name and password are hidden and not used; one kept from an earlier choice is no error
-                if (!OperatingSystem.IsWindows())
-                {
-                    yield return new ValidationMessage("Signing in as yourself works on Windows only: choose Windows account and give a user name and password.", nameof(SharePointSettings.SignInMethod));
-                }
-            }
-            else if (s.UsesCurrentLogon)
-            {
-                if (!string.IsNullOrEmpty(s.Password))
-                {
-                    yield return new ValidationMessage("A password needs a user name.", nameof(SharePointSettings.Username));
-                }
-
-                if (!OperatingSystem.IsWindows())
-                {
-                    yield return new ValidationMessage("Give a user name and password: signing in as the current account works on Windows only.", nameof(SharePointSettings.Username));
-                }
-            }
-            else if (s.Username!.Trim().Any(char.IsWhiteSpace))
-            {
-                yield return new ValidationMessage(@"The user name is DOMAIN\name or name@domain, with no spaces.", nameof(SharePointSettings.Username));
+                yield return problem;
             }
         }
 
@@ -634,14 +600,14 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     {
         SiteAddress.TryParse(s.FirstSite, out var site, out _);
         var siteUri = new Uri(site.Url);
-        var session = new BrowserSession(BrowserLocator.Find(s.Browser), ProfileDir(site.Host), NullLogger.Instance);
+        var session = WebSession(s, siteUri, NullLogger.Instance);
         if (!session.CanSignIn)
         {
             return new TestResult(false, NoBrowser);
         }
 
-        var cookies = await session.SignInAsync(siteUri, interactive: true, progress.Report, ct).ConfigureAwait(false);
-        using var handler = new BrowserSessionHandler(cookies, siteUri, c => session.SignInAsync(siteUri, interactive: false, progress.Report, c), NullLogger.Instance);
+        var cookies = await session.SignInAsync(interactive: true, progress.Report, ct).ConfigureAwait(false);
+        using var handler = new BrowserSessionHandler(cookies, siteUri, c => session.SignInAsync(interactive: false, progress.Report, c), NullLogger.Instance);
         using var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, NullLogger.Instance, handler: handler);
         if (s.IsMultiSite)
         {
@@ -1067,7 +1033,7 @@ public sealed class SharePointSiteSource : SharePointSource
     {
         SiteAddress.TryParse(_settings.FirstSite, out var site, out _);
         var siteUri = new Uri(site.Url);
-        var session = new BrowserSession(BrowserLocator.Find(_settings.Browser), SharePointPlugin.ProfileDir(site.Host), Logger);
+        var session = SharePointPlugin.WebSession(_settings, siteUri, Logger);
         if (!session.CanSignIn)
         {
             throw new SourceFailedException(SharePointPlugin.NoBrowser, permanent: true);
@@ -1077,14 +1043,14 @@ public sealed class SharePointSiteSource : SharePointSource
         IReadOnlyList<SessionCookie> cookies;
         try
         {
-            cookies = await session.SignInAsync(siteUri, interactive: true, Progress, ct).ConfigureAwait(false);
+            cookies = await session.SignInAsync(interactive: true, Progress, ct).ConfigureAwait(false);
         }
         catch (SignInRequiredException ex)
         {
             throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
         }
 
-        var handler = new BrowserSessionHandler(cookies, siteUri, c => session.SignInAsync(siteUri, interactive: false, Progress, c), Logger);
+        var handler = new BrowserSessionHandler(cookies, siteUri, c => session.SignInAsync(interactive: false, Progress, c), Logger);
         var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, Logger, MarkDegraded, MarkHealthy, handler);
         if (_settings.IsMultiSite)
         {

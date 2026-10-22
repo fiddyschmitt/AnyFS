@@ -575,7 +575,7 @@ public abstract class SharePointSource : SourceBase, ICountable
         if (resolved is { Page: { } page })
         {
             // a page in a site's own folder: its Markdown, made when the site was listed; read-only like Site Pages'
-            return mode == VfsOpenMode.Read ? new MarkdownFile(page.Markdown) : throw VfsException.ReadOnly(path, "the site's page shows as Markdown, for reading");
+            return mode == VfsOpenMode.Read ? new MemoryFile(page.Markdown, "a page") : throw VfsException.ReadOnly(path, "the site's page shows as Markdown, for reading");
         }
 
         if (resolved is not { Library: { } library } place)
@@ -1785,64 +1785,4 @@ public abstract class SharePointSource : SourceBase, ICountable
     /// <param name="Page">The page when the place is one in the site's own folder (a classic site's default.aspx as Markdown).</param>
     private sealed record Place(WebNode Web, LibraryInfo? Library, string ItemPath, WebFolder? Folder = null, SitePage? Page = null);
 
-    /// <summary>A page's Markdown held in memory, read-only.</summary>
-    private sealed class MarkdownFile(byte[] markdown) : IVfsFile
-    {
-        public long Length => markdown.Length;
-
-        public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct)
-        {
-            if (offset >= markdown.Length)
-            {
-                return ValueTask.FromResult(0);
-            }
-
-            var n = (int)Math.Min(buffer.Length, markdown.Length - offset);
-            markdown.AsMemory((int)offset, n).CopyTo(buffer);
-            return ValueTask.FromResult(n);
-        }
-
-        public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct) => throw VfsException.NotSupported("writing a page");
-
-        public ValueTask SetLengthAsync(long length, CancellationToken ct) => throw VfsException.NotSupported("writing a page");
-
-        public ValueTask FlushAsync(CancellationToken ct) => ValueTask.CompletedTask;
-
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-    }
-
-    /// <summary>A response body stream that disposes its response with it.</summary>
-    private sealed class ResponseStream(HttpResponseMessage response, Stream body) : Stream
-    {
-        public override bool CanRead => body.CanRead;
-        public override bool CanSeek => false;
-        public override bool CanWrite => false;
-        public override long Length => throw new NotSupportedException();
-        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
-        public override void Flush() { }
-        public override int Read(byte[] buffer, int offset, int count) => body.Read(buffer, offset, count);
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) => body.ReadAsync(buffer, cancellationToken);
-        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => body.ReadAsync(buffer, offset, count, cancellationToken);
-        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
-        public override void SetLength(long value) => throw new NotSupportedException();
-        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-            {
-                body.Dispose();
-                response.Dispose();
-            }
-
-            base.Dispose(disposing);
-        }
-
-        public override async ValueTask DisposeAsync()
-        {
-            await body.DisposeAsync().ConfigureAwait(false);
-            response.Dispose();
-            await base.DisposeAsync().ConfigureAwait(false);
-        }
-    }
 }

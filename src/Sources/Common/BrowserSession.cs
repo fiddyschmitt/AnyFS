@@ -7,43 +7,42 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 
-namespace AnyFS.Sources.SharePoint;
-
-/// <summary>One cookie a signed-in SharePoint page holds: enough to replay it on a plain HTTP request.</summary>
-internal sealed record SessionCookie(string Name, string Value, string Domain, string Path, bool Secure, bool HttpOnly);
+namespace AnyFS.Sources.Common;
 
 /// <summary>
-/// A SharePoint Online sign-in taken from a browser, for people whose organisation will not register an app
-/// (spec 7.3.2). AnyFS launches a Chromium browser (<see cref="BrowserLocator"/>) with a profile of its own, one per
-/// site host (<see cref="SharePointPlugin.ProfileDir"/>), so the person's own browser and its profile are never read; the person signs in on
-/// Microsoft's real page, where multi-factor and Conditional Access happen as always; the site's cookies are read
-/// over the browser's DevTools protocol and replayed on plain requests to SharePoint's REST API, the way the
-/// site's own pages call it. The browser is open only long enough to read the cookies, never while files are
-/// served. The profile keeps the Microsoft sign-in session, so a later headless launch renews the site cookies
-/// with nobody at the keyboard until that session itself lapses; only then is a window shown again. Where AnyFS cannot
-/// reach the DevTools port itself (a policy, or a browser that never opens it), the sign-in goes through Selenium
-/// WebDriver instead (<see cref="WebDriverSession"/>), for good.
+/// A sign-in taken from a browser (spec 7.3.2), for people whose organisation will not register an app or whose sign-in
+/// only a browser can do. AnyFS launches a Chromium browser (<see cref="BrowserLocator"/>) with a profile of its own, one per
+/// host (<see cref="WebSignInTarget.ProfileFor"/>), so the person's own browser and its profile are never read; the person
+/// signs in on the real sign-in page, where multi-factor and Conditional Access happen as always; the cookies are read over
+/// the browser's DevTools protocol and replayed on plain requests, the way the site's own pages make them. What the session
+/// is and when the person has signed in is the <see cref="WebSignInTarget"/>'s to say. The browser is open only long enough
+/// to read the cookies, never while files are served. The profile keeps the sign-in session, so a later headless launch
+/// renews the cookies with nobody at the keyboard until that session itself lapses; only then is a window shown again.
+/// Where AnyFS cannot reach the DevTools port itself (a policy, or a browser that never opens it), the sign-in goes through
+/// Selenium WebDriver instead (<see cref="WebDriverSession"/>), for good.
 /// </summary>
-internal sealed class BrowserSession
+public sealed class BrowserSession
 {
     private static readonly TimeSpan SilentDeadline = TimeSpan.FromSeconds(25);
     private static readonly TimeSpan InteractiveDeadline = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan PortDeadline = TimeSpan.FromSeconds(30);
 
     private readonly string? _browserPath;
+    private readonly WebSignInTarget _target;
     private readonly string _profileDir;
     private readonly ILogger _logger;
     private readonly IReadOnlyList<WebDriverBrowser> _webDriverBrowsers;
     private WebDriverSession? _webDriver;
 
     /// <param name="browserPath">The Chromium browser to drive over DevTools, or null when there is none (WebDriver only, through Firefox).</param>
-    /// <param name="profileDir">AnyFS's profile for the site host; the WebDriver fallback keeps its own beside it.</param>
-    public BrowserSession(string? browserPath, string profileDir, ILogger logger)
+    /// <param name="target">What to sign in to, and how to tell the person has.</param>
+    public BrowserSession(string? browserPath, WebSignInTarget target, ILogger logger)
     {
         _browserPath = browserPath;
-        _profileDir = profileDir;
+        _target = target;
+        _profileDir = target.ProfileDir;
         _logger = logger;
-        _webDriverBrowsers = WebDriverSession.Browsers(Environment.GetEnvironmentVariable("ANYFS_SHAREPOINT_WEBDRIVER"));
+        _webDriverBrowsers = WebDriverSession.Browsers(ForcedWebDriver);
     }
 
     /// <summary>The browser AnyFS will drive, for messages ("Microsoft Edge").</summary>
@@ -52,53 +51,59 @@ internal sealed class BrowserSession
     /// <summary>Whether there is any browser to sign in with, over DevTools or WebDriver.</summary>
     public bool CanSignIn => _browserPath is not null || _webDriverBrowsers.Count > 0;
 
+    private string Prefix => _target.LogPrefix;
+
+    private Uri Site => _target.Page;
+
+    private string? ForcedWebDriver => _target.WebDriverVariable is { } name ? Environment.GetEnvironmentVariable(name) : null;
+
     /// <summary>
-    /// Why AnyFS should sign in through WebDriver from the start, or null: <c>ANYFS_SHAREPOINT_WEBDRIVER</c> says so (tests,
+    /// Why AnyFS should sign in through WebDriver from the start, or null: the target's variable says so (tests,
     /// troubleshooting), there is no Chromium browser, or its policy blocks AnyFS's own DevTools launch.
     /// </summary>
     private string? WebDriverFromTheStart()
     {
-        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ANYFS_SHAREPOINT_WEBDRIVER")))
+        if (!string.IsNullOrWhiteSpace(ForcedWebDriver))
         {
-            return "ANYFS_SHAREPOINT_WEBDRIVER is set";
+            return $"{_target.WebDriverVariable} is set";
         }
 
         return _browserPath is null ? "no Edge, Chrome or Chromium is installed" : BrowserLocator.DevToolsBlocked(_browserPath);
     }
 
     /// <summary>Signs in through WebDriver from now on, renewals included, since AnyFS cannot drive the browser's DevTools port itself.</summary>
-    private Task<IReadOnlyList<SessionCookie>> FallBackAsync(string why, Uri site, bool interactive, Action<string> progress, CancellationToken ct)
+    private Task<IReadOnlyList<SessionCookie>> FallBackAsync(string why, bool interactive, Action<string> progress, CancellationToken ct)
     {
         if (_webDriverBrowsers.Count == 0)
         {
-            throw new SignInRequiredException($"The web session cannot read the sign-in from {BrowserName} ({why}), and there is no other browser for its WebDriver fallback; install Firefox, or use an app sign-in (Sign in with).", permanent: true);
+            throw new SignInRequiredException($"The web session cannot read the sign-in from {BrowserName} ({why}), and there is no other browser for its WebDriver fallback; install Firefox{_target.OtherWayIn}.", permanent: true);
         }
 
-        _logger.LogInformation("sharepoint: signing in to {Host} through WebDriver ({Browsers}), since {Why}", site.Host, string.Join(", ", _webDriverBrowsers.Select(b => b.Name)), why);
-        _webDriver ??= new WebDriverSession(_webDriverBrowsers, _profileDir, _logger);
-        return _webDriver.SignInAsync(site, interactive, progress, ct);
+        _logger.LogInformation("{Prefix}: signing in to {Host} through WebDriver ({Browsers}), since {Why}", Prefix, Site.Host, string.Join(", ", _webDriverBrowsers.Select(b => b.Name)), why);
+        _webDriver ??= new WebDriverSession(_webDriverBrowsers, _target, _logger);
+        return _webDriver.SignInAsync(interactive, progress, ct);
     }
 
     /// <summary>Where a browser on the profile writes its DevTools port once it listens (<c>--remote-debugging-port=0</c>).</summary>
     private string PortFile => Path.Combine(_profileDir, "DevToolsActivePort");
 
     /// <summary>
-    /// The site's cookies: first a headless launch, which succeeds without a window while the profile's Microsoft
-    /// session is still good (a restart, or a silent renewal); failing that, and only when <paramref name="interactive"/>,
-    /// a window for the person to sign in. Throws <see cref="SignInRequiredException"/> when no sign-in can be had:
-    /// permanent when waiting cannot help (remote debugging turned off, the window closed, nobody signing in), so the
-    /// source waits for a Retry instead of opening windows every few minutes.
+    /// The session's cookies: first a headless launch, which succeeds without a window while the profile's sign-in is still
+    /// good (a restart, or a silent renewal); failing that, and only when <paramref name="interactive"/>, a window for the
+    /// person to sign in. Throws <see cref="SignInRequiredException"/> when no sign-in can be had: permanent when waiting
+    /// cannot help (remote debugging turned off, the window closed, nobody signing in), so the source waits for a Retry
+    /// instead of opening windows every few minutes.
     /// </summary>
-    public async Task<IReadOnlyList<SessionCookie>> SignInAsync(Uri site, bool interactive, Action<string> progress, CancellationToken ct)
+    public async Task<IReadOnlyList<SessionCookie>> SignInAsync(bool interactive, Action<string> progress, CancellationToken ct)
     {
         if (_webDriver is not null)
         {
-            return await _webDriver.SignInAsync(site, interactive, progress, ct).ConfigureAwait(false);
+            return await _webDriver.SignInAsync(interactive, progress, ct).ConfigureAwait(false);
         }
 
         if (WebDriverFromTheStart() is { } why)
         {
-            return await FallBackAsync(why, site, interactive, progress, ct).ConfigureAwait(false);
+            return await FallBackAsync(why, interactive, progress, ct).ConfigureAwait(false);
         }
 
         Capture silent;
@@ -106,7 +111,7 @@ internal sealed class BrowserSession
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            silent = await CaptureAsync(site, headless: true, SilentDeadline, ct).ConfigureAwait(false);
+            silent = await CaptureAsync(headless: true, SilentDeadline, ct).ConfigureAwait(false);
             if (silent.Cookies is { } cookies)
             {
                 return cookies;
@@ -119,7 +124,7 @@ internal sealed class BrowserSession
 
             if (!silent.DevToolsUnreachable)
             {
-                return await SignInWithAWindowAsync(site, interactive, progress, silent, ct).ConfigureAwait(false);
+                return await SignInWithAWindowAsync(interactive, progress, silent, ct).ConfigureAwait(false);
             }
         }
         finally
@@ -128,39 +133,39 @@ internal sealed class BrowserSession
         }
 
         // the browser would not let AnyFS at its DevTools port: WebDriver instead, outside the gate (it keeps its own profile)
-        return await FallBackAsync(silent.Failure!, site, interactive, progress, ct).ConfigureAwait(false);
+        return await FallBackAsync(silent.Failure!, interactive, progress, ct).ConfigureAwait(false);
     }
 
     /// <summary>After a headless launch found no saved sign-in: a window for the person, where one may be shown.</summary>
-    private async Task<IReadOnlyList<SessionCookie>> SignInWithAWindowAsync(Uri site, bool interactive, Action<string> progress, Capture silent, CancellationToken ct)
+    private async Task<IReadOnlyList<SessionCookie>> SignInWithAWindowAsync(bool interactive, Action<string> progress, Capture silent, CancellationToken ct)
     {
         if (!interactive)
         {
-            throw new SignInRequiredException($"the browser sign-in for {site.Host} has lapsed; sign in again (open the source, or its Retry)", permanent: false);
+            throw new SignInRequiredException($"the browser sign-in for {Site.Host} has lapsed; sign in again (open the source, or its Retry)", permanent: false);
         }
 
-        _logger.LogInformation("sharepoint: no sign-in to read for {Host} without a window ({Why}); opening {Browser} for the person to sign in", site.Host, silent.Failure, BrowserName);
-        progress($"Sign in to {site.Host} in the {BrowserName} window that opened");
-        var shown = await CaptureAsync(site, headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
+        _logger.LogInformation("{Prefix}: no sign-in to read for {Host} without a window ({Why}); opening {Browser} for the person to sign in", Prefix, Site.Host, silent.Failure, BrowserName);
+        progress($"Sign in to {Site.Host} in the {BrowserName} window that opened");
+        var shown = await CaptureAsync(headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
         return shown.Cookies ?? throw new SignInRequiredException(shown.Failure!, permanent: true);
     }
 
     /// <summary>
-    /// What one launch of the browser came to: the site's cookies, or why not; whether trying again can help; whether the
+    /// What one launch of the browser came to: the session's cookies, or why not; whether trying again can help; whether the
     /// browser kept AnyFS from its DevTools port, which WebDriver may still get past.
     /// </summary>
     private sealed record Capture(IReadOnlyList<SessionCookie>? Cookies, string? Failure = null, bool Final = false, bool DevToolsUnreachable = false);
 
     /// <summary>
-    /// Opens <paramref name="site"/> in the browser and waits for its FedAuth cookie with a page on the site, meaning the
-    /// page is signed in, until <paramref name="deadline"/>. The browser is always closed before returning.
+    /// Opens the target's page in the browser and waits for the target to find the person signed in, until
+    /// <paramref name="deadline"/>. The browser is always closed before returning.
     /// </summary>
-    private async Task<Capture> CaptureAsync(Uri site, bool headless, TimeSpan deadline, CancellationToken ct)
+    private async Task<Capture> CaptureAsync(bool headless, TimeSpan deadline, CancellationToken ct)
     {
         Directory.CreateDirectory(_profileDir);
         await CloseLeftoverAsync(ct).ConfigureAwait(false);
         var mode = headless ? "headless" : "with a window";
-        using var browser = LaunchBrowser(site, headless);
+        using var browser = LaunchBrowser(headless);
         Cdp? cdp = null;
         try
         {
@@ -171,24 +176,25 @@ internal sealed class BrowserSession
             }
 
             cdp = await Cdp.ConnectAsync(endpoint, ct).ConfigureAwait(false);
-            _logger.LogInformation("sharepoint: opened {Browser} {Mode} for {Host} (DevTools on port {Port})", BrowserName, mode, site.Host, endpoint.Port);
+            _logger.LogInformation("{Prefix}: opened {Browser} {Mode} for {Host} (DevTools on port {Port})", Prefix, BrowserName, mode, Site.Host, endpoint.Port);
             var until = DateTime.UtcNow + deadline;
             var sawPage = false;
             DateTime? noPagesSince = null;
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
-                var cookies = await SiteCookiesAsync(cdp, site, ct).ConfigureAwait(false);
+                var cookies = await CookiesAsync(cdp, ct).ConfigureAwait(false);
                 var pages = await PagesAsync(cdp, ct).ConfigureAwait(false);
-                if (cookies.Any(c => c.Name == "FedAuth") && pages.Any(p => p.Host.Equals(site.Host, StringComparison.OrdinalIgnoreCase)))
+                var check = await _target.CheckAsync(pages, cookies, ct).ConfigureAwait(false);
+                if (check.Done)
                 {
-                    _logger.LogInformation("sharepoint: read the sign-in to {Host} from {Browser} ({Count} cookies)", site.Host, BrowserName, cookies.Count);
+                    _logger.LogInformation("{Prefix}: read the sign-in to {Host} from {Browser} ({Count} cookies)", Prefix, Site.Host, BrowserName, cookies.Count);
                     return new Capture(cookies);
                 }
 
-                if (pages.FirstOrDefault(p => IsSessionProxy(p, site)) is { } proxied)
+                if (check.Failure is { } failure)
                 {
-                    return new Capture(null, $"{site.Host} opens through a session proxy ({proxied.Host}, Microsoft Defender for Cloud Apps), which the web session cannot go through; an app sign-in can", Final: true);
+                    return new Capture(null, failure, Final: true);
                 }
 
                 // a browser that keeps running in the background after its last window closes stays connected, so a
@@ -198,16 +204,16 @@ internal sealed class BrowserSession
                 noPagesSince = headless || !sawPage || pages.Count > 0 ? null : noPagesSince ?? DateTime.UtcNow;
                 if (DateTime.UtcNow - noPagesSince > TimeSpan.FromSeconds(3))
                 {
-                    return new Capture(null, WindowClosed(site), Final: true);
+                    return new Capture(null, WindowClosed(), Final: true);
                 }
 
                 if (DateTime.UtcNow > until)
                 {
-                    _logger.LogInformation("sharepoint: no sign-in to {Host} after {Seconds} s {Mode}; pages open: {Pages}; cookies for the site: {Cookies}",
-                        site.Host, deadline.TotalSeconds, mode, string.Join(", ", pages.Select(p => p.Host + p.AbsolutePath)), string.Join(", ", cookies.Select(c => c.Name)));
+                    _logger.LogInformation("{Prefix}: no sign-in to {Host} after {Seconds} s {Mode}; pages open: {Pages}; cookies for the session: {Cookies}",
+                        Prefix, Site.Host, deadline.TotalSeconds, mode, string.Join(", ", pages.Select(p => p.Host + p.AbsolutePath)), string.Join(", ", cookies.Select(c => c.Name)));
                     return headless
                         ? new Capture(null, "no saved sign-in")
-                        : new Capture(null, $"nobody finished the sign-in to {site.Host} within {InteractiveDeadline.TotalMinutes:N0} minutes; Retry to sign in", Final: true);
+                        : new Capture(null, $"nobody finished the sign-in to {Site.Host} within {InteractiveDeadline.TotalMinutes:N0} minutes; Retry to sign in", Final: true);
                 }
 
                 await Task.Delay(TimeSpan.FromSeconds(headless ? 1 : 2), ct).ConfigureAwait(false);
@@ -216,12 +222,12 @@ internal sealed class BrowserSession
         catch (Exception ex) when (ex is WebSocketException or IOException or TimeoutException)
         {
             // the browser went away before a sign-in was read: a closed window, or a crash
-            _logger.LogInformation("sharepoint: {Browser} ({Mode}) closed before the sign-in to {Host} was read: {Error}", BrowserName, mode, site.Host, ex.Message);
-            return headless ? new Capture(null, $"{BrowserName} quit before the sign-in was read") : new Capture(null, WindowClosed(site), Final: true);
+            _logger.LogInformation("{Prefix}: {Browser} ({Mode}) closed before the sign-in to {Host} was read: {Error}", Prefix, BrowserName, mode, Site.Host, ex.Message);
+            return headless ? new Capture(null, $"{BrowserName} quit before the sign-in was read") : new Capture(null, WindowClosed(), Final: true);
         }
         catch (Exception ex) when (ex is KeyNotFoundException or InvalidOperationException)
         {
-            _logger.LogWarning(ex, "sharepoint: {Browser} answered a DevTools command in an unexpected form", BrowserName);
+            _logger.LogWarning(ex, "{Prefix}: {Browser} answered a DevTools command in an unexpected form", Prefix, BrowserName);
             return new Capture(null, $"{BrowserName} answered AnyFS in a form it does not know ({ex.Message}); the web session cannot read the sign-in from this version", Final: true);
         }
         finally
@@ -230,15 +236,11 @@ internal sealed class BrowserSession
         }
     }
 
-    private string WindowClosed(Uri site) => $"the {BrowserName} window was closed before the sign-in to {site.Host} finished; Retry to sign in";
+    private string WindowClosed() => $"the {BrowserName} window was closed before the sign-in to {Site.Host} finished; Retry to sign in";
 
     private string NoDevTools(bool handedOver) => handedOver
         ? $"{BrowserName} handed the launch to another {BrowserName} that holds the profile and cannot be reached (a window left open, or a profile folder fixed by policy)"
         : $"{BrowserName} started without opening its DevTools port (your organisation's RemoteDebuggingAllowed policy does this; edge://policy lists the policies in force)";
-
-    /// <summary>A Microsoft Defender for Cloud Apps session proxy serves the site under its own suffix (contoso.sharepoint.com.mcas.ms).</summary>
-    private static bool IsSessionProxy(Uri page, Uri site)
-        => page.Host.StartsWith(site.Host + ".", StringComparison.OrdinalIgnoreCase) && page.Host.Contains(".mcas", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Closes a browser still open on the profile from an earlier sign-in (AnyFS stopped while its window was up, or an
@@ -248,7 +250,7 @@ internal sealed class BrowserSession
     {
         if (ReadPortFile() is { } endpoint && await AnswersAsync(endpoint, ct).ConfigureAwait(false))
         {
-            _logger.LogInformation("sharepoint: closing the {Browser} left open on the sign-in profile {Profile}", BrowserName, _profileDir);
+            _logger.LogInformation("{Prefix}: closing the {Browser} left open on the sign-in profile {Profile}", Prefix, BrowserName, _profileDir);
             try
             {
                 using var quick = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -292,7 +294,7 @@ internal sealed class BrowserSession
         }
     }
 
-    private Process LaunchBrowser(Uri site, bool headless)
+    private Process LaunchBrowser(bool headless)
     {
         var info = new ProcessStartInfo(_browserPath ?? throw new InvalidOperationException("no Chromium browser to launch")) { UseShellExecute = false };
         foreach (var arg in new[] { $"--user-data-dir={_profileDir}", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--new-window" })
@@ -305,7 +307,7 @@ internal sealed class BrowserSession
             info.ArgumentList.Add("--headless=new");
         }
 
-        info.ArgumentList.Add(site.AbsoluteUri);
+        info.ArgumentList.Add(Site.AbsoluteUri);
 
         // the browser's own log lines would otherwise land in AnyFS's terminal (anyfs serve); drained, not kept
         info.RedirectStandardOutput = true;
@@ -358,34 +360,27 @@ internal sealed class BrowserSession
         }
     }
 
-    private static async Task<IReadOnlyList<SessionCookie>> SiteCookiesAsync(Cdp cdp, Uri site, CancellationToken ct)
+    /// <summary>The cookies the profile holds that the target keeps.</summary>
+    private async Task<IReadOnlyList<SessionCookie>> CookiesAsync(Cdp cdp, CancellationToken ct)
     {
         var result = await cdp.SendAsync("Storage.getCookies", ct: ct).ConfigureAwait(false);
         var cookies = new List<SessionCookie>();
         foreach (var c in result.GetProperty("cookies").EnumerateArray())
         {
-            var domain = c.GetProperty("domain").GetString()!;
-            if (!DomainMatches(domain, site.Host))
-            {
-                continue;
-            }
-
-            cookies.Add(new SessionCookie(
+            var cookie = new SessionCookie(
                 c.GetProperty("name").GetString()!,
                 c.GetProperty("value").GetString()!,
-                domain,
+                c.GetProperty("domain").GetString()!,
                 c.GetProperty("path").GetString()!,
                 c.GetProperty("secure").GetBoolean(),
-                c.GetProperty("httpOnly").GetBoolean()));
+                c.GetProperty("httpOnly").GetBoolean());
+            if (_target.Keeps(cookie))
+            {
+                cookies.Add(cookie);
+            }
         }
 
         return cookies;
-    }
-
-    private static bool DomainMatches(string cookieDomain, string host)
-    {
-        var domain = cookieDomain.TrimStart('.');
-        return host.Equals(domain, StringComparison.OrdinalIgnoreCase) || host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>The addresses of the browser's open pages (tabs).</summary>

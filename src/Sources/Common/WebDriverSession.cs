@@ -7,7 +7,7 @@ using OpenQA.Selenium.Edge;
 using OpenQA.Selenium.Firefox;
 using SeleniumLogging = OpenQA.Selenium.Internal.Logging;
 
-namespace AnyFS.Sources.SharePoint;
+namespace AnyFS.Sources.Common;
 
 /// <summary>A browser the WebDriver fallback can use: its kind and where it is installed.</summary>
 internal sealed record WebDriverBrowser(BrowserKind Kind, string Path)
@@ -24,16 +24,19 @@ internal sealed record WebDriverBrowser(BrowserKind Kind, string Path)
 /// policy, or a browser that never opens the port. The person's default browser comes first, then the others installed,
 /// Firefox among them, whose WebDriver no Edge or Chrome policy touches; a Chromium browser whose policy blocks remote
 /// debugging is left out, since its WebDriver needs it too. Selenium Manager, carried in the single-file build, finds or
-/// fetches the driver that matches each browser. A profile of AnyFS's own per site host and browser keeps the Microsoft
-/// session, so a headless renewal works as it does over DevTools.
+/// fetches the driver that matches each browser. A profile of AnyFS's own per host and browser keeps the sign-in
+/// session, so a headless renewal works as it does over DevTools. WebDriver reads only the cookies of the page the
+/// browser shows, so once signed in it opens the target's other pages in turn for theirs (<see cref="WebSignInTarget.AlsoVisitAsync"/>).
 /// </summary>
 internal sealed class WebDriverSession
 {
     private static readonly TimeSpan SilentDeadline = TimeSpan.FromSeconds(25);
     private static readonly TimeSpan InteractiveDeadline = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan VisitDeadline = TimeSpan.FromSeconds(30);
 
     private readonly IReadOnlyList<WebDriverBrowser> _browsers;
+    private readonly WebSignInTarget _target;
     private readonly string _profileBase;
     private readonly ILogger _logger;
     private WebDriverBrowser? _working;
@@ -46,10 +49,11 @@ internal sealed class WebDriverSession
         context.Handlers.Add(LogBridge.Instance);
     }
 
-    public WebDriverSession(IReadOnlyList<WebDriverBrowser> browsers, string profileBase, ILogger logger)
+    public WebDriverSession(IReadOnlyList<WebDriverBrowser> browsers, WebSignInTarget target, ILogger logger)
     {
         _browsers = browsers;
-        _profileBase = profileBase;
+        _target = target;
+        _profileBase = target.ProfileDir;
         _logger = logger;
     }
 
@@ -58,8 +62,12 @@ internal sealed class WebDriverSession
 
     public bool HasBrowsers => _browsers.Count > 0;
 
+    private string Prefix => _target.LogPrefix;
+
+    private Uri Site => _target.Page;
+
     /// <summary>
-    /// The browsers to try, in order: the one <c>ANYFS_SHAREPOINT_WEBDRIVER</c> names (edge, chrome, chromium, firefox), if it
+    /// The browsers to try, in order: the one the target's WebDriver variable names (edge, chrome, chromium, firefox), if it
     /// does; else the default browser, then Firefox, Chrome, Chromium and Edge, as installed and not blocked by policy.
     /// </summary>
     public static IReadOnlyList<WebDriverBrowser> Browsers(string? forced)
@@ -98,16 +106,16 @@ internal sealed class WebDriverSession
         return order;
     }
 
-    /// <summary>The browser <c>ANYFS_SHAREPOINT_WEBDRIVER</c> names, or null for any (1, true, or nothing).</summary>
+    /// <summary>The browser a WebDriver variable names, or null for any (1, true, or nothing).</summary>
     internal static BrowserKind? ForcedKind(string? value) => Enum.TryParse<BrowserKind>(value?.Trim(), ignoreCase: true, out var kind) && !int.TryParse(value, out _) ? kind : null;
 
     /// <summary>
-    /// The site's cookies, as <see cref="BrowserSession.SignInAsync"/> gets them over DevTools: headless first, then, only
+    /// The session's cookies, as <see cref="BrowserSession.SignInAsync"/> gets them over DevTools: headless first, then, only
     /// when <paramref name="interactive"/>, a window for the person; each browser in turn until one starts.
     /// </summary>
-    public async Task<IReadOnlyList<SessionCookie>> SignInAsync(Uri site, bool interactive, Action<string> progress, CancellationToken ct)
+    public async Task<IReadOnlyList<SessionCookie>> SignInAsync(bool interactive, Action<string> progress, CancellationToken ct)
     {
-        LogBridge.Instance.Target = _logger;
+        LogBridge.Instance.Use(_logger, Prefix);
         var failures = new List<string>();
         var browsers = _working is null ? _browsers : [_working, .. _browsers.Where(b => b != _working)];
         foreach (var browser in browsers)
@@ -117,7 +125,7 @@ internal sealed class WebDriverSession
             await gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                var silent = await CaptureAsync(browser, profile, site, headless: true, SilentDeadline, ct).ConfigureAwait(false);
+                var silent = await CaptureAsync(browser, profile, headless: true, SilentDeadline, ct).ConfigureAwait(false);
                 if (silent.Unstartable)
                 {
                     failures.Add($"{browser.Name}: {silent.Failure}");
@@ -137,12 +145,12 @@ internal sealed class WebDriverSession
 
                 if (!interactive)
                 {
-                    throw new SignInRequiredException($"the browser sign-in for {site.Host} has lapsed; sign in again (open the source, or its Retry)");
+                    throw new SignInRequiredException($"the browser sign-in for {Site.Host} has lapsed; sign in again (open the source, or its Retry)");
                 }
 
-                _logger.LogInformation("sharepoint: no sign-in to read for {Host} in {Browser} without a window ({Why}); opening it for the person to sign in", site.Host, browser.Name, silent.Failure);
-                progress($"Sign in to {site.Host} in the {browser.Name} window that opened");
-                var shown = await CaptureAsync(browser, profile, site, headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
+                _logger.LogInformation("{Prefix}: no sign-in to read for {Host} in {Browser} without a window ({Why}); opening it for the person to sign in", Prefix, Site.Host, browser.Name, silent.Failure);
+                progress($"Sign in to {Site.Host} in the {browser.Name} window that opened");
+                var shown = await CaptureAsync(browser, profile, headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
                 if (shown.Unstartable)
                 {
                     failures.Add($"{browser.Name}: {shown.Failure}");
@@ -163,10 +171,10 @@ internal sealed class WebDriverSession
             : $"WebDriver could not start a browser to sign in with ({string.Join("; ", failures)})", permanent: true);
     }
 
-    /// <summary>What one browser session came to: the site's cookies, or why not; whether trying again can help; whether the browser did not start at all.</summary>
+    /// <summary>What one browser session came to: the session's cookies, or why not; whether trying again can help; whether the browser did not start at all.</summary>
     private sealed record Capture(IReadOnlyList<SessionCookie>? Cookies, string? Failure = null, bool Final = false, bool Unstartable = false);
 
-    private async Task<Capture> CaptureAsync(WebDriverBrowser browser, string profile, Uri site, bool headless, TimeSpan deadline, CancellationToken ct)
+    private async Task<Capture> CaptureAsync(WebDriverBrowser browser, string profile, bool headless, TimeSpan deadline, CancellationToken ct)
     {
         var mode = headless ? "headless" : "with a window";
         Directory.CreateDirectory(profile);
@@ -177,45 +185,39 @@ internal sealed class WebDriverSession
         }
         catch (Exception ex) when (ex is WebDriverException or InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
         {
-            _logger.LogInformation("sharepoint: WebDriver could not start {Browser} {Mode}: {Error}", browser.Name, mode, ex.Message);
+            _logger.LogInformation("{Prefix}: WebDriver could not start {Browser} {Mode}: {Error}", Prefix, browser.Name, mode, ex.Message);
             return new Capture(null, FirstLine(ex.Message), Unstartable: true);
         }
 
         try
         {
-            _logger.LogInformation("sharepoint: WebDriver opened {Browser} {Mode} for {Host}", browser.Name, mode, site.Host);
-            try
-            {
-                await Task.Run(() => driver.Navigate().GoToUrl(site), ct).ConfigureAwait(false);
-            }
-            catch (WebDriverTimeoutException)
-            {
-                // a slow page; the cookies are what matters
-            }
-
+            _logger.LogInformation("{Prefix}: WebDriver opened {Browser} {Mode} for {Host}", Prefix, browser.Name, mode, Site.Host);
+            await GoAsync(driver, Site, ct).ConfigureAwait(false);
             var until = DateTime.UtcNow + deadline;
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
-                var (page, cookies) = await Task.Run(() => Read(driver, site), ct).ConfigureAwait(false);
-                if (page is not null && cookies.Any(c => c.Name == "FedAuth") && page.Host.Equals(site.Host, StringComparison.OrdinalIgnoreCase))
+                var (page, cookies) = await Task.Run(() => Read(driver), ct).ConfigureAwait(false);
+                var check = await _target.CheckAsync(page is null ? [] : [page], cookies, ct).ConfigureAwait(false);
+                if (check.Done)
                 {
-                    _logger.LogInformation("sharepoint: read the sign-in to {Host} from {Browser} through WebDriver ({Count} cookies)", site.Host, browser.Name, cookies.Count);
-                    return new Capture(cookies);
+                    var all = await VisitTheRestAsync(driver, cookies, ct).ConfigureAwait(false);
+                    _logger.LogInformation("{Prefix}: read the sign-in to {Host} from {Browser} through WebDriver ({Count} cookies)", Prefix, Site.Host, browser.Name, all.Count);
+                    return new Capture(all);
                 }
 
-                if (page is not null && page.Host.StartsWith(site.Host + ".", StringComparison.OrdinalIgnoreCase) && page.Host.Contains(".mcas", StringComparison.OrdinalIgnoreCase))
+                if (check.Failure is { } failure)
                 {
-                    return new Capture(null, $"{site.Host} opens through a session proxy ({page.Host}, Microsoft Defender for Cloud Apps), which the web session cannot go through; an app sign-in can", Final: true);
+                    return new Capture(null, failure, Final: true);
                 }
 
                 if (DateTime.UtcNow > until)
                 {
-                    _logger.LogInformation("sharepoint: no sign-in to {Host} after {Seconds} s in {Browser} {Mode}; page: {Page}; cookies for the site: {Cookies}",
-                        site.Host, deadline.TotalSeconds, browser.Name, mode, page is null ? "none" : page.Host + page.AbsolutePath, string.Join(", ", cookies.Select(c => c.Name)));
+                    _logger.LogInformation("{Prefix}: no sign-in to {Host} after {Seconds} s in {Browser} {Mode}; page: {Page}; cookies for the session: {Cookies}",
+                        Prefix, Site.Host, deadline.TotalSeconds, browser.Name, mode, page is null ? "none" : page.Host + page.AbsolutePath, string.Join(", ", cookies.Select(c => c.Name)));
                     return headless
                         ? new Capture(null, "no saved sign-in")
-                        : new Capture(null, $"nobody finished the sign-in to {site.Host} within {InteractiveDeadline.TotalMinutes:N0} minutes; Retry to sign in", Final: true);
+                        : new Capture(null, $"nobody finished the sign-in to {Site.Host} within {InteractiveDeadline.TotalMinutes:N0} minutes; Retry to sign in", Final: true);
                 }
 
                 await Task.Delay(TimeSpan.FromSeconds(headless ? 1 : 2), ct).ConfigureAwait(false);
@@ -224,10 +226,10 @@ internal sealed class WebDriverSession
         catch (WebDriverException ex)
         {
             // the window was closed, or the browser went away
-            _logger.LogInformation("sharepoint: {Browser} ({Mode}) closed before the sign-in to {Host} was read: {Error}", browser.Name, mode, site.Host, FirstLine(ex.Message));
+            _logger.LogInformation("{Prefix}: {Browser} ({Mode}) closed before the sign-in to {Host} was read: {Error}", Prefix, browser.Name, mode, Site.Host, FirstLine(ex.Message));
             return headless
                 ? new Capture(null, $"{browser.Name} quit before the sign-in was read")
-                : new Capture(null, $"the {browser.Name} window was closed before the sign-in to {site.Host} finished; Retry to sign in", Final: true);
+                : new Capture(null, $"the {browser.Name} window was closed before the sign-in to {Site.Host} finished; Retry to sign in", Final: true);
         }
         finally
         {
@@ -235,8 +237,63 @@ internal sealed class WebDriverSession
         }
     }
 
-    /// <summary>The page the browser shows and the cookies it holds for the site; follows the person to another window when they close the first.</summary>
-    private static (Uri? Page, IReadOnlyList<SessionCookie> Cookies) Read(IWebDriver driver, Uri site)
+    private static async Task GoAsync(IWebDriver driver, Uri page, CancellationToken ct)
+    {
+        try
+        {
+            await Task.Run(() => driver.Navigate().GoToUrl(page), ct).ConfigureAwait(false);
+        }
+        catch (WebDriverTimeoutException)
+        {
+            // a slow page; the cookies are what matters
+        }
+    }
+
+    /// <summary>
+    /// Once signed in: the target's other pages (<see cref="WebSignInTarget.AlsoVisitAsync"/>), each opened until the browser
+    /// shows it (its sign-in done) and its cookies read; all the cookies so far, each once. A page that does not show in
+    /// time is passed over, with what it had set by then.
+    /// </summary>
+    private async Task<IReadOnlyList<SessionCookie>> VisitTheRestAsync(IWebDriver driver, IReadOnlyList<SessionCookie> cookies, CancellationToken ct)
+    {
+        var all = new Dictionary<(string, string, string), SessionCookie>();
+        void Add(IEnumerable<SessionCookie> more)
+        {
+            foreach (var c in more)
+            {
+                all[(c.Name, c.Domain.TrimStart('.').ToLowerInvariant(), c.Path)] = c;
+            }
+        }
+
+        Add(cookies);
+        foreach (var page in await _target.AlsoVisitAsync(cookies, ct).ConfigureAwait(false))
+        {
+            await GoAsync(driver, page, ct).ConfigureAwait(false);
+            var until = DateTime.UtcNow + VisitDeadline;
+            while (true)
+            {
+                var (shown, theirs) = await Task.Run(() => Read(driver), ct).ConfigureAwait(false);
+                Add(theirs);
+                if (shown is not null && shown.Host.Equals(page.Host, StringComparison.OrdinalIgnoreCase) && shown.AbsolutePath.StartsWith(page.AbsolutePath.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+
+                if (DateTime.UtcNow > until)
+                {
+                    _logger.LogInformation("{Prefix}: {Page} did not show within {Seconds} s after the sign-in (the browser shows {Shown}); going on without it", Prefix, page.GetLeftPart(UriPartial.Path), VisitDeadline.TotalSeconds, shown is null ? "nothing" : shown.Host + shown.AbsolutePath);
+                    break;
+                }
+
+                await Task.Delay(500, ct).ConfigureAwait(false);
+            }
+        }
+
+        return all.Values.ToList();
+    }
+
+    /// <summary>The page the browser shows and the cookies it holds for it that the target keeps; follows the person to another window when they close the first.</summary>
+    private (Uri? Page, IReadOnlyList<SessionCookie> Cookies) Read(IWebDriver driver)
     {
         string url;
         try
@@ -255,17 +312,12 @@ internal sealed class WebDriverSession
             url = driver.Url;
         }
 
+        var page = Uri.TryCreate(url, UriKind.Absolute, out var shown) ? shown : null;
         var cookies = driver.Manage().Cookies.AllCookies
-            .Select(c => new SessionCookie(c.Name, c.Value, string.IsNullOrEmpty(c.Domain) ? site.Host : c.Domain, string.IsNullOrEmpty(c.Path) ? "/" : c.Path, c.Secure, c.IsHttpOnly))
-            .Where(c => DomainMatches(c.Domain, site.Host))
+            .Select(c => new SessionCookie(c.Name, c.Value, string.IsNullOrEmpty(c.Domain) ? (page ?? Site).Host : c.Domain, string.IsNullOrEmpty(c.Path) ? "/" : c.Path, c.Secure, c.IsHttpOnly))
+            .Where(_target.Keeps)
             .ToList();
-        return (Uri.TryCreate(url, UriKind.Absolute, out var page) ? page : null, cookies);
-    }
-
-    private static bool DomainMatches(string cookieDomain, string host)
-    {
-        var domain = cookieDomain.TrimStart('.');
-        return host.Equals(domain, StringComparison.OrdinalIgnoreCase) || host.EndsWith("." + domain, StringComparison.OrdinalIgnoreCase);
+        return (page, cookies);
     }
 
     private static IWebDriver Start(WebDriverBrowser browser, string profile, bool headless)
@@ -344,10 +396,18 @@ internal sealed class WebDriverSession
     {
         public static readonly LogBridge Instance = new();
 
-        public volatile ILogger Target = NullLogger.Instance;
+        private volatile Sink _sink = new(NullLogger.Instance, "web session");
+
+        /// <summary>Where Selenium's lines go from now on: the log of the source signing in, with its prefix.</summary>
+        public void Use(ILogger logger, string prefix) => _sink = new Sink(logger, prefix);
 
         public void Handle(SeleniumLogging.LogEvent logEvent)
-            => Target.Log(logEvent.Level >= SeleniumLogging.LogEventLevel.Warn ? Microsoft.Extensions.Logging.LogLevel.Information : Microsoft.Extensions.Logging.LogLevel.Debug, "sharepoint: selenium: {Message}", logEvent.Message);
+        {
+            var sink = _sink;
+            sink.Logger.Log(logEvent.Level >= SeleniumLogging.LogEventLevel.Warn ? Microsoft.Extensions.Logging.LogLevel.Information : Microsoft.Extensions.Logging.LogLevel.Debug, "{Prefix}: selenium: {Message}", sink.Prefix, logEvent.Message);
+        }
+
+        private sealed record Sink(ILogger Logger, string Prefix);
     }
 }
 

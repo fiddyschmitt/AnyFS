@@ -41,13 +41,6 @@ internal sealed record SignInOptions(
     bool ForceLogin = false,
     MicrosoftCloud? Cloud = null);
 
-/// <summary>Thrown when a token can't be had without the user signing in again (the refresh token expired or was revoked), or the sign-in was refused.</summary>
-/// <param name="permanent">The refusal is about the settings or the organisation's policy, so trying again unchanged would only fail again (and open the browser again).</param>
-public sealed class SignInRequiredException(string message, Exception? inner = null, bool permanent = false) : Exception(message, inner)
-{
-    public bool Permanent { get; } = permanent;
-}
-
 /// <summary>
 /// The Microsoft identity platform sign-in behind the SharePoint source's app sign-in (Online and Embedded), on MSAL. Silent
 /// first (the cache from the last run, refresh tokens included); otherwise the system browser or a device
