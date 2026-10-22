@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sources.ThreeDX</AssemblyName>
+    <RootNamespace>AnyFS.Sources.ThreeDX</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- AngleSharp (MIT): the sign-in pages' forms (a SAML hand-over, 3DPassport's or the identity provider's sign-in) -->
+    <PackageReference Include="AngleSharp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <!-- the web session (with its Selenium WebDriver fallback), Windows account credentials, ResponseStream, MemoryFile -->
+    <ProjectReference Include="..\Common\AnyFS.Sources.Common.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="AnyFS.Sources.Common" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
+  </ItemGroup>
+</Project>

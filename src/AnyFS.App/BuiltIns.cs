@@ -8,6 +8,7 @@ using AnyFS.Mounts.WinFsp;
 using AnyFS.Sources.Mirror;
 using AnyFS.Sources.SharePoint;
 using AnyFS.Sources.Sshfs;
+using AnyFS.Sources.ThreeDX;
 
 namespace AnyFS.App;
 
@@ -20,6 +21,7 @@ public static class BuiltIns
         registry.AddBuiltIn(new MirrorPlugin());
         registry.AddBuiltIn(new SshfsPlugin());
         registry.AddBuiltIn(new SharePointPlugin());
+        registry.AddBuiltIn(new ThreeDXPlugin());
         registry.AddBuiltIn(new WinFspMountProvider());
         registry.AddBuiltIn(new FuseMountProvider());
         registry.AddBuiltIn(new SmbMountProvider());
