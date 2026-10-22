@@ -72,7 +72,14 @@ every dialog on headless Avalonia. A few tests need something from outside and m
 inconclusive or skipped without it: the live SSHFS tests want `ANYFS_TEST_SSH_HOST`, `_PORT`,
 `_USER`, `_KEY` and `_ROOT` (plus `_PASSWORD_USER` and `_PASSWORD` for the password paths), the
 real-server SMB test wants the fetched binary (or `ANYFS_SMB_SERVER` pointing at one), and the
-WinFsp tests want the driver installed.
+WinFsp tests want the driver installed. The 3DX source's tests run against a small fake 3DEXPERIENCE
+platform on 127.0.0.1 (`tests/AnyFS.Sources.Tests/Fake3DX.cs`: 3DPassport, 3DSpace, 3DSearch, a file
+server and an identity provider), so they need nothing outside; the Windows sign-ins among them run
+on Windows only. Three of them open more: `ANYFS_TEST_3DX_BROWSER=1` lets the web session's browser
+tests start Edge headless (over DevTools, and through WebDriver), `ANYFS_TEST_3DX_EXE` pointing at a
+published `anyfs.exe` serves a 3DX source of the fake through that build's HTTP mount, and
+`ANYFS_TEST_3DX_SCALE=1` builds, saves and reads back a tree of 200,000 documents and prints the
+times and memory to the test's output.
 
 ## Publish
 
@@ -130,8 +137,12 @@ src/AnyFS.Core           model, plugin host, router, read-only layers, status, s
 src/AnyFS.App            anyfs: the window (Gui/) and the command line (Cli/)
 src/Sources/Mirror       the Mirror source
 src/Sources/Sshfs        the SSHFS source over SSH.NET
+src/Sources/Common       what more than one source needs: the web session's sign-in in a browser of AnyFS's own over
+                         DevTools (Selenium WebDriver where that is closed), Windows account credentials, small helpers
 src/Sources/SharePoint   the SharePoint source: Graph after an MSAL sign-in, REST with a Windows account or a web
-                         session read from a browser over DevTools (Selenium WebDriver where that is closed)
+                         session read from a browser
+src/Sources/ThreeDX      the 3DX source: a 3DEXPERIENCE platform's documents through 3DSearch and 3DSpace, read-only,
+                         signed in through 3DPassport (single sign-on, a browser, or a Windows account)
 src/Mounts/WinFsp        the WinFsp mount (Windows)
 src/Mounts/Smb           the SMB mount: the VFS endpoint and the portable-smb-server process
 src/Mounts/Fuse          the FUSE mount (Linux)
