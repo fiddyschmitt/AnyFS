@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-10-22)
 
 The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.0.md).
 
@@ -27,18 +27,55 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   or its server, in brackets where two would share a name), with its libraries, `Subsites` and, for a
   root site, `Sites`; a library is pinned only with one site. The sites share the one sign-in: a
   Windows account reaches sites on several servers, the web session one server, an app sign-in one
-  Microsoft cloud. The source starts when every site answers, and the Test button gives a line per
-  site. The suggested name is the server they share (`acme.sharepoint.us`), none when they share
-  none. An address deeper than a site now finds its site: a subsite under `/sites/x` is kept, and a
-  page, view, list or well-known library after the site is cut; since SharePoint answers a library's
-  or a folder's address with 404, connecting steps back a name at a time to the site that answers.
+  Microsoft cloud. A site that does not open (the account refused, no site there, a server not
+  answering) is left out: the log says why, and it is tried again every five minutes in the
+  background, joining under a name clear of those shown once it opens. The start waits up to 15
+  seconds for every site, then goes on as soon as one has opened, and a site still being looked up
+  shows when it answers. Over the REST API a lookup makes two attempts and leaves the source's
+  health alone, so a server that is down neither holds the start nor shows the source as degraded.
+  The source fails only when none opens, for good when each was refused or is not there. The Test
+  button waits the same way, gives a line per site that opens and lists the ones left out. The
+  suggested name is the server they share (`acme.sharepoint.us`), none when they share none. An
+  address deeper than a site now finds its site: a subsite under `/sites/x` is kept, and a page,
+  view, list or well-known library after the site is cut; since SharePoint answers a library's or a
+  folder's address with 404, connecting steps back a name at a time to the site that answers. The
+  addresses are stored one per line, trimmed, each once, in alphabetical order (the SDK's new
+  `ISourcePlugin.NormaliseSettings`). With the root site of the one server they are on among them,
+  the root site is the source's own (no folder named after the server) and the others go where
+  they belong: a site collection's own site in its `Sites` folder, a subsite in its `Subsites`
+  folder, as SharePoint says (REST's `_api/site` against the site's address, Graph's
+  `siteCollection` facet). A site given shows once, where the enumeration puts it: one the root
+  lists anyway, or one below a site that shows (a subsite of a site search found), is left to its
+  place, found by listing subsites down from the site above it, so one below a site the account may
+  not list still shows; without the root, a site below another given one is no folder of its own.
+  The Test button says where each shows.
 - **A site's pages** (the Site Pages library) show in a `Site Pages` folder as Markdown, read-only:
-  `Page.aspx` is `Page.md`, the page's title as a heading and its body from the HTML SharePoint keeps
-  it in (`CanvasContent1` for a modern page, `WikiField` for a wiki page), web parts by the text
-  SharePoint renders of them for search, addresses made absolute. Over REST the folder's listing
-  carries every page's content in one request; over Graph, which keeps Site Pages out of a site's
-  drives, its drive is found through the site's lists. Converted with ReverseMarkdown (MIT) over
-  AngleSharp (MIT): MarkItDown's .NET ports carry cloud SDKs and image libraries for other formats.
+  `Page.aspx` is `Page.aspx.md`, the page's full address on the first line, then its title as a
+  heading and its body from the HTML SharePoint keeps it in (`CanvasContent1` for a modern page,
+  `WikiField` for a wiki page), web parts by the text SharePoint renders of them for search,
+  addresses made absolute. Over REST the folder's listing carries every page's content in one
+  request; over Graph, which keeps Site Pages out of a site's drives, its drive is found through the
+  site's lists. Converted with ReverseMarkdown (MIT) over AngleSharp (MIT): MarkItDown's .NET ports
+  carry cloud SDKs and image libraries for other formats. Over REST the pages in a site's own folder
+  (a classic site's `default.aspx`, its landing page) show beside its libraries the same way,
+  rendered by SharePoint and made Markdown from the page's main area; one that forwards elsewhere (a
+  modern site's) is left out. An account that may only read a site may not list that folder: there
+  `default.aspx` is looked for by name.
+- **Library names**: a library shows by its title, and a title may hold what a name cannot
+  (`Health / Safety`): each of `" * : < > ? / \ |` shows as its full-width look-alike
+  (`Health ／ Safety`), a trailing dot as `．`, trailing spaces and control characters dropped; a
+  changed name takes a number where another has it. Containers' names go the same way.
+- **Kept listings** (SharePoint, on by default, "Keep folder listings"): folders are answered from
+  what the source last saw; a folder a client lists twice within five seconds (refresh pressed) is
+  listed afresh; and the source walks every site and folder in the background, at the start (which
+  is the count of "Count files on start") and every 30 minutes after ("Walk every folder every
+  (minutes)"), every site at once, four folders of each at a time. Off, listings are kept for two
+  seconds as before.
+- **Pace** (SharePoint Online): requests to a tenant go at 10 a second on average, up to 100 at
+  once after a quiet spell (a token bucket, `System.Threading.RateLimiting`), from every source and
+  worker together, inside the published default of 3,000 requests in 5 minutes a user; a throttled
+  answer (429 or 503 with Retry-After) holds every request to the tenant until it has passed, as
+  Microsoft asks of a client with many threads. SharePoint Server is not paced.
 - **Sign in with** (Automatic by default; a sign-in that cannot serve the address, such as a Windows
   password for Microsoft 365, is caught in the settings): an *app sign-in*, browser or device code,
   with the shipped app registration or the organisation's own (MSAL, the cache in the source's
@@ -48,8 +85,12 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   own, the session's cookies go to SharePoint's REST API, and a headless browser renews them while
   Microsoft's sign-in lasts (one browser per profile at a time, a browser left open on it closed
   first; a closed window or a Defender for Cloud Apps proxy named, and the source then waits for
-  Retry). Where AnyFS cannot reach the browser's DevTools port itself (Edge's or Chrome's
-  RemoteDebuggingAllowed or UserDataDir policy, or no port opening), the sign-in goes through
+  Retry). It renews only when the session has lapsed: SharePoint Online refuses a signed-in account
+  what it may not open exactly as it refuses a lapsed session (403, `X-Forms_Based_Auth_Required`),
+  but then sets a new session cookie, so a refusal that does, or one older than a request since
+  answered, passes through; and never twice within two minutes. Where AnyFS cannot reach the
+  browser's DevTools port itself (Edge's or Chrome's RemoteDebuggingAllowed or UserDataDir policy,
+  or no port opening), the sign-in goes through
   Selenium WebDriver instead, as Mount3DX's does: the default browser first, then Firefox, Chrome and
   Edge, each with a profile of AnyFS's own; a *Windows account* (NTLM or Kerberos; a user name and password, or the
   current logon on Windows, which *Windows account, as yourself* names outright and asks nothing for: a smartcard
@@ -79,7 +120,17 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   is not `ICountable`, keeps 8 listings in flight through the SDK's new `TreeCount`, and SSHFS's own
   count uses the same helper with its SFTP listing (a SharePoint site's walk went from 4.3 s to 1.2 s
   on the test site's small tree).
-- **SDK**: `ListingCache.Update` corrects one cached entry in place after a source's own write;
+- **SDK**: `ListingCache.Kept` keeps a listing until it is listed afresh, `ListAsync` takes a
+  client's second listing within `refreshOnRepeat` as refresh pressed, `RefreshAsync` lists a folder
+  for a walk; a listing's time now counts from when it arrived, not when it was asked for (a folder
+  slower to list than its TTL was stale on arrival, so every stat in it listed it again: a 24-thread
+  search read 108 files of a 5,000-file SharePoint folder in ten minutes before, 1,000 in 15 s
+  after); a write or invalidation while a folder is being listed applies to that listing.
+  `SpoolCache` and `RandomAccessOverStream` fail a download that sends nothing for 60 s, and a spool
+  whose download failed is let go, so the file opens again; `ISourcePlugin.NormaliseSettings` tidies
+  a plugin's settings before they are stored. `SdkInfo.SdkVersion` is 0.2.0: a 0.1 host refuses a
+  plugin built against this SDK. `ListingCache.Update` corrects one cached entry in
+  place after a source's own write;
   `SequentialReadAhead`, the per-handle read-ahead the WinFsp mount had, as a helper for mounts;
   `ISettingVisibility`, for a plugin whose fields depend on what has been entered (the window's
   form asks it after every change and hides what it rules out; Test now waits up to ten minutes,
@@ -97,6 +148,13 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   not open `\\anyfs\<collection>` itself and programs that look a path up through the shell (Paint,
   Open dialogs) could not open files below it. Checked in the lab's Windows VM, 2.1 then the beta. A
   2.1 install now shows **Upgrade WinFsp driver** on the tile.
+- **A failure stays with its request**: WinFsp logs an exception that leaves a callback and its
+  cleanup, close and directory listings catch their own; the mount runs 64 dispatcher threads, not one
+  per processor (each request holds its thread until the source answers); the SMB bridge drops its
+  kept handle after a failed read and answers anything unexpected with a 500 and its message; FUSE's
+  statfs catches everything; an FTP session's failure is logged; an exception nothing caught goes to
+  the log (GUI and `anyfs serve`); a source edited straight after it was added no longer fails with a
+  NullReferenceException (a race in the source runner's start).
 - **SMB**: the VFS endpoint keeps read handles between `/read` requests (`ReadHandles`); the bundled
   server gets a minute to start, not 15 s (its first launch on a freshly booted Windows machine).
 - **FUSE**: per-handle read-ahead through `SequentialReadAhead` (the kernel's 128 KiB reads cost a
@@ -108,7 +166,8 @@ The release notes are in [docs/release-notes/v0.2.0.md](docs/release-notes/v0.2.
   gss-ntlmssp plugin (on in macOS builds too, untested there so far). Selenium Manager rides in the
   single-file build as a native file (3.7 MB on Windows), for the web session's WebDriver fallback.
   ReverseMarkdown and AngleSharp add 1.4 MB; the trimmer keeps ReverseMarkdown whole, since it finds
-  its tag converters by reflection.
+  its tag converters by reflection. `System.Threading.RateLimiting` (MIT, the .NET runtime's) paces
+  SharePoint Online.
 
 ## 0.1.1 (2026-10-17)
 
