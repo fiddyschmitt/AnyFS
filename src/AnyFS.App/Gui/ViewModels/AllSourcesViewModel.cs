@@ -128,7 +128,7 @@ public sealed partial class AllSourcesViewModel : ObservableObject
             vm => vm.Id,
             s => new SourceTileViewModel(
                 s.Id,
-                showPath: false,
+                inCollection: false,
                 enabled => _ops.Run("Enable source", () => _engine.SetSourceEnabledAsync(s.Id, enabled)),
                 setReadOnly: null,
                 () => _ops.Run("Retry", () => _engine.RetrySourceAsync(s.Id))),

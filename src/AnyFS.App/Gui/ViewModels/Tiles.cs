@@ -164,10 +164,10 @@ public sealed partial class SourceTileViewModel : TileViewModel
     private readonly Func<Task> _retry;
     private bool _syncing;
 
-    public SourceTileViewModel(Guid id, bool showPath, Func<bool, Task> setEnabled, Func<bool, Task>? setReadOnly, Func<Task> retry)
+    public SourceTileViewModel(Guid id, bool inCollection, Func<bool, Task> setEnabled, Func<bool, Task>? setReadOnly, Func<Task> retry)
         : base(id)
     {
-        ShowPath = showPath;
+        InCollection = inCollection;
         ShowReadOnly = setReadOnly is not null;
         _setEnabled = setEnabled;
         _setReadOnly = setReadOnly;
@@ -175,12 +175,12 @@ public sealed partial class SourceTileViewModel : TileViewModel
         RetryCommand = new AsyncRelayCommand(() => _retry(), () => CanRetry);
     }
 
-    /// <summary>The collection's lists show the source path; the All sources tab shows where it's used instead.</summary>
-    public bool ShowPath { get; }
+    /// <summary>On a collection's list, with its Open containing folder button; the All sources tab shows the type and where the source is used instead.</summary>
+    public bool InCollection { get; }
 
     public bool ShowReadOnly { get; }
 
-    public bool ShowUses => !ShowPath;
+    public bool ShowUses => !InCollection;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IconKey))]
@@ -205,9 +205,6 @@ public sealed partial class SourceTileViewModel : TileViewModel
     /// <summary>The badge letter when the plugin has no icon.</summary>
     [ObservableProperty]
     public partial string Initial { get; set; } = "?";
-
-    [ObservableProperty]
-    public partial string Path { get; set; } = "";
 
     [ObservableProperty]
     public partial bool Enabled { get; set; }
@@ -241,8 +238,6 @@ public sealed partial class SourceTileViewModel : TileViewModel
     /// <summary>All sources tab: one line per collection using it, with the path there and a read-only mark (spec 11.2).</summary>
     public ObservableCollection<string> Uses { get; } = [];
 
-    public string PathCaption => Path.Length == 0 ? "(collection root)" : Path;
-
     public void Update(SourceStatus status, string typeName, bool readOnlyLocked, IReadOnlyList<string> uses, IReadOnlyList<OpenTargetViewModel> targets)
     {
         _syncing = true;
@@ -252,8 +247,6 @@ public sealed partial class SourceTileViewModel : TileViewModel
             TypeId = status.Type;
             TypeName = typeName;
             Initial = typeName.Length > 0 ? typeName[..1].ToUpperInvariant() : "?";
-            Path = status.Path;
-            OnPropertyChanged(nameof(PathCaption));
             Enabled = status.Enabled;
             ReadOnlyLocked = readOnlyLocked;
             ReadOnly = status.ReadOnly || readOnlyLocked;

@@ -111,6 +111,10 @@ public class ViewModelTests
         return Collections.Mounts.Single(m => m.Name == "Fake");
     }
 
+    /// <summary>Where a source sits in the selected collection, as the settings have it (its tile does not show it).</summary>
+    private string PathOf(Guid sourceId)
+        => _engine.Settings.Collections.Single(c => c.Id == Collections.SelectedCollection!.Id).Sources.Single(m => m.Id == sourceId).Path;
+
     [TestMethod]
     public void FirstStartShowsCollectionOneWithItsNativeMountTile()
     {
@@ -172,10 +176,10 @@ public class ViewModelTests
 
         var tile = Collections.Sources.Single();
         Assert.AreEqual("alpha", tile.Name);
-        Assert.AreEqual("mem", tile.Path);
+        Assert.AreEqual("mem", PathOf(tile.Id));
         Assert.AreEqual("Memory", tile.TypeName);
         Assert.AreEqual("M", tile.Initial);
-        Assert.IsTrue(tile.ShowPath);
+        Assert.IsTrue(tile.InCollection);
         await Wait.UntilAsync(() => _engine.FindSourceRunner(tile.Id)!.Handle.IsUsable, what: "alpha ready");
         _vm.Refresh();
         Assert.AreEqual(StatusColour.Green, tile.Colour);
@@ -244,7 +248,7 @@ public class ViewModelTests
         await Wait.UntilAsync(() => _engine.Snapshot().Collections.Single(c => c.Name == "bob").Sources.Count == 1, what: "membership");
         _vm.Refresh();
         var tile = Collections.Sources.Single();
-        Assert.AreEqual("mem/alpha", tile.Path);
+        Assert.AreEqual("mem/alpha", PathOf(tile.Id));
         Assert.IsTrue(tile.ReadOnly);
         Assert.IsFalse(Collections.HasExistingSources, "alpha is in bob now");
 
@@ -295,7 +299,7 @@ public class ViewModelTests
         await Wait.UntilAsync(() => _engine.FindSourceRunner(tile.Id)!.Handle.IsUsable, what: "restarted");
         _vm.Refresh();
         Assert.AreEqual("alpha2", tile.Name);
-        Assert.AreEqual("files", tile.Path);
+        Assert.AreEqual("files", PathOf(tile.Id));
         CollectionAssert.AreEqual(new[] { "b.txt" }, (await ListAsync(_engine.Collections.Single(c => c.Name == "work").Vfs, "files")));
     }
 

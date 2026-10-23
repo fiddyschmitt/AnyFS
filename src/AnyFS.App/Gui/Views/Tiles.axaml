@@ -40,7 +40,6 @@
           </Border>
           <StackPanel Grid.Column="1" VerticalAlignment="Center">
             <TextBlock Classes="name" Text="{Binding Name}" />
-            <TextBlock Classes="muted" Text="{Binding PathCaption}" IsVisible="{Binding ShowPath}" ToolTip.Tip="The source path: where this source sits in the collection" />
             <TextBlock Classes="muted" Text="{Binding TypeName}" IsVisible="{Binding ShowUses}" />
           </StackPanel>
           <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Top">
@@ -68,7 +67,7 @@
             </ItemsControl.ItemTemplate>
           </ItemsControl>
           <DockPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,8,0,0">
-            <views:OpenButton DockPanel.Dock="Right" IsVisible="{Binding ShowPath}" />
+            <views:OpenButton DockPanel.Dock="Right" IsVisible="{Binding InCollection}" />
             <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" ClipToBounds="True" Margin="0,0,8,0">
               <TextBlock Text="{Binding FilesText}" VerticalAlignment="Center" FontFeatures="+tnum" />
               <ProgressBar IsIndeterminate="True" Width="44" Height="4" MinWidth="44" IsVisible="{Binding Counting}" VerticalAlignment="Center" />
