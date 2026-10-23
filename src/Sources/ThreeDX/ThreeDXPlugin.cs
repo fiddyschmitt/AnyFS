@@ -19,7 +19,8 @@ public sealed class ThreeDXPlugin : ISourcePlugin, IValidatable, ITestable, ISet
 
     public string TypeFolder => "3dx";
 
-    public Stream? OpenIcon() => null;
+    /// <summary>The 3DEXPERIENCE compass, a PNG (Assets/3dx.png).</summary>
+    public Stream? OpenIcon() => typeof(ThreeDXPlugin).Assembly.GetManifestResourceStream("3dx.png");
 
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public Type SettingsType => typeof(ThreeDXSettings);

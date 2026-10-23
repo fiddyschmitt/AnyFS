@@ -16,6 +16,11 @@
     <Using Include="AnyFS.Sources.Common" />
   </ItemGroup>
   <ItemGroup>
+    <!-- the type's icon (OpenIcon): the 3DEXPERIENCE compass from the user's 3dx.png (23-Oct-2026), cut out along the
+         dial's edge (its background, glow, rays and caption left behind) and scaled to 64 px -->
+    <EmbeddedResource Include="Assets\3dx.png" LogicalName="3dx.png" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
   </ItemGroup>
 </Project>

@@ -157,6 +157,18 @@ public class ThreeDXPluginTests
     public void NoAddressIsNoService(string given) => Assert.IsNull(ThreeDXSettings.SpaceOf(given));
 
     [TestMethod]
+    public void TheIconIsThe3DExperienceCompassAsA64PixelPng()
+    {
+        using var icon = _plugin.OpenIcon();
+        Assert.IsNotNull(icon, "embedded in the plugin");
+        var header = new byte[24];
+        icon.ReadExactly(header);
+        CollectionAssert.AreEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }, header[..8], "a PNG");
+        Assert.AreEqual(64, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(16)), "width");
+        Assert.AreEqual(64, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(20)), "height");
+    }
+
+    [TestMethod]
     public void TheAddressIsStoredAsTheServicesAndNamesTheSource()
     {
         var settings = new ThreeDXSettings { ServerUrl = " https://aus-3dx-01.contoso.com:444/3dspace/common/emxNavigator.jsp " };
