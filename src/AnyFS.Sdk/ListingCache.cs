@@ -6,36 +6,40 @@ namespace AnyFS.Sdk;
 /// Memoises directory listings, because clients stat every file they list. Concurrent misses for the same directory
 /// share one upstream call. A listing is kept for a time (a couple of seconds, so it is near enough current), or, for a
 /// source that is slow to list, until it is listed afresh (<see cref="Kept"/>): the source then answers from what it
-/// knows, lists a folder again when a client lists it twice within a few seconds (the person pressing refresh,
-/// <see cref="ListAsync"/>), and walks its tree again now and then (<see cref="RefreshAsync"/>). Writes through the same
-/// source keep the listings right (<see cref="Update"/>, <see cref="Invalidate"/>), also a listing still on its way: what
-/// changed while it was being fetched is applied to it when it lands, so it never brings back what a write replaced.
+/// knows and walks its tree again now and then (<see cref="RefreshAsync"/>). Writes through the same source keep the
+/// listings right (<see cref="Update"/>, <see cref="Invalidate"/>), also a listing still on its way: what changed while it
+/// was being fetched is applied to it when it lands, so it never brings back what a write replaced.
 /// </summary>
 public sealed class ListingCache
 {
     /// <summary>The time a listing is kept for when it is kept until listed afresh or invalidated.</summary>
     public static readonly TimeSpan Kept = Timeout.InfiniteTimeSpan;
 
+    private const string NoRefreshOnRepeat = "A folder listed again soon after is no sign of a refresh: programs list a folder over and over (Adobe Acrobat opening a file does), so the window is ignored. List afresh with RefreshAsync when the source has its own reason to.";
+
     private readonly TimeSpan _ttl;
-    private readonly TimeSpan? _refreshOnRepeat;
     private readonly Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> _lister;
     private readonly int _maxDirectories;
     private readonly TimeProvider _time;
     private readonly object _gate = new();
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Fetch> _fetches = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, long> _clientListed = new(StringComparer.Ordinal);
 
     /// <param name="ttl">How long a listing is good for, or <see cref="Kept"/>.</param>
-    /// <param name="refreshOnRepeat">A client listing a folder again within this long of its last listing gets it listed afresh (<see cref="ListAsync"/>); null never.</param>
-    public ListingCache(TimeSpan ttl, Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> lister, int maxDirectories = 10_000, TimeProvider? time = null, TimeSpan? refreshOnRepeat = null)
+    public ListingCache(TimeSpan ttl, Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> lister, int maxDirectories = 10_000, TimeProvider? time = null)
     {
         ArgumentNullException.ThrowIfNull(lister);
         _ttl = ttl;
         _lister = lister;
         _maxDirectories = maxDirectories;
         _time = time ?? TimeProvider.System;
-        _refreshOnRepeat = refreshOnRepeat;
+    }
+
+    /// <summary>As the constructor above, with <paramref name="refreshOnRepeat"/> ignored (kept for plugins built against SDK 0.2).</summary>
+    [Obsolete(NoRefreshOnRepeat)]
+    public ListingCache(TimeSpan ttl, Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> lister, int maxDirectories, TimeProvider? time, TimeSpan? refreshOnRepeat)
+        : this(ttl, lister, maxDirectories, time)
+    {
     }
 
     /// <summary>How many listings are held.</summary>
@@ -52,38 +56,9 @@ public sealed class ListingCache
         return FetchAsync(path, ct);
     }
 
-    /// <summary>
-    /// A client's listing of a folder (a mount enumerating it): as <see cref="GetAsync"/>, except that one coming within
-    /// the refresh window of the client's last listing of the same folder is taken as the person asking to see it as it
-    /// is now (refresh pressed), and the folder is listed afresh.
-    /// </summary>
-    public ValueTask<IReadOnlyList<VfsEntry>> ListAsync(string path, CancellationToken ct)
-    {
-        if (_refreshOnRepeat is not { } window)
-        {
-            return GetAsync(path, ct);
-        }
-
-        var now = _time.GetTimestamp();
-        var previous = 0L;
-        _clientListed.AddOrUpdate(path, now, (_, before) =>
-        {
-            previous = before;
-            return now;
-        });
-        if (_clientListed.Count > 4096)
-        {
-            foreach (var pair in _clientListed)
-            {
-                if (_time.GetElapsedTime(pair.Value, now) > window)
-                {
-                    _clientListed.TryRemove(pair);
-                }
-            }
-        }
-
-        return previous != 0 && _time.GetElapsedTime(previous, now) <= window ? RefreshAsync(path, ct) : GetAsync(path, ct);
-    }
+    /// <summary>The same as <see cref="GetAsync"/> (kept for plugins built against SDK 0.2).</summary>
+    [Obsolete(NoRefreshOnRepeat)]
+    public ValueTask<IReadOnlyList<VfsEntry>> ListAsync(string path, CancellationToken ct) => GetAsync(path, ct);
 
     /// <summary>Lists <paramref name="path"/> from the upstream now (or joins a listing of it on its way) and keeps the result in place of what was held.</summary>
     public ValueTask<IReadOnlyList<VfsEntry>> RefreshAsync(string path, CancellationToken ct) => FetchAsync(path, ct);

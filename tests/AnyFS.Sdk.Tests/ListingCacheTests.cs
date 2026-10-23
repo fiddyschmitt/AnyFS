@@ -167,23 +167,23 @@ public class ListingCacheTests
     }
 
     [TestMethod]
-    public async Task AClientListingAFolderTwiceWithinTheWindowGetsItAfresh()
+    public async Task AKeptListingIsNotListedAfreshForBeingListedAgainSoon()
     {
-        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time, refreshOnRepeat: TimeSpan.FromSeconds(5));
-        await cache.ListAsync("docs", CancellationToken.None);
+        // a program opening a file lists its folder over and over: no sign that anything changed
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
+        await cache.GetAsync("docs", CancellationToken.None);
+        _time.Advance(TimeSpan.FromSeconds(1));
+        await cache.GetAsync("docs", CancellationToken.None);
         Assert.AreEqual(1, _calls);
 
-        _time.Advance(TimeSpan.FromSeconds(30));
-        await cache.ListAsync("docs", CancellationToken.None);
-        Assert.AreEqual(1, _calls, "long after the last: from the cache");
-
-        _time.Advance(TimeSpan.FromSeconds(3));
-        await cache.ListAsync("docs", CancellationToken.None);
-        Assert.AreEqual(2, _calls, "again within five seconds: refresh pressed");
-
-        await cache.GetAsync("docs", CancellationToken.None);
-        await cache.StatAsync("docs/a.txt", CancellationToken.None);
-        Assert.AreEqual(2, _calls, "lookups are not a client listing");
+        // what a plugin built against SDK 0.2 calls: the refresh window it gives is ignored
+#pragma warning disable CS0618
+        var old = new ListingCache(ListingCache.Kept, ListAsync, 10_000, _time, TimeSpan.FromSeconds(5));
+        await old.ListAsync("docs", CancellationToken.None);
+        _time.Advance(TimeSpan.FromSeconds(1));
+        await old.ListAsync("docs", CancellationToken.None);
+#pragma warning restore CS0618
+        Assert.AreEqual(2, _calls, "one listing for the second cache too");
     }
 
     [TestMethod]
