@@ -363,7 +363,10 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
 
     private FuseFileStat StatFor(string path, VfsEntry entry)
     {
-        var writable = fs.CanWrite(path) && !entry.Attributes.HasFlag(VfsAttributes.ReadOnly);
+        // a file shows its own read-only only (no write bit), not its source's, collection's or mount's: a copy would keep
+        // the mode; writes to it are refused when it is opened all the same. A folder's write bit says whether it takes new
+        // entries, which the kernel goes by.
+        var writable = !entry.Attributes.HasFlag(VfsAttributes.ReadOnly) && (!entry.IsDirectory || fs.CanWrite(path));
         var mode = entry.IsDirectory ? DirectoryBase : FileBase;
         if (writable)
         {

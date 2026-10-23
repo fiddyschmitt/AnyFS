@@ -113,12 +113,32 @@ public class WinFspMountTests
     }
 
     [TestMethod]
-    public async Task ReadOnlyMountRefusesWritesAndShowsTheAttribute()
+    public async Task ReadOnlyMountRefusesWritesWithoutTheAttribute()
     {
         RequireWinFsp();
         var (_, unc, source) = await MountAsync(readOnly: true);
-        Assert.IsTrue(File.GetAttributes(Path.Combine(unc, "readme.txt")).HasFlag(FileAttributes.ReadOnly));
+        Assert.IsFalse(File.GetAttributes(Path.Combine(unc, "readme.txt")).HasFlag(FileAttributes.ReadOnly), "the file is not read-only itself: a copy of it must not be");
         Assert.AreEqual("hello readme", File.ReadAllText(Path.Combine(unc, "readme.txt")), "reads are fine");
+        try
+        {
+            File.AppendAllText(Path.Combine(unc, "readme.txt"), "x");
+            Assert.Fail("a write to a file of a read-only mount must fail, attribute or not");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+
+        var copy = Path.Combine(Path.GetTempPath(), "anyfs-copy-" + Guid.NewGuid().ToString("N") + ".txt");
+        File.Copy(Path.Combine(unc, "readme.txt"), copy);
+        try
+        {
+            Assert.IsFalse(File.GetAttributes(copy).HasFlag(FileAttributes.ReadOnly), "the copy is an ordinary file");
+        }
+        finally
+        {
+            File.Delete(copy);
+        }
+
         try
         {
             File.WriteAllText(Path.Combine(unc, "new.txt"), "x");

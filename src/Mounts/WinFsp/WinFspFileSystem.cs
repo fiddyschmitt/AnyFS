@@ -13,7 +13,8 @@ namespace AnyFS.Mounts.WinFsp;
 /// <summary>
 /// The WinFsp callbacks (spec 8.1) over a collection's <see cref="IVirtualFileSystem"/>: case-insensitive, preserving,
 /// no reparse points, streams or security (a fixed descriptor granting everyone everything; the read-only layers
-/// decide what writes succeed and show as FILE_ATTRIBUTE_READONLY). WinFsp calls these on its dispatcher threads
+/// decide what writes succeed, and only a file's own read-only shows as FILE_ATTRIBUTE_READONLY, so copies of a
+/// read-only source's files are not read-only). WinFsp calls these on its dispatcher threads
 /// (<see cref="WinFspMount.DispatcherThreads"/>), so each one waits for the asynchronous VFS call. A failure is the
 /// request's alone: each callback answers it with a status, and whatever still escapes one is logged and answered
 /// by <see cref="ExceptionHandler"/>, so the volume serves on.
@@ -61,7 +62,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             return status;
         }
 
-        fileAttributes = Attributes(path, entry);
+        fileAttributes = Attributes(entry);
         if (securityDescriptor is not null)
         {
             securityDescriptor = Everyone;
@@ -509,19 +510,19 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
                 {
                     if (Stat(desc.Path, out _) is { } self)
                     {
-                        list.Add((".", Info(desc.Path, self)));
+                        list.Add((".", Info(self)));
                     }
 
                     var parentPath = VfsPath.Parent(desc.Path);
                     if (Stat(parentPath, out _) is { } parent)
                     {
-                        list.Add(("..", Info(parentPath, parent)));
+                        list.Add(("..", Info(parent)));
                     }
                 }
 
                 foreach (var child in Wait(ListAsync(desc.Path)))
                 {
-                    list.Add((child.Name, Info(VfsPath.Join(desc.Path, child.Name), child)));
+                    list.Add((child.Name, Info(child)));
                 }
             }
             catch (VfsException ex)
@@ -576,7 +577,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             return status;
         }
 
-        fileInfo = Info(desc.Path, entry);
+        fileInfo = Info(entry);
         if (desc.File is { } file && !entry.IsDirectory)
         {
             // the handle knows the current length better than a cached stat might
@@ -587,14 +588,14 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         return STATUS_SUCCESS;
     }
 
-    private FileInfo Info(string path, VfsEntry entry)
+    private FileInfo Info(VfsEntry entry)
     {
         var modified = entry.Modified is { } m ? (ulong)m.ToFileTime() : _mountedAt;
         var created = entry.Created is { } c ? (ulong)c.ToFileTime() : modified;
         var size = entry.IsDirectory ? 0UL : (ulong)entry.Length;
         return new FileInfo
         {
-            FileAttributes = Attributes(path, entry),
+            FileAttributes = Attributes(entry),
             FileSize = size,
             AllocationSize = (size + AllocationUnit - 1) / AllocationUnit * AllocationUnit,
             CreationTime = created,
@@ -604,15 +605,17 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         };
     }
 
-    private uint Attributes(string path, VfsEntry entry)
+    private static uint Attributes(VfsEntry entry)
     {
         uint attributes = 0;
         if (entry.IsDirectory)
         {
             attributes |= AttrDirectory;
         }
-        else if (entry.Attributes.HasFlag(VfsAttributes.ReadOnly) || !fs.CanWrite(path))
+        else if (entry.Attributes.HasFlag(VfsAttributes.ReadOnly))
         {
+            // the file's own read-only only: one that is read-only because its source, collection or mount is would
+            // pass the attribute on to every copy made of it; writes to it are refused when it is opened all the same
             attributes |= AttrReadonly;
         }
 

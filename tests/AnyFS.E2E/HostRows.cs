@@ -319,6 +319,13 @@ public abstract class HostRows
         var tail = Fixture.SizeOf("large.bin") - 65536;
         Assert.AreEqual(Fixture.Sha256Hex(Fixture.Range("large.bin", tail, 65536)), client.Sha256Range(access, Rel("large.bin"), tail, 65536), "range at the tail");
 
+        // no read-only mark on a file for being in a read-only collection or source: a copy of it would keep the mark (the
+        // user, 23-Oct-2026); its writes are refused all the same (below)
+        if (client.MarkedReadOnly(access, Rel("small.bin")) is { } marked)
+        {
+            Assert.IsFalse(marked, $"small.bin shows as read-only to {client.M.Name} over {kind}");
+        }
+
         // writes
         var wrote = client.TryWriteRoundTrip(access, prefix, out var detail);
         if (kind == MountKind.Http)

@@ -175,10 +175,12 @@ public class SmbMountTests
         using var caps2 = JsonDocument.Parse(await perFile.GetStringAsync("capabilities"));
         Assert.IsFalse(caps2.RootElement.GetProperty("readOnly").GetBoolean(), "the mount is writable");
         using var readme = JsonDocument.Parse(await perFile.GetStringAsync("stat?path=readme.txt"));
-        Assert.IsTrue(readme.RootElement.GetProperty("readOnly").GetBoolean(), "but the source can't write: the file is read-only (FILE_ATTRIBUTE_READONLY on the share)");
+        Assert.IsFalse(readme.RootElement.GetProperty("readOnly").GetBoolean(), "the source can't write, but the file is not read-only itself: no FILE_ATTRIBUTE_READONLY for every copy to keep");
         using var list = JsonDocument.Parse(await perFile.GetStringAsync("list?path="));
-        Assert.IsTrue(list.RootElement.GetProperty("entries").EnumerateArray().Single(e => e.GetProperty("name").GetString() == "readme.txt").GetProperty("readOnly").GetBoolean());
-        Assert.AreEqual(HttpStatusCode.Forbidden, (await perFile.PutAsync("write?path=readme.txt&offset=0", new ByteArrayContent("x"u8.ToArray()))).StatusCode);
+        Assert.IsFalse(list.RootElement.GetProperty("entries").EnumerateArray().Single(e => e.GetProperty("name").GetString() == "readme.txt").GetProperty("readOnly").GetBoolean());
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await perFile.PutAsync("write?path=readme.txt&offset=0", new ByteArrayContent("x"u8.ToArray()))).StatusCode, "its writes are refused all the same");
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await perFile.PostAsync("truncate?path=readme.txt&size=0", null)).StatusCode);
+        Assert.AreEqual(HttpStatusCode.Forbidden, (await perFile.PostAsync("create?path=new.txt", null)).StatusCode);
     }
 
     [TestMethod]

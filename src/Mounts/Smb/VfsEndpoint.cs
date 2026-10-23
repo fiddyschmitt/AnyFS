@@ -24,8 +24,8 @@ namespace AnyFS.Mounts.Smb;
 /// GET /capabilities /stat /list /read /statfs, POST /create /mkdir /rename /truncate /chtimes, PUT /write,
 /// DELETE /remove, every collection under /&lt;collection&gt;, on a loopback port chosen by the OS, with a per-launch
 /// random token that every request must carry in X-Vfs-Token. The AnyFS additions to the contract: the token and a
-/// per-file <c>readOnly</c> in stat and list answers, which the server turns into FILE_ATTRIBUTE_READONLY and
-/// STATUS_ACCESS_DENIED without ever calling a write endpoint.
+/// per-file <c>readOnly</c> in stat and list answers for a file read-only itself, which the server turns into
+/// FILE_ATTRIBUTE_READONLY and STATUS_ACCESS_DENIED without ever calling a write endpoint.
 /// </summary>
 internal sealed class VfsEndpoint : IAsyncDisposable
 {
@@ -189,7 +189,7 @@ internal sealed class VfsEndpoint : IAsyncDisposable
                         return;
                     }
 
-                    await JsonAsync(ctx, Info(fs, path, entry), VfsJson.Default.FileInfo, ct).ConfigureAwait(false);
+                    await JsonAsync(ctx, Info(entry), VfsJson.Default.FileInfo, ct).ConfigureAwait(false);
                     return;
                 }
 
@@ -198,7 +198,7 @@ internal sealed class VfsEndpoint : IAsyncDisposable
                     var entries = new List<FileInfo>();
                     await foreach (var child in fs.ListAsync(path, ct).ConfigureAwait(false))
                     {
-                        entries.Add(Info(fs, VfsPath.Join(path, child.Name), child));
+                        entries.Add(Info(child));
                     }
 
                     await JsonAsync(ctx, new DirEntries(entries), VfsJson.Default.DirEntries, ct).ConfigureAwait(false);
@@ -365,9 +365,14 @@ internal sealed class VfsEndpoint : IAsyncDisposable
         }
     }
 
-    /// <summary>A file is readOnly when the three layers refuse writes to it; directories carry the flag too but the server ignores it for them.</summary>
-    private static FileInfo Info(IVirtualFileSystem fs, string path, VfsEntry entry)
-        => new(entry.Name, entry.IsDirectory ? 0 : entry.Length, entry.Modified ?? DateTimeOffset.UnixEpoch, entry.IsDirectory, !entry.IsDirectory && !fs.CanWrite(path));
+    /// <summary>
+    /// A file is readOnly when it is read-only itself; not when only its source, collection or mount refuses writes, since
+    /// the server shows readOnly as FILE_ATTRIBUTE_READONLY, which every copy of the file would keep. Writes to such a file
+    /// are refused by the write endpoints (403, which the server answers as STATUS_MEDIA_WRITE_PROTECTED). Directories
+    /// carry no flag.
+    /// </summary>
+    private static FileInfo Info(VfsEntry entry)
+        => new(entry.Name, entry.IsDirectory ? 0 : entry.Length, entry.Modified ?? DateTimeOffset.UnixEpoch, entry.IsDirectory, !entry.IsDirectory && entry.Attributes.HasFlag(VfsAttributes.ReadOnly));
 
     private static int StatusFor(VfsError error) => error switch
     {

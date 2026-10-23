@@ -49,6 +49,9 @@ public abstract partial class Client(Machine machine)
     /// <summary>Create a folder, write a file, rename it, read it back, delete both. True when all of it worked; false with the refusal when any step did not.</summary>
     public abstract bool TryWriteRoundTrip(Access access, string relDir, out string detail);
 
+    /// <summary>Whether the client shows the file as read-only (Windows' read-only attribute; no owner write bit in a POSIX mode), which a copy of it keeps; null over a URL.</summary>
+    public abstract bool? MarkedReadOnly(Access access, string relFile);
+
     public abstract IReadOnlyList<string> ConcurrentSha256(Access access, string relFile, int readers);
 
     public abstract (string Hash, double Seconds) TimedSha256(Access access, string relFile);
@@ -78,6 +81,12 @@ public abstract partial class Client(Machine machine)
 public abstract class PosixClient(Machine machine) : Client(machine)
 {
     protected abstract string Sha256Command { get; }
+
+    /// <summary>The shell command that prints a file's mode as ls does (-rw-r--r--).</summary>
+    protected abstract string ModeCommand(string quotedPath);
+
+    public override bool? MarkedReadOnly(Access access, string relFile)
+        => access.IsUrl ? null : M.Sh(ModeCommand(Q(PathOf(access, relFile)))).Trim() is { Length: > 2 } mode ? mode[2] != 'w' : throw new InvalidOperationException("no mode for " + relFile);
 
     protected static string Q(string s) => "'" + s.Replace("'", "'\\''") + "'";
 
@@ -170,6 +179,8 @@ public sealed class LinuxClient(Machine machine) : PosixClient(machine)
 {
     protected override string Sha256Command => "sha256sum";
 
+    protected override string ModeCommand(string quotedPath) => $"stat -c %A {quotedPath}";
+
     public override Access Attach(MountKind kind, AnyFsHost host, string collection, bool local)
     {
         var address = HostAddress(host, local);
@@ -218,6 +229,8 @@ public sealed class LinuxClient(Machine machine) : PosixClient(machine)
 public sealed class MacClient(Machine machine) : PosixClient(machine)
 {
     protected override string Sha256Command => "shasum -a 256";
+
+    protected override string ModeCommand(string quotedPath) => $"stat -f %Sp {quotedPath}";
 
     public override Access Attach(MountKind kind, AnyFsHost host, string collection, bool local)
     {
@@ -390,6 +403,9 @@ public sealed class WindowsClient(Machine machine) : Client(machine)
 
         return ok;
     }
+
+    public override bool? MarkedReadOnly(Access access, string relFile)
+        => access.IsUrl ? null : M.Sh($"(Get-Item -LiteralPath {Q(PathOf(access, relFile))}).IsReadOnly").Trim() == "True";
 
     /// <summary>
     /// The readers run as N curl processes (URLs) or N runspace threads in the one PowerShell (paths): a PowerShell
