@@ -75,11 +75,16 @@ real-server SMB test wants the fetched binary (or `ANYFS_SMB_SERVER` pointing at
 WinFsp tests want the driver installed. The 3DX source's tests run against a small fake 3DEXPERIENCE
 platform on 127.0.0.1 (`tests/AnyFS.Sources.Tests/Fake3DX.cs`: 3DPassport, 3DSpace, 3DSearch, a file
 server and an identity provider), so they need nothing outside; the Windows sign-ins among them run
-on Windows only. Three of them open more: `ANYFS_TEST_3DX_BROWSER=1` lets the web session's browser
-tests start Edge headless (over DevTools, and through WebDriver), `ANYFS_TEST_3DX_EXE` pointing at a
-published `anyfs.exe` serves a 3DX source of the fake through that build's HTTP mount, and
+on Windows only. Four of them open more: `ANYFS_TEST_3DX_BROWSER=1` lets the web session's browser
+tests start Edge and Firefox headless (over DevTools, and through WebDriver with each, an identity
+provider on a site of its own and one that shows a dialog among them), `ANYFS_TEST_3DX_EXE` pointing at
+a published `anyfs.exe` serves a 3DX source of the fake through that build's HTTP mount,
 `ANYFS_TEST_3DX_SCALE=1` builds, saves and reads back a tree of 200,000 documents and prints the
-times and memory to the test's output.
+times and memory to the test's output, and `ANYFS_TEST_3DX_WINDOW` pointing at a published
+`anyfs.exe` opens its window over a 3DX source listing the fake and prints how long the window took
+to answer while it listed (`ANYFS_TEST_3DX_WINDOW_DOCS`, 50,000 documents; `_DELAY_MS`, each listing
+call's time, 150; `_CRAWL=1` walks the drive after; `_CPU=1` measures the window's CPU instead). The
+GUI tests' `ANYFS_TEST_UI_LOAD=1` does the same on headless Avalonia with a listing of its own.
 
 ## Publish
 
