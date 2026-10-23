@@ -9,15 +9,27 @@ namespace AnyFS.Core.Settings;
 /// Secrets at rest (spec 9.3): values protected with ASP.NET Core Data Protection (DPAPI-backed keys on
 /// Windows, a per-user key ring in state/keys elsewhere), stored in state/secrets.json keyed
 /// "&lt;owner id&gt;/&lt;property&gt;". Works headless and needs no native dependencies.
+///
+/// Its lock covers the dictionaries alone: protecting and unprotecting (Windows' data protection, which can take
+/// seconds on a machine of a domain) and writing the file happen outside it, the writes in order of the changes, so
+/// a source keeping its session or token cache never holds up a read (the window's, a source starting) for that long.
+/// An operation that takes a second or more is logged.
 /// </summary>
 public sealed class SecretStore
 {
+    private static readonly TimeSpan SlowWorthLogging = TimeSpan.FromSeconds(1);
+
     private readonly string _file;
     private readonly IDataProtector _protector;
     private readonly ILogger _logger;
     private readonly object _gate = new();
+    private readonly object _saveGate = new();
     private readonly Dictionary<string, string> _protected = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string?> _cache = new(StringComparer.Ordinal);
+
+    // every change bumps the version (under _gate); the file is written with the newest one only (under _saveGate)
+    private long _version;
+    private long _written;
 
     public SecretStore(SettingsPaths paths, ILogger logger)
         : this(paths.SecretsFile, paths.KeysDirectory, logger)
@@ -55,6 +67,7 @@ public sealed class SecretStore
     public string? Get(Guid ownerId, string property)
     {
         var key = Key(ownerId, property);
+        string? blob;
         lock (_gate)
         {
             if (_cache.TryGetValue(key, out var cached))
@@ -62,58 +75,74 @@ public sealed class SecretStore
                 return cached;
             }
 
-            if (!_protected.TryGetValue(key, out var blob))
+            if (!_protected.TryGetValue(key, out blob))
             {
-                return null;
-            }
-
-            try
-            {
-                var value = _protector.Unprotect(blob);
-                _cache[key] = value;
-                return value;
-            }
-            catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or FormatException)
-            {
-                _logger.LogWarning("secret {Key} could not be decrypted (keys changed?); it will need to be entered again", key);
                 return null;
             }
         }
+
+        string value;
+        try
+        {
+            value = Timed("decrypt a secret", () => _protector.Unprotect(blob));
+        }
+        catch (Exception ex) when (ex is System.Security.Cryptography.CryptographicException or FormatException)
+        {
+            _logger.LogWarning("secret {Key} could not be decrypted (keys changed?); it will need to be entered again", key);
+            return null;
+        }
+
+        lock (_gate)
+        {
+            // kept only if the secret is still the one decrypted (a Set meanwhile has its own value cached)
+            if (_protected.TryGetValue(key, out var now) && now == blob)
+            {
+                _cache[key] = value;
+            }
+        }
+
+        return value;
     }
 
     public void Set(Guid ownerId, string property, string? value)
     {
         var key = Key(ownerId, property);
-        lock (_gate)
+        if (string.IsNullOrEmpty(value))
         {
-            if (string.IsNullOrEmpty(value))
+            Change(() =>
             {
                 if (!_protected.Remove(key))
                 {
-                    return;
+                    return false;
                 }
 
                 _cache.Remove(key);
-            }
-            else
-            {
-                if (_cache.TryGetValue(key, out var existing) && existing == value)
-                {
-                    return;
-                }
-
-                _protected[key] = _protector.Protect(value);
-                _cache[key] = value;
-            }
-
-            Save();
+                return true;
+            });
+            return;
         }
+
+        lock (_gate)
+        {
+            if (_cache.TryGetValue(key, out var existing) && existing == value)
+            {
+                return;
+            }
+        }
+
+        var blob = Timed("encrypt a secret", () => _protector.Protect(value));
+        Change(() =>
+        {
+            _protected[key] = blob;
+            _cache[key] = value;
+            return true;
+        });
     }
 
     public void RemoveAll(Guid ownerId)
     {
         var prefix = ownerId.ToString("N") + "/";
-        lock (_gate)
+        Change(() =>
         {
             var removed = false;
             foreach (var key in _protected.Keys.Where(k => k.StartsWith(prefix, StringComparison.Ordinal)).ToList())
@@ -123,11 +152,58 @@ public sealed class SecretStore
                 removed = true;
             }
 
-            if (removed)
+            return removed;
+        });
+    }
+
+    /// <summary>Applies a change to the dictionaries under the lock (<paramref name="change"/> says whether there was one), then writes the file outside it.</summary>
+    private void Change(Func<bool> change)
+    {
+        SecretsFile snapshot;
+        long version;
+        lock (_gate)
+        {
+            if (!change())
             {
-                Save();
+                return;
+            }
+
+            version = ++_version;
+            snapshot = new SecretsFile();
+            foreach (var (k, v) in _protected.OrderBy(p => p.Key, StringComparer.Ordinal))
+            {
+                snapshot.Secrets[k] = v;
             }
         }
+
+        lock (_saveGate)
+        {
+            // a later change was written already, this one in it
+            if (version <= _written)
+            {
+                return;
+            }
+
+            Timed("write secrets.json", () =>
+            {
+                JsonFiles.WriteAtomic(_file, snapshot, CoreJsonContext.Default.SecretsFile);
+                return true;
+            });
+            _written = version;
+        }
+    }
+
+    private T Timed<T>(string what, Func<T> action)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var result = action();
+        var took = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+        if (took >= SlowWorthLogging)
+        {
+            _logger.LogInformation("secrets: it took {Milliseconds:F0} ms to {What} (Windows' data protection, or another program holding the file)", took.TotalMilliseconds, what);
+        }
+
+        return result;
     }
 
     /// <summary>The store scoped to one source or mount, as handed to plugins.</summary>
@@ -155,17 +231,6 @@ public sealed class SecretStore
             var moved = JsonFiles.Quarantine(_file);
             _logger.LogError(ex, "secrets.json could not be read; moved to {Path}", moved);
         }
-    }
-
-    private void Save()
-    {
-        var file = new SecretsFile();
-        foreach (var (k, v) in _protected.OrderBy(p => p.Key, StringComparer.Ordinal))
-        {
-            file.Secrets[k] = v;
-        }
-
-        JsonFiles.WriteAtomic(_file, file, CoreJsonContext.Default.SecretsFile);
     }
 
     private sealed class Scoped(SecretStore store, Guid ownerId) : ISecretStore

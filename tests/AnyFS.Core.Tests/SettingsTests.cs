@@ -360,4 +360,48 @@ public class SecretStoreTests
         Assert.AreEqual(0, again.Count);
         Assert.AreEqual(0, new SecretStore(file, keys, NullLogger.Instance).Count);
     }
+
+    [TestMethod]
+    public async Task AReadIsNotHeldUpByAnotherSecretsSlowWrite()
+    {
+        // a source keeping its token cache while the file is held (an antivirus scanning it): the window reading a
+        // source's settings waited for the whole write before (the user's window, busy for 18 s after adding three
+        // SharePoint sources)
+        var file = Path.Combine(_root, "secrets.json");
+        var store = new SecretStore(file, Path.Combine(_root, "keys"), NullLogger.Instance);
+        var owner = Guid.NewGuid();
+        store.Set(owner, "Password", "hunter2");
+        var held = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var release = new Timer(_ => held.Dispose(), null, 250, Timeout.Infinite);
+        var writing = Task.Run(() => store.Set(Guid.NewGuid(), "msal-cache", new string('x', 10_000)));
+        await Task.Delay(50);
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        Assert.AreEqual("hunter2", store.Get(owner, "Password"));
+        var took = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+        await writing;
+        held.Dispose();
+        Assert.IsTrue(took < TimeSpan.FromMilliseconds(100), $"the read took {took.TotalMilliseconds:F0} ms behind the write");
+        Assert.AreEqual(2, new SecretStore(file, Path.Combine(_root, "keys"), NullLogger.Instance).Count, "both written");
+    }
+
+    [TestMethod]
+    public void WritesMadeTogetherLeaveTheNewestOnDisk()
+    {
+        var file = Path.Combine(_root, "secrets.json");
+        var keys = Path.Combine(_root, "keys");
+        var store = new SecretStore(file, keys, NullLogger.Instance);
+        var owners = Enumerable.Range(0, 16).Select(_ => Guid.NewGuid()).ToList();
+        Parallel.ForEach(owners, owner =>
+        {
+            for (var i = 0; i < 5; i++)
+            {
+                store.Set(owner, "Token", $"t{i}");
+            }
+        });
+
+        var again = new SecretStore(file, keys, NullLogger.Instance);
+        Assert.AreEqual(16, again.Count);
+        Assert.IsTrue(owners.All(o => again.Get(o, "Token") == "t4"), "every owner's last value is the one kept");
+    }
 }
