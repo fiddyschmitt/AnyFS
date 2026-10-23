@@ -18,6 +18,11 @@ internal static class IndexFile
 
     public const string FileName = "documents.json.gz";
 
+    /// <summary>
+    /// Writes the index whole beside <paramref name="path"/> and moves it into place; the move is tried again for a moment
+    /// while something holds the old file open without letting it be replaced (an antivirus scanning it), which Windows
+    /// refuses with access denied: a list that took minutes is not lost to that.
+    /// </summary>
     public static void Save(string path, SavedIndex index)
     {
         var temp = path + ".tmp";
@@ -27,7 +32,18 @@ internal static class IndexFile
             JsonSerializer.Serialize(zip, index, IndexJson.Default.SavedIndex);
         }
 
-        File.Move(temp, path, overwrite: true);
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.Move(temp, path, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when ((ex is UnauthorizedAccessException or IOException) && attempt < 6)
+            {
+                Thread.Sleep(10 << (attempt - 1));
+            }
+        }
     }
 
     /// <summary>The index saved at <paramref name="path"/>, or null when there is none, it cannot be read, or it was taken from somewhere else.</summary>
@@ -40,7 +56,7 @@ internal static class IndexFile
 
         try
         {
-            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             using var zip = new GZipStream(file, CompressionMode.Decompress);
             var index = JsonSerializer.Deserialize(zip, IndexJson.Default.SavedIndex);
             return index is { Version: Version } && index.Server == server && index.Query == query && index.Tenant == tenant && index.Dates == dates ? index : null;
