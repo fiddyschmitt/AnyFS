@@ -84,7 +84,10 @@ times and memory to the test's output, and `ANYFS_TEST_3DX_WINDOW` pointing at a
 `anyfs.exe` opens its window over a 3DX source listing the fake and prints how long the window took
 to answer while it listed (`ANYFS_TEST_3DX_WINDOW_DOCS`, 50,000 documents; `_DELAY_MS`, each listing
 call's time, 150; `_CRAWL=1` walks the drive after; `_CPU=1` measures the window's CPU instead). The
-GUI tests' `ANYFS_TEST_UI_LOAD=1` does the same on headless Avalonia with a listing of its own.
+GUI tests' `ANYFS_TEST_UI_LOAD=1` does the same on headless Avalonia with a listing of its own, and with
+sources keeping their sign-ins in the secret store while something holds secrets.json; and
+`ANYFS_TEST_UI_SHAREPOINT` (a SharePoint Server site, with `ANYFS_TEST_SPS_USER` and `_PASSWORD`) adds
+three sources of it to the window and measures it as they start.
 
 ## Publish
 
