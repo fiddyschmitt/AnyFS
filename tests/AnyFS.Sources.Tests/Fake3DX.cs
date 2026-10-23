@@ -60,16 +60,22 @@ internal sealed class Fake3DX : IDisposable
     private readonly ConcurrentDictionary<string, (FakeDocument Document, FakeFile File)> _downloads = new();
     private int _counter;
 
-    public Fake3DX(Passport passport = Passport.Form, Idp idp = Idp.Negotiate)
+    /// <param name="idpHost">The identity provider's host: the platform's own (127.0.0.1), or localhost for a site of its own, as a browser tells an organisation's sign-in apart from 3DX.</param>
+    public Fake3DX(Passport passport = Passport.Form, Idp idp = Idp.Negotiate, string idpHost = "127.0.0.1")
     {
         PassportMode = passport;
         IdpMode = idp;
+        IdpHost = idpHost;
         Port = FreePort();
         BadgePort = FreePort();
-        _listener.Prefixes.Add($"http://127.0.0.1:{Port}/");
+        foreach (var host in new[] { "127.0.0.1", idpHost }.Distinct())
+        {
+            _listener.Prefixes.Add($"http://{host}:{Port}/");
+            _badgeListener.Prefixes.Add($"http://{host}:{BadgePort}/");
+        }
+
         _listener.AuthenticationSchemeSelectorDelegate = SchemeFor;
         _listener.Start();
-        _badgeListener.Prefixes.Add($"http://127.0.0.1:{BadgePort}/");
         _badgeListener.Start();
         _ = ServeAsync(_listener);
         _ = ServeAsync(_badgeListener);
@@ -79,11 +85,22 @@ internal sealed class Fake3DX : IDisposable
 
     public Idp IdpMode { get; }
 
+    public string IdpHost { get; }
+
     public int Port { get; }
 
     public int BadgePort { get; }
 
     public string Origin => $"http://127.0.0.1:{Port}";
+
+    /// <summary>Where the identity provider and its sign-in page (GAS) answer.</summary>
+    public string IdpOrigin => $"http://{IdpHost}:{Port}";
+
+    /// <summary>Whether the identity provider's pages ask a browser to keep them apart from the pages that led there (Cross-Origin-Opener-Policy: same-origin), as some sign-in pages do.</summary>
+    public bool IdpOpenerPolicy { get; set; }
+
+    /// <summary>Whether the script-only sign-in shows a notice in a dialog of the browser's (alert) before it goes on, as some sign-in pages do.</summary>
+    public bool IdpAlert { get; set; }
 
     /// <summary>What the source is given: the 3DSpace service.</summary>
     public string SpaceUrl => $"{Origin}/3dspace";
@@ -327,7 +344,7 @@ internal sealed class Fake3DX : IDisposable
                     response.AppendHeader("Set-Cookie", $"PSESSION={pending}; Path=/3dpassport; HttpOnly");
                     await HtmlAsync(response, 200, $"""
                         <html><head><title>Redirecting</title></head><body onload="document.forms[0].submit()">
-                        <form method="post" action="{Origin}/idp/sso"><input type="hidden" name="SAMLRequest" value="{Convert.ToBase64String(Encoding.UTF8.GetBytes(Next("AuthnRequest")))}"/><input type="hidden" name="RelayState" value="{WebUtility.HtmlEncode(service)}"/><noscript><input type="submit" value="Continue"/></noscript></form>
+                        <form method="post" action="{IdpOrigin}/idp/sso"><input type="hidden" name="SAMLRequest" value="{Convert.ToBase64String(Encoding.UTF8.GetBytes(Next("AuthnRequest")))}"/><input type="hidden" name="RelayState" value="{WebUtility.HtmlEncode(service)}"/><noscript><input type="submit" value="Continue"/></noscript></form>
                         </body></html>
                         """);
                     return;
@@ -676,6 +693,11 @@ internal sealed class Fake3DX : IDisposable
         var request = context.Request;
         var response = context.Response;
         var path = request.Url!.AbsolutePath;
+        if (IdpOpenerPolicy)
+        {
+            response.AddHeader("Cross-Origin-Opener-Policy", "same-origin");
+        }
+
         if (path == "/idp/sso" && request.HttpMethod == "POST")
         {
             var form = await FormAsync(request);
@@ -696,14 +718,15 @@ internal sealed class Fake3DX : IDisposable
                 case Idp.Badge:
                     var resume = "/idp/resume/" + Guid.NewGuid().ToString("N")[..10];
                     _relays[resume] = relay;
-                    Redirect(response, $"{Origin}/gas/?resumeUrl={Uri.EscapeDataString(Origin + "/idp/resume")}&resumePath={Uri.EscapeDataString(resume)}&instanceId=inst7&assuranceLevel=2");
+                    Redirect(response, $"{IdpOrigin}/gas/?resumeUrl={Uri.EscapeDataString(IdpOrigin + "/idp/resume")}&resumePath={Uri.EscapeDataString(resume)}&instanceId=inst7&assuranceLevel=2");
                     return;
                 case Idp.Script:
                     var key = Guid.NewGuid().ToString("N")[..10];
                     _relays[key] = relay;
+                    var notice = IdpAlert ? "alert('This system is for authorised use only.'); " : "";
                     await HtmlAsync(response, 200, $"""
                         <html><head><title>Signing in</title></head><body>
-                        <script>document.cookie = 'idpjs={key}; path=/'; window.location.href = '/idp/js-done';</script>
+                        <script>setTimeout(function () {"{"} {notice}document.cookie = 'idpjs={key}; path=/'; window.location.href = '/idp/js-done'; {"}"}, {(IdpAlert ? 1500 : 0)});</script>
                         </body></html>
                         """);
                     return;
@@ -758,6 +781,11 @@ internal sealed class Fake3DX : IDisposable
     {
         var response = context.Response;
         var path = context.Request.Url!.AbsolutePath;
+        if (IdpOpenerPolicy)
+        {
+            response.AddHeader("Cross-Origin-Opener-Policy", "same-origin");
+        }
+
         const string BadgePath = "window.Tn_INTERNAL_SECURE_BADGE_AUTH=\"/old\";var _INTERNAL_SECURE_BADGE_AUTH=\"/badge/auth\";";
         if (path == "/gas/")
         {
@@ -797,8 +825,8 @@ internal sealed class Fake3DX : IDisposable
         // the error page's address as Mount3DX writes it: the sign-in page's scheme, host and path, no port
         var q = context.Request.QueryString;
         if (context.Request.Url!.AbsolutePath != "/badge/auth" || q["pingfedDropoff"] != "true" || q["instanceId"] != "inst7" || q["assuranceLevel"] != "2"
-            || q["gasWebClient"] != "true" || q["errorUrl"] != "http://127.0.0.1/gas/" || q["coordinates"] != "null" || q["countryCodeRequested"] != "false"
-            || q["usaItarGeoRequested"] != "false" || q["resumeUrl"] != Origin + "/idp/resume" || q["resumePath"] is not { } resume || !_relays.TryRemove(resume, out var relay))
+            || q["gasWebClient"] != "true" || q["errorUrl"] != $"http://{IdpHost}/gas/" || q["coordinates"] != "null" || q["countryCodeRequested"] != "false"
+            || q["usaItarGeoRequested"] != "false" || q["resumeUrl"] != IdpOrigin + "/idp/resume" || q["resumePath"] is not { } resume || !_relays.TryRemove(resume, out var relay))
         {
             context.Response.StatusCode = 400;
             return;

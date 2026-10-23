@@ -194,27 +194,39 @@ internal sealed class WebDriverSession
             _logger.LogInformation("{Prefix}: WebDriver opened {Browser} {Mode} for {Host}", Prefix, browser.Name, mode, Site.Host);
             await GoAsync(driver, Site, ct).ConfigureAwait(false);
             var until = DateTime.UtcNow + deadline;
+            (Uri? Page, IReadOnlyList<SessionCookie> Cookies) seen = (null, []);
+            string? hiccup = null;
             while (true)
             {
                 ct.ThrowIfCancellationRequested();
-                var (page, cookies) = await Task.Run(() => Read(driver), ct).ConfigureAwait(false);
-                var check = await _target.CheckAsync(page is null ? [] : [page], cookies, ct).ConfigureAwait(false);
-                if (check.Done)
+                var read = await TryReadAsync(driver, ct).ConfigureAwait(false);
+                if (read.Error is { } error && error != hiccup)
                 {
-                    var all = await VisitTheRestAsync(driver, cookies, ct).ConfigureAwait(false);
-                    _logger.LogInformation("{Prefix}: read the sign-in to {Host} from {Browser} through WebDriver ({Count} cookies)", Prefix, Site.Host, browser.Name, all.Count);
-                    return new Capture(all);
+                    _logger.LogInformation("{Prefix}: {Browser} did not answer for a moment, its window still open ({Error}); asking again", Prefix, browser.Name, error);
                 }
 
-                if (check.Failure is { } failure)
+                hiccup = read.Error;
+                if (read.Seen is { } now)
                 {
-                    return new Capture(null, failure, Final: true);
+                    seen = now;
+                    var check = await _target.CheckAsync(now.Page is null ? [] : [now.Page], now.Cookies, ct).ConfigureAwait(false);
+                    if (check.Done)
+                    {
+                        var all = await VisitTheRestAsync(driver, now.Cookies, ct).ConfigureAwait(false);
+                        _logger.LogInformation("{Prefix}: read the sign-in to {Host} from {Browser} through WebDriver ({Count} cookies)", Prefix, Site.Host, browser.Name, all.Count);
+                        return new Capture(all);
+                    }
+
+                    if (check.Failure is { } failure)
+                    {
+                        return new Capture(null, failure, Final: true);
+                    }
                 }
 
                 if (DateTime.UtcNow > until)
                 {
                     _logger.LogInformation("{Prefix}: no sign-in to {Host} after {Seconds} s in {Browser} {Mode}; page: {Page}; cookies for the session: {Cookies}",
-                        Prefix, Site.Host, deadline.TotalSeconds, browser.Name, mode, page is null ? "none" : page.Host + page.AbsolutePath, string.Join(", ", cookies.Select(c => c.Name)));
+                        Prefix, Site.Host, deadline.TotalSeconds, browser.Name, mode, seen.Page is null ? "none" : seen.Page.Host + seen.Page.AbsolutePath, string.Join(", ", seen.Cookies.Select(c => c.Name)));
                     return headless
                         ? new Capture(null, "no saved sign-in")
                         : new Capture(null, $"nobody finished the sign-in to {Site.Host} within {InteractiveDeadline.TotalMinutes:N0} minutes; Retry to sign in", Final: true);
@@ -225,7 +237,7 @@ internal sealed class WebDriverSession
         }
         catch (WebDriverException ex)
         {
-            // the window was closed, or the browser went away
+            // the browser has no window left: the person closed it, or it went away
             _logger.LogInformation("{Prefix}: {Browser} ({Mode}) closed before the sign-in to {Host} was read: {Error}", Prefix, browser.Name, mode, Site.Host, FirstLine(ex.Message));
             return headless
                 ? new Capture(null, $"{browser.Name} quit before the sign-in was read")
@@ -237,22 +249,67 @@ internal sealed class WebDriverSession
         }
     }
 
-    private static async Task GoAsync(IWebDriver driver, Uri page, CancellationToken ct)
+    /// <summary>Opens <paramref name="page"/>; the browser's answer to the command does not matter (a slow page, a dialog the page shows, a page on its way), only what it then shows.</summary>
+    private async Task GoAsync(IWebDriver driver, Uri page, CancellationToken ct)
     {
         try
         {
             await Task.Run(() => driver.Navigate().GoToUrl(page), ct).ConfigureAwait(false);
         }
-        catch (WebDriverTimeoutException)
+        catch (WebDriverException ex)
         {
-            // a slow page; the cookies are what matters
+            _logger.LogDebug("{Prefix}: opening {Page}: {Error}", Prefix, page.GetLeftPart(UriPartial.Path), FirstLine(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// What <see cref="Read"/> reads, or, while the browser's window is open but does not answer (a dialog of the page's is
+    /// up, which AnyFS leaves to the person; a page on its way between two sites), the error it gave. Throws only when the
+    /// browser has no window left: closed by the person, or gone.
+    /// </summary>
+    private async Task<((Uri? Page, IReadOnlyList<SessionCookie> Cookies)? Seen, string? Error)> TryReadAsync(IWebDriver driver, CancellationToken ct)
+    {
+        try
+        {
+            return (await Task.Run(() => Read(driver), ct).ConfigureAwait(false), null);
+        }
+        catch (WebDriverException ex)
+        {
+            if (!await Task.Run(() => StillOpen(driver), ct).ConfigureAwait(false))
+            {
+                throw;
+            }
+
+            return (null, FirstLine(ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Whether the browser still has a window (asking for its windows is answered with a page's dialog up, too). A browser
+    /// that does not answer in time is taken as open: a dialog of the system's can hold it, as the smartcard's PIN prompt
+    /// does; one that is gone fails at once.
+    /// </summary>
+    private static bool StillOpen(IWebDriver driver)
+    {
+        try
+        {
+            return driver.WindowHandles.Count > 0;
+        }
+        catch (WebDriverException ex) when (ex is WebDriverTimeoutException || ex.InnerException is TaskCanceledException or TimeoutException)
+        {
+            return true;
+        }
+        catch (WebDriverException)
+        {
+            return false;
         }
     }
 
     /// <summary>
     /// Once signed in: the target's other pages (<see cref="WebSignInTarget.AlsoVisitAsync"/>), each opened until the browser
     /// shows it (its sign-in done) and its cookies read; all the cookies so far, each once. A page that does not show in
-    /// time is passed over, with what it had set by then.
+    /// time is passed over, with what it had set by then; a browser that goes away meanwhile ends the visits, the sign-in
+    /// already read.
     /// </summary>
     private async Task<IReadOnlyList<SessionCookie>> VisitTheRestAsync(IWebDriver driver, IReadOnlyList<SessionCookie> cookies, CancellationToken ct)
     {
@@ -266,27 +323,38 @@ internal sealed class WebDriverSession
         }
 
         Add(cookies);
-        foreach (var page in await _target.AlsoVisitAsync(cookies, ct).ConfigureAwait(false))
+        try
         {
-            await GoAsync(driver, page, ct).ConfigureAwait(false);
-            var until = DateTime.UtcNow + VisitDeadline;
-            while (true)
+            foreach (var page in await _target.AlsoVisitAsync(cookies, ct).ConfigureAwait(false))
             {
-                var (shown, theirs) = await Task.Run(() => Read(driver), ct).ConfigureAwait(false);
-                Add(theirs);
-                if (shown is not null && shown.Host.Equals(page.Host, StringComparison.OrdinalIgnoreCase) && shown.AbsolutePath.StartsWith(page.AbsolutePath.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+                await GoAsync(driver, page, ct).ConfigureAwait(false);
+                var until = DateTime.UtcNow + VisitDeadline;
+                Uri? shown = null;
+                while (true)
                 {
-                    break;
-                }
+                    if ((await TryReadAsync(driver, ct).ConfigureAwait(false)).Seen is { } now)
+                    {
+                        shown = now.Page;
+                        Add(now.Cookies);
+                        if (shown is not null && shown.Host.Equals(page.Host, StringComparison.OrdinalIgnoreCase) && shown.AbsolutePath.StartsWith(page.AbsolutePath.TrimEnd('/'), StringComparison.OrdinalIgnoreCase))
+                        {
+                            break;
+                        }
+                    }
 
-                if (DateTime.UtcNow > until)
-                {
-                    _logger.LogInformation("{Prefix}: {Page} did not show within {Seconds} s after the sign-in (the browser shows {Shown}); going on without it", Prefix, page.GetLeftPart(UriPartial.Path), VisitDeadline.TotalSeconds, shown is null ? "nothing" : shown.Host + shown.AbsolutePath);
-                    break;
-                }
+                    if (DateTime.UtcNow > until)
+                    {
+                        _logger.LogInformation("{Prefix}: {Page} did not show within {Seconds} s after the sign-in (the browser shows {Shown}); going on without it", Prefix, page.GetLeftPart(UriPartial.Path), VisitDeadline.TotalSeconds, shown is null ? "nothing" : shown.Host + shown.AbsolutePath);
+                        break;
+                    }
 
-                await Task.Delay(500, ct).ConfigureAwait(false);
+                    await Task.Delay(500, ct).ConfigureAwait(false);
+                }
             }
+        }
+        catch (WebDriverException ex)
+        {
+            _logger.LogInformation("{Prefix}: the browser closed after the sign-in was read, before its other pages showed ({Error}); going on with the sign-in", Prefix, FirstLine(ex.Message));
         }
 
         return all.Values.ToList();
@@ -331,7 +399,7 @@ internal sealed class WebDriverSession
                 service.HideCommandPromptWindow = true;
                 service.SuppressInitialDiagnosticInformation = true;
                 service.LogLevel = FirefoxDriverLogLevel.Fatal;
-                var options = new FirefoxOptions { BinaryLocation = browser.Path, PageLoadStrategy = PageLoadStrategy.Eager };
+                var options = new FirefoxOptions { BinaryLocation = browser.Path, PageLoadStrategy = PageLoadStrategy.Eager, UnhandledPromptBehavior = PromptBehavior(headless) };
                 options.AddArguments("-profile", profile);
                 if (headless)
                 {
@@ -364,11 +432,19 @@ internal sealed class WebDriverSession
         service.SuppressInitialDiagnosticInformation = true;
     }
 
+    /// <summary>
+    /// What WebDriver does with a dialog a page shows (an alert, a confirmation) when AnyFS next asks the browser something:
+    /// with a window, nothing, so the person answers it (AnyFS's questions fail meanwhile, and are asked again); headless,
+    /// where nobody can, it is accepted, as a person going on with the sign-in would.
+    /// </summary>
+    private static UnhandledPromptBehavior PromptBehavior(bool headless) => headless ? UnhandledPromptBehavior.AcceptAndNotify : UnhandledPromptBehavior.Ignore;
+
     private static T Chromium<T>(T options, WebDriverBrowser browser, string profile, bool headless)
         where T : ChromiumOptions
     {
         options.BinaryLocation = browser.Path;
         options.PageLoadStrategy = PageLoadStrategy.Eager;
+        options.UnhandledPromptBehavior = PromptBehavior(headless);
         options.AddArguments($"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check");
         if (headless)
         {
