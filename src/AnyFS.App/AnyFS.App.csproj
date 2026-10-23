@@ -31,7 +31,9 @@
     <!-- AVLN3001: views are constructed in code with their view models, never by the runtime XAML loader -->
     <NoWarn>$(NoWarn);AVLN3001</NoWarn>
     <EnableUnsafeBinaryFormatterSerialization>false</EnableUnsafeBinaryFormatterSerialization>
-    <UseSystemResourceKeys>true</UseSystemResourceKeys>
+    <!-- .NET's own error messages stay in (0.85 MiB): with resource keys a dialog read "UnauthorizedAccess_IODenied_NoPathName"
+         and the log's network errors were keys too (23-Oct-2026) -->
+    <UseSystemResourceKeys>false</UseSystemResourceKeys>
   </PropertyGroup>
 
   <!-- Bundled tools (spec 8.1, 8.2, 14). Every build embeds them for the runtime it targets: the publish RID, or the
