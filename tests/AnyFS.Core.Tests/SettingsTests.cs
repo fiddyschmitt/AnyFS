@@ -176,6 +176,43 @@ public class SettingsStoreTests
         Assert.IsNull(JsonFiles.Read(path, CoreJsonContext.Default.AppSettings), "an empty file reads as missing");
     }
 
+    [TestMethod]
+    public void AnAtomicWriteGoesThroughWhileAnyFSReadsTheFile()
+    {
+        var path = Path.Combine(_root, "status.json");
+        JsonFiles.WriteAtomic(path, new AppSettings { LogLevel = "first" }, CoreJsonContext.Default.AppSettings);
+
+        // anyfs status reading it as the engine writes it again: Windows refuses the rename while it is open (access denied)
+        var reading = JsonFiles.OpenToRead(path);
+        using var done = new Timer(_ => reading.Dispose(), null, 100, Timeout.Infinite);
+        JsonFiles.WriteAtomic(path, new AppSettings { LogLevel = "second" }, CoreJsonContext.Default.AppSettings);
+        reading.Dispose();
+        Assert.AreEqual("second", JsonFiles.Read(path, CoreJsonContext.Default.AppSettings)!.LogLevel);
+
+        // and the file can be deleted while it is read, as the engine does when it stops
+        using (JsonFiles.OpenToRead(path))
+        {
+            File.Delete(path);
+        }
+
+        Assert.IsFalse(File.Exists(path));
+    }
+
+    [TestMethod]
+    public void AnAtomicWriteWaitsOutAnotherProgramHoldingTheFileForAMoment()
+    {
+        var path = Path.Combine(_root, "status.json");
+        JsonFiles.WriteAtomic(path, new AppSettings { LogLevel = "first" }, CoreJsonContext.Default.AppSettings);
+
+        // as an antivirus scanning the file holds it: read, not shared for deleting, so Windows refuses to replace it
+        var held = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var release = new Timer(_ => held.Dispose(), null, 100, Timeout.Infinite);
+        JsonFiles.WriteAtomic(path, new AppSettings { LogLevel = "second" }, CoreJsonContext.Default.AppSettings);
+        held.Dispose();
+        Assert.AreEqual("second", JsonFiles.Read(path, CoreJsonContext.Default.AppSettings)!.LogLevel);
+        Assert.AreEqual(1, Directory.GetFiles(_root, "status.json*").Length, "no temp file left behind");
+    }
+
     private sealed class FakePlugin : ISourcePlugin
     {
         public string TypeId => "fake";

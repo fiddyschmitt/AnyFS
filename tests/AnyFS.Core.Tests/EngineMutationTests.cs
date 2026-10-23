@@ -211,6 +211,70 @@ public class EngineMutationTests
     }
 
     [TestMethod]
+    public async Task ASourceDeletedWhileItStartsGoesWhileAnotherProgramHoldsItsSecretsAMoment()
+    {
+        // the user removed a 3DX source (and its definition) while it listed its documents: stopping, it kept its session
+        // (a secret), and something scanning the secrets file just written (an antivirus) still held it when the engine
+        // removed the source's secrets; Windows refused the rename and Remove source said UnauthorizedAccess_IODenied_NoPathName
+        var registry = Registry();
+        var plugin = new ListingPlugin(_paths.SecretsFile);
+        registry.AddBuiltIn(plugin);
+        await using var engine = new AnyFsEngine(_paths, registry, NullLoggerFactory.Instance);
+        engine.Load();
+        await engine.StartAsync(null, CancellationToken.None);
+        var work = await engine.AddCollectionAsync("work");
+        var source = await engine.AddSourceAsync("3dx", "listing", true, false, new MemoryPluginSettings());
+        await engine.AddMembershipAsync(work.Id, source.Id, "3dx", false);
+        await Wait.UntilAsync(() => plugin.Listing, what: "the source listing its documents");
+
+        await engine.RemoveMembershipAsync(work.Id, source.Id);
+        await engine.DeleteSourceAsync(source.Id);
+        Assert.IsTrue(plugin.HeldTheFile, "the secrets file was held as the source was removed");
+        Assert.IsNull(engine.Secrets.Get(source.Id, "session"));
+        Assert.IsNull(engine.FindSourceRunner(source.Id));
+        Assert.AreEqual(0, Reload().Sources.Count);
+    }
+
+    /// <summary>A source that lists until stopped, keeps a session secret when it stops, and then has its secrets file held for a moment, as an antivirus scanning it does.</summary>
+    private sealed class ListingPlugin(string secretsFile) : ISourcePlugin
+    {
+        public volatile bool Listing;
+        public volatile bool HeldTheFile;
+
+        public string TypeId => "listing";
+
+        public string DisplayName => "Listing";
+
+        public string Description => "";
+
+        public string TypeFolder => "listing";
+
+        public Stream? OpenIcon() => null;
+
+        public Type SettingsType => typeof(MemoryPluginSettings);
+
+        public object CreateDefaultSettings() => new MemoryPluginSettings();
+
+        public ISource CreateSource(object settings) => new MemorySource
+        {
+            OnInitialise = async (ctx, ct) =>
+            {
+                ctx.ReportProgress("Listing the documents", 0.1);
+                Listing = true;
+                await Task.Delay(Timeout.Infinite, ct);
+            },
+            OnDispose = context =>
+            {
+                context?.Secrets.Set("session", "cookies");
+                var held = new FileStream(secretsFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+                HeldTheFile = true;
+                _ = Task.Delay(150).ContinueWith(_ => held.Dispose(), TaskScheduler.Default);
+                return Task.CompletedTask;
+            },
+        };
+    }
+
+    [TestMethod]
     public async Task RenamingACollectionRestartsItsMountsUnderTheNewName()
     {
         await using var engine = await StartedAsync();

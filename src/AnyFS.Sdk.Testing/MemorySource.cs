@@ -24,6 +24,9 @@ public sealed class MemorySource : SourceBase
     /// <summary>Hook for tests of the host: runs inside <see cref="SourceBase.OnInitialiseAsync"/>.</summary>
     public Func<ISourceContext, CancellationToken, Task>? OnInitialise { get; set; }
 
+    /// <summary>Hook for tests of the host: runs first in <see cref="DisposeAsync"/>, with the context the source was given (null if it never was).</summary>
+    public Func<ISourceContext?, Task>? OnDispose { get; set; }
+
     public int InitialiseCalls { get; private set; }
 
     public int ListCalls { get; private set; }
@@ -257,10 +260,15 @@ public sealed class MemorySource : SourceBase
         return Task.CompletedTask;
     }
 
-    public override ValueTask DisposeAsync()
+    public override async ValueTask DisposeAsync()
     {
+        if (OnDispose is not null)
+        {
+            await OnDispose(LastContext).ConfigureAwait(false);
+        }
+
         Disposed = true;
-        return base.DisposeAsync();
+        await base.DisposeAsync().ConfigureAwait(false);
     }
 
     private Node? Find(string normalizedPath)

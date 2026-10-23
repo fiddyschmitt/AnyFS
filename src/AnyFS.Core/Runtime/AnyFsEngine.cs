@@ -35,6 +35,9 @@ public sealed class AnyFsEngine : IAsyncDisposable
     private bool _started;
     private bool _stopped;
 
+    // status.json writes that failed in a row (every 2 s): a warning once they have for half a minute
+    private int _statusFailures;
+
     public AnyFsEngine(SettingsPaths paths, PluginRegistry registry, ILoggerFactory loggerFactory, IPromptHandler? prompts = null, TimeProvider? time = null)
     {
         Paths = paths;
@@ -213,15 +216,28 @@ public sealed class AnyFsEngine : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Writes status.json, as <see cref="RunAsync"/> does every two seconds. A write that fails (something else held the file
+    /// a moment longer than <see cref="JsonFiles.WriteAtomic"/> waits, an antivirus scanning it) leaves the last one in
+    /// place until the next: logged at debug, and as a warning only once the file has stayed unwritable for half a minute.
+    /// </summary>
     public void WriteStatus()
     {
         try
         {
             JsonFiles.WriteAtomic(Paths.StatusFile, Snapshot(), CoreJsonContext.Default.StatusSnapshot);
+            _statusFailures = 0;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            _logger.LogWarning(ex, "status.json could not be written");
+            if (++_statusFailures == 15)
+            {
+                _logger.LogWarning(ex, "status.json could not be written for half a minute ({Path}); anyfs status may not see this AnyFS running", Paths.StatusFile);
+            }
+            else
+            {
+                _logger.LogDebug("status.json could not be written ({Error}); it is written again in two seconds", ex.Message);
+            }
         }
     }
 
@@ -1316,17 +1332,31 @@ public sealed class AnyFsEngine : IAsyncDisposable
     private static string NormalisePath(string path)
         => VfsPath.TryNormalizeSourcePath(path ?? "", out var normalised, out var reason) ? normalised : throw new ArgumentException($"The path '{path}' isn't valid: {reason}");
 
+    /// <summary>
+    /// Deletes a source's folder, trying again for a moment while a file in it is still held (an antivirus scanning what the
+    /// source wrote as it stopped); what is still held then is left behind, which nothing reads again.
+    /// </summary>
     private static void DeleteQuietly(string directory)
     {
-        try
+        for (var attempt = 1; ; attempt++)
         {
-            if (Directory.Exists(directory))
+            try
             {
-                Directory.Delete(directory, recursive: true);
+                if (Directory.Exists(directory))
+                {
+                    Directory.Delete(directory, recursive: true);
+                }
+
+                return;
             }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
+            catch (Exception ex) when ((ex is IOException or UnauthorizedAccessException) && attempt < 4)
+            {
+                Thread.Sleep(50 * attempt);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return;
+            }
         }
     }
 
