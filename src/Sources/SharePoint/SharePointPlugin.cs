@@ -96,7 +96,7 @@ public sealed class SharePointSettings
     public int SpoolBelowMiB { get; set; } = 8;
 
     [Setting("Keep folder listings", Advanced = true, Order = 22,
-        Hint = "Answer from what AnyFS last saw of each folder instead of asking SharePoint every time, so folders open at once. A folder listed twice within five seconds (refresh pressed) is asked afresh, and every site and folder is walked again in the background (below), so changes made outside AnyFS show then. Off: listings are kept for two seconds.")]
+        Hint = "Answer from what AnyFS last saw of each folder instead of asking SharePoint every time, so folders open at once. Every site and folder is walked again in the background (below), so changes made outside AnyFS show then. Off: listings are kept for two seconds.")]
     public bool KeepListings { get; set; } = true;
 
     [Setting("Walk every folder every (minutes)", Advanced = true, Order = 23,

@@ -6,8 +6,7 @@ namespace AnyFS.Sources.Tests;
 
 /// <summary>
 /// The walk of a SharePoint source's whole tree (every site at once, a few folders of each at a time) and the listings kept
-/// from it: answered from what the source last saw, listed afresh on a refresh (a folder listed twice within a few seconds)
-/// and by the next walk. Against the in-memory store.
+/// from it: answered from what the source last saw until the next walk lists them afresh. Against the in-memory store.
 /// </summary>
 [TestClass]
 public class SharePointWalkTests
@@ -56,7 +55,7 @@ public class SharePointWalkTests
     }
 
     [TestMethod]
-    public async Task KeptListingsAreWhatTheSourceLastSawUntilRefreshed()
+    public async Task KeptListingsAreWhatTheSourceLastSawUntilTheNextWalk()
     {
         var store = MemoryDocumentStore.Sample();
         store.Seed("/Shared Documents", "fixture/readme.txt", Encoding.UTF8.GetBytes("readme"));
@@ -65,14 +64,13 @@ public class SharePointWalkTests
         Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
         var listed = store.FolderListings;
 
-        // changed outside AnyFS: not seen until asked for
+        // changed outside AnyFS: not seen until the next walk, however often the folder is listed (programs list a folder
+        // over and over, opening a file among them)
         store.Seed("/Shared Documents", "fixture/outside.txt", Encoding.UTF8.GetBytes("outside"));
         CollectionAssert.AreEqual(new[] { "readme.txt" }, await SpsTestServer.NamesAsync(source, "Documents/fixture"), "from what the walk saw");
+        CollectionAssert.AreEqual(new[] { "readme.txt" }, await SpsTestServer.NamesAsync(source, "Documents/fixture"), "listed again at once: still from what the walk saw");
         Assert.IsNull(await source.StatAsync("Documents/fixture/outside.txt", None));
         Assert.AreEqual(listed, store.FolderListings, "no request");
-
-        CollectionAssert.AreEquivalent(new[] { "readme.txt", "outside.txt" }, await SpsTestServer.NamesAsync(source, "Documents/fixture"), "listed again at once: refresh");
-        Assert.IsNotNull(await source.StatAsync("Documents/fixture/outside.txt", None));
 
         // what is written through the source shows at once
         await using (var file = await source.OpenAsync("Documents/fixture/made.txt", VfsOpenMode.CreateNew, None))

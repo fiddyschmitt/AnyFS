@@ -20,7 +20,7 @@ namespace AnyFS.Sources.SharePoint;
 /// <see cref="LibraryInfo.Pages"/>) are read-only Markdown files made by the store, as are the pages in a site's own
 /// folder (a classic site's default.aspx).
 /// Listings sit in a <see cref="ListingCache"/>, for two seconds or, with <see cref="KeepListings"/>, until listed afresh
-/// (refresh pressed, or the walk of the whole tree every <see cref="WalkEvery"/>), and stats are answered from it; a
+/// by the walk of the whole tree every <see cref="WalkEvery"/>, and stats are answered from it; a
 /// listing also remembers each item's ids (and download URL, where the flavour has one), so an open needs no extra round trip. Files below the
 /// spool threshold are downloaded whole into the <see cref="SpoolCache"/> (and served again from it while
 /// their version is unchanged); larger ones are read in ranges through <see cref="RandomAccessOverStream"/>,
@@ -43,9 +43,6 @@ public abstract class SharePointSource : SourceBase, ICountable
     internal const int WalkInFlight = 64;
 
     private static readonly TimeSpan ListingTtl = TimeSpan.FromSeconds(2);
-
-    // with listings kept: a folder listed again this soon after a client's last listing of it is listed afresh (refresh pressed)
-    private static readonly TimeSpan RefreshOnRepeat = TimeSpan.FromSeconds(5);
 
     // search finds a new site only minutes after it is made, so asking more often than this gains nothing
     private static readonly TimeSpan OtherSitesTtl = TimeSpan.FromMinutes(5);
@@ -129,8 +126,8 @@ public abstract class SharePointSource : SourceBase, ICountable
 
     /// <summary>
     /// Whether folder listings are kept until listed afresh rather than for two seconds: the source answers from what it
-    /// last saw, lists a folder again when a client lists it twice within a few seconds (refresh), and walks the whole
-    /// tree at the start and again every <see cref="WalkEvery"/>.
+    /// last saw, and walks the whole tree at the start and again every <see cref="WalkEvery"/>, which lists every folder
+    /// afresh.
     /// </summary>
     protected virtual bool KeepListings => false;
 
@@ -168,7 +165,7 @@ public abstract class SharePointSource : SourceBase, ICountable
         }
 
         _listings = KeepListings
-            ? new ListingCache(ListingCache.Kept, ListRemoteAsync, maxDirectories: 1_000_000, refreshOnRepeat: RefreshOnRepeat)
+            ? new ListingCache(ListingCache.Kept, ListRemoteAsync, maxDirectories: 1_000_000)
             : new ListingCache(ListingTtl, ListRemoteAsync);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
         if (KeepListings)
@@ -229,7 +226,7 @@ public abstract class SharePointSource : SourceBase, ICountable
     public override async IAsyncEnumerable<VfsEntry> ListAsync(string path, [EnumeratorCancellation] CancellationToken ct)
     {
         path = VfsPath.Normalize(path);
-        foreach (var entry in await Listings.ListAsync(path, ct).ConfigureAwait(false))
+        foreach (var entry in await Listings.GetAsync(path, ct).ConfigureAwait(false))
         {
             yield return entry;
         }
