@@ -17,7 +17,11 @@ public interface ISourcePlugin
     /// <summary>First segment of the default source path: "files", "sshfs", "3dx".</summary>
     string TypeFolder { get; }
 
-    /// <summary>An SVG or PNG, or null for the default icon.</summary>
+    /// <summary>
+    /// The type's icon, or null for the default (a letter on a coloured square). A PNG with a transparent background, about
+    /// 64 pixels square, is drawn alone in the letter's place; an SVG is accepted but shows as the letter until the window
+    /// can draw SVG.
+    /// </summary>
     Stream? OpenIcon();
 
     /// <summary>

@@ -2,6 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:AnyFS.App.Gui.ViewModels"
         xmlns:views="using:AnyFS.App.Gui.Views"
+        xmlns:g="using:AnyFS.App.Gui"
         x:Class="AnyFS.App.Gui.Views.MountDialog"
         x:DataType="vm:MountDialogViewModel"
         Title="{Binding Title}"
@@ -35,8 +36,11 @@
             <ListBox.ItemTemplate>
               <DataTemplate x:DataType="vm:ProviderChoiceViewModel">
                 <Grid ColumnDefinitions="Auto,*" Margin="0,2">
-                  <Border Classes="badge" Width="26" Height="26" Margin="0,0,8,0">
-                    <TextBlock Text="{Binding Initial}" />
+                  <Border Classes="badge" Classes.icon="{Binding IconKey, Converter={x:Static g:Converters.HasPluginIcon}}" Width="26" Height="26" Margin="0,0,8,0">
+                    <Panel>
+                      <TextBlock Text="{Binding Initial}" />
+                      <Image Source="{Binding IconKey, Converter={x:Static g:Converters.PluginIcon}}" />
+                    </Panel>
                   </Border>
                   <StackPanel Grid.Column="1">
                     <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" />

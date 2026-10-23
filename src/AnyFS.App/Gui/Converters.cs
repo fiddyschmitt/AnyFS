@@ -28,6 +28,9 @@ public static class Converters
     /// <summary>A plugin's icon as an image, or null (then the tile shows its letter badge).</summary>
     public static readonly IValueConverter PluginIcon = new FuncValueConverter<string?, IImage?>(PluginIcons.For);
 
+    /// <summary>Whether the plugin has an icon the window can draw: the badge then shows it alone (its <c>icon</c> class).</summary>
+    public static readonly IValueConverter HasPluginIcon = new FuncValueConverter<string?, bool>(key => PluginIcons.For(key) is not null);
+
     public static readonly IValueConverter IsNotNull = new FuncValueConverter<object?, bool>(value => value is not null);
 
     /// <summary>The value minus the converter parameter, never below zero: a MaxWidth bound to a parent's width, leaving room for what sits beside.</summary>
@@ -53,7 +56,8 @@ public static class Converters
 
 /// <summary>
 /// Decodes <c>OpenIcon()</c> streams once per plugin. PNG is rendered; SVG needs a renderer that isn't in
-/// this build yet (Avalonia.Svg.Skia has no Avalonia 12 release), so SVG icons fall back to the badge.
+/// this build yet (Avalonia.Svg.Skia has no Avalonia 12 release, still none on 23-Oct-2026), so SVG icons fall back to
+/// the badge, and a built-in plugin ships its icon as a PNG rendered from its SVG (SharePoint's).
 /// </summary>
 public static class PluginIcons
 {

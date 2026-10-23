@@ -58,7 +58,7 @@ public sealed class SamplePlugin : ISourcePlugin
     public string DisplayName => "Sample";
     public string Description => "A tiny read-only source.";
     public string TypeFolder => "sample";      // first segment of the default source path
-    public Stream? OpenIcon() => null;
+    public Stream? OpenIcon() => null;         // a PNG, about 64 px square and transparent, or null for a letter
 
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public Type SettingsType => typeof(SampleSettings);

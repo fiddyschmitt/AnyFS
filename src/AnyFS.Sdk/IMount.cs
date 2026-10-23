@@ -31,6 +31,7 @@ public interface IMountProviderPlugin
 
     string Description { get; }
 
+    /// <summary>The provider's icon, or null for the default: as <see cref="ISourcePlugin.OpenIcon"/>.</summary>
     Stream? OpenIcon();
 
     IReadOnlyList<OSPlatform> SupportedPlatforms { get; }

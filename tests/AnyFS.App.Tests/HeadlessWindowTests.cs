@@ -469,4 +469,86 @@ public class HeadlessWindowTests
             }
         }
     }
+
+    [TestMethod]
+    public async Task ATypeWithAnIconShowsItInPlaceOfTheLetter()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "anyfs-tests", "window-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await Session.Dispatch(async () =>
+            {
+                var registry = new PluginRegistry();
+                registry.AddBuiltIn(new MemoryPlugin());
+                registry.AddBuiltIn(new IconPlugin());
+                registry.AddBuiltIn(new FakeMountProvider());
+                var host = GuiHost.Create(new GuiOptions(Path.Combine(root, "settings")), registry);
+                PluginIcons.Registry = host.Engine.Registry;
+                host.Start();
+                await Task.Delay(300);
+                var collection = host.Engine.Settings.Collections.Single();
+                foreach (var (name, type) in new[] { ("lettered", "memory"), ("pictured", "iconic") })
+                {
+                    var source = await host.Engine.AddSourceAsync(name, type, true, false, new MemoryPluginSettings());
+                    await host.Engine.AddMembershipAsync(collection.Id, source.Id, name, false);
+                }
+
+                var window = new MainWindow(host);
+                window.Show();
+                await Task.Delay(500);
+                window.ViewModel.Refresh();
+                await Task.Delay(300);
+
+                Border Badge(string name) => window.GetVisualDescendants().OfType<Border>()
+                    .Single(b => b.Classes.Contains("badge") && b.DataContext is AnyFS.App.Gui.ViewModels.SourceTileViewModel tile && tile.Name == name);
+                var pictured = Badge("pictured");
+                Assert.IsTrue(pictured.Classes.Contains("icon"));
+                Assert.IsNotNull(pictured.GetVisualDescendants().OfType<Image>().Single().Source, "the type's icon");
+                Assert.IsFalse(pictured.GetVisualDescendants().OfType<TextBlock>().Single().IsVisible, "no letter behind it");
+
+                var lettered = Badge("lettered");
+                Assert.IsFalse(lettered.Classes.Contains("icon"));
+                Assert.IsNull(lettered.GetVisualDescendants().OfType<Image>().Single().Source);
+                Assert.IsTrue(lettered.GetVisualDescendants().OfType<TextBlock>().Single().IsVisible, "the letter on its square");
+
+                await host.ShutdownAsync();
+                window.Close();
+                return true;
+            }, CancellationToken.None);
+        }
+        finally
+        {
+            PluginIcons.Registry = null;
+            try
+            {
+                Directory.Delete(root, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    /// <summary>A Memory source whose type has an icon (a one-pixel PNG).</summary>
+    private sealed class IconPlugin : ISourcePlugin
+    {
+        private static readonly byte[] Png = Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==");
+        private readonly MemoryPlugin _inner = new();
+
+        public string TypeId => "iconic";
+
+        public string DisplayName => "Iconic";
+
+        public string Description => "";
+
+        public string TypeFolder => "iconic";
+
+        public Stream? OpenIcon() => new MemoryStream(Png);
+
+        public Type SettingsType => typeof(MemoryPluginSettings);
+
+        public object CreateDefaultSettings() => new MemoryPluginSettings();
+
+        public ISource CreateSource(object settings) => _inner.CreateSource(settings);
+    }
 }

@@ -133,6 +133,13 @@
     <Setter Property="HorizontalAlignment" Value="Center" />
     <Setter Property="VerticalAlignment" Value="Center" />
   </Style>
+  <!-- a plugin with an icon of its own: the icon alone, the badge's size, without the accent square or the letter -->
+  <Style Selector="Border.badge.icon">
+    <Setter Property="Background" Value="Transparent" />
+  </Style>
+  <Style Selector="Border.badge.icon TextBlock">
+    <Setter Property="IsVisible" Value="False" />
+  </Style>
   <Style Selector="Border.readonly">
     <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundBaseLowBrush}" />
     <Setter Property="CornerRadius" Value="4" />

@@ -64,6 +64,9 @@ public sealed class PluginChoiceViewModel(ISourcePlugin plugin)
 
     public string Initial => Plugin.DisplayName.Length > 0 ? Plugin.DisplayName[..1].ToUpperInvariant() : "?";
 
+    /// <summary>Key for the plugin icon cache, as the tiles' (<see cref="SourceTileViewModel.IconKey"/>).</summary>
+    public string IconKey => "source:" + TypeId;
+
     /// <summary>The free-text filter of the Add source dialog: name, description or type id.</summary>
     public bool Matches(string filter)
         => filter.Length == 0 || DisplayName.Contains(filter, StringComparison.OrdinalIgnoreCase) || Description.Contains(filter, StringComparison.OrdinalIgnoreCase) || TypeId.Contains(filter, StringComparison.OrdinalIgnoreCase);
@@ -449,6 +452,9 @@ public sealed class ProviderChoiceViewModel(IMountProviderPlugin provider)
     public string Caption => IsAvailable ? Description : $"{Description}  ({UnavailableReason})";
 
     public string Initial => Provider.DisplayName.Length > 0 ? Provider.DisplayName[..1].ToUpperInvariant() : "?";
+
+    /// <summary>Key for the plugin icon cache, as the tiles' (<see cref="MountTileViewModel.IconKey"/>).</summary>
+    public string IconKey => "mount:" + TypeId;
 
     /// <summary>Kernel file systems and shares (WinFsp, FUSE, SMB, NFS): the "High performance" pill.</summary>
     public bool IsHighPerformance => Provider.Tier is PerformanceTier.Native or PerformanceTier.Network;

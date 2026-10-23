@@ -32,10 +32,10 @@
       <TextBlock Classes="tilegroup" Text="{Binding GroupHeader}" IsVisible="{Binding HasGroupHeader}" />
       <Border Classes="tile">
         <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
-          <Border Grid.RowSpan="4" Classes="badge" ToolTip.Tip="{Binding TypeName}">
+          <Border Grid.RowSpan="4" Classes="badge" Classes.icon="{Binding IconKey, Converter={x:Static g:Converters.HasPluginIcon}}" ToolTip.Tip="{Binding TypeName}">
             <Panel>
               <TextBlock Text="{Binding Initial}" />
-              <Image Width="22" Height="22" Source="{Binding IconKey, Converter={x:Static g:Converters.PluginIcon}}" />
+              <Image Source="{Binding IconKey, Converter={x:Static g:Converters.PluginIcon}}" />
             </Panel>
           </Border>
           <StackPanel Grid.Column="1" VerticalAlignment="Center">
@@ -83,10 +83,10 @@
   <DataTemplate x:Key="MountTile" x:DataType="vm:MountTileViewModel">
     <Border Classes="tile">
       <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto,Auto">
-        <Border Grid.RowSpan="5" Classes="badge">
+        <Border Grid.RowSpan="5" Classes="badge" Classes.icon="{Binding IconKey, Converter={x:Static g:Converters.HasPluginIcon}}">
           <Panel>
             <TextBlock Text="{Binding Initial}" />
-            <Image Width="22" Height="22" Source="{Binding IconKey, Converter={x:Static g:Converters.PluginIcon}}" />
+            <Image Source="{Binding IconKey, Converter={x:Static g:Converters.PluginIcon}}" />
           </Panel>
         </Border>
         <StackPanel Grid.Column="1" VerticalAlignment="Center">
