@@ -27,53 +27,57 @@
   </DataTemplate>
 
   <DataTemplate x:Key="SourceTile" x:DataType="vm:SourceTileViewModel">
-    <Border Classes="tile">
-      <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
-        <Border Grid.RowSpan="4" Classes="badge" ToolTip.Tip="{Binding TypeName}">
-          <Panel>
-            <TextBlock Text="{Binding Initial}" />
-            <Image Width="22" Height="22" Source="{Binding IconKey, Converter={x:Static g:Converters.PluginIcon}}" />
-          </Panel>
-        </Border>
-        <StackPanel Grid.Column="1" VerticalAlignment="Center">
-          <TextBlock Classes="name" Text="{Binding Name}" />
-          <TextBlock Classes="muted" Text="{Binding PathCaption}" IsVisible="{Binding ShowPath}" ToolTip.Tip="The source path: where this source sits in the collection" />
-          <TextBlock Classes="muted" Text="{Binding TypeName}" IsVisible="{Binding ShowUses}" />
-        </StackPanel>
-        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Top">
-          <CheckBox IsChecked="{Binding Enabled}" Content="Enabled" MinHeight="0" Padding="6,0,0,0" />
-          <CheckBox IsChecked="{Binding ReadOnly}" IsEnabled="{Binding !ReadOnlyLocked}" IsVisible="{Binding ShowReadOnly}" Content="Read-only" MinHeight="0" Padding="6,0,0,0" ToolTip.Tip="{Binding ReadOnlyTooltip}" />
-          <Button Classes="icon" IsVisible="{Binding CanRetry}" ToolTip.Tip="Retry now">
-            <PathIcon Classes="small" Data="{StaticResource IconMore}" />
-            <Button.Flyout>
-              <MenuFlyout>
-                <MenuItem Header="Retry now" Command="{Binding RetryCommand}" />
-              </MenuFlyout>
-            </Button.Flyout>
-          </Button>
-        </StackPanel>
-        <Grid Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" ColumnDefinitions="Auto,Auto" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
-          <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" />
-          <TextBlock Grid.Column="1" Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
-                     MaxWidth="{Binding $parent[Grid].Bounds.Width, Converter={x:Static g:Converters.Minus}, ConverterParameter=18}" />
-        </Grid>
-        <ItemsControl Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding Uses}" IsVisible="{Binding ShowUses}" Margin="0,4,0,0">
-          <ItemsControl.ItemTemplate>
-            <DataTemplate x:DataType="x:String">
-              <TextBlock Classes="muted" Text="{Binding}" />
-            </DataTemplate>
-          </ItemsControl.ItemTemplate>
-        </ItemsControl>
-        <DockPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,8,0,0">
-          <views:OpenButton DockPanel.Dock="Right" IsVisible="{Binding ShowPath}" />
-          <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" ClipToBounds="True" Margin="0,0,8,0">
-            <TextBlock Text="{Binding FilesText}" VerticalAlignment="Center" FontFeatures="+tnum" />
-            <ProgressBar IsIndeterminate="True" Width="44" Height="4" MinWidth="44" IsVisible="{Binding Counting}" VerticalAlignment="Center" />
-            <ProgressBar Minimum="0" Maximum="1" Value="{Binding Progress, Mode=OneWay, FallbackValue=0}" Width="44" Height="4" MinWidth="44" IsVisible="{Binding HasProgress}" VerticalAlignment="Center" />
+    <!-- a collection's list is grouped by type: the type's name heads its first tile -->
+    <StackPanel>
+      <TextBlock Classes="tilegroup" Text="{Binding GroupHeader}" IsVisible="{Binding HasGroupHeader}" />
+      <Border Classes="tile">
+        <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
+          <Border Grid.RowSpan="4" Classes="badge" ToolTip.Tip="{Binding TypeName}">
+            <Panel>
+              <TextBlock Text="{Binding Initial}" />
+              <Image Width="22" Height="22" Source="{Binding IconKey, Converter={x:Static g:Converters.PluginIcon}}" />
+            </Panel>
+          </Border>
+          <StackPanel Grid.Column="1" VerticalAlignment="Center">
+            <TextBlock Classes="name" Text="{Binding Name}" />
+            <TextBlock Classes="muted" Text="{Binding PathCaption}" IsVisible="{Binding ShowPath}" ToolTip.Tip="The source path: where this source sits in the collection" />
+            <TextBlock Classes="muted" Text="{Binding TypeName}" IsVisible="{Binding ShowUses}" />
           </StackPanel>
-        </DockPanel>
-      </Grid>
-    </Border>
+          <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Top">
+            <CheckBox IsChecked="{Binding Enabled}" Content="Enabled" MinHeight="0" Padding="6,0,0,0" />
+            <CheckBox IsChecked="{Binding ReadOnly}" IsEnabled="{Binding !ReadOnlyLocked}" IsVisible="{Binding ShowReadOnly}" Content="Read-only" MinHeight="0" Padding="6,0,0,0" ToolTip.Tip="{Binding ReadOnlyTooltip}" />
+            <Button Classes="icon" IsVisible="{Binding CanRetry}" ToolTip.Tip="Retry now">
+              <PathIcon Classes="small" Data="{StaticResource IconMore}" />
+              <Button.Flyout>
+                <MenuFlyout>
+                  <MenuItem Header="Retry now" Command="{Binding RetryCommand}" />
+                </MenuFlyout>
+              </Button.Flyout>
+            </Button>
+          </StackPanel>
+          <Grid Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" ColumnDefinitions="Auto,Auto" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
+            <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" />
+            <TextBlock Grid.Column="1" Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                       MaxWidth="{Binding $parent[Grid].Bounds.Width, Converter={x:Static g:Converters.Minus}, ConverterParameter=18}" />
+          </Grid>
+          <ItemsControl Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding Uses}" IsVisible="{Binding ShowUses}" Margin="0,4,0,0">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="x:String">
+                <TextBlock Classes="muted" Text="{Binding}" />
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+          <DockPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,8,0,0">
+            <views:OpenButton DockPanel.Dock="Right" IsVisible="{Binding ShowPath}" />
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center" ClipToBounds="True" Margin="0,0,8,0">
+              <TextBlock Text="{Binding FilesText}" VerticalAlignment="Center" FontFeatures="+tnum" />
+              <ProgressBar IsIndeterminate="True" Width="44" Height="4" MinWidth="44" IsVisible="{Binding Counting}" VerticalAlignment="Center" />
+              <ProgressBar Minimum="0" Maximum="1" Value="{Binding Progress, Mode=OneWay, FallbackValue=0}" Width="44" Height="4" MinWidth="44" IsVisible="{Binding HasProgress}" VerticalAlignment="Center" />
+            </StackPanel>
+          </DockPanel>
+        </Grid>
+      </Border>
+    </StackPanel>
   </DataTemplate>
 
   <DataTemplate x:Key="MountTile" x:DataType="vm:MountTileViewModel">

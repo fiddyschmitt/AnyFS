@@ -100,6 +100,13 @@
     <Setter Property="FontWeight" Value="SemiBold" />
     <Setter Property="Margin" Value="0,8,0,6" />
   </Style>
+  <!-- a type's name above its first tile in a collection's Sources list -->
+  <Style Selector="TextBlock.tilegroup">
+    <Setter Property="Foreground" Value="{DynamicResource SystemControlForegroundBaseMediumBrush}" />
+    <Setter Property="FontSize" Value="12" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Margin" Value="2,4,0,6" />
+  </Style>
   <Style Selector="TextBlock.caption">
     <Setter Property="Margin" Value="0,0,0,4" />
   </Style>

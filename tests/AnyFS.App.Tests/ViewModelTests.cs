@@ -551,6 +551,36 @@ public class ViewModelTests
     }
 
     [TestMethod]
+    public async Task ACollectionsSourcesAreGroupedByTypeThenByName()
+    {
+        var collection = _engine.Collections.Single();
+        var ids = new Dictionary<string, Guid>();
+        foreach (var (name, type) in new[] { ("zeta", "memory"), ("Alpha", "quick"), ("beta", "memory"), ("gamma", "named"), ("Delta", "quick") })
+        {
+            object settings = type == "named" ? new NamedServerSettings { Server = name } : new MemoryPluginSettings();
+            var definition = await _engine.AddSourceAsync(name, type, true, false, settings);
+            await _engine.AddMembershipAsync(collection.Id, definition.Id, $"{type}/{name}", false);
+            ids[name] = definition.Id;
+        }
+
+        _vm.Refresh();
+        CollectionAssert.AreEqual(new[] { "beta", "zeta", "gamma", "Alpha", "Delta" }, Collections.Sources.Select(s => s.Name).ToList(), "Memory, Named, Quick; by name within each");
+        CollectionAssert.AreEqual(new[] { "Memory", null, "Named", "Quick", null }, Collections.Sources.Select(s => s.GroupHeader).ToList(), "the type above its first tile");
+        CollectionAssert.AreEqual(new[] { "Alpha", "beta", "Delta", "gamma", "zeta" }, _vm.AllSources.Sources.Select(s => s.Name).ToList(), "the All sources tab stays by name");
+        Assert.IsTrue(_vm.AllSources.Sources.All(s => s.GroupHeader is null));
+
+        // one type left: nothing to tell apart
+        foreach (var name in new[] { "Alpha", "gamma", "Delta" })
+        {
+            await _engine.RemoveMembershipAsync(collection.Id, ids[name]);
+        }
+
+        _vm.Refresh();
+        CollectionAssert.AreEqual(new[] { "beta", "zeta" }, Collections.Sources.Select(s => s.Name).ToList());
+        Assert.IsTrue(Collections.Sources.All(s => s.GroupHeader is null));
+    }
+
+    [TestMethod]
     public async Task SourceDialogKeepsANameTypedFirstAndAnExistingSourcesName()
     {
         var dialog = new SourceDialogViewModel(_engine, _dialogs, null, null, askPath: true);

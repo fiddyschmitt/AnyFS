@@ -192,6 +192,16 @@ public sealed partial class SourceTileViewModel : TileViewModel
     [ObservableProperty]
     public partial string TypeName { get; set; } = "";
 
+    /// <summary>
+    /// A collection's list is grouped by type: the type's name, shown above the first tile of each type when the collection
+    /// has more than one; null for the rest (and on the All sources tab).
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasGroupHeader))]
+    public partial string? GroupHeader { get; set; }
+
+    public bool HasGroupHeader => GroupHeader is not null;
+
     /// <summary>The badge letter when the plugin has no icon.</summary>
     [ObservableProperty]
     public partial string Initial { get; set; } = "?";

@@ -112,9 +112,15 @@ public sealed partial class CollectionsViewModel : ObservableObject
         var collectionId = status?.Id ?? Guid.Empty;
         var runner = status is null ? null : _engine.FindCollectionRunner(status.Id);
 
+        // grouped by type: the types in alphabetical order, the sources of each by name (spec 11.1)
+        var sources = (status?.Sources ?? [])
+            .OrderBy(s => TypeNameOf(s.Type), StringComparer.OrdinalIgnoreCase)
+            .ThenBy(s => s.Type, StringComparer.Ordinal)
+            .ThenBy(s => s.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
         ListSync.Sync(
             Sources,
-            status?.Sources ?? [],
+            sources,
             s => s.Id,
             vm => vm.Id,
             s => new SourceTileViewModel(
@@ -129,6 +135,13 @@ public sealed partial class CollectionsViewModel : ObservableObject
                 var locked = handle is { Current: not null } && !handle.Capabilities.CanWrite;
                 vm.Update(s, TypeNameOf(s.Type), locked, [], CollectionOpenTargets(collectionId, s.Path));
             });
+
+        // the type's name above its first tile, when the collection has sources of more than one type
+        var grouped = sources.Select(s => s.Type).Distinct(StringComparer.Ordinal).Skip(1).Any();
+        for (var i = 0; i < Sources.Count; i++)
+        {
+            Sources[i].GroupHeader = grouped && (i == 0 || Sources[i - 1].TypeId != Sources[i].TypeId) ? Sources[i].TypeName : null;
+        }
 
         ListSync.Sync(
             Mounts,
