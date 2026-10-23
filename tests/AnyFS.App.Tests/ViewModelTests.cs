@@ -238,7 +238,10 @@ public class ViewModelTests
         };
         choice.AddCommand.Execute(null);
         await _vm.Operations.Last;
-        await Wait.UntilAsync(() => _engine.Settings.Collections.Single(c => c.Name == "bob").Sources.Count == 1, what: "membership");
+
+        // what the window shows: the running collection's sources, which the mutation (off the window's thread) updates
+        // after the settings
+        await Wait.UntilAsync(() => _engine.Snapshot().Collections.Single(c => c.Name == "bob").Sources.Count == 1, what: "membership");
         _vm.Refresh();
         var tile = Collections.Sources.Single();
         Assert.AreEqual("mem/alpha", tile.Path);

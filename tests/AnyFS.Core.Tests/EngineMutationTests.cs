@@ -235,6 +235,83 @@ public class EngineMutationTests
         Assert.AreEqual(0, Reload().Sources.Count);
     }
 
+    [TestMethod]
+    public async Task AMutationCalledOnTheWindowsThreadDoesItsWorkOffIt()
+    {
+        // the window awaits mutations on its own thread; with the lock free their work (settings and secrets written, a
+        // plugin's hooks) ran there before, holding the window up (the user's "busy for 18059 ms" adding SharePoint sources)
+        var registry = Registry();
+        var plugin = new WatchedPlugin();
+        registry.AddBuiltIn(plugin);
+        await using var engine = new AnyFsEngine(_paths, registry, NullLoggerFactory.Instance);
+        engine.Load();
+        await engine.StartAsync(null, CancellationToken.None);
+
+        using var window = new SingleThreadContext();
+        var added = window.Run(() => engine.AddSourceAsync("watched", "watched", true, false, new MemoryPluginSettings()));
+        await added;
+        Assert.IsNotNull(plugin.NormalisedOn);
+        Assert.AreNotEqual(window.ThreadId, plugin.NormalisedOn, "the plugin's hook ran on the window's thread");
+    }
+
+    /// <summary>A plugin that notes the thread its settings were normalised on.</summary>
+    private sealed class WatchedPlugin : ISourcePlugin
+    {
+        public int? NormalisedOn;
+
+        public string TypeId => "watched";
+
+        public string DisplayName => "Watched";
+
+        public string Description => "";
+
+        public string TypeFolder => "watched";
+
+        public Stream? OpenIcon() => null;
+
+        public Type SettingsType => typeof(MemoryPluginSettings);
+
+        public object CreateDefaultSettings() => new MemoryPluginSettings();
+
+        public void NormaliseSettings(object settings) => NormalisedOn = Environment.CurrentManagedThreadId;
+
+        public ISource CreateSource(object settings) => new MemorySource();
+    }
+
+    /// <summary>A thread of its own with a synchronization context, as a window's: work posted to it runs there, in order.</summary>
+    private sealed class SingleThreadContext : SynchronizationContext, IDisposable
+    {
+        private readonly System.Collections.Concurrent.BlockingCollection<(SendOrPostCallback Callback, object? State)> _work = new();
+        private readonly Thread _thread;
+
+        public SingleThreadContext()
+        {
+            _thread = new Thread(() =>
+            {
+                SetSynchronizationContext(this);
+                foreach (var (callback, state) in _work.GetConsumingEnumerable())
+                {
+                    callback(state);
+                }
+            }) { IsBackground = true };
+            _thread.Start();
+        }
+
+        public int ThreadId => _thread.ManagedThreadId;
+
+        public override void Post(SendOrPostCallback d, object? state) => _work.Add((d, state));
+
+        /// <summary>Starts <paramref name="start"/> on the thread and hands back its task.</summary>
+        public Task<T> Run<T>(Func<Task<T>> start)
+        {
+            var started = new TaskCompletionSource<Task<T>>();
+            Post(_ => started.SetResult(start()), null);
+            return started.Task.Unwrap();
+        }
+
+        public void Dispose() => _work.CompleteAdding();
+    }
+
     /// <summary>A source that lists until stopped, keeps a session secret when it stops, and then has its secrets file held for a moment, as an antivirus scanning it does.</summary>
     private sealed class ListingPlugin(string secretsFile) : ISourcePlugin
     {

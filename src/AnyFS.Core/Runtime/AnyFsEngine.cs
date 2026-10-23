@@ -26,6 +26,14 @@ public sealed class AnyFsEngine : IAsyncDisposable
     private readonly IPromptHandler _prompts;
     private readonly TimeProvider _time;
     private readonly SemaphoreSlim _mutations = new(1, 1);
+
+    /// <summary>
+    /// Waits for the mutations' lock, then goes on off the caller's thread. The window calls mutations on its own thread,
+    /// and with the lock free the rest ran there: settings and secrets written, Windows' data protection, a plugin's
+    /// hooks, for as long as they take, the window held up meanwhile (the user, 23-Oct-2026, after adding three SharePoint
+    /// sources: "window: its thread was busy for 18059 ms").
+    /// </summary>
+    private async Task EnterAsync() => await _mutations.WaitAsync().ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Dictionary<Guid, SourceHandle> _handles = [];
     private SourceRunner[] _sources = [];
@@ -365,7 +373,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>Defines a source (sources are global, spec 9.4) and starts it. Secrets go to the secret store, never to sources.json.</summary>
     public async Task<SourceDefinition> AddSourceAsync(string name, string typeId, bool enabled, bool countFilesOnStart, object settings)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -398,7 +406,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>Edits a source wherever it's used; it restarts when its settings changed (spec 11.1).</summary>
     public async Task UpdateSourceAsync(Guid id, string name, bool enabled, bool countFilesOnStart, object settings)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -465,7 +473,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>The Enabled checkbox: a disabled source is absent from every tree; enabling starts it at once (spec 4.1, 6.4).</summary>
     public async Task SetSourceEnabledAsync(Guid id, bool enabled)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -502,7 +510,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>The Retry item: start again at once, forgetting the backoff.</summary>
     public async Task RetrySourceAsync(Guid id)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -522,7 +530,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>Deletes the definition everywhere: memberships, secrets, per-source state and cache.</summary>
     public async Task DeleteSourceAsync(Guid id)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -621,7 +629,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
     private async Task ImportNewAsync(SourceDefinition source, bool keepId)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -653,7 +661,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
     private async Task ReplaceImportedAsync(Guid id, SourceDefinition source)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -795,7 +803,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
     public async Task<CollectionDefinition> AddCollectionAsync(string name)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -823,7 +831,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>Renaming restarts the collection's mounts: the prefix, URL or export changes (spec 8.8).</summary>
     public async Task RenameCollectionAsync(Guid id, string name)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -855,7 +863,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
     public async Task SetCollectionEnabledAsync(Guid id, bool enabled)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -898,7 +906,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>Deletes the collection and its mounts; its sources stay defined (the window asks about orphans, spec 9.4).</summary>
     public async Task DeleteCollectionAsync(Guid id)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -935,7 +943,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
     public async Task AddMembershipAsync(Guid collectionId, Guid sourceId, string path, bool readOnly)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -969,7 +977,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>The path and Read-only of a source in one collection only (spec 4.2, 11.1).</summary>
     public async Task UpdateMembershipAsync(Guid collectionId, Guid sourceId, string path, bool readOnly)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -995,7 +1003,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
     public async Task RemoveMembershipAsync(Guid collectionId, Guid sourceId)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -1025,7 +1033,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
     public async Task<MountDefinition> AddMountAsync(Guid collectionId, string name, string providerId, bool enabled, bool readOnly, object settings)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -1056,7 +1064,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>Editing a mount restarts it (spec 8.8); a name-only edit doesn't.</summary>
     public async Task UpdateMountAsync(Guid collectionId, Guid mountId, string name, bool enabled, bool readOnly, object settings)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -1099,7 +1107,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>Stops and starts a mount again now (after a failure, or after its provider was installed).</summary>
     public async Task RetryMountAsync(Guid collectionId, Guid mountId)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -1120,7 +1128,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
     public async Task SetMountEnabledAsync(Guid collectionId, Guid mountId, bool enabled)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
@@ -1155,7 +1163,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
     public async Task DeleteMountAsync(Guid collectionId, Guid mountId)
     {
-        await _mutations.WaitAsync().ConfigureAwait(false);
+        await EnterAsync().ConfigureAwait(false);
         try
         {
             ThrowIfStopped();
