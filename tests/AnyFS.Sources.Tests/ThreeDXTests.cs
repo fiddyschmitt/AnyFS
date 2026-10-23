@@ -1050,6 +1050,186 @@ public class ThreeDXPublishedTests
 }
 
 /// <summary>
+/// The published window while a 3DX source lists a big server at its start (the user, 23-Oct-2026: "When enumerating at
+/// startup, the UI becomes less responsive"): how long the window takes to answer a message (SendMessageTimeout with
+/// WM_NULL, what Windows itself asks a window that may hang) every 50 ms, while the source lists and after. Its WinFsp drive
+/// mounted, as at the user's. ANYFS_TEST_3DX_WINDOW names the published anyfs.exe (Windows only: it opens the window);
+/// ANYFS_TEST_3DX_WINDOW_DOCS the documents (50,000), ANYFS_TEST_3DX_WINDOW_DELAY_MS how long each listing call takes (150). The
+/// numbers go to the test's output.
+/// </summary>
+[TestClass]
+public class ThreeDXWindowTests
+{
+    public TestContext TestContext { get; set; } = null!;
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr SendMessageTimeout(IntPtr window, uint message, UIntPtr wParam, IntPtr lParam, uint flags, uint timeout, out UIntPtr result);
+
+    [TestMethod]
+    public async Task TheWindowAnswersWhileThe3DXSourceListsAtItsStart()
+    {
+        var exe = Environment.GetEnvironmentVariable("ANYFS_TEST_3DX_WINDOW");
+        if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe) || !OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("set ANYFS_TEST_3DX_WINDOW to a published anyfs.exe (it opens its window), on Windows");
+        }
+
+        var count = int.Parse(Environment.GetEnvironmentVariable("ANYFS_TEST_3DX_WINDOW_DOCS") ?? "50000", System.Globalization.CultureInfo.InvariantCulture);
+        var delay = int.Parse(Environment.GetEnvironmentVariable("ANYFS_TEST_3DX_WINDOW_DELAY_MS") ?? "150", System.Globalization.CultureInfo.InvariantCulture);
+        using var fake = new Fake3DX(Fake3DX.Passport.Negotiate) { ListingDelay = TimeSpan.FromMilliseconds(delay) };
+        for (var i = 0; i < count; i++)
+        {
+            fake.Add($"DOC-{i:D6}", "A", $"Document {i}", "Document", ($"file-{i}.pdf", "x"u8.ToArray()), ($"file-{i}.docx", "y"u8.ToArray()));
+        }
+
+        var work = Path.Combine(Path.GetTempPath(), "anyfs-tests", "3dx-window-" + Guid.NewGuid().ToString("N"));
+        var settings = Directory.CreateDirectory(Path.Combine(work, "settings")).FullName;
+        await File.WriteAllTextAsync(Path.Combine(settings, "sources.json"), $$"""
+            { "version": 1, "sources": [
+              { "id": "aaaaaaaa-0000-0000-0000-000000000001", "name": "big", "type": "3dx", "enabled": true,
+                "settings": { "serverUrl": "{{fake.SpaceUrl}}", "signInMethod": "{{ThreeDXSettings.WindowsCurrent}}", "dateOrder": "{{ThreeDXDates.DayFirst}}", "keepAliveMinutes": 0 } } ] }
+            """);
+        await File.WriteAllTextAsync(Path.Combine(settings, "collections.json"), """
+            { "version": 1, "collections": [ { "id": "aaaaaaaa-0000-0000-0000-000000000002", "name": "work", "enabled": true,
+              "sources": [ { "id": "aaaaaaaa-0000-0000-0000-000000000001", "path": "3dx", "readOnly": true } ],
+              "mounts": [ { "id": "aaaaaaaa-0000-0000-0000-000000000003", "name": "WinFsp", "provider": "winfsp", "enabled": true, "readOnly": true, "settings": { } } ] } ] }
+            """);
+        var info = new System.Diagnostics.ProcessStartInfo(exe!) { UseShellExecute = false };
+        info.ArgumentList.Add("--settings-dir");
+        info.ArgumentList.Add(settings);
+        using var window = System.Diagnostics.Process.Start(info)!;
+        try
+        {
+            for (var i = 0; i < 100 && window.MainWindowHandle == IntPtr.Zero; i++)
+            {
+                await Task.Delay(200);
+                window.Refresh();
+            }
+
+            Assert.AreNotEqual(IntPtr.Zero, window.MainWindowHandle, "the window opened");
+
+            // what the window costs while a source is starting (its tile's progress bars moving) and once it is ready
+            if (Environment.GetEnvironmentVariable("ANYFS_TEST_3DX_WINDOW_CPU") is "1" or "true")
+            {
+                fake.ListingDelay = TimeSpan.FromMinutes(10);
+                await Task.Delay(TimeSpan.FromSeconds(10));
+                var starting = await CpuAsync(window, TimeSpan.FromSeconds(20));
+                fake.ListingDelay = TimeSpan.Zero;
+                for (var i = 0; i < 600 && SourceState(Path.Combine(work, "state", "status.json")) != "Ready"; i++)
+                {
+                    await Task.Delay(500);
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(5));
+                var ready = await CpuAsync(window, TimeSpan.FromSeconds(20));
+                TestContext.WriteLine($"window CPU while the source starts: {starting:F1}% of one core; once it is ready: {ready:F1}%");
+                return;
+            }
+
+            var listing = new List<double>();
+            var after = new List<double>();
+            var status = Path.Combine(work, "state", "status.json");
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            DateTime? listed = null;
+            while (System.Diagnostics.Stopwatch.GetElapsedTime(started) < TimeSpan.FromMinutes(5) && (listed is null || DateTime.UtcNow - listed < TimeSpan.FromSeconds(15)))
+            {
+                var asked = System.Diagnostics.Stopwatch.GetTimestamp();
+                SendMessageTimeout(window.MainWindowHandle, 0 /* WM_NULL */, UIntPtr.Zero, IntPtr.Zero, 0x2 /* SMTO_ABORTIFHUNG */, 10_000, out _);
+                (listed is null ? listing : after).Add(System.Diagnostics.Stopwatch.GetElapsedTime(asked).TotalMilliseconds);
+                if (listed is null && SourceState(status) == "Ready")
+                {
+                    listed = DateTime.UtcNow;
+                    TestContext.WriteLine($"listed {count:N0} documents in {System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalSeconds:F0} s");
+                }
+
+                await Task.Delay(50);
+            }
+
+            TestContext.WriteLine($"while listing: {Describe(listing)}");
+            TestContext.WriteLine($"after: {Describe(after)}");
+            Assert.IsNotNull(listed, "the source listed its documents");
+
+            // then something walking the drive (Explorer, an indexer, an antivirus): every document's folder listed
+            if (Environment.GetEnvironmentVariable("ANYFS_TEST_3DX_WINDOW_CRAWL") is "1" or "true")
+            {
+                var crawling = new List<double>();
+                var root = @"\\anyfs\work\3dx";
+                var folders = 0;
+                using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+                var all = Directory.EnumerateDirectories(root).ToList();
+                var entries = 0L;
+                var walk = Parallel.ForEachAsync(all, new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = stop.Token }, (folder, token) =>
+                {
+                    Interlocked.Add(ref entries, Directory.EnumerateFileSystemEntries(folder).Count());
+                    Interlocked.Increment(ref folders);
+                    return ValueTask.CompletedTask;
+                });
+                while (!walk.IsCompleted)
+                {
+                    var asked = System.Diagnostics.Stopwatch.GetTimestamp();
+                    SendMessageTimeout(window.MainWindowHandle, 0, UIntPtr.Zero, IntPtr.Zero, 0x2, 10_000, out _);
+                    crawling.Add(System.Diagnostics.Stopwatch.GetElapsedTime(asked).TotalMilliseconds);
+                    await Task.Delay(50);
+                }
+
+                TestContext.WriteLine($"walking the drive ({folders:N0} of {all.Count:N0} folders listed): {Describe(crawling)}");
+            }
+        }
+        finally
+        {
+            if (!window.HasExited)
+            {
+                window.Kill(entireProcessTree: true);
+                window.WaitForExit(10000);
+            }
+
+            try
+            {
+                Directory.Delete(work, true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+            }
+        }
+    }
+
+    /// <summary>The process's CPU over <paramref name="period"/>, in percent of one core.</summary>
+    private static async Task<double> CpuAsync(System.Diagnostics.Process process, TimeSpan period)
+    {
+        process.Refresh();
+        var before = process.TotalProcessorTime;
+        await Task.Delay(period);
+        process.Refresh();
+        return (process.TotalProcessorTime - before).TotalMilliseconds / period.TotalMilliseconds * 100;
+    }
+
+    private static string? SourceState(string statusFile)
+    {
+        try
+        {
+            using var stream = new FileStream(statusFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var json = JsonDocument.Parse(stream);
+            return json.RootElement.GetProperty("collections")[0].GetProperty("sources")[0].GetProperty("state").GetString();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or KeyNotFoundException or InvalidOperationException or IndexOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static string Describe(List<double> times)
+    {
+        if (times.Count == 0)
+        {
+            return "none";
+        }
+
+        var sorted = times.OrderBy(t => t).ToList();
+        return $"{sorted.Count} asks, median {sorted[sorted.Count / 2]:F1} ms, 95th {sorted[(int)(sorted.Count * 0.95)]:F1} ms, 99th {sorted[(int)(sorted.Count * 0.99)]:F1} ms, worst {sorted[^1]:F0} ms, over 100 ms {sorted.Count(t => t > 100)}, over 500 ms {sorted.Count(t => t > 500)}";
+    }
+}
+
+/// <summary>
 /// The tree at the user's scale (200,000 documents, which Mount3DX lists in about five minutes): how long it takes to build,
 /// keep and read back, how much memory it holds, and what a folder refreshed costs. ANYFS_TEST_3DX_SCALE=1; the numbers go
 /// to the test's output.

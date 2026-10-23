@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using AnyFS.App.Gui.Services;
 using AnyFS.App.Gui.ViewModels;
 using AnyFS.Core.Model;
@@ -5,16 +6,24 @@ using AnyFS.Sdk;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Threading;
+using Microsoft.Extensions.Logging;
 
 namespace AnyFS.App.Gui.Views;
 
 public partial class MainWindow : Window
 {
+    /// <summary>How long the window's thread may take to get to a probe before the wait is logged.</summary>
+    internal static readonly TimeSpan StallWorthLogging = TimeSpan.FromSeconds(1);
+
     private readonly GuiHost _host;
     private readonly DispatcherTimer _timer;
+    private readonly Timer _watchdog;
     private DateTime _lastRefresh = DateTime.MinValue;
     private int _dirty;
     private bool _closing;
+
+    // when the probe in flight was sent (a Stopwatch timestamp), 0 when none is
+    private long _probeSent;
 
     public MainWindow(GuiHost host)
     {
@@ -28,16 +37,46 @@ public partial class MainWindow : Window
         host.Prompts.SetPresenter(ShowPromptAsync);
         host.Engine.Changed += OnEngineChanged;
         _timer = new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Background, (_, _) => Tick());
+        _watchdog = new Timer(_ => Probe(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         Opened += (_, _) =>
         {
             RestorePlacement();
             ViewModel.Refresh();
             _timer.Start();
+            _watchdog.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
         };
         Closing += OnClosing;
     }
 
     public MainViewModel ViewModel { get; }
+
+    /// <summary>
+    /// Every second, from outside, how long the window's thread takes to get to a probe: a wait of a second or more is logged
+    /// with how much of it the garbage collector held every thread, so a sluggish window says why (the user, 23-Oct-2026:
+    /// "When enumerating at startup, the UI becomes less responsive").
+    /// </summary>
+    private void Probe()
+    {
+        var sent = Stopwatch.GetTimestamp();
+        if (Interlocked.CompareExchange(ref _probeSent, sent, 0) != 0)
+        {
+            // the last probe is still waiting: it is being timed
+            return;
+        }
+
+        var paused = GC.GetTotalPauseDuration();
+        var full = GC.CollectionCount(2);
+        Dispatcher.UIThread.Post(() =>
+        {
+            var waited = Stopwatch.GetElapsedTime(sent);
+            Interlocked.Exchange(ref _probeSent, 0);
+            if (waited >= StallWorthLogging)
+            {
+                _host.Logger.LogInformation("window: its thread was busy for {Milliseconds:F0} ms (the garbage collector held every thread for {Paused:F0} ms of it, {Full} full collections; {Heap:N0} MiB in use)",
+                    waited.TotalMilliseconds, (GC.GetTotalPauseDuration() - paused).TotalMilliseconds, GC.CollectionCount(2) - full, GC.GetTotalMemory(false) >> 20);
+            }
+        }, DispatcherPriority.Input);
+    }
 
     /// <summary>Changes arrive on any thread; the UI picks them up within a quarter second, and every second regardless.</summary>
     private void OnEngineChanged() => Interlocked.Exchange(ref _dirty, 1);
@@ -69,6 +108,7 @@ public partial class MainWindow : Window
 
         _closing = true;
         _timer.Stop();
+        _watchdog.Dispose();
         _host.Engine.Changed -= OnEngineChanged;
         SavePlacement();
         if (_host.IsShutDown)

@@ -114,6 +114,18 @@ internal sealed class Fake3DX : IDisposable
     /// <summary>Whether the file server answers a range with just that range (206); false sends the whole file (200).</summary>
     public bool HonoursRanges { get; set; } = true;
 
+    /// <summary>How long 3DSearch's search and 3DSpace's documents call take to answer, as a server far away does; a change applies to the calls already waiting too.</summary>
+    public TimeSpan ListingDelay { get; set; }
+
+    private async Task ListingWaitAsync()
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (System.Diagnostics.Stopwatch.GetElapsedTime(started) < ListingDelay)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(50, ListingDelay.TotalMilliseconds)));
+        }
+    }
+
     /// <summary>Whether 3DSpace's API answers a request without a session with a bare 401 instead of sending it to 3DPassport (its pages still do).</summary>
     public bool ApiRefusesWithoutSession { get; set; }
 
@@ -531,6 +543,7 @@ internal sealed class Fake3DX : IDisposable
                 return;
             case ("POST", "/3dspace/resources/v1/modeler/documents/ids"):
                 Interlocked.Increment(ref _documentPosts);
+                await ListingWaitAsync();
                 var body = await new StreamReader(request.InputStream).ReadToEndAsync();
                 var ids = body.StartsWith("$ids=", StringComparison.Ordinal) ? Uri.UnescapeDataString(body[5..]).Split(',', StringSplitOptions.RemoveEmptyEntries) : [];
                 List<FakeDocument> found;
@@ -627,6 +640,7 @@ internal sealed class Fake3DX : IDisposable
         }
 
         Interlocked.Increment(ref _searchPosts);
+        await ListingWaitAsync();
         var query = JsonNode.Parse(await new StreamReader(request.InputStream).ReadToEndAsync())!;
         var size = query["nresults"]!.GetValue<int>();
         var start = query["next_start"] is { } next ? int.Parse(next.GetValue<string>().Split(' ')[0], System.Globalization.CultureInfo.InvariantCulture) : query["start"]!.GetValue<int>();
