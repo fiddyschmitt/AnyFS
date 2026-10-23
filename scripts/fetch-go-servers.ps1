@@ -6,7 +6,8 @@
   Reads scripts/go-servers.json (release tag, asset names, SHA-256s) and puts each binary at
   tools/go-servers/<rid>/portable-smb-server[.exe], which src/Mounts/Smb embeds when publishing for that RID
   (spec 8.2, 14). A checksum that is still empty in the JSON is reported as unverified rather than failing,
-  so a release can be used before its hashes are filled in.
+  so a release can be used before its hashes are filled in. A binary already in place whose SHA-256 matches the
+  JSON is kept rather than downloaded again (the workflows restore tools/go-servers from a cache).
 
   -FromLocal copies the binaries out of a local build of the Go repo (its build.ps1 output folder) instead
   of downloading, for work on both sides at once.
@@ -50,6 +51,13 @@ foreach ($server in $servers) {
             Copy-Item $source $dest -Force
             Set-Executable $dest
             Write-Host ("  {0,-12} {1}  <- {2}" -f $r, $server, $source)
+            continue
+        }
+
+        # one already here (a CI cache restored it, or an earlier run) is kept when it is the pinned one
+        if ($asset.sha256 -and (Test-Path $dest) -and (Get-FileHash $dest -Algorithm SHA256).Hash.ToLowerInvariant() -eq $asset.sha256.ToLowerInvariant()) {
+            Set-Executable $dest
+            Write-Host ("  {0,-12} {1}  already here, sha256 ok" -f $r, $server)
             continue
         }
 

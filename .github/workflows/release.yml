@@ -31,6 +31,22 @@ jobs:
         with:
           global-json-file: global.json
 
+      # portable-smb-server for every runtime, from the cache the build workflow keeps on main (same key); the fetch
+      # below checks each binary's SHA-256 and downloads only what is missing
+      - name: Cache the Go servers
+        uses: actions/cache@v4
+        with:
+          path: tools/go-servers
+          key: go-servers-${{ runner.os }}-${{ hashFiles('scripts/go-servers.json') }}
+
+      # the WinFsp installer Windows builds embed, the same way, keyed on winfsp.json
+      - name: Cache the WinFsp installer
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: tools/winfsp
+          key: winfsp-${{ runner.os }}-${{ hashFiles('scripts/winfsp.json') }}
+
       # the tools the executable embeds: the SMB server per runtime, and on Windows the WinFsp installer
       - name: Fetch the bundled tools
         shell: pwsh
