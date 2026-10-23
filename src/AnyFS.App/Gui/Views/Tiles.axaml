@@ -29,7 +29,7 @@
   <DataTemplate x:Key="SourceTile" x:DataType="vm:SourceTileViewModel">
     <Border Classes="tile">
       <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="Auto,Auto,Auto,Auto">
-        <Border Grid.RowSpan="4" Classes="badge">
+        <Border Grid.RowSpan="4" Classes="badge" ToolTip.Tip="{Binding TypeName}">
           <Panel>
             <TextBlock Text="{Binding Initial}" />
             <Image Width="22" Height="22" Source="{Binding IconKey, Converter={x:Static g:Converters.PluginIcon}}" />

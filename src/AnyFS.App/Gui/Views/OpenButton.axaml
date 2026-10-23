@@ -3,9 +3,9 @@
              xmlns:vm="using:AnyFS.App.Gui.ViewModels"
              x:Class="AnyFS.App.Gui.Views.OpenButton"
              x:DataType="vm:TileViewModel">
-  <!-- Open containing folder (spec 11.1): one mount opens it; several show a flyout; none is disabled with a tooltip -->
+  <!-- Open containing folder (spec 11.1): one mount opens it; several show a flyout; none is disabled; no tooltip (the user, 23-Oct-2026) -->
   <Panel>
-    <Button Command="{Binding OpenSingleCommand}" IsVisible="{Binding HasOneOpenTarget}" ToolTip.Tip="{Binding SingleTargetDetail}">
+    <Button Command="{Binding OpenSingleCommand}" IsVisible="{Binding HasOneOpenTarget}">
       <StackPanel Orientation="Horizontal" Spacing="6">
         <PathIcon Classes="small" Data="{StaticResource IconFolderOpen}" />
         <TextBlock Text="Open containing folder" />
@@ -28,7 +28,7 @@
         </MenuFlyout>
       </Button.Flyout>
     </Button>
-    <Button IsEnabled="False" IsVisible="{Binding HasNoOpenTarget}" ToolTip.Tip="{Binding NoOpenTooltip}">
+    <Button IsEnabled="False" IsVisible="{Binding HasNoOpenTarget}">
       <StackPanel Orientation="Horizontal" Spacing="6">
         <PathIcon Classes="small" Data="{StaticResource IconFolderOpen}" />
         <TextBlock Text="Open containing folder" />

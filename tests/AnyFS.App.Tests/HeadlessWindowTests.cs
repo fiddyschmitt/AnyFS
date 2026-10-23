@@ -71,4 +71,52 @@ public class HeadlessWindowTests
             }
         }
     }
+
+    [TestMethod]
+    public async Task ASourcesIconShowsItsTypeAndTheOpenButtonsNoTooltip()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "anyfs-tests", "window-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await Session.Dispatch(async () =>
+            {
+                var registry = new PluginRegistry();
+                registry.AddBuiltIn(new MemoryPlugin());
+                registry.AddBuiltIn(new FakeMountProvider());
+                var host = GuiHost.Create(new GuiOptions(Path.Combine(root, "settings")), registry);
+                host.Start();
+                await Task.Delay(300);
+                var collection = host.Engine.Settings.Collections.Single();
+                var source = await host.Engine.AddSourceAsync("alpha", "memory", true, false, new MemoryPluginSettings { Files = "a.txt=A" });
+                await host.Engine.AddMembershipAsync(collection.Id, source.Id, "alpha", false);
+                var window = new MainWindow(host);
+                window.Show();
+                await Task.Delay(500);
+                window.ViewModel.Refresh();
+                await Task.Delay(300);
+
+                var badges = window.GetVisualDescendants().OfType<Border>().Where(b => b.Classes.Contains("badge") && b.DataContext is AnyFS.App.Gui.ViewModels.SourceTileViewModel).ToList();
+                Assert.IsTrue(badges.Count > 0, "a source tile was realised");
+                Assert.IsTrue(badges.All(b => (ToolTip.GetTip(b) as string) == "Memory"), "the source's icon names its type");
+
+                var openButtons = window.GetVisualDescendants().OfType<OpenButton>().SelectMany(o => o.GetVisualDescendants().OfType<Button>()).ToList();
+                Assert.IsTrue(openButtons.Count > 0, "Open containing folder buttons were realised");
+                Assert.IsTrue(openButtons.All(b => ToolTip.GetTip(b) is null), "no tooltip on Open containing folder");
+
+                await host.ShutdownAsync();
+                window.Close();
+                return true;
+            }, CancellationToken.None);
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
 }

@@ -70,11 +70,6 @@ public abstract partial class TileViewModel : ObservableObject
 
     public bool HasNoOpenTarget => OpenTargets.Count == 0;
 
-    /// <summary>The access path behind the single Open button, for its tooltip.</summary>
-    public string SingleTargetDetail => OpenTargets.Count == 1 ? OpenTargets[0].Detail : "";
-
-    public virtual string NoOpenTooltip => "No running mount to open";
-
     protected void SetOpenTargets(IReadOnlyList<OpenTargetViewModel> targets)
     {
         if (targets.Count == OpenTargets.Count && targets.Zip(OpenTargets).All(p => p.First.SameAs(p.Second)))
@@ -92,7 +87,6 @@ public abstract partial class TileViewModel : ObservableObject
         OnPropertyChanged(nameof(HasOneOpenTarget));
         OnPropertyChanged(nameof(HasManyOpenTargets));
         OnPropertyChanged(nameof(HasNoOpenTarget));
-        OnPropertyChanged(nameof(SingleTargetDetail));
     }
 
     protected void SetStatus(string state, string text, string? extra = null)
@@ -123,8 +117,6 @@ public sealed partial class CollectionTileViewModel : TileViewModel
 
     [ObservableProperty]
     public partial bool Counting { get; set; }
-
-    public override string NoOpenTooltip => "This collection has no running mount";
 
     public void Update(CollectionStatus status, IReadOnlyList<OpenTargetViewModel> targets)
     {
@@ -409,8 +401,6 @@ public sealed partial class MountTileViewModel : TileViewModel
     public string StatusCopyTooltip => StatusAccessPath is null ? "" : $"Copy the {StatusAccessPath.Label}";
 
     public bool HasAccessPaths => AccessPaths.Count > 0;
-
-    public override string NoOpenTooltip => "The mount isn't running";
 
     public void Update(MountStatus status, string providerName, IReadOnlyList<OpenTargetViewModel> targets, InstallOffer? install = null)
     {
