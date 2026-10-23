@@ -126,6 +126,9 @@ internal sealed class Fake3DX : IDisposable
     /// <summary>Whether the page's configuration gives the badge sign-in's port as text ("50123") rather than as a number.</summary>
     public bool BadgePortAsText { get; set; }
 
+    /// <summary>Whether the identity provider sends the browser to its sign-in page with the resume parameters after a '#' (<c>/gas/#/?resumeUrl=...</c>, an application that routes by its fragment) rather than in the query.</summary>
+    public bool ResumeInFragment { get; set; }
+
     /// <summary>Whether 3DPassport, given a SAML response without a relay state, shows its own page (signed in) rather than sending the client on to the service.</summary>
     public bool StaysWithoutRelayState { get; set; }
 
@@ -718,7 +721,8 @@ internal sealed class Fake3DX : IDisposable
                 case Idp.Badge:
                     var resume = "/idp/resume/" + Guid.NewGuid().ToString("N")[..10];
                     _relays[resume] = relay;
-                    Redirect(response, $"{IdpOrigin}/gas/?resumeUrl={Uri.EscapeDataString(IdpOrigin + "/idp/resume")}&resumePath={Uri.EscapeDataString(resume)}&instanceId=inst7&assuranceLevel=2");
+                    var parameters = $"resumeUrl={Uri.EscapeDataString(IdpOrigin + "/idp/resume")}&resumePath={Uri.EscapeDataString(resume)}&instanceId=inst7&assuranceLevel=2";
+                    Redirect(response, ResumeInFragment ? $"{IdpOrigin}/gas/#/?{parameters}" : $"{IdpOrigin}/gas/?{parameters}");
                     return;
                 case Idp.Script:
                     var key = Guid.NewGuid().ToString("N")[..10];

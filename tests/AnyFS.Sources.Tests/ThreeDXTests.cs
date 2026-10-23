@@ -252,6 +252,14 @@ public class ThreeDXPluginTests
         var query = SingleSignOn.Query(page);
         Assert.AreEqual("/idp/Abc/resume", query["resumePath"]);
         Assert.AreEqual("b c", query["a"]);
+
+        // as Mount3DX reads them: after a '#' too (an application routed by its fragment), names in any case
+        var routed = SingleSignOn.Query(new Uri("https://gas.contoso.com/GAS/#/login?resumeUrl=https%3A%2F%2Fsso%2Fr&ResumePath=%2Fidp%2Fx&instanceId=i&assuranceLevel=2"));
+        Assert.AreEqual("https://sso/r", routed["resumeUrl"]);
+        Assert.AreEqual("/idp/x", routed["resumePath"]);
+        StringAssert.StartsWith(SingleSignOn.Shape(new Uri("https://gas.contoso.com/GAS/#/login?resumeUrl=https%3A%2F%2Fsso%2Fr&ResumePath=%2Fidp%2Fx&instanceId=i&assuranceLevel=2")),
+            "parameters resumeUrl, ResumePath, instanceId, assuranceLevel; a fragment of ");
+        Assert.AreEqual("no parameters", SingleSignOn.Shape(new Uri("https://igas.contoso.com/GAS/")));
         CollectionAssert.AreEqual(new[] { "https://gas.contoso.com/gas/" }, SingleSignOn.Bases(page).ToArray());
         CollectionAssert.AreEqual(new[] { "https://gas.contoso.com/gas/", "https://gas.contoso.com:9031/gas/" }, SingleSignOn.Bases(new Uri("https://gas.contoso.com:9031/gas/?a=b")).ToArray(),
             "Mount3DX's address of the page has no port; a port of the page's own is asked too");
@@ -445,6 +453,21 @@ public class ThreeDXSignInTests
             Assert.IsTrue(signOn.Skip(first.Count).All(r => r.UserAgent is null), trail);
             var steps = signOn.Skip(first.Count).Select(r => $"{r.Method} {r.Path}").ToList();
             CollectionAssert.IsSubsetOf(new[] { "POST /idp/sso", "GET /gas/", "GET /gas/js/app.js", "GET /gas/configuration/internal", $"GET :{fake.BadgePort}/badge/auth", "POST /3dpassport/saml/acs" }, steps, trail);
+        }
+    }
+
+    [TestMethod]
+    public async Task TheResumeParametersAfterTheSignInPagesHashAreReadAsMount3DXReadsThem()
+    {
+        // the identity provider sends the client to /gas/#/?resumeUrl=...: the parameters are in the fragment, not the query
+        using var fake = new Fake3DX(Fake3DX.Passport.Saml, Fake3DX.Idp.Badge) { ResumeInFragment = true };
+        var log = new LineLogger();
+        var (signedIn, problem, session) = await SignInAsync(Settings(fake, ThreeDXSettings.WebSession), log);
+        using (session)
+        {
+            Assert.IsTrue(signedIn, problem + "\n" + log);
+            Assert.AreEqual("by single sign-on", session.How);
+            Assert.AreEqual(1, fake.BadgeAttempts);
         }
     }
 

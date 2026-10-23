@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Web;
 using AngleSharp.Dom;
 using AngleSharp.Html.Parser;
 using Microsoft.Extensions.Logging;
@@ -73,7 +74,7 @@ internal static class SingleSignOn
             var query = Query(signInPage);
             if (new[] { "resumeUrl", "resumePath", "instanceId", "assuranceLevel" }.FirstOrDefault(name => !query.ContainsKey(name)) is { } missing)
             {
-                return Stop($"the identity provider's page ({signInPage.Host}{signInPage.AbsolutePath}, {(int)posted.StatusCode}) has no {missing} in its address: it is no badge sign-in");
+                return Stop($"the identity provider's page ({signInPage.Host}{signInPage.AbsolutePath}, {(int)posted.StatusCode}) has no {missing} in its address ({Shape(signInPage)}): it is no badge sign-in");
             }
 
             var (document, body) = await ParseAsync(posted, ct).ConfigureAwait(false);
@@ -282,20 +283,31 @@ internal static class SingleSignOn
     /// <summary>Two parts of an address joined with one slash, as Mount3DX joins them.</summary>
     internal static string Join(string left, string right) => $"{left.TrimEnd('/')}/{right.TrimStart('/')}";
 
-    /// <summary>The page address's query parameters, decoded (the first of each name).</summary>
+    /// <summary>
+    /// The page address's parameters as Mount3DX reads them: the whole address, every '?' made an '&amp;', read as a query
+    /// (<see cref="HttpUtility.ParseQueryString(string)"/>). So the parameters after a '#' count too, where an application
+    /// that routes by the fragment carries them (<c>/GAS/#/?resumeUrl=...</c>), and names match in any case.
+    /// </summary>
     internal static Dictionary<string, string> Query(Uri page)
     {
-        var parameters = new Dictionary<string, string>(StringComparer.Ordinal);
-        foreach (var pair in page.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        var read = HttpUtility.ParseQueryString(page.ToString().Replace("?", "&", StringComparison.Ordinal));
+        var parameters = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in read.AllKeys)
         {
-            var eq = pair.IndexOf('=');
-            var name = Decode(eq < 0 ? pair : pair[..eq]);
-            var value = eq < 0 ? "" : Decode(pair[(eq + 1)..]);
-            parameters.TryAdd(name, value);
+            if (name is not null && read[name] is { } value)
+            {
+                parameters[name] = value;
+            }
         }
 
         return parameters;
     }
 
-    private static string Decode(string text) => Uri.UnescapeDataString(text.Replace('+', ' '));
+    /// <summary>What an address carries, for the log: its parameters' names and whether it has a fragment, no values (they can carry tickets).</summary>
+    internal static string Shape(Uri page)
+    {
+        var names = Query(page).Keys.ToList();
+        var parameters = names.Count == 0 ? "no parameters" : "parameters " + string.Join(", ", names);
+        return page.Fragment.Length > 1 ? $"{parameters}; a fragment of {page.Fragment.Length - 1} characters" : parameters;
+    }
 }
