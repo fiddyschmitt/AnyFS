@@ -67,6 +67,8 @@ secret properties never enter it.
 |---|---|
 | `paths` | One path per line: UNC paths and drive paths on Windows (`\\server\share`, `C:\`, `D:\Photos`), any folder on Linux/macOS (`/mnt/nas`). Forward slashes are fine. Each path appears under its own chain: `\\h\s\x` as `h/s/x`, `C:\a` as `c/a`, `/mnt/nas` as `mnt/nas`. |
 | `checkIntervalSeconds` | How often unreachable paths are retried (default 60). |
+| `countThreadsPerPath` | When the files are counted, how many folders of one path are listed at the same time, each on a thread of its own (default 8, 1 to 64). |
+| `countPathsInParallel` | When the files are counted, how many paths are counted at the same time (default 8, 1 to 64). |
 
 ### SSHFS (`sshfs`)
 

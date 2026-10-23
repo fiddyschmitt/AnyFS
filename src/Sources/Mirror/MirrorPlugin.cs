@@ -12,6 +12,14 @@ public sealed class MirrorSettings
 
     [Setting("Check paths every (seconds)", Advanced = true, Order = 10, Hint = "How often unreachable paths are retried and reachable ones re-checked.")]
     public int CheckIntervalSeconds { get; set; } = 60;
+
+    [Setting("Threads per path when counting", Advanced = true, Order = 11,
+        Hint = "Counting the files (Count files on start) lists this many folders of one path at the same time, each on a thread of its own.")]
+    public int CountThreadsPerPath { get; set; } = 8;
+
+    [Setting("Paths counted in parallel", Advanced = true, Order = 12,
+        Hint = "How many of the paths are counted at the same time; the others wait their turn.")]
+    public int CountPathsInParallel { get; set; } = 8;
 }
 
 /// <summary>
@@ -33,7 +41,7 @@ public sealed class MirrorPlugin : ISourcePlugin, IValidatable, ISettingTextProv
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public Type SettingsType => typeof(MirrorSettings);
 
-    /// <summary>Local disks walk quickly, so new Mirror sources count on start (every path at once, <see cref="MirrorSource.CountFilesAsync"/>).</summary>
+    /// <summary>Local disks walk quickly, so new Mirror sources count on start (eight paths at a time, eight threads each, <see cref="MirrorSource.CountFilesAsync"/>).</summary>
     public bool IsQuickToCount => true;
 
     public object CreateDefaultSettings() => new MirrorSettings();
@@ -83,6 +91,16 @@ public sealed class MirrorPlugin : ISourcePlugin, IValidatable, ISettingTextProv
         if (s.CheckIntervalSeconds < 5)
         {
             yield return new ValidationMessage("The check interval must be at least 5 seconds.", nameof(MirrorSettings.CheckIntervalSeconds));
+        }
+
+        if (s.CountThreadsPerPath is < 1 or > MirrorSource.MaxCountParallelism)
+        {
+            yield return new ValidationMessage($"Threads per path must be between 1 and {MirrorSource.MaxCountParallelism}.", nameof(MirrorSettings.CountThreadsPerPath));
+        }
+
+        if (s.CountPathsInParallel is < 1 or > MirrorSource.MaxCountParallelism)
+        {
+            yield return new ValidationMessage($"Paths counted in parallel must be between 1 and {MirrorSource.MaxCountParallelism}.", nameof(MirrorSettings.CountPathsInParallel));
         }
     }
 }

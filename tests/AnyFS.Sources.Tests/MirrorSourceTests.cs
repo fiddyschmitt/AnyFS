@@ -36,9 +36,10 @@ public class MirrorSourceTests
         return root.ChainPath;
     }
 
-    private static async Task<MirrorSource> StartAsync(string paths, TestSourceContext? context = null, int interval = 60)
+    private static async Task<MirrorSource> StartAsync(string paths, TestSourceContext? context = null, int interval = 60, int threads = 8, int pathsInParallel = 8)
     {
-        var source = (MirrorSource)new MirrorPlugin().CreateSource(new MirrorSettings { Paths = paths, CheckIntervalSeconds = interval });
+        var settings = new MirrorSettings { Paths = paths, CheckIntervalSeconds = interval, CountThreadsPerPath = threads, CountPathsInParallel = pathsInParallel };
+        var source = (MirrorSource)new MirrorPlugin().CreateSource(settings);
         await source.InitialiseAsync(context ?? new TestSourceContext("mirror"), CancellationToken.None);
         return source;
     }
@@ -269,6 +270,89 @@ public class MirrorSourceTests
         Assert.AreEqual(3, files);
         Assert.AreEqual(files, source.Counters.FilesKnown);
         Assert.AreEqual(directories, source.Counters.DirectoriesKnown);
+    }
+
+    [TestMethod]
+    [DataRow(1, 1)]
+    [DataRow(3, 2)]
+    [DataRow(8, 8)]
+    public async Task CountFilesAgreesWithAWalkWhateverTheThreadsAndPaths(int threads, int pathsInParallel)
+    {
+        // three paths, each 4 folders wide and 3 deep with two files in every folder: 2 x (4 + 16 + 64) files a path
+        var paths = new List<string>();
+        foreach (var name in new[] { "A", "B", "C" })
+        {
+            var path = Path.Combine(_root, name);
+            paths.Add(path);
+            MakeTree(path, depth: 3);
+        }
+
+        var source = await StartAsync(string.Join('\n', paths), threads: threads, pathsInParallel: pathsInParallel);
+        await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+        var (files, directories) = await WalkAsync(source);
+        Assert.AreEqual(3 * 2 * (4 + 16 + 64), files);
+        Assert.AreEqual(files, source.Counters.FilesKnown);
+        Assert.AreEqual(directories, source.Counters.DirectoriesKnown);
+
+        static void MakeTree(string folder, int depth)
+        {
+            Directory.CreateDirectory(folder);
+            if (depth == 0)
+            {
+                return;
+            }
+
+            for (var i = 0; i < 4; i++)
+            {
+                var sub = Path.Combine(folder, $"d{i}");
+                Directory.CreateDirectory(sub);
+                File.WriteAllText(Path.Combine(sub, "one.txt"), "1");
+                File.WriteAllText(Path.Combine(sub, "two.txt"), "2");
+                MakeTree(sub, depth - 1);
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task CountFilesListsAsManyFoldersOfAPathAndAsManyPathsAtOnceAsTheSettingsSay()
+    {
+        // four paths of ten folders each, every listing held a moment so that the counting threads overlap
+        var paths = new List<string>();
+        foreach (var name in new[] { "A", "B", "C", "D" })
+        {
+            var path = Path.Combine(_root, name);
+            paths.Add(path);
+            for (var i = 0; i < 10; i++)
+            {
+                Directory.CreateDirectory(Path.Combine(path, $"d{i}"));
+            }
+        }
+
+        var source = await StartAsync(string.Join('\n', paths), threads: 3, pathsInParallel: 2);
+        var gate = new object();
+        var listing = new Dictionary<string, int>();
+        int mostOfOnePath = 0, mostPaths = 0;
+        source.CountListing = (root, _) =>
+        {
+            lock (gate)
+            {
+                listing[root.Original] = listing.GetValueOrDefault(root.Original) + 1;
+                mostOfOnePath = Math.Max(mostOfOnePath, listing[root.Original]);
+                mostPaths = Math.Max(mostPaths, listing.Count(p => p.Value > 0));
+            }
+
+            Thread.Sleep(60);
+            lock (gate)
+            {
+                listing[root.Original]--;
+            }
+        };
+
+        await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(3, mostOfOnePath, "three folders of one path listed at once");
+        Assert.AreEqual(2, mostPaths, "two paths counted at once");
+        var (_, directories) = await WalkAsync(source);
+        Assert.AreEqual(directories, source.Counters.DirectoriesKnown, "every folder counted once");
     }
 
     /// <summary>What the host's generic count would find: every listing, directory by directory.</summary>

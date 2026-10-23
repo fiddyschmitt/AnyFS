@@ -76,4 +76,18 @@ public class MirrorRootTests
         Assert.IsTrue(messages.Any(m => m.Message.Contains("not-absolute", StringComparison.Ordinal)));
         Assert.IsTrue(messages.Any(m => m.Property == nameof(MirrorSettings.CheckIntervalSeconds)));
     }
+
+    [TestMethod]
+    public void CountingTakesEightThreadsPerPathAndEightPathsAtOnceByDefault()
+    {
+        var settings = new MirrorSettings();
+        Assert.AreEqual(8, settings.CountThreadsPerPath);
+        Assert.AreEqual(8, settings.CountPathsInParallel);
+
+        var paths = OperatingSystem.IsWindows() ? @"C:\x" : "/x";
+        var plugin = new MirrorPlugin();
+        Assert.AreEqual(0, plugin.Validate(new MirrorSettings { Paths = paths, CountThreadsPerPath = 64, CountPathsInParallel = 1 }).Count());
+        var messages = plugin.Validate(new MirrorSettings { Paths = paths, CountThreadsPerPath = 0, CountPathsInParallel = 65 }).ToList();
+        CollectionAssert.AreEquivalent(new[] { nameof(MirrorSettings.CountThreadsPerPath), nameof(MirrorSettings.CountPathsInParallel) }, messages.Select(m => m.Property).ToList());
+    }
 }

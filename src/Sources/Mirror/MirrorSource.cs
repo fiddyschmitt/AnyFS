@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
@@ -14,7 +15,10 @@ public sealed class MirrorSource : SourceBase, ICountable
 {
     private static readonly EnumerationOptions Enumeration = new() { AttributesToSkip = 0, IgnoreInaccessible = true, ReturnSpecialDirectories = false };
 
-    /// <summary>How many entries a counting walk sees between updates of <see cref="SourceBase.Counters"/>.</summary>
+    /// <summary>The most threads per path, and paths at a time, a count takes (<see cref="MirrorSettings.CountThreadsPerPath"/>, <see cref="MirrorSettings.CountPathsInParallel"/>).</summary>
+    internal const int MaxCountParallelism = 64;
+
+    /// <summary>How many entries a counting thread sees between updates of <see cref="SourceBase.Counters"/>.</summary>
     private const int CountBatch = 1024;
 
     private readonly MirrorSettings _settings;
@@ -48,18 +52,36 @@ public sealed class MirrorSource : SourceBase, ICountable
     /// <summary>For tests: re-check reachability now.</summary>
     public void CheckRoots() => CheckRootsCore(report: true);
 
+    /// <summary>For tests: called on a counting thread as it starts listing a folder of a path.</summary>
+    internal Action<MirrorRoot, string>? CountListing { get; set; }
+
     /// <summary>
-    /// "Count files on start": every configured path is walked at the same time, each on its own thread,
-    /// with <see cref="SourceBase.Counters"/> updated as the walks go. A path configured inside another
-    /// (C:\ and C:\Photos) is counted once, by its own walk; junctions and symlinks are counted but not
-    /// followed; an unreachable path contributes nothing until the next count.
+    /// "Count files on start": <see cref="MirrorSettings.CountPathsInParallel"/> of the configured paths are walked at a time
+    /// (8 by default), each by <see cref="MirrorSettings.CountThreadsPerPath"/> threads of its own (8) that list its folders
+    /// in parallel, with <see cref="SourceBase.Counters"/> updated as the walks go. The threads are the walk's, not the
+    /// thread pool's: a listing blocks on the disk or the share, and 64 of them would starve the pool the rest of AnyFS
+    /// runs on. A path configured inside another (C:\ and C:\Photos) is counted once, by its own walk; junctions and
+    /// symlinks are counted but not followed; an unreachable path contributes nothing until the next count.
     /// </summary>
     public async Task CountFilesAsync(CancellationToken ct)
     {
         // every level of the folder chains is a folder of the source
         Counters.Set(0, CountNodes(_root, underRoot: _root.Root is not null), EnumerationState.InProgress);
         var chains = new HashSet<string>(_roots.Select(r => r.ChainPath), StringComparer.OrdinalIgnoreCase);
-        var walks = _roots.Select(root => Task.Run(() => WalkForCount(root, chains, ct), ct)).ToList();
+        var threads = Math.Clamp(_settings.CountThreadsPerPath, 1, MaxCountParallelism);
+        using var turns = new SemaphoreSlim(Math.Clamp(_settings.CountPathsInParallel, 1, MaxCountParallelism));
+        var walks = _roots.Select(async root =>
+        {
+            await turns.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await WalkForCountAsync(root, chains, threads, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                turns.Release();
+            }
+        }).ToList();
         await Task.WhenAll(walks).ConfigureAwait(false);
     }
 
@@ -67,7 +89,11 @@ public sealed class MirrorSource : SourceBase, ICountable
     private static long CountNodes(Node node, bool underRoot)
         => node.Children.Values.Sum(child => (child.Root is not null || !underRoot ? 1 : 0) + CountNodes(child, underRoot || child.Root is not null));
 
-    private void WalkForCount(MirrorRoot root, HashSet<string> chains, CancellationToken ct)
+    /// <summary>
+    /// One path's count: <paramref name="threads"/> threads take its folders from one stack (deepest first, so the stack
+    /// stays short), list them and put the subfolders back, until none is left or being listed.
+    /// </summary>
+    private async Task WalkForCountAsync(MirrorRoot root, HashSet<string> chains, int threads, CancellationToken ct)
     {
         if (!Directory.Exists(root.FullPath))
         {
@@ -75,54 +101,78 @@ public sealed class MirrorSource : SourceBase, ICountable
             return;
         }
 
-        long files = 0, directories = 0;
-        var pending = 0;
-        var stack = new Stack<(string Real, string Chain)>();
-        stack.Push((root.FullPath, root.ChainPath));
-        while (stack.Count > 0)
+        using var folders = new BlockingCollection<(string Real, string Chain)>(new ConcurrentStack<(string Real, string Chain)>());
+        var outstanding = 1;
+        folders.Add((root.FullPath, root.ChainPath), ct);
+
+        void Count()
         {
-            ct.ThrowIfCancellationRequested();
-            var (real, chain) = stack.Pop();
+            long files = 0, directories = 0;
+            var pending = 0;
             try
             {
-                foreach (var entry in new DirectoryInfo(real).EnumerateFileSystemInfos("*", Enumeration))
+                foreach (var (real, chain) in folders.GetConsumingEnumerable(ct))
                 {
-                    if (entry.Attributes.HasFlag(FileAttributes.Directory))
+                    try
                     {
-                        var childChain = chain.Length == 0 ? entry.Name : chain + "/" + entry.Name;
-                        if (chains.Count > 1 && chains.Contains(childChain))
+                        CountListing?.Invoke(root, real);
+                        foreach (var entry in new DirectoryInfo(real).EnumerateFileSystemInfos("*", Enumeration))
                         {
-                            // another configured path appears here and walks it (and it's a chain node, counted already)
-                            continue;
-                        }
+                            if (entry.Attributes.HasFlag(FileAttributes.Directory))
+                            {
+                                var childChain = chain.Length == 0 ? entry.Name : chain + "/" + entry.Name;
+                                if (chains.Count > 1 && chains.Contains(childChain))
+                                {
+                                    // another configured path appears here and walks it (and it's a chain node, counted already)
+                                    continue;
+                                }
 
-                        directories++;
-                        if (!entry.Attributes.HasFlag(FileAttributes.ReparsePoint))
-                        {
-                            stack.Push((entry.FullName, childChain));
+                                directories++;
+                                if (!entry.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                                {
+                                    // counted as outstanding before it is put back, so the walk cannot end in between
+                                    Interlocked.Increment(ref outstanding);
+                                    folders.Add((entry.FullName, childChain), ct);
+                                }
+                            }
+                            else
+                            {
+                                files++;
+                            }
+
+                            if (++pending == CountBatch)
+                            {
+                                Counters.Add(files, directories);
+                                files = directories = 0;
+                                pending = 0;
+                                ct.ThrowIfCancellationRequested();
+                            }
                         }
                     }
-                    else
+                    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                     {
-                        files++;
+                        Logger.LogDebug("mirror: count skipped {Path}: {Error}", real, ex.Message);
                     }
-
-                    if (++pending == CountBatch)
+                    finally
                     {
-                        Counters.Add(files, directories);
-                        files = directories = 0;
-                        pending = 0;
-                        ct.ThrowIfCancellationRequested();
+                        // the last folder listed: the other threads' waits for more end
+                        if (Interlocked.Decrement(ref outstanding) == 0)
+                        {
+                            folders.CompleteAdding();
+                        }
                     }
                 }
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            finally
             {
-                Logger.LogDebug("mirror: count skipped {Path}: {Error}", real, ex.Message);
+                Counters.Add(files, directories);
             }
         }
 
-        Counters.Add(files, directories);
+        var counting = Enumerable.Range(0, threads)
+            .Select(_ => Task.Factory.StartNew(Count, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default))
+            .ToList();
+        await Task.WhenAll(counting).ConfigureAwait(false);
     }
 
     protected override Task OnInitialiseAsync(CancellationToken ct)
