@@ -24,6 +24,11 @@
     <Using Include="AnyFS.Sources.Common" />
   </ItemGroup>
   <ItemGroup>
+    <!-- the type's icon (OpenIcon): sharepoint.svg (the user's, 23-Oct-2026) rendered at 64 px, since the window draws
+         PNG icons only (no SVG renderer for Avalonia 12 yet); render it again from the SVG when that changes -->
+    <EmbeddedResource Include="Assets\sharepoint.png" LogicalName="sharepoint.png" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
     <InternalsVisibleTo Include="SharePointSignIn" />
   </ItemGroup>

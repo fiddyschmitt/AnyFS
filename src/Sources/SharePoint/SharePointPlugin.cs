@@ -250,7 +250,8 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
     public string TypeFolder => "sharepoint";
 
-    public Stream? OpenIcon() => null;
+    /// <summary>SharePoint's logo, a PNG rendered from Assets/sharepoint.svg.</summary>
+    public Stream? OpenIcon() => typeof(SharePointPlugin).Assembly.GetManifestResourceStream("sharepoint.png");
 
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public Type SettingsType => typeof(SharePointSettings);
