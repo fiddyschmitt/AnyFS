@@ -105,9 +105,8 @@ internal sealed class DocumentFolder(DxDocument document, string name, FolderFil
 /// shortcut to the document in 3DX and its metadata. Names two documents (or two files of one) share are told apart by a
 /// number, as Mount3DX does: every document of the name gets one, in the order they were made, with the document's type;
 /// every file of the name gets one. Immutable: a refresh makes a new tree and the source swaps it in whole, so a listing
-/// never sees half of one; a document fetched afresh replaces its own folder and shares the rest (<see cref="With"/>).
-/// Made for the hundreds of thousands of documents a platform holds (200,000 at the user's): names and references only,
-/// lookups by name and by id through two dictionaries the trees after a refreshed folder share.
+/// never sees half of one. Made for the hundreds of thousands of documents a platform holds (200,000 at the user's): names
+/// and references only, lookups by name through one dictionary.
 /// </summary>
 internal sealed class DocumentTree
 {
@@ -117,14 +116,12 @@ internal sealed class DocumentTree
     private readonly DxDocument[] _documents;
     private readonly DocumentFolder[] _folders;
     private readonly Dictionary<string, int> _byName;
-    private readonly Dictionary<string, int> _byId;
 
-    private DocumentTree(DxDocument[] documents, DocumentFolder[] folders, Dictionary<string, int> byName, Dictionary<string, int> byId, Uri? space, DateTimeOffset taken, long fileCount)
+    private DocumentTree(DxDocument[] documents, DocumentFolder[] folders, Dictionary<string, int> byName, Uri? space, DateTimeOffset taken, long fileCount)
     {
         _documents = documents;
         _folders = folders;
         _byName = byName;
-        _byId = byId;
         Space = space;
         Taken = taken;
         FileCount = fileCount;
@@ -149,18 +146,16 @@ internal sealed class DocumentTree
 
     public DocumentFolder? Folder(string name) => _byName.TryGetValue(name, out var i) ? _folders[i] : null;
 
-    /// <summary>A document's folder by the document's id (3DX's ids are hex: either case).</summary>
-    public DocumentFolder? ById(string id) => _byId.TryGetValue(id, out var i) ? _folders[i] : null;
-
     /// <param name="space">The 3DSpace service the documents are on, when each folder is to hold the document's <see cref="ThreeDXNames.LinkFile"/> (to it) and <see cref="ThreeDXNames.MetadataFile"/>; null for neither.</param>
     public static DocumentTree Build(IReadOnlyList<DxDocument> documents, Uri? space, DateTimeOffset taken)
     {
-        // the same document twice (3DSearch can list one on two pages while the index changes) shows once
-        var byId = new Dictionary<string, int>(documents.Count, StringComparer.OrdinalIgnoreCase);
+        // the same document twice (3DSearch can list one on two pages while the index changes) shows once; 3DX's ids are hex,
+        // in either case
+        var ids = new HashSet<string>(documents.Count, StringComparer.OrdinalIgnoreCase);
         var unique = new List<DxDocument>(documents.Count);
         foreach (var document in documents)
         {
-            if (byId.TryAdd(document.Id, unique.Count))
+            if (ids.Add(document.Id))
             {
                 unique.Add(document);
             }
@@ -178,41 +173,7 @@ internal sealed class DocumentTree
             fileCount += folders[i].FileCount;
         }
 
-        return new DocumentTree(all, folders, byName, byId, space, taken, fileCount);
-    }
-
-    /// <summary>
-    /// A copy of the tree with one document as 3DX now describes it (or without it, when it is gone): a folder listed afresh.
-    /// When its folder keeps its name (the name, revision and title unchanged, and where it is numbered, its type and date
-    /// too) only that folder is new and the rest is shared; otherwise the tree is made again.
-    /// </summary>
-    public DocumentTree With(string id, DxDocument? document)
-    {
-        if (document is not null && _byId.TryGetValue(id, out var index) && document.Id.Equals(id, StringComparison.OrdinalIgnoreCase))
-        {
-            var old = _folders[index];
-            var oldBase = ThreeDXNames.DocumentFolder(old.Document.Name, old.Document.Revision, old.Document.Title);
-            var newBase = ThreeDXNames.DocumentFolder(document.Name, document.Revision, document.Title);
-            var sameNumber = old.Name == oldBase || (document.Type == old.Document.Type && document.Created == old.Document.Created);
-            if (string.Equals(oldBase, newBase, StringComparison.Ordinal) && sameNumber)
-            {
-                var folder = new DocumentFolder(document, old.Name, FilesOf(document, Space), Space);
-                var documents = (DxDocument[])_documents.Clone();
-                var folders = (DocumentFolder[])_folders.Clone();
-                documents[index] = document;
-                folders[index] = folder;
-                return new DocumentTree(documents, folders, _byName, _byId, Space, Taken, FileCount - old.FileCount + folder.FileCount);
-            }
-        }
-
-        var list = _documents.Where(d => !d.Id.Equals(id, StringComparison.OrdinalIgnoreCase)).ToList();
-        if (document is not null)
-        {
-            var at = Array.FindIndex(_documents, d => d.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
-            list.Insert(at < 0 ? list.Count : at, document);
-        }
-
-        return Build(list, Space, Taken);
+        return new DocumentTree(all, folders, byName, space, taken, fileCount);
     }
 
     /// <summary>The folder name of each document, by index: its own, or numbered where documents share it.</summary>

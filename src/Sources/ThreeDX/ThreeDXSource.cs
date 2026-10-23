@@ -13,18 +13,14 @@ namespace AnyFS.Sources.ThreeDX;
 /// listed at the start (<see cref="DocumentLister"/>) into a tree held in memory (<see cref="DocumentTree"/>), which answers
 /// every listing and stat without a request; the tree is saved in the source's state folder, so a restart serves the last
 /// one at once while it is listed afresh in the background, as it is every <see cref="ThreeDXSettings.RefreshMinutes"/>. A
-/// document's folder listed twice within a few seconds (refresh pressed) has the document fetched afresh at once (the root
-/// does not: listing every document is minutes of 3DX's time). A file up to the spool size is downloaded whole on open into the
-/// <see cref="SpoolCache"/>, served as it arrives and kept for the next open while its version stands; a larger one is read
-/// in ranges as the client asks (<see cref="RandomAccessOverStream"/>), several at a time. The sessions are kept alive as
-/// Mount3DX keeps them, and renewed when they lapse (<see cref="ThreeDXSession"/>); trouble with 3DX shows as Degraded until
-/// a request succeeds again.
+/// file up to the spool size is downloaded whole on open into the <see cref="SpoolCache"/>, served as it arrives and kept
+/// for the next open while its version stands; a larger one is read in ranges as the client asks
+/// (<see cref="RandomAccessOverStream"/>), several at a time. The sessions are kept alive as Mount3DX keeps them, and
+/// renewed when they lapse (<see cref="ThreeDXSession"/>); trouble with 3DX shows as Degraded until a request succeeds
+/// again.
 /// </summary>
 public sealed class ThreeDXSource : SourceBase, ICountable
 {
-    // a folder listed again this soon after a client's last listing of it is fetched afresh (refresh pressed)
-    private static readonly TimeSpan RefreshOnRepeat = TimeSpan.FromSeconds(5);
-
     // a document's metadata is made again after this, when read again
     private static readonly TimeSpan MetadataFor = TimeSpan.FromMinutes(1);
 
@@ -32,8 +28,6 @@ public sealed class ThreeDXSource : SourceBase, ICountable
     private readonly SessionOptions? _options;
     private readonly CancellationTokenSource _stopping = new();
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
-    private readonly object _treeGate = new();
-    private readonly ConcurrentDictionary<string, long> _listed = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, (byte[] Content, DateTime At)> _metadata = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, long> _sizes = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _rangeIgnoredSaid = new(StringComparer.Ordinal);
@@ -232,11 +226,7 @@ public sealed class ThreeDXSource : SourceBase, ICountable
 
     private void Swap(DocumentTree tree)
     {
-        lock (_treeGate)
-        {
-            _tree = tree;
-        }
-
+        _tree = tree;
         Counters.Set(tree.FileCount, tree.Folders.Count, EnumerationState.Complete);
     }
 
@@ -250,44 +240,6 @@ public sealed class ThreeDXSource : SourceBase, ICountable
         {
             Logger.LogWarning("3dx: the document list could not be kept for the next start: {Error}", ex.Message);
         }
-    }
-
-    /// <summary>A client's listing of <paramref name="path"/> that comes within <see cref="RefreshOnRepeat"/> of its last: refresh pressed.</summary>
-    private bool ListedAgain(string path)
-    {
-        var now = Stopwatch.GetTimestamp();
-        var previous = 0L;
-        _listed.AddOrUpdate(path, now, (_, before) =>
-        {
-            previous = before;
-            return now;
-        });
-        if (_listed.Count > 4096)
-        {
-            foreach (var pair in _listed.Where(p => Stopwatch.GetElapsedTime(p.Value) > RefreshOnRepeat))
-            {
-                _listed.TryRemove(pair);
-            }
-        }
-
-        return previous != 0 && Stopwatch.GetElapsedTime(previous, now) <= RefreshOnRepeat;
-    }
-
-    /// <summary>One document as 3DX describes it now, put into the tree in place of what was known (refresh pressed in its folder).</summary>
-    private async Task<DocumentFolder?> RefreshDocumentAsync(DocumentFolder folder, CancellationToken ct)
-    {
-        var fresh = await Run(() => Client.DocumentAsync(folder.Document.Id, ct)).ConfigureAwait(false);
-        DocumentTree tree;
-        lock (_treeGate)
-        {
-            tree = _tree.With(folder.Document.Id, fresh);
-            _tree = tree;
-        }
-
-        Counters.Set(tree.FileCount, tree.Folders.Count, EnumerationState.Complete);
-        _metadata.TryRemove(folder.Document.Id, out _);
-        Logger.LogInformation("3dx: {Folder} fetched afresh: {Files} files", folder.Name, fresh?.Files.Count ?? 0);
-        return tree.ById(folder.Document.Id);
     }
 
     // --- listing and stat -------------------------------------------------------------------------------------------------
@@ -325,8 +277,6 @@ public sealed class ThreeDXSource : SourceBase, ICountable
         path = VfsPath.Normalize(path);
         if (path.Length == 0)
         {
-            // the root is not listed afresh on a refresh: that is every document, minutes of 3DX's time (200,000 take about
-            // five), and Explorer lists a folder twice in a moment of its own accord
             foreach (var folder in _tree.Folders)
             {
                 yield return folder.Entry;
@@ -344,11 +294,6 @@ public sealed class ThreeDXSource : SourceBase, ICountable
         if (file is not null)
         {
             throw VfsException.NotADirectory(path);
-        }
-
-        if (ListedAgain(path))
-        {
-            found = await RefreshDocumentAsync(found, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
         }
 
         foreach (var item in found.Files)

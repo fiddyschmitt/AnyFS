@@ -216,13 +216,6 @@ internal sealed class ThreeDXClient
         return documents;
     }
 
-    /// <summary>One document as 3DX describes it now; null when it is gone.</summary>
-    public async Task<DxDocument?> DocumentAsync(string id, CancellationToken ct)
-    {
-        using var result = await DocumentsJsonAsync([id], ct).ConfigureAwait(false);
-        return Data(result).Select(Document).OfType<DxDocument>().FirstOrDefault(d => d.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
-    }
-
     private Task<JsonDocument> DocumentsJsonAsync(IReadOnlyList<string> ids, CancellationToken ct)
         => PostJsonAsync(new Uri(Space, "resources/v1/modeler/documents/ids"),
             () => new StringContent("$ids=" + string.Join(",", ids.Select(Uri.EscapeDataString)), Encoding.UTF8, "application/x-www-form-urlencoded"),

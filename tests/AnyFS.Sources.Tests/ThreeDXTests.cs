@@ -51,11 +51,14 @@ public class ThreeDXNamesTests
         var newer = new DxDocument("B2", "doc", "spec", "1", "Controlled Document", DateTimeOffset.Parse("2021-01-01T00:00:00Z"), null, []);
         var other = new DxDocument("C3", "Other", "Other", "1", "Document", null, null, []);
         var tree = DocumentTree.Build([newer, other, older], space: null, DateTimeOffset.UtcNow);
-        Assert.AreEqual("DOC Rev 1 (Spec) (1) (Document)", tree.ById("A1")!.Name);
-        Assert.AreEqual("doc Rev 1 (spec) (2) (Controlled Document)", tree.ById("B2")!.Name);
-        Assert.AreEqual("Other Rev 1", tree.ById("c3")!.Name, "ids are found in either case");
+        Assert.AreEqual("DOC Rev 1 (Spec) (1) (Document)", Of(tree, "A1").Name);
+        Assert.AreEqual("doc Rev 1 (spec) (2) (Controlled Document)", Of(tree, "B2").Name);
+        Assert.AreEqual("Other Rev 1", Of(tree, "C3").Name);
         Assert.IsNotNull(tree.Folder("doc rev 1 (spec) (1) (document)"), "names are found in either case");
     }
+
+    /// <summary>The folder of the document with this id.</summary>
+    private static DocumentFolder Of(DocumentTree tree, string id) => tree.Folders.Single(f => f.Document.Id == id);
 
     [TestMethod]
     public void FilesThatShareANameAndTheSourcesOwnNamesAreNumbered()
@@ -67,39 +70,9 @@ public class ThreeDXNamesTests
             new("F3", "_link.url", 5, null, null),
         };
         var tree = DocumentTree.Build([new DxDocument("D", "DOC", "Title", "A", "Document", null, null, files)], new Uri("https://3dx.contoso.com/3dspace/"), DateTimeOffset.UtcNow);
-        var names = tree.ById("D")!.Files.Select(f => f.Name).ToList();
+        var names = Of(tree, "D").Files.Select(f => f.Name).ToList();
         CollectionAssert.AreEquivalent(new[] { "drawing (1).pdf", "Drawing (2).pdf", "_link (1).url", "_link.url", "_metadata.json" }, names);
         Assert.AreEqual(5, tree.FileCount);
-    }
-
-    [TestMethod]
-    public void AFolderFetchedAfreshReplacesItselfAndANewNameRemakesTheTree()
-    {
-        var made = DateTimeOffset.Parse("2020-01-01T00:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
-        var a = new DxDocument("A1", "DOC", "Spec", "1", "Document", made, null, [new DxFile("F1", "one.pdf", 1, null, null)]);
-        var twin = new DxDocument("B2", "DOC", "Spec", "1", "Document", made.AddDays(1), null, []);
-        var other = new DxDocument("C3", "Other", "Other", "1", "Document", null, null, []);
-        var space = new Uri("https://3dx.contoso.com/3dspace/");
-        var tree = DocumentTree.Build([a, twin, other], space, DateTimeOffset.UtcNow);
-        Assert.AreEqual("DOC Rev 1 (Spec) (1) (Document)", tree.ById("A1")!.Name);
-
-        // a file added: the same folder, numbered as before, with its new file; the others untouched
-        var more = a with { Files = [.. a.Files, new DxFile("F2", "two.pdf", 2, null, null)] };
-        var after = tree.With("A1", more);
-        Assert.AreEqual("DOC Rev 1 (Spec) (1) (Document)", after.ById("A1")!.Name);
-        Assert.IsNotNull(after.Folder("DOC Rev 1 (Spec) (1) (Document)")!.File("two.pdf"));
-        Assert.AreSame(tree.ById("C3"), after.ById("C3"), "only the folder fetched afresh is new");
-        Assert.AreEqual(tree.FileCount + 1, after.FileCount);
-        Assert.IsNull(tree.ById("A1")!.File("two.pdf"), "the tree before is as it was");
-
-        // a new title: a new name, and the twin it was numbered beside is itself again
-        var renamed = tree.With("A1", a with { Title = "Specification" });
-        Assert.AreEqual("DOC Rev 1 (Specification)", renamed.ById("A1")!.Name);
-        Assert.AreEqual("DOC Rev 1 (Spec)", renamed.ById("B2")!.Name);
-        Assert.AreEqual(3, renamed.Folders.Count);
-
-        // gone from 3DX: gone from the tree
-        Assert.IsNull(tree.With("C3", null).ById("C3"));
     }
 
     [TestMethod]
@@ -787,7 +760,7 @@ public class ThreeDXSourceTests
         Assert.AreEqual(signIns, fake.SignIns, "the kept session is used: no sign-in");
         Assert.AreEqual(1, (await ListAsync(second, "")).Count);
 
-        // the root listed twice is not listed afresh (every document is minutes of 3DX's time); the refresh brings the new one
+        // listed again: still the kept list; the refresh brings the new one
         Assert.AreEqual(1, (await ListAsync(second, "")).Count);
         Assert.AreEqual(searches, fake.SearchPosts);
         await second.RefreshAsync(report: false, CancellationToken.None);
@@ -820,7 +793,7 @@ public class ThreeDXSourceTests
     }
 
     [TestMethod]
-    public async Task AFolderRefreshedHasItsDocumentFetchedAfresh()
+    public async Task AFolderListedAgainIsServedFromTheTreeUntilTheNextRefresh()
     {
         using var fake = new Fake3DX();
         var doc = fake.Add("DOC-F", "1", "Fresh", "Document", ("one.txt", Bytes(20, 10)));
@@ -829,11 +802,15 @@ public class ThreeDXSourceTests
         var folder = "DOC-F Rev 1 (Fresh)";
         Assert.AreEqual(3, (await ListAsync(source, folder)).Count);
 
+        // programs list a folder over and over (opening a file among them): no sign that anything changed
         doc.Files.Add(new FakeFile(Fake3DX.NewId(), "two.txt", Bytes(30, 11), "03/07/2018 10:12:33 AM", "03/07/2018 10:12:33 AM"));
-        var posts = fake.DocumentPosts;
-        var again = await ListAsync(source, folder);
-        Assert.AreEqual(posts + 1, fake.DocumentPosts, "the document was asked for again");
-        CollectionAssert.Contains(again.Select(e => e.Name).ToList(), "two.txt");
+        var (posts, searches) = (fake.DocumentPosts, fake.SearchPosts);
+        Assert.AreEqual(3, (await ListAsync(source, folder)).Count, "listed again at once: from the tree");
+        Assert.AreEqual(posts, fake.DocumentPosts, "3DX not asked");
+        Assert.AreEqual(searches, fake.SearchPosts);
+
+        await source.RefreshAsync(report: false, CancellationToken.None);
+        CollectionAssert.Contains((await ListAsync(source, folder)).Select(e => e.Name).ToList(), "two.txt");
         Assert.AreEqual(30, (await source.StatAsync($"{folder}/two.txt", CancellationToken.None))!.Length);
     }
 }
@@ -1231,8 +1208,7 @@ public class ThreeDXWindowTests
 
 /// <summary>
 /// The tree at the user's scale (200,000 documents, which Mount3DX lists in about five minutes): how long it takes to build,
-/// keep and read back, how much memory it holds, and what a folder refreshed costs. ANYFS_TEST_3DX_SCALE=1; the numbers go
-/// to the test's output.
+/// keep and read back, and how much memory it holds. ANYFS_TEST_3DX_SCALE=1; the numbers go to the test's output.
 /// </summary>
 [TestClass]
 public class ThreeDXScaleTests
@@ -1296,13 +1272,7 @@ public class ThreeDXScaleTests
             var load = clock.Elapsed;
             Assert.AreEqual(200_000, loaded!.Documents.Count);
 
-            clock.Restart();
-            var changed = documents[123_456] with { Files = [.. documents[123_456].Files, new DxFile("NEW", "added.txt", 5, null, null)] };
-            var after = tree.With(changed.Id, changed);
-            var with = clock.Elapsed;
-            Assert.IsNotNull(after.ById(changed.Id)!.File("added.txt"));
-
-            TestContext.WriteLine($"build {build.TotalMilliseconds:F0} ms, held {held / (1 << 20)} MiB for {tree.Folders.Count:N0} folders and {tree.FileCount:N0} files; root walk {root.TotalMilliseconds:F0} ms; save {save.TotalMilliseconds:F0} ms ({size / (1 << 20)} MiB); load {load.TotalMilliseconds:F0} ms; one folder refreshed {with.TotalMilliseconds:F0} ms");
+            TestContext.WriteLine($"build {build.TotalMilliseconds:F0} ms, held {held / (1 << 20)} MiB for {tree.Folders.Count:N0} folders and {tree.FileCount:N0} files; root walk {root.TotalMilliseconds:F0} ms; save {save.TotalMilliseconds:F0} ms ({size / (1 << 20)} MiB); load {load.TotalMilliseconds:F0} ms");
         }
         finally
         {
