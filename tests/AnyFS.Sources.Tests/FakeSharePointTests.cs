@@ -173,6 +173,23 @@ public class FakeSharePointTests
         }
     }
 
+    /// <summary>A site with more libraries than Graph gives in one answer has them all, a page at a time.</summary>
+    [TestMethod]
+    public async Task ASiteWithManyLibrariesHasThemAll()
+    {
+        using var fake = FakeSharePoint.Sandbox();
+        fake.GraphPageSize = 2;
+        for (var i = 1; i <= 4; i++)
+        {
+            fake.AddLibrary(fake.TestSite, $"Library {i}", $"Library{i}");
+        }
+
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, TenantSettings(fake, SharePointSettings.AppDeviceCode), context);
+        var names = await SpsTestServer.NamesAsync(source, "");
+        CollectionAssert.IsSubsetOf(new[] { "Documents", "Library 1", "Library 2", "Library 3", "Library 4", "Site Pages" }, names, string.Join(", ", names));
+    }
+
     /// <summary>A web session that lapses is renewed without a window, and the write it refused goes through.</summary>
     [TestMethod]
     public async Task ALapsedWebSessionIsRenewedWithoutAWindow()

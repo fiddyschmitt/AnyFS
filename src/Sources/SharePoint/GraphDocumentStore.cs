@@ -205,23 +205,36 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
     private static async Task<IReadOnlyList<LibraryInfo>> ListDrivesAsync(GraphClient graph, string siteId, WebInfo? web, string description, CancellationToken ct)
     {
-        var drivesCall = graph.GetJsonAsync($"sites/{siteId}/drives?$select=id,name,driveType,quota", description, ct);
+        var drivesCall = DrivesAsync(graph, siteId, web, description, ct);
         var pagesCall = PagesLibraryAsync(graph, siteId, web, description, ct);
         await Task.WhenAll(drivesCall, pagesCall).ConfigureAwait(false);
-        using var doc = await drivesCall.ConfigureAwait(false);
-        var libraries = new List<LibraryInfo>();
-        foreach (var element in doc.RootElement.GetProperty("value").EnumerateArray())
-        {
-            var drive = GraphClient.ParseDrive(element);
-            if (drive.Name.Length > 0)
-            {
-                libraries.Add(new LibraryInfo(drive.Id, drive.Name, drive.QuotaTotal, drive.QuotaRemaining, web));
-            }
-        }
-
+        var libraries = await drivesCall.ConfigureAwait(false);
         if (await pagesCall.ConfigureAwait(false) is { } pages && !libraries.Any(l => l.Key == pages.Key))
         {
             libraries.Add(pages);
+        }
+
+        return libraries;
+    }
+
+    /// <summary>The site's document libraries, a page at a time as Graph gives a site with many.</summary>
+    private static async Task<List<LibraryInfo>> DrivesAsync(GraphClient graph, string siteId, WebInfo? web, string description, CancellationToken ct)
+    {
+        var url = $"sites/{siteId}/drives?$select=id,name,driveType,quota";
+        var libraries = new List<LibraryInfo>();
+        while (url is not null)
+        {
+            using var doc = await graph.GetJsonAsync(url, description, ct).ConfigureAwait(false);
+            foreach (var element in doc.RootElement.GetProperty("value").EnumerateArray())
+            {
+                var drive = GraphClient.ParseDrive(element);
+                if (drive.Name.Length > 0)
+                {
+                    libraries.Add(new LibraryInfo(drive.Id, drive.Name, drive.QuotaTotal, drive.QuotaRemaining, web));
+                }
+            }
+
+            url = doc.RootElement.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
         }
 
         return libraries;
