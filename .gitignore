@@ -499,6 +499,8 @@ anyfs.*.log
 # the WinFsp installer scripts/fetch-winfsp.ps1 downloads (embedded in Windows builds for the Install button)
 /tools/winfsp/
 /tools/sharepoint/
+# the Exchange Server ISO: a junction to D:\VMs\media\exchange (provisioning/exchange/README.md)
+/tools/exchange/
 
 # AnyFS lab
 provisioning/publish/

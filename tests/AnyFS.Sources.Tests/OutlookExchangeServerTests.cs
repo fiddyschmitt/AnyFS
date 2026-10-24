@@ -156,4 +156,44 @@ public class OutlookExchangeServerTests
             StringAssert.Contains(failed.Message, "schema validation");
         }
     }
+
+    /// <summary>
+    /// A real Exchange server (the lab's anyfs-ex-1): set ANYFS_TEST_EWS_URL (https://192.168.0.89 or its EWS address),
+    /// ANYFS_TEST_EWS_USER (ANYFS\ex_user) and ANYFS_TEST_EWS_PASSWORD. The certificate is the lab's own, so any is trusted.
+    /// </summary>
+    [TestMethod]
+    public async Task TheLabExchangeServerIsServedOverSoap()
+    {
+        var url = Environment.GetEnvironmentVariable("ANYFS_TEST_EWS_URL");
+        var user = Environment.GetEnvironmentVariable("ANYFS_TEST_EWS_USER");
+        var password = Environment.GetEnvironmentVariable("ANYFS_TEST_EWS_PASSWORD");
+        if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(user) || string.IsNullOrEmpty(password))
+        {
+            Assert.Inconclusive("set ANYFS_TEST_EWS_URL, ANYFS_TEST_EWS_USER and ANYFS_TEST_EWS_PASSWORD to run against an Exchange server");
+        }
+
+        var settings = new OutlookSettings { Path = url!, SignInMethod = OutlookSettings.Windows, Username = user, Password = password, TrustAnyCertificate = true, RefreshMinutes = 0, CalendarMonthsBack = 12, CalendarMonthsAhead = 3 };
+        var result = await new OutlookPlugin().TestAsync(settings, new Progress<string>(), null, CancellationToken.None);
+        Assert.IsTrue(result.Success, result.Message);
+        StringAssert.Contains(result.Message, "with a Windows account");
+
+        using var context = new TestSourceContext("outlook");
+        await using var source = new OutlookSource(settings);
+        await source.InitialiseAsync(context, CancellationToken.None);
+        var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
+        CollectionAssert.IsSubsetOf(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, root);
+        var years = await OutlookFixtures.ListAsync(source, "Inbox");
+        Assert.IsTrue(years.Count > 0, "the Inbox is empty: the lab's seeded messages are missing");
+        var year = VfsPath.Join("Inbox", years.First(e => e.Name.Length == 4).Name);
+        var months = await OutlookFixtures.ListAsync(source, year);
+        var items = await OutlookFixtures.ListAsync(source, VfsPath.Join(year, months[0].Name));
+        Assert.IsTrue(items.Count > 0);
+        var first = VfsPath.Join(VfsPath.Join(year, months[0].Name), items[0].Name);
+        var files = await OutlookFixtures.ListAsync(source, first);
+        var eml = files.Single(f => f.Name.EndsWith(".eml", StringComparison.Ordinal));
+        var text = await OutlookFixtures.TextAsync(source, VfsPath.Join(first, eml.Name));
+        StringAssert.Contains(text, "\r\nSubject: ");
+        var markdown = await OutlookFixtures.TextAsync(source, VfsPath.Join(first, files.Single(f => f.Name.EndsWith(".md", StringComparison.Ordinal)).Name));
+        StringAssert.Contains(markdown, "**From:**");
+    }
 }

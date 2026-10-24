@@ -129,6 +129,21 @@ machines:
     web_url: "http://anyfs-sp-2"
     db_prefix: SP2019
 
+  # The Exchange Server: one Mailbox server in the same domain, on a VM of its own as Microsoft asks (never on a
+  # domain controller or beside SharePoint). `vagrant up anyfs-dc-1 anyfs-ex-1` builds it (two hours the first
+  # time: the prerequisites, Exchange's setup, then the mailboxes). It is what the Outlook source's on-premises
+  # store reads from (provisioning/exchange/README.md). Its own field: `image` (the ISO in tools/exchange).
+  - name: anyfs-ex-1
+    os: windows
+    role: exchange
+    autostart: false
+    ip: 192.168.0.89
+    box: gusztavvargadr/windows-server-2022-standard
+    box_version: "2607.0.0"
+    memory_mb: 12288                 # Exchange asks 8 GB for a Mailbox server at the least; 12 keeps it usable
+    cpus: 4
+    image: ExchangeServerSE-x64.iso
+
 linux:
   # On the upstream machine: the fixture tree the tests generate there (tests/fixtures/MakeTree), which
   # Samba shares as [fixture] and the SSHFS source serves over sshd.
@@ -159,6 +174,18 @@ sharepoint:
   media: "../tools/sharepoint"                        # the SharePoint and SQL Server ISOs, which scripts/fetch-sharepoint.ps1 downloads; shared into the VMs
   site: "/sites/anyfs"                                # the site collection the tests use, in each farm
   dsc_version: "5.7.1"                                # SharePointDsc, the PowerShell Gallery module that builds the farm
+
+# The Exchange Server (the machine with role exchange) lives in the SharePoint farms' domain. Exchange Server
+# Subscription Edition runs as a trial with no product key for 180 days. The domain's Administrator (the dc's
+# login) installs it: setup needs a schema, enterprise and domain administrator. Throwaway values for this lab only.
+exchange:
+  organization: AnyFSLab
+  media: "../tools/exchange"                 # the Exchange SE ISO: D:\VMs\media\exchange on this PC, through a junction
+  mailboxes:
+    tester: { user: ex_user,  password: "AnyFS-lab-mail-2026!" }   # what the tests sign in as: a mailbox with an archive, and the shared mailbox
+    other:  { user: ex_other, password: "AnyFS-lab-mail-2026!" }   # a second mailbox: who the seeded mail is from
+  shared_mailbox: "Lab Shared"               # a shared mailbox the tester has full access to
+  pst_fixtures: "../tests/LibOutlook.Tests/fixtures"   # imported into the tester's mailbox: mail with attachments, a contact, an appointment
 
 # The Mac mini runs the macOS test VM (tart, on Apple's Virtualization framework); only a Mac can.
 # Vagrant runs there for it, with the vagrant-tart provider. mac.ps1 drives it from this PC: it copies

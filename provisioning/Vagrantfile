@@ -52,6 +52,13 @@ sp_accounts = sharepoint.fetch("accounts")
 sharepoint_media_dir = File.expand_path(sharepoint.fetch("media"), __dir__)
 FileUtils.mkdir_p(sharepoint_media_dir)
 
+# The Exchange Server (the machine with role exchange): its organisation, its mailboxes, its media (tools/exchange
+# holds the ISO) and the PST fixtures it imports.
+exchange = settings.fetch("exchange")
+exchange_media_dir = File.expand_path(exchange.fetch("media"), __dir__)
+exchange_pst_dir = File.expand_path(exchange.fetch("pst_fixtures"), __dir__)
+FileUtils.mkdir_p(exchange_media_dir)
+
 # Each machine's smoke test runs after every `vagrant up`, `reload` and `provision` (after any
 # restart the provisioning needed): its PASS/WARN/FAIL lines are shown, and a FAIL stops Vagrant there.
 class LabSmokeTestFailed < Vagrant::Errors::VagrantError
@@ -153,8 +160,8 @@ Vagrant.configure("2") do |config|
             end
           end
 
-        when "dc", "sharepoint"
-          # The SharePoint farm's machines (provisioning/sharepoint/README.md). Their provisioners work in
+        when "dc", "sharepoint", "exchange"
+          # The SharePoint farm's machines (provisioning/sharepoint/README.md) and the Exchange server. Their provisioners work in
           # rounds: each does what is missing, and leaves the marker when the next step needs a restart
           # (promotion to a domain controller, joining the domain, SQL Server, SharePoint's prerequisites).
           # The trigger restarts the VM and runs the provisioners again until no restart is asked for, then
@@ -171,8 +178,8 @@ Vagrant.configure("2") do |config|
                      "SP_TEST_USER" => sp_accounts.fetch("tester").fetch("user"),
                      "SP_TEST_PASSWORD" => sp_accounts.fetch("tester").fetch("password") }
           if m.fetch("role") == "dc"
-            sp_servers = settings.fetch("machines").select { |x| x.fetch("role") == "sharepoint" }
-            abort("#{name}: a dc needs a machine with role sharepoint in settings.yml") if sp_servers.empty?
+            sp_servers = settings.fetch("machines").select { |x| %w[sharepoint exchange].include?(x.fetch("role")) }
+            abort("#{name}: a dc needs a machine with role sharepoint or exchange in settings.yml") if sp_servers.empty?
             # Short WinRM waits: its provisioner is quick, and a refused logon (see above) should surface in minutes.
             node.winrm.timeout = 300
             node.winrm.retry_limit = 2
@@ -182,7 +189,7 @@ Vagrant.configure("2") do |config|
                                        env: sp_env.merge("SP_SAFE_MODE_PASSWORD" => sharepoint.fetch("safe_mode_password"),
                                                          # name=ip;name=ip: an A record for each SharePoint machine
                                                          "SP_SERVERS" => sp_servers.map { |x| "#{x.fetch("name")}=#{x.fetch("ip")}" }.join(";"))
-          else
+          elsif m.fetch("role") == "sharepoint"
             dc = settings.fetch("machines").find { |x| x.fetch("role") == "dc" } or
               abort("#{name}: a sharepoint machine needs a machine with role dc in settings.yml")
             # the SQL Server this farm uses: another machine's (by its address, which needs no domain DNS), or its own
@@ -214,6 +221,27 @@ Vagrant.configure("2") do |config|
                                                          "SP_SQL_SERVER" => sql_server_ip,
                                                          "SP_SITE" => sharepoint.fetch("site"),
                                                          "SP_DSC_VERSION" => sharepoint.fetch("dsc_version"))
+          else
+            dc = settings.fetch("machines").find { |x| x.fetch("role") == "dc" } or
+              abort("#{name}: an exchange machine needs a machine with role dc in settings.yml")
+            # \\vboxsvr\exchange is tools/exchange, the installation image; \\vboxsvr\pst the PST fixtures the tester's
+            # mailbox is seeded from.
+            node.vm.synced_folder exchange_media_dir, "C:/anyfs-lab/media", id: "exchange", SharedFoldersEnableSymlinksCreate: false
+            node.vm.synced_folder exchange_pst_dir, "C:/anyfs-lab/pst", id: "pst", SharedFoldersEnableSymlinksCreate: false
+            node.winrm.timeout = 600
+            node.vm.provision "file", source: "windows/ex-smoke-test.ps1", destination: "C:/anyfs-lab/smoke-test.ps1"
+            node.vm.provision "file", source: "windows/ex-configure.ps1", destination: "C:/anyfs-lab/ex-configure.ps1"
+            node.vm.provision "shell", path: "windows/ex-provision.ps1",
+                                       env: sp_env.merge("DC_IP" => dc.fetch("ip"),
+                                                         "EX_LAN_IP" => m.fetch("ip"),
+                                                         # the domain's Administrator: setup needs a schema, enterprise and domain administrator
+                                                         "EX_ADMIN_USER" => dc.fetch("login_user", account.fetch("user")),
+                                                         "EX_ADMIN_PASSWORD" => account.fetch("password"),
+                                                         "EX_ORGANIZATION" => exchange.fetch("organization"),
+                                                         "EX_IMAGE" => m.fetch("image"),
+                                                         "EX_MAILBOXES" => exchange.fetch("mailboxes").values.map { |a| "#{a.fetch("user")}=#{a.fetch("password")}" }.join(";"),
+                                                         "EX_TESTER" => exchange.fetch("mailboxes").fetch("tester").fetch("user"),
+                                                         "EX_SHARED" => exchange.fetch("shared_mailbox"))
           end
 
           # The provisioner restarts the machine itself (shutdown /r, ten seconds after it exits) and leaves the
@@ -263,7 +291,7 @@ Vagrant.configure("2") do |config|
           end
 
         else
-          abort("#{name}: a Windows machine's role is host, dc or sharepoint, not #{m.fetch("role")}")
+          abort("#{name}: a Windows machine's role is host, dc, sharepoint or exchange, not #{m.fetch("role")}")
         end
       else
         # The project folder, so the guest can see ansible/ and settings.yml. The guests never need to
