@@ -49,6 +49,9 @@ internal sealed class RequestPace
     /// <summary>The pace for a site's host when it is SharePoint Online's (.sharepoint.com, .sharepoint.us); null for SharePoint Server.</summary>
     public static RequestPace? ForHost(string host) => MicrosoftCloud.FromSiteHost(host) is null ? null : For(host);
 
+    /// <summary>Sets the pace for <paramref name="key"/>: a test's stand-in tenant, which need not be spared as SharePoint Online must.</summary>
+    internal static void Use(string key, RequestPace pace) => Paces[key] = pace;
+
     /// <summary>Waits for a request's turn: past any hold, then for a token, then past a hold that began meanwhile.</summary>
     public async ValueTask WaitAsync(CancellationToken ct)
     {

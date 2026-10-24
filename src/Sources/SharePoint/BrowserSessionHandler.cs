@@ -36,7 +36,10 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
     private long _lastRenewal;
     private bool _waitSaid;
 
-    /// <param name="inner">What sends the requests: a handler that keeps the cookies, unless a test stands in for SharePoint.</param>
+    /// <param name="inner">
+    /// What sends the requests: a handler that keeps the cookies, unless a test stands in for SharePoint, when the cookies
+    /// are carried through the one given as the default handler carries them (<see cref="CookieCarrier"/>).
+    /// </param>
     public BrowserSessionHandler(IReadOnlyList<SessionCookie> initial, Uri site, Func<CancellationToken, Task<IReadOnlyList<SessionCookie>>> renew, ILogger logger, HttpMessageHandler? inner = null, TimeSpan? minRenewalInterval = null)
     {
         _site = site;
@@ -45,7 +48,7 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
         _minRenewalInterval = minRenewalInterval ?? DefaultMinRenewalInterval;
         _cookies = new CookieContainer();
         Apply(initial);
-        InnerHandler = inner ?? new SocketsHttpHandler
+        InnerHandler = inner is not null ? new CookieCarrier(_cookies) { InnerHandler = inner } : new SocketsHttpHandler
         {
             CookieContainer = _cookies,
             UseCookies = true,
@@ -214,6 +217,44 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
 
     /// <summary>A body we can read again to resend: none, or one already buffered in memory (the digest POST, JSON). An upload's StreamContent is read once.</summary>
     private static bool Rereadable(HttpContent? content) => content is null or ByteArrayContent or StringContent;
+
+    /// <summary>
+    /// Carries the session's cookies through a handler that keeps none (a test's stand-in for SharePoint) as the default
+    /// handler keeps them: those for the request's address sent with it, and those its answer sets taken into the jar.
+    /// </summary>
+    private sealed class CookieCarrier(CookieContainer cookies) : DelegatingHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var address = request.RequestUri!;
+
+            // a request sent again after a renewal comes with the old cookies among its headers
+            request.Headers.Remove("Cookie");
+            var header = cookies.GetCookieHeader(address);
+            if (header.Length > 0)
+            {
+                request.Headers.TryAddWithoutValidation("Cookie", header);
+            }
+
+            var response = await base.SendAsync(request, ct).ConfigureAwait(false);
+            if (response.Headers.TryGetValues("Set-Cookie", out var set))
+            {
+                foreach (var value in set)
+                {
+                    try
+                    {
+                        cookies.SetCookies(address, value);
+                    }
+                    catch (CookieException)
+                    {
+                        // as the default handler: a cookie it cannot take is dropped
+                    }
+                }
+            }
+
+            return response;
+        }
+    }
 
     protected override void Dispose(bool disposing)
     {

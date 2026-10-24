@@ -530,9 +530,11 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     /// for a Windows account) and lists what the source would show. A Microsoft sign-in is kept in memory and a web
     /// session in its browser profile, so the source started from the same dialog does not ask again.
     /// </summary>
-    public async Task<TestResult> TestAsync(object settings, IProgress<string> progress, CancellationToken ct)
+    public Task<TestResult> TestAsync(object settings, IProgress<string> progress, CancellationToken ct) => TestAsync((SharePointSettings)settings, progress, standIn: null, ct);
+
+    /// <summary>The Test button, with a test's stand-in for Microsoft 365 and the browser in place of the real ones when it gives one.</summary>
+    internal async Task<TestResult> TestAsync(SharePointSettings s, IProgress<string> progress, SharePointStandIn? standIn, CancellationToken ct)
     {
-        var s = (SharePointSettings)settings;
         if (s.Kind is not { } kind)
         {
             return new TestResult(false, SiteAddress.TryParse(s.FirstSite, out _, out var reason) ? "The address is not a SharePoint site or a container type id." : reason);
@@ -547,10 +549,10 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         {
             return (kind, s.EffectiveSignIn) switch
             {
-                (SharePointKind.Embedded, _) => await TestContainersAsync(s, progress, ct).ConfigureAwait(false),
+                (SharePointKind.Embedded, _) => await TestContainersAsync(s, progress, standIn, ct).ConfigureAwait(false),
                 (_, SharePointSignIn.Windows) => await TestWindowsAsync(s, progress, ct).ConfigureAwait(false),
-                (_, SharePointSignIn.WebSession) => await TestWebSessionAsync(s, progress, ct).ConfigureAwait(false),
-                _ => await TestGraphSiteAsync(s, progress, ct).ConfigureAwait(false),
+                (_, SharePointSignIn.WebSession) => await TestWebSessionAsync(s, progress, standIn, ct).ConfigureAwait(false),
+                _ => await TestGraphSiteAsync(s, progress, standIn, ct).ConfigureAwait(false),
             };
         }
         catch (SignInRequiredException ex)
@@ -563,7 +565,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         }
     }
 
-    private static async Task<TestResult> TestGraphSiteAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
+    private static async Task<TestResult> TestGraphSiteAsync(SharePointSettings s, IProgress<string> progress, SharePointStandIn? standIn, CancellationToken ct)
     {
         SiteAddress.TryParse(s.FirstSite, out var site, out _);
         var cloud = s.EffectiveCloud;
@@ -572,24 +574,22 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
             return new TestResult(false, CloudSettings.OwnRegistrationNeeded(cloud, SitePermissions));
         }
 
-        var signIn = MicrosoftSignIn(s, EntraSignIn.SiteScopes, progress.Report, prompt: null, loadCache: () => EntraSignIn.RecentCache(s.EffectiveClientId, s.EffectiveTenant, s.LoginHint), saveCache: _ => { });
-        progress.Report(cloud.IsGlobal ? "Signing in" : $"Signing in to the {cloud.Name} cloud");
-        await signIn.SignInAsync(ct).ConfigureAwait(false);
+        var app = await TestSignInAsync(s, EntraSignIn.SiteScopes, cloud, progress, standIn, ct).ConfigureAwait(false);
 
         // the store is not disposed: it would dispose the client, which the using here does
-        using var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), NullLogger.Instance, cloud: cloud);
+        using var graph = new GraphClient(app.Token, NullLogger.Instance, handler: standIn?.Handler(), cloud: cloud);
         if (s.IsMultiSite)
         {
-            progress.Report($"Signed in as {signIn.Username}; looking up {s.Sites.Count} sites");
-            return await SitesAsync($"Signed in as {signIn.Username}.", GraphDocumentStore.ForSites(graph), s.Sites, ct).ConfigureAwait(false);
+            progress.Report($"Signed in as {app.Username}; looking up {s.Sites.Count} sites");
+            return await SitesAsync($"Signed in as {app.Username}.", GraphDocumentStore.ForSites(graph), s.Sites, ct).ConfigureAwait(false);
         }
 
-        progress.Report($"Signed in as {signIn.Username}; looking up {site.Url}");
-        var notFound = new TestResult(false, $"Signed in as {signIn.Username}, but {site.Url} was not found, or this account has no access to it.");
+        progress.Report($"Signed in as {app.Username}; looking up {site.Url}");
+        var notFound = new TestResult(false, $"Signed in as {app.Username}, but {site.Url} was not found, or this account has no access to it.");
         try
         {
             var store = await GraphDocumentStore.ConnectAsync(graph, site, ct).ConfigureAwait(false);
-            return store is null ? notFound : await LibrariesAsync($"Signed in as {signIn.Username}. {store.Description}", s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
+            return store is null ? notFound : await LibrariesAsync($"Signed in as {app.Username}. {store.Description}", s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
         }
         catch (VfsException ex) when (ex.Error == VfsError.NotFound)
         {
@@ -597,27 +597,54 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         }
     }
 
-    private static async Task<TestResult> TestWebSessionAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
+    /// <summary>The Test button's app sign-in: MSAL's, kept in memory for the source started next, or the stand-in's account.</summary>
+    private static async Task<AppSignIn> TestSignInAsync(SharePointSettings s, IReadOnlyList<string> scopes, MicrosoftCloud cloud, IProgress<string> progress, SharePointStandIn? standIn, CancellationToken ct)
+    {
+        if (standIn is not null)
+        {
+            return new AppSignIn(standIn.Account, standIn.Token);
+        }
+
+        var signIn = MicrosoftSignIn(s, scopes, progress.Report, prompt: null, loadCache: () => EntraSignIn.RecentCache(s.EffectiveClientId, s.EffectiveTenant, s.LoginHint), saveCache: _ => { });
+        progress.Report(cloud.IsGlobal ? "Signing in" : $"Signing in to the {cloud.Name} cloud");
+        await signIn.SignInAsync(ct).ConfigureAwait(false);
+        return new AppSignIn(signIn.Username, signIn.GetAccessTokenAsync);
+    }
+
+    private static async Task<TestResult> TestWebSessionAsync(SharePointSettings s, IProgress<string> progress, SharePointStandIn? standIn, CancellationToken ct)
     {
         SiteAddress.TryParse(s.FirstSite, out var site, out _);
         var siteUri = new Uri(site.Url);
-        var session = WebSession(s, siteUri, NullLogger.Instance);
-        if (!session.CanSignIn)
+        BrowserSessionHandler handler;
+        string browser;
+        if (standIn is not null)
         {
-            return new TestResult(false, NoBrowser);
+            handler = new BrowserSessionHandler(await standIn.Cookies(true, ct).ConfigureAwait(false), siteUri, c => standIn.Cookies(false, c), NullLogger.Instance, standIn.Handler());
+            browser = standIn.BrowserName;
+        }
+        else
+        {
+            var session = WebSession(s, siteUri, NullLogger.Instance);
+            if (!session.CanSignIn)
+            {
+                return new TestResult(false, NoBrowser);
+            }
+
+            var cookies = await session.SignInAsync(interactive: true, progress.Report, ct).ConfigureAwait(false);
+            handler = new BrowserSessionHandler(cookies, siteUri, c => session.SignInAsync(interactive: false, progress.Report, c), NullLogger.Instance);
+            browser = session.BrowserName;
         }
 
-        var cookies = await session.SignInAsync(interactive: true, progress.Report, ct).ConfigureAwait(false);
-        using var handler = new BrowserSessionHandler(cookies, siteUri, c => session.SignInAsync(interactive: false, progress.Report, c), NullLogger.Instance);
+        // the client disposes the handler
         using var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, NullLogger.Instance, handler: handler);
         if (s.IsMultiSite)
         {
-            return await SitesAsync($"Signed in with {session.BrowserName}.", RestDocumentStore.ForSites(rest), s.Sites, ct).ConfigureAwait(false);
+            return await SitesAsync($"Signed in with {browser}.", RestDocumentStore.ForSites(rest), s.Sites, ct).ConfigureAwait(false);
         }
 
         var store = await RestDocumentStore.ConnectAsync(rest, site, ct).ConfigureAwait(false);
         progress.Report($"Signed in to {store.Description}; listing the libraries");
-        return await LibrariesAsync($"Signed in with {session.BrowserName}. {store.Description}", s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
+        return await LibrariesAsync($"Signed in with {browser}. {store.Description}", s.PinnedLibrary, store, s.IsRootSite, ct).ConfigureAwait(false);
     }
 
     private static async Task<TestResult> TestWindowsAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
@@ -647,7 +674,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
         }
     }
 
-    private static async Task<TestResult> TestContainersAsync(SharePointSettings s, IProgress<string> progress, CancellationToken ct)
+    private static async Task<TestResult> TestContainersAsync(SharePointSettings s, IProgress<string> progress, SharePointStandIn? standIn, CancellationToken ct)
     {
         s.TryGetContainerType(out var containerType);
         var cloud = s.EffectiveCloud;
@@ -656,41 +683,39 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
             return new TestResult(false, CloudSettings.OwnRegistrationNeeded(cloud, ContainerPermissions, ContainerRegistrationExtra));
         }
 
-        var signIn = MicrosoftSignIn(s, EntraSignIn.ContainerScopes, progress.Report, prompt: null, loadCache: () => EntraSignIn.RecentCache(s.EffectiveClientId, s.EffectiveTenant, s.LoginHint), saveCache: _ => { });
-        progress.Report(cloud.IsGlobal ? "Signing in" : $"Signing in to the {cloud.Name} cloud");
-        await signIn.SignInAsync(ct).ConfigureAwait(false);
-        using var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), NullLogger.Instance, cloud: cloud);
+        var app = await TestSignInAsync(s, EntraSignIn.ContainerScopes, cloud, progress, standIn, ct).ConfigureAwait(false);
+        using var graph = new GraphClient(app.Token, NullLogger.Instance, handler: standIn?.Handler(), cloud: cloud);
         try
         {
             if (s.PinnedContainerId is { } id)
             {
-                progress.Report($"Signed in as {signIn.Username}; looking up container {id}");
+                progress.Report($"Signed in as {app.Username}; looking up container {id}");
                 await GraphDocumentStore.GetContainerAsync(graph, containerType, id, ct).ConfigureAwait(false);
-                return new TestResult(true, $"Signed in as {signIn.Username}. Container {id} is there and active.");
+                return new TestResult(true, $"Signed in as {app.Username}. Container {id} is there and active.");
             }
 
-            progress.Report($"Signed in as {signIn.Username}; listing the containers");
+            progress.Report($"Signed in as {app.Username}; listing the containers");
             var containers = await GraphDocumentStore.ListContainersAsync(graph, containerType, ct).ConfigureAwait(false);
             if (containers.Count == 0)
             {
-                return new TestResult(false, $"Signed in as {signIn.Username}, but Graph lists no container of type {containerType} for this account. It lists only containers the account is a direct member of, and nothing at all for an account without a OneDrive; a container's id in the Library setting works regardless.");
+                return new TestResult(false, $"Signed in as {app.Username}, but Graph lists no container of type {containerType} for this account. It lists only containers the account is a direct member of, and nothing at all for an account without a OneDrive; a container's id in the Library setting works regardless.");
             }
 
             var names = string.Join(", ", containers.Select(c => c.Name));
             if (s.PinnedLibrary is { } pinned && !containers.Any(c => string.Equals(c.Name, pinned, StringComparison.OrdinalIgnoreCase)))
             {
-                return new TestResult(false, $"Signed in as {signIn.Username}. No container named {pinned}; this account's containers of the type are: {names}.");
+                return new TestResult(false, $"Signed in as {app.Username}. No container named {pinned}; this account's containers of the type are: {names}.");
             }
 
-            return new TestResult(true, $"Signed in as {signIn.Username}. {containers.Count} container{(containers.Count == 1 ? "" : "s")} of the type: {names}.");
+            return new TestResult(true, $"Signed in as {app.Username}. {containers.Count} container{(containers.Count == 1 ? "" : "s")} of the type: {names}.");
         }
         catch (VfsException ex) when (ex.Error == VfsError.AccessDenied)
         {
-            return new TestResult(false, $"Signed in as {signIn.Username}, but Graph refused: {ex.Message}. The application (client ID {s.EffectiveClientId}) must be registered on the container type with permission to read and write its containers, and the account must be a member of the container.");
+            return new TestResult(false, $"Signed in as {app.Username}, but Graph refused: {ex.Message}. The application (client ID {s.EffectiveClientId}) must be registered on the container type with permission to read and write its containers, and the account must be a member of the container.");
         }
         catch (VfsException ex) when (ex.Error == VfsError.NotFound && s.PinnedContainerId is { } id)
         {
-            return new TestResult(false, $"Signed in as {signIn.Username}, but there is no container {id} that this account can see.");
+            return new TestResult(false, $"Signed in as {app.Username}, but there is no container {id} that this account can see.");
         }
     }
 
@@ -815,13 +840,21 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 public sealed class SharePointSiteSource : SharePointSource
 {
     private readonly SharePointSettings _settings;
+    private readonly SharePointStandIn? _standIn;
 
     // who a source of several sites signed in as, where that is known, for what it says of the sites it could not open
     private string? _account;
 
     public SharePointSiteSource(SharePointSettings settings)
+        : this(settings, standIn: null)
+    {
+    }
+
+    /// <param name="standIn">A test's stand-in for Microsoft 365 and the browser (<see cref="SharePointStandIn"/>); null for the real thing.</param>
+    internal SharePointSiteSource(SharePointSettings settings, SharePointStandIn? standIn)
     {
         _settings = settings;
+        _standIn = standIn;
     }
 
     /// <summary>The site's id in Graph, for an app-signed-in Online site (for tests).</summary>
@@ -888,8 +921,15 @@ public sealed class SharePointSiteSource : SharePointSource
             Logger);
     }
 
-    private async Task SignInMicrosoftAsync(EntraSignIn signIn, MicrosoftCloud cloud, CancellationToken ct)
+    /// <summary>The app sign-in: MSAL's, its cache in the source's secret store, or the test's stand-in's account.</summary>
+    private async Task<AppSignIn> SignInAppAsync(IReadOnlyList<string> scopes, MicrosoftCloud cloud, CancellationToken ct)
     {
+        if (_standIn is { } standIn)
+        {
+            return new AppSignIn(standIn.Account, standIn.Token);
+        }
+
+        var signIn = MicrosoftSignIn(scopes, ct);
         Progress(cloud.IsGlobal ? "Signing in to Microsoft 365" : $"Signing in to Microsoft 365 in the {cloud.Name} cloud");
         try
         {
@@ -899,6 +939,8 @@ public sealed class SharePointSiteSource : SharePointSource
         {
             throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
         }
+
+        return new AppSignIn(signIn.Username, signIn.GetAccessTokenAsync);
     }
 
     private void RefuseWithoutOwnRegistration(MicrosoftCloud cloud, string permissions, string extra = "")
@@ -920,10 +962,9 @@ public sealed class SharePointSiteSource : SharePointSource
         SiteAddress.TryParse(_settings.FirstSite, out var site, out _);
         var cloud = _settings.EffectiveCloud;
         RefuseWithoutOwnRegistration(cloud, SharePointPlugin.SitePermissions);
-        var signIn = MicrosoftSignIn(EntraSignIn.SiteScopes, ct);
-        await SignInMicrosoftAsync(signIn, cloud, ct).ConfigureAwait(false);
+        var signIn = await SignInAppAsync(EntraSignIn.SiteScopes, cloud, ct).ConfigureAwait(false);
 
-        var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy, cloud: cloud, pace: RequestPace.ForHost(site.Host));
+        var graph = new GraphClient(signIn.Token, Logger, MarkDegraded, MarkHealthy, _standIn?.Handler(), cloud, RequestPace.ForHost(site.Host));
         if (_settings.IsMultiSite)
         {
             // the source opens the sites itself, and leaves out those that do not open
@@ -968,11 +1009,10 @@ public sealed class SharePointSiteSource : SharePointSource
         _settings.TryGetContainerType(out var containerType);
         var cloud = _settings.EffectiveCloud;
         RefuseWithoutOwnRegistration(cloud, SharePointPlugin.ContainerPermissions, SharePointPlugin.ContainerRegistrationExtra);
-        var signIn = MicrosoftSignIn(EntraSignIn.ContainerScopes, ct);
-        await SignInMicrosoftAsync(signIn, cloud, ct).ConfigureAwait(false);
+        var signIn = await SignInAppAsync(EntraSignIn.ContainerScopes, cloud, ct).ConfigureAwait(false);
 
         // containers have no site host to go by: their pace is the account's
-        var graph = new GraphClient((token, refresh) => signIn.GetAccessTokenAsync(token, refresh), Logger, MarkDegraded, MarkHealthy, cloud: cloud, pace: RequestPace.For(signIn.Username ?? containerType.ToString()));
+        var graph = new GraphClient(signIn.Token, Logger, MarkDegraded, MarkHealthy, _standIn?.Handler(), cloud, RequestPace.For(signIn.Username ?? containerType.ToString()));
         Progress($"Listing the containers of type {containerType}");
         try
         {
@@ -1034,24 +1074,34 @@ public sealed class SharePointSiteSource : SharePointSource
     {
         SiteAddress.TryParse(_settings.FirstSite, out var site, out _);
         var siteUri = new Uri(site.Url);
-        var session = SharePointPlugin.WebSession(_settings, siteUri, Logger);
-        if (!session.CanSignIn)
+        Func<bool, CancellationToken, Task<IReadOnlyList<SessionCookie>>> signIn;
+        if (_standIn is { } standIn)
         {
-            throw new SourceFailedException(SharePointPlugin.NoBrowser, permanent: true);
+            signIn = standIn.Cookies;
+        }
+        else
+        {
+            var session = SharePointPlugin.WebSession(_settings, siteUri, Logger);
+            if (!session.CanSignIn)
+            {
+                throw new SourceFailedException(SharePointPlugin.NoBrowser, permanent: true);
+            }
+
+            signIn = (interactive, c) => session.SignInAsync(interactive, Progress, c);
         }
 
         Progress($"Signing in to {site.Host}");
         IReadOnlyList<SessionCookie> cookies;
         try
         {
-            cookies = await session.SignInAsync(interactive: true, Progress, ct).ConfigureAwait(false);
+            cookies = await signIn(true, ct).ConfigureAwait(false);
         }
         catch (SignInRequiredException ex)
         {
             throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
         }
 
-        var handler = new BrowserSessionHandler(cookies, siteUri, c => session.SignInAsync(interactive: false, Progress, c), Logger);
+        var handler = new BrowserSessionHandler(cookies, siteUri, c => signIn(false, c), Logger, _standIn?.Handler());
         var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, Logger, MarkDegraded, MarkHealthy, handler);
         if (_settings.IsMultiSite)
         {
