@@ -348,6 +348,7 @@ internal sealed class GraphClient : IDisposable
     private async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, HttpCompletionOption completion, bool authenticated, bool idempotent, CancellationToken ct)
     {
         var renewedToken = false;
+        var refreshToken = false;
         for (var attempt = 1; ; attempt++)
         {
             if (_pace is not null)
@@ -358,8 +359,8 @@ internal sealed class GraphClient : IDisposable
             var request = make();
             if (authenticated)
             {
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await _token(ct, renewedToken).ConfigureAwait(false));
-                renewedToken = false;
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await _token(ct, refreshToken).ConfigureAwait(false));
+                refreshToken = false;
             }
 
             HttpResponseMessage response;
@@ -391,8 +392,9 @@ internal sealed class GraphClient : IDisposable
 
             if (status == HttpStatusCode.Unauthorized && authenticated && attempt < MaxAttempts && !renewedToken)
             {
+                // once: a 401 to a token just renewed is the sign-in's answer, not a lapse
                 response.Dispose();
-                renewedToken = true;
+                renewedToken = refreshToken = true;
                 continue;
             }
 

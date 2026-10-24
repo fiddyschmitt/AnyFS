@@ -108,6 +108,31 @@ public class FakeSharePointTests
         CollectionAssert.AreEqual(bytes[200_000..210_000], middle, "the file from the offset, not from its start");
     }
 
+    /// <summary>
+    /// A token Graph stops taking before its time is renewed once and the call goes on; one refused again straight after is
+    /// the sign-in's answer, said, not a new token asked for five times over.
+    /// </summary>
+    [TestMethod]
+    public async Task ATokenGraphRefusesIsRenewedOnce()
+    {
+        using var fake = FakeSharePoint.Sandbox();
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, TenantSettings(fake, SharePointSettings.AppDeviceCode), context);
+        Assert.AreEqual(0, fake.TokensRefreshed);
+
+        fake.ExpireTokens();
+        await source.CreateDirectoryAsync("Documents/after-expiry", None);
+        Assert.AreEqual(1, fake.TokensRefreshed, "a new token, once");
+        Assert.IsNotNull(fake.TestSite.Library("Documents").Root.Folder("after-expiry"), "and the folder made with it");
+
+        var refusals = fake.Count(s => s.Status == 401);
+        fake.Fail(r => r.IsGraph, 100, _ => FakeSharePoint.Response.Json(401, FakeSharePoint.GraphError("InvalidAuthenticationToken", "Access token validation failure. Invalid audience.")));
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.CreateDirectoryAsync("Documents/refused", None));
+        StringAssert.Contains(ex.Message, "no longer accepted");
+        Assert.AreEqual(2, fake.TokensRefreshed, "one more new token");
+        Assert.AreEqual(refusals + 2, fake.Count(s => s.Status == 401), "the request, and once more with the new token");
+    }
+
     /// <summary>A web session that lapses is renewed without a window, and the write it refused goes through.</summary>
     [TestMethod]
     public async Task ALapsedWebSessionIsRenewedWithoutAWindow()
