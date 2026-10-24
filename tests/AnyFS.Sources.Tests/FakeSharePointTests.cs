@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json.Nodes;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
 using AnyFS.Sources.SharePoint;
@@ -131,6 +132,26 @@ public class FakeSharePointTests
         StringAssert.Contains(ex.Message, "no longer accepted");
         Assert.AreEqual(2, fake.TokensRefreshed, "one more new token");
         Assert.AreEqual(refusals + 2, fake.Count(s => s.Status == 401), "the request, and once more with the new token");
+    }
+
+    /// <summary>SharePoint's search answering without its results (PrimaryQueryResult null) leaves the root's Sites out, not the root's listing.</summary>
+    [TestMethod]
+    public async Task ASearchAnswerWithoutResultsLeavesTheRootListed()
+    {
+        using var fake = FakeSharePoint.Sandbox();
+        fake.Fail(r => r.RawPath.Contains("/_api/search/query", StringComparison.OrdinalIgnoreCase), 100, _ => FakeSharePoint.Response.Json(200, new JsonObject
+        {
+            ["ElapsedTime"] = 12,
+            ["PrimaryQueryResult"] = null,
+            ["Properties"] = new JsonArray(),
+            ["SecondaryQueryResults"] = new JsonArray(),
+        }));
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, TenantSettings(fake, SharePointSettings.WebSession, site: fake.Origin), context);
+
+        var names = await SpsTestServer.NamesAsync(source, "");
+        CollectionAssert.Contains(names, "Documents", string.Join(", ", names));
+        Assert.IsTrue(fake.Count(s => s.Path.Contains("/_api/search/query", StringComparison.OrdinalIgnoreCase)) > 0, "search was asked");
     }
 
     /// <summary>A web session that lapses is renewed without a window, and the write it refused goes through.</summary>

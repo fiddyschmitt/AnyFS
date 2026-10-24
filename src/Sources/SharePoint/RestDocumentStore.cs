@@ -201,11 +201,21 @@ internal sealed class RestDocumentStore : IDocumentStore
         for (var start = 0; start < 100 * Page; start += Page)
         {
             using var doc = await client.GetJsonAsync($"search/query?querytext='contentclass:STS_Site'&selectproperties='Path'&trimduplicates=false&rowlimit={Page}&startrow={start}", web?.Key ?? Description, ct).ConfigureAwait(false);
-            var results = doc.RootElement.GetProperty("PrimaryQueryResult").GetProperty("RelevantResults");
-            var rows = results.GetProperty("Table").GetProperty("Rows");
+            if (!(doc.RootElement.TryGetProperty("PrimaryQueryResult", out var primary) && primary.ValueKind == JsonValueKind.Object
+                && primary.TryGetProperty("RelevantResults", out var results) && results.ValueKind == JsonValueKind.Object
+                && results.TryGetProperty("Table", out var table) && table.ValueKind == JsonValueKind.Object
+                && table.TryGetProperty("Rows", out var rows) && rows.ValueKind == JsonValueKind.Array))
+            {
+                // search answered, but without its results (PrimaryQueryResult null): an error, so the sites known before stay
+                throw new VfsException(VfsError.IoError, $"{web?.Url ?? Description}: SharePoint's search answered without results");
+            }
+
             foreach (var row in rows.EnumerateArray())
             {
-                var path = row.GetProperty("Cells").EnumerateArray().Where(c => c.GetProperty("Key").GetString() == "Path").Select(c => c.GetProperty("Value").GetString()).FirstOrDefault();
+                var cells = row.TryGetProperty("Cells", out var all) && all.ValueKind == JsonValueKind.Array ? all.EnumerateArray().ToList() : [];
+                var path = cells.Where(c => c.TryGetProperty("Key", out var k) && k.ValueKind == JsonValueKind.String && k.GetString() == "Path")
+                    .Select(c => c.TryGetProperty("Value", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null)
+                    .FirstOrDefault();
                 if (Uri.TryCreate(path, UriKind.Absolute, out var site) && string.Equals(site.Authority, client.SiteUrl.Authority, StringComparison.OrdinalIgnoreCase))
                 {
                     var serverRelative = Uri.UnescapeDataString(site.AbsolutePath).TrimEnd('/');
