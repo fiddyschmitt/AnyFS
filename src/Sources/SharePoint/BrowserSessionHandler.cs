@@ -8,7 +8,8 @@ namespace AnyFS.Sources.SharePoint;
 /// Sends the browser session's cookies on every request to SharePoint's REST API, and when the site refuses a
 /// request because they have lapsed (401, 403, or a redirect to the sign-in host) asks <see cref="BrowserSession"/>
 /// to renew them headless and tries the one request again (spec 7.3.2). A renewal that needs a person is left to the
-/// source: the refusal then passes through, the source turns Degraded, and the next start signs in with a window.
+/// source: its <see cref="SignInRequiredException"/> is thrown for the refused request, and for every refused one after
+/// it until a renewal may be tried again, so the source turns Degraded, and the next start signs in with a window.
 /// Renewals are serialised, and one serves every request that was in flight when the cookies went stale.
 /// SharePoint Online refuses a signed-in account a site or file it may not open exactly as it refuses a lapsed session
 /// (403 with X-Forms_Based_Auth_Required), so a refusal renews only when nothing shows the session is good: SharePoint
@@ -35,6 +36,9 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
     private long _signedInSend = long.MinValue;
     private long _lastRenewal;
     private bool _waitSaid;
+
+    // why the last renewal failed, when it needed a person
+    private SignInRequiredException? _needsPerson;
 
     /// <param name="inner">
     /// What sends the requests: a handler that keeps the cookies, unless a test stands in for SharePoint, when the cookies
@@ -95,9 +99,20 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
                 return response;
             }
 
-            if (!await RenewAsync(generation, request, response, ct).ConfigureAwait(false))
+            bool renewed;
+            try
             {
-                return response; // the renewal needs a person, or came too soon after the last; let the refusal reach the source
+                renewed = await RenewAsync(generation, request, response, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                response.Dispose();
+                throw;
+            }
+
+            if (!renewed)
+            {
+                return response; // too soon after the last renewal; let the refusal reach the source
             }
         }
 
@@ -137,7 +152,7 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
 
     /// <summary>
     /// Renews once per generation: the first caller to see stale cookies renews; the rest reuse that result. False when the
-    /// renewal needs a person, or when the last one was too recent to try again.
+    /// last one was too recent to try again; the <see cref="SignInRequiredException"/> of one that needed a person, then.
     /// </summary>
     private async Task<bool> RenewAsync(int seenGeneration, HttpRequestMessage request, HttpResponseMessage response, CancellationToken ct)
     {
@@ -151,6 +166,12 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
 
             if (_lastRenewal != 0 && Stopwatch.GetElapsedTime(_lastRenewal) < _minRenewalInterval)
             {
+                if (_needsPerson is { } lapsed)
+                {
+                    // nothing has changed since the renewal that needed a person: this refusal is the lapsed sign-in's too
+                    throw new SignInRequiredException(lapsed.Message, lapsed, lapsed.Permanent);
+                }
+
                 if (!_waitSaid)
                 {
                     _waitSaid = true;
@@ -163,15 +184,22 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
             _logger.LogInformation("sharepoint: the browser session for {Host} was refused ({Status} for {Method} {Path}); renewing it", _site.Host, (int)response.StatusCode, request.Method, request.RequestUri?.AbsolutePath);
             _lastRenewal = Stopwatch.GetTimestamp();
             _waitSaid = false;
-            var fresh = await _renew(ct).ConfigureAwait(false);
+            IReadOnlyList<SessionCookie> fresh;
+            try
+            {
+                fresh = await _renew(ct).ConfigureAwait(false);
+            }
+            catch (SignInRequiredException ex)
+            {
+                _logger.LogInformation("sharepoint: the browser session for {Host} could not be renewed without a sign-in: {Message}", _site.Host, ex.Message);
+                _needsPerson = ex;
+                throw;
+            }
+
+            _needsPerson = null;
             Apply(fresh);
             Interlocked.Increment(ref _generation);
             return true;
-        }
-        catch (SignInRequiredException ex)
-        {
-            _logger.LogInformation("sharepoint: the browser session for {Host} could not be renewed without a sign-in: {Message}", _site.Host, ex.Message);
-            return false;
         }
         finally
         {

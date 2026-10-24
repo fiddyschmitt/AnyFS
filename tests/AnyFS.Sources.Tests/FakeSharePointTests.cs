@@ -223,6 +223,31 @@ public class FakeSharePointTests
         Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth);
     }
 
+    /// <summary>
+    /// A web session that lapses when the browser's own sign-in has lapsed too cannot be renewed without a person: the source
+    /// turns Degraded with the sign-in's reason (its next start signs in with a window), rather than calling everything
+    /// "access denied".
+    /// </summary>
+    [TestMethod]
+    public async Task AWebSessionThatNeedsAPersonTurnsTheSourceDegraded()
+    {
+        using var fake = FakeSharePoint.Sandbox();
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, TenantSettings(fake, SharePointSettings.WebSession), context);
+
+        fake.BrowserLapsed = true;
+        fake.ExpireSessions();
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.CreateDirectoryAsync("Documents/after-lapse", None));
+        Assert.AreEqual(VfsError.Unavailable, ex.Error, ex.Message);
+        StringAssert.Contains(ex.Message, "lapsed");
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+
+        // and the next refusal says so too, without a browser started again so soon
+        ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.CreateDirectoryAsync("Documents/again", None));
+        StringAssert.Contains(ex.Message, "lapsed");
+        Assert.AreEqual(1, fake.SessionSignIns, "the renewals failed, none made a session");
+    }
+
     /// <summary>Throttled (429 with Retry-After) at SharePoint Online's pace: the requests wait it out, and the write goes through.</summary>
     [TestMethod]
     public async Task AThrottledWriteWaitsAndGoesThrough()

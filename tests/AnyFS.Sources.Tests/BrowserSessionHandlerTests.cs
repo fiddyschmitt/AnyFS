@@ -150,6 +150,42 @@ public class BrowserSessionHandlerTests
         }
     }
 
+    /// <summary>
+    /// A renewal that needs a person (the browser's own sign-in has lapsed) is the source's to say, Degraded: its exception
+    /// comes out of the refused request, and out of every refused one until a renewal may be tried again.
+    /// </summary>
+    [TestMethod]
+    public async Task ARenewalThatNeedsAPersonIsThrownForTheSource()
+    {
+        var renewals = 0;
+        var online = new Online((_, _) => Task.FromResult(Refused(signedIn: false)));
+        var handler = new BrowserSessionHandler(
+            [new SessionCookie("FedAuth", "old", Site.Host, "/", true, true)],
+            Site,
+            _ =>
+            {
+                Interlocked.Increment(ref renewals);
+                return Task.FromException<IReadOnlyList<SessionCookie>>(new SignInRequiredException("The sign-in to contoso.sharepoint.com has lapsed; sign in again with the browser."));
+            },
+            NullLogger.Instance,
+            online,
+            TimeSpan.FromMilliseconds(400));
+        online.Jar = handler.Cookies;
+        using var http = new HttpClient(handler);
+
+        var ex = await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => http.GetAsync($"{Site}/_api/web/title"));
+        StringAssert.Contains(ex.Message, "lapsed");
+        for (var i = 0; i < 3; i++)
+        {
+            await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => http.GetAsync($"{Site}/_api/web/title"));
+        }
+
+        Assert.AreEqual(1, renewals, "no browser started again so soon");
+        await Task.Delay(500);
+        await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => http.GetAsync($"{Site}/_api/web/title"));
+        Assert.AreEqual(2, renewals, "and tried again once the interval has passed (another source may have signed in)");
+    }
+
     [TestMethod]
     public async Task ARedirectWithinTheSiteIsAnAnswerAndOneToTheSignInRenews()
     {
