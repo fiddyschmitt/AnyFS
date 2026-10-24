@@ -233,8 +233,16 @@ internal sealed class FakeExchange
 
     // --- the service ------------------------------------------------------------------------------------------------------
 
+    /// <summary>Whether SOAP requests (an Exchange server's EWS) are refused for their sign-in, as a wrong password would be.</summary>
+    public bool RefuseWindowsSignIn { get; set; }
+
     private HttpResponseMessage Serve(HttpRequestMessage request, string body)
     {
+        if (request.RequestUri?.AbsolutePath.EndsWith("/EWS/Exchange.asmx", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return ServeSoap(request, body);
+        }
+
         var query = System.Web.HttpUtility.ParseQueryString(request.RequestUri?.Query ?? "");
         var action = query["action"] ?? (request.Headers.TryGetValues("Action", out var values) ? values.First() : "");
         lock (_gate)
@@ -548,6 +556,284 @@ internal sealed class FakeExchange
     }
 
     private static HttpResponseMessage Text(int status, string text) => new((HttpStatusCode)status) { Content = new StringContent(text, Encoding.UTF8, "application/json") };
+
+    // --- the same mailbox as an Exchange server's EWS (SOAP) ------------------------------------------------------------
+
+    private static readonly System.Xml.Linq.XNamespace S = "http://schemas.xmlsoap.org/soap/envelope/";
+    private static readonly System.Xml.Linq.XNamespace T = "http://schemas.microsoft.com/exchange/services/2006/types";
+    private static readonly System.Xml.Linq.XNamespace M = "http://schemas.microsoft.com/exchange/services/2006/messages";
+
+    private HttpResponseMessage ServeSoap(HttpRequestMessage request, string body)
+    {
+        System.Xml.Linq.XElement operation;
+        try
+        {
+            operation = System.Xml.Linq.XDocument.Parse(body).Root?.Element(S + "Body")?.Elements().FirstOrDefault() ?? throw new InvalidOperationException("no operation");
+        }
+        catch (Exception ex) when (ex is System.Xml.XmlException or InvalidOperationException)
+        {
+            return new HttpResponseMessage(HttpStatusCode.BadRequest) { Content = new StringContent("not SOAP", Encoding.UTF8, "text/plain") };
+        }
+
+        var action = operation.Name.LocalName;
+        lock (_gate)
+        {
+            Actions.Add(action);
+        }
+
+        if (Intercept?.Invoke(request, action) is { } intercepted)
+        {
+            return intercepted;
+        }
+
+        if (RefuseWindowsSignIn)
+        {
+            lock (_gate)
+            {
+                Refusals++;
+            }
+
+            var refused = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+            refused.Headers.WwwAuthenticate.ParseAdd("Negotiate");
+            refused.Headers.WwwAuthenticate.ParseAdd("NTLM");
+            return refused;
+        }
+
+        lock (_gate)
+        {
+            System.Xml.Linq.XElement message = action switch
+            {
+                "FindFolder" => SoapFindFolder(),
+                "FindItem" => SoapFindItem(operation),
+                "GetItem" => SoapGetItem(operation),
+                "GetAttachment" => SoapGetAttachment(operation),
+                "SyncFolderItems" => SoapSyncFolderItems(operation),
+                _ => SoapError($"{action}ResponseMessage", "ErrorInvalidRequest", $"{action} is not served by the fake"),
+            };
+            var envelope = new System.Xml.Linq.XDocument(new System.Xml.Linq.XElement(S + "Envelope",
+                new System.Xml.Linq.XAttribute(System.Xml.Linq.XNamespace.Xmlns + "s", S), new System.Xml.Linq.XAttribute(System.Xml.Linq.XNamespace.Xmlns + "t", T), new System.Xml.Linq.XAttribute(System.Xml.Linq.XNamespace.Xmlns + "m", M),
+                new System.Xml.Linq.XElement(S + "Header", new System.Xml.Linq.XElement(T + "ServerVersionInfo", new System.Xml.Linq.XAttribute("MajorVersion", 15), new System.Xml.Linq.XAttribute("MinorVersion", 2), new System.Xml.Linq.XAttribute("Version", "V2017_07_11"))),
+                new System.Xml.Linq.XElement(S + "Body", new System.Xml.Linq.XElement(M + $"{action}Response", new System.Xml.Linq.XElement(M + "ResponseMessages", message)))));
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(envelope.ToString(System.Xml.Linq.SaveOptions.DisableFormatting), Encoding.UTF8, "text/xml") };
+        }
+    }
+
+    private System.Xml.Linq.XElement SoapFindFolder()
+    {
+        var root = _folders.Values.Single(f => f.IsRoot);
+        var list = _folders.Values.Where(f => !f.IsRoot).Select(f => FolderXml(f, root)).ToList();
+        return new System.Xml.Linq.XElement(M + "FindFolderResponseMessage", new System.Xml.Linq.XAttribute("ResponseClass", "Success"), new System.Xml.Linq.XElement(M + "ResponseCode", "NoError"),
+            new System.Xml.Linq.XElement(M + "RootFolder", new System.Xml.Linq.XAttribute("IndexedPagingOffset", list.Count), new System.Xml.Linq.XAttribute("TotalItemsInView", list.Count), new System.Xml.Linq.XAttribute("IncludesLastItemInRange", "true"), new System.Xml.Linq.XElement(T + "Folders", list)));
+    }
+
+    private System.Xml.Linq.XElement SoapFindItem(System.Xml.Linq.XElement operation)
+    {
+        var folder = ResolveXml(operation.Element(M + "ParentFolderIds")?.Elements().FirstOrDefault());
+        if (folder is null)
+        {
+            return SoapError("FindItemResponseMessage", "ErrorFolderNotFound", "The specified folder could not be found in the store.");
+        }
+
+        var items = _items.Values.Where(i => i.FolderId == folder.Id).ToList();
+        if (operation.Element(M + "CalendarView") is { } view)
+        {
+            var from = DateTimeOffset.Parse((string)view.Attribute("StartDate")!, CultureInfo.InvariantCulture);
+            var to = DateTimeOffset.Parse((string)view.Attribute("EndDate")!, CultureInfo.InvariantCulture);
+            if (to - from > TimeSpan.FromDays(731))
+            {
+                return SoapError("FindItemResponseMessage", "ErrorCalendarViewRangeTooBig", "The specified view range exceeds the maximum range of two years.");
+            }
+
+            var inRange = items.Where(i => i.Start is { } s && s >= from && s < to).OrderBy(i => i.Start).ToList();
+            return new System.Xml.Linq.XElement(M + "FindItemResponseMessage", new System.Xml.Linq.XAttribute("ResponseClass", "Success"), new System.Xml.Linq.XElement(M + "ResponseCode", "NoError"),
+                new System.Xml.Linq.XElement(M + "RootFolder", new System.Xml.Linq.XAttribute("TotalItemsInView", inRange.Count), new System.Xml.Linq.XAttribute("IncludesLastItemInRange", "true"), new System.Xml.Linq.XElement(T + "Items", inRange.Select(i => ItemXml(i, full: false, mime: false)))));
+        }
+
+        var paging = operation.Element(M + "IndexedPageItemView");
+        var offset = int.TryParse((string?)paging?.Attribute("Offset"), out var o) ? o : 0;
+        var max = int.TryParse((string?)paging?.Attribute("MaxEntriesReturned"), out var m) ? m : 1000;
+        var ordered = items.OrderByDescending(i => i.Received ?? i.Created ?? DateTimeOffset.MinValue).ToList();
+        var page = ordered.Skip(offset).Take(max).ToList();
+        return new System.Xml.Linq.XElement(M + "FindItemResponseMessage", new System.Xml.Linq.XAttribute("ResponseClass", "Success"), new System.Xml.Linq.XElement(M + "ResponseCode", "NoError"),
+            new System.Xml.Linq.XElement(M + "RootFolder", new System.Xml.Linq.XAttribute("IndexedPagingOffset", offset + page.Count), new System.Xml.Linq.XAttribute("TotalItemsInView", ordered.Count), new System.Xml.Linq.XAttribute("IncludesLastItemInRange", offset + page.Count >= ordered.Count ? "true" : "false"),
+                new System.Xml.Linq.XElement(T + "Items", page.Select(i => ItemXml(i, full: false, mime: false)))));
+    }
+
+    private System.Xml.Linq.XElement SoapGetItem(System.Xml.Linq.XElement operation)
+    {
+        var id = (string?)operation.Element(M + "ItemIds")?.Element(T + "ItemId")?.Attribute("Id") ?? "";
+        if (!_items.TryGetValue(id, out var item))
+        {
+            return SoapError("GetItemResponseMessage", "ErrorItemNotFound", "The specified object was not found in the store.");
+        }
+
+        var mime = string.Equals(operation.Element(M + "ItemShape")?.Element(T + "IncludeMimeContent")?.Value, "true", StringComparison.OrdinalIgnoreCase);
+        return new System.Xml.Linq.XElement(M + "GetItemResponseMessage", new System.Xml.Linq.XAttribute("ResponseClass", "Success"), new System.Xml.Linq.XElement(M + "ResponseCode", "NoError"),
+            new System.Xml.Linq.XElement(M + "Items", ItemXml(item, full: true, mime: mime)));
+    }
+
+    private System.Xml.Linq.XElement SoapGetAttachment(System.Xml.Linq.XElement operation)
+    {
+        var id = (string?)operation.Element(M + "AttachmentIds")?.Element(T + "AttachmentId")?.Attribute("Id") ?? "";
+        if (!_attachments.TryGetValue(id, out var found))
+        {
+            return SoapError("GetAttachmentResponseMessage", "ErrorAttachmentNotFound", "The attachment could not be found.");
+        }
+
+        var (_, a) = found;
+        var xml = a.Embedded is { } embedded
+            ? new System.Xml.Linq.XElement(T + "ItemAttachment", new System.Xml.Linq.XElement(T + "AttachmentId", new System.Xml.Linq.XAttribute("Id", a.Id)), new System.Xml.Linq.XElement(T + "Name", a.Name), new System.Xml.Linq.XElement(T + "ContentType", a.ContentType), ItemXml(embedded, full: true, mime: true))
+            : new System.Xml.Linq.XElement(T + "FileAttachment", new System.Xml.Linq.XElement(T + "AttachmentId", new System.Xml.Linq.XAttribute("Id", a.Id)), new System.Xml.Linq.XElement(T + "Name", a.Name), new System.Xml.Linq.XElement(T + "ContentType", a.ContentType), new System.Xml.Linq.XElement(T + "Content", Convert.ToBase64String(a.Content ?? [])));
+        return new System.Xml.Linq.XElement(M + "GetAttachmentResponseMessage", new System.Xml.Linq.XAttribute("ResponseClass", "Success"), new System.Xml.Linq.XElement(M + "ResponseCode", "NoError"), new System.Xml.Linq.XElement(M + "Attachments", xml));
+    }
+
+    private System.Xml.Linq.XElement SoapSyncFolderItems(System.Xml.Linq.XElement operation)
+    {
+        var folder = ResolveXml(operation.Element(M + "SyncFolderId")?.Elements().FirstOrDefault());
+        if (folder is null)
+        {
+            return SoapError("SyncFolderItemsResponseMessage", "ErrorFolderNotFound", "The specified folder could not be found in the store.");
+        }
+
+        var state = operation.Element(M + "SyncState")?.Value;
+        var since = 0;
+        if (!string.IsNullOrEmpty(state))
+        {
+            var parts = state.Split(':');
+            if (parts.Length != 3 || parts[0] != "sync" || parts[1] != folder.Id || !int.TryParse(parts[2], out since))
+            {
+                return SoapError("SyncFolderItemsResponseMessage", "ErrorInvalidSyncStateData", "The sync state data is corrupt.");
+            }
+        }
+
+        var max = int.TryParse(operation.Element(M + "MaxChangesReturned")?.Value, out var n) ? n : 100;
+        var changes = new System.Xml.Linq.XElement(M + "Changes");
+        var last = since;
+        foreach (var (version, kind, itemId) in folder.Changes.Where(c => c.Version > since).Take(max))
+        {
+            last = version;
+            if (kind == "Delete" || !_items.TryGetValue(itemId, out var item))
+            {
+                changes.Add(new System.Xml.Linq.XElement(T + "Delete", new System.Xml.Linq.XElement(T + "ItemId", new System.Xml.Linq.XAttribute("Id", itemId))));
+            }
+            else
+            {
+                changes.Add(new System.Xml.Linq.XElement(T + kind, ItemXml(item, full: false, mime: false)));
+            }
+        }
+
+        return new System.Xml.Linq.XElement(M + "SyncFolderItemsResponseMessage", new System.Xml.Linq.XAttribute("ResponseClass", "Success"), new System.Xml.Linq.XElement(M + "ResponseCode", "NoError"),
+            new System.Xml.Linq.XElement(M + "SyncState", $"sync:{folder.Id}:{last}"), new System.Xml.Linq.XElement(M + "IncludesLastItemInRange", folder.Changes.All(c => c.Version <= last) ? "true" : "false"), changes);
+    }
+
+    private Folder? ResolveXml(System.Xml.Linq.XElement? idNode)
+    {
+        if (idNode is null)
+        {
+            return null;
+        }
+
+        var id = (string?)idNode.Attribute("Id") ?? "";
+        return idNode.Name == T + "DistinguishedFolderId"
+            ? (id == "msgfolderroot" ? _folders.Values.Single(f => f.IsRoot) : _folders.Values.FirstOrDefault(f => f.Distinguished == id))
+            : _folders.GetValueOrDefault(id);
+    }
+
+    private static System.Xml.Linq.XElement SoapError(string type, string code, string text)
+        => new(M + type, new System.Xml.Linq.XAttribute("ResponseClass", "Error"), new System.Xml.Linq.XElement(M + "MessageText", text), new System.Xml.Linq.XElement(M + "ResponseCode", code));
+
+    private static System.Xml.Linq.XElement FolderXml(Folder f, Folder root)
+    {
+        var xml = new System.Xml.Linq.XElement(T + f.Type,
+            new System.Xml.Linq.XElement(T + "FolderId", new System.Xml.Linq.XAttribute("Id", f.Id), new System.Xml.Linq.XAttribute("ChangeKey", "ck")),
+            new System.Xml.Linq.XElement(T + "ParentFolderId", new System.Xml.Linq.XAttribute("Id", f.ParentId ?? root.Id), new System.Xml.Linq.XAttribute("ChangeKey", "ck")),
+            new System.Xml.Linq.XElement(T + "FolderClass", f.FolderClass),
+            new System.Xml.Linq.XElement(T + "DisplayName", f.Name),
+            new System.Xml.Linq.XElement(T + "TotalCount", f.Count),
+            new System.Xml.Linq.XElement(T + "ChildFolderCount", 0));
+        if (f.Type == "Folder")
+        {
+            xml.Add(new System.Xml.Linq.XElement(T + "UnreadCount", 0));
+        }
+
+        if (f.Distinguished is not null)
+        {
+            xml.Add(new System.Xml.Linq.XElement(T + "DistinguishedFolderId", f.Distinguished));
+        }
+
+        return xml;
+    }
+
+    private static System.Xml.Linq.XElement ItemXml(Item i, bool full, bool mime)
+    {
+        var xml = new System.Xml.Linq.XElement(T + i.Type);
+        if (mime && i.Mime is { } bytes)
+        {
+            xml.Add(new System.Xml.Linq.XElement(T + "MimeContent", new System.Xml.Linq.XAttribute("CharacterSet", "UTF-8"), Convert.ToBase64String(bytes)));
+        }
+
+        xml.Add(new System.Xml.Linq.XElement(T + "ItemId", new System.Xml.Linq.XAttribute("Id", i.Id), new System.Xml.Linq.XAttribute("ChangeKey", "ck")),
+            new System.Xml.Linq.XElement(T + "ItemClass", i.ItemClass),
+            new System.Xml.Linq.XElement(T + "Subject", i.Subject),
+            new System.Xml.Linq.XElement(T + "Size", i.Size),
+            new System.Xml.Linq.XElement(T + "HasAttachments", i.Attachments.Count > 0 ? "true" : "false"),
+            new System.Xml.Linq.XElement(T + "LastModifiedTime", Stamp(i.Modified)),
+            new System.Xml.Linq.XElement(T + "DateTimeCreated", Stamp(i.Created)));
+        if (full)
+        {
+            xml.Add(new System.Xml.Linq.XElement(T + "Body", new System.Xml.Linq.XAttribute("BodyType", "HTML"), i.BodyHtml ?? ""));
+            xml.Add(new System.Xml.Linq.XElement(T + "Attachments", i.Attachments.Select(a => new System.Xml.Linq.XElement(T + (a.Embedded is null ? "FileAttachment" : "ItemAttachment"),
+                new System.Xml.Linq.XElement(T + "AttachmentId", new System.Xml.Linq.XAttribute("Id", a.Id)),
+                new System.Xml.Linq.XElement(T + "Name", a.Name),
+                new System.Xml.Linq.XElement(T + "ContentType", a.ContentType),
+                a.ContentId is null ? null : new System.Xml.Linq.XElement(T + "ContentId", a.ContentId),
+                new System.Xml.Linq.XElement(T + "Size", a.Content?.Length ?? a.Embedded?.Size ?? 0),
+                new System.Xml.Linq.XElement(T + "IsInline", a.IsInline ? "true" : "false")))));
+        }
+
+        if (i.Type == "Message")
+        {
+            xml.Add(new System.Xml.Linq.XElement(T + "DateTimeReceived", Stamp(i.Received)), new System.Xml.Linq.XElement(T + "DateTimeSent", Stamp(i.Sent)),
+                new System.Xml.Linq.XElement(T + "IsRead", i.IsRead ? "true" : "false"), new System.Xml.Linq.XElement(T + "IsDraft", "false"), new System.Xml.Linq.XElement(T + "Importance", "Normal"),
+                new System.Xml.Linq.XElement(T + "InternetMessageId", i.InternetMessageId), new System.Xml.Linq.XElement(T + "DisplayTo", string.Join("; ", i.To.Select(t => t.Name))), new System.Xml.Linq.XElement(T + "DisplayCc", string.Join("; ", i.Cc.Select(t => t.Name))));
+            if (i.From is { } from)
+            {
+                xml.Add(new System.Xml.Linq.XElement(T + "From", MailboxXml(from)), new System.Xml.Linq.XElement(T + "Sender", MailboxXml(from)));
+            }
+
+            if (full)
+            {
+                xml.Add(new System.Xml.Linq.XElement(T + "ToRecipients", i.To.Select(MailboxXml)), new System.Xml.Linq.XElement(T + "CcRecipients", i.Cc.Select(MailboxXml)));
+            }
+        }
+        else if (i.Type == "CalendarItem")
+        {
+            xml.Add(new System.Xml.Linq.XElement(T + "UID", i.Uid), new System.Xml.Linq.XElement(T + "Start", Stamp(i.Start)), new System.Xml.Linq.XElement(T + "End", Stamp(i.End)), new System.Xml.Linq.XElement(T + "IsAllDayEvent", "false"),
+                new System.Xml.Linq.XElement(T + "LegacyFreeBusyStatus", "Busy"), new System.Xml.Linq.XElement(T + "Location", i.Location), new System.Xml.Linq.XElement(T + "IsRecurring", i.IsRecurring ? "true" : "false"), new System.Xml.Linq.XElement(T + "CalendarItemType", i.CalendarItemType));
+            if (i.Organizer is { } organizer)
+            {
+                xml.Add(new System.Xml.Linq.XElement(T + "Organizer", MailboxXml(organizer)));
+            }
+
+            if (full)
+            {
+                xml.Add(new System.Xml.Linq.XElement(T + "RequiredAttendees", i.Attendees.Select(a => new System.Xml.Linq.XElement(T + "Attendee", MailboxXml(a.Who), new System.Xml.Linq.XElement(T + "ResponseType", a.Response)))));
+            }
+        }
+        else if (i.Type == "Contact")
+        {
+            xml.Add(new System.Xml.Linq.XElement(T + "FileAs", i.DisplayName), new System.Xml.Linq.XElement(T + "DisplayName", i.DisplayName), new System.Xml.Linq.XElement(T + "GivenName", i.GivenName),
+                new System.Xml.Linq.XElement(T + "CompanyName", i.Company),
+                new System.Xml.Linq.XElement(T + "EmailAddresses", new System.Xml.Linq.XElement(T + "Entry", new System.Xml.Linq.XAttribute("Key", "EmailAddress1"), i.Email)),
+                new System.Xml.Linq.XElement(T + "PhoneNumbers", new System.Xml.Linq.XElement(T + "Entry", new System.Xml.Linq.XAttribute("Key", "BusinessPhone"), i.Phone)),
+                new System.Xml.Linq.XElement(T + "JobTitle", i.JobTitle), new System.Xml.Linq.XElement(T + "Surname", i.Surname));
+        }
+
+        return xml;
+    }
+
+    private static System.Xml.Linq.XElement MailboxXml((string Name, string Address) m)
+        => new(T + "Mailbox", new System.Xml.Linq.XElement(T + "Name", m.Name), new System.Xml.Linq.XElement(T + "EmailAddress", m.Address), new System.Xml.Linq.XElement(T + "RoutingType", "SMTP"), new System.Xml.Linq.XElement(T + "MailboxType", "Mailbox"));
 
     // --- the model --------------------------------------------------------------------------------------------------------
 

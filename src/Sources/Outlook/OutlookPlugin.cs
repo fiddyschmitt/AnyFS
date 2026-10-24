@@ -19,7 +19,7 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
 
     public string DisplayName => "Outlook";
 
-    public string Description => "A mailbox (Exchange Online, through Outlook on the web with no app registration) or an Outlook data file (.pst or .ost, read while Outlook has it open): its folders by year and month, a folder per message with the message as Markdown and .eml and its attachments, contacts as .vcf, appointments as .ics. Read-only.";
+    public string Description => "A mailbox on Exchange Online (through Outlook on the web, no app registration) or on an Exchange server (a Windows account), or an Outlook data file (.pst or .ost, read while Outlook has it open): its folders by year and month, a folder per message with the message as Markdown and .eml and its attachments, contacts as .vcf, appointments as .ics. Read-only.";
 
     public string TypeFolder => "outlook";
 
@@ -32,7 +32,7 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
 
     public ISource CreateSource(object settings) => new OutlookSource((OutlookSettings)settings);
 
-    /// <summary>The mailbox's address, or the file's name without its extension ("archive" for archive.pst).</summary>
+    /// <summary>The mailbox's address, the server's host, or the file's name without its extension ("archive" for archive.pst).</summary>
     public string? SuggestName(object settings)
     {
         var s = (OutlookSettings)settings;
@@ -41,7 +41,12 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
             return null;
         }
 
-        var name = s.Kind == OutlookKind.Mailbox ? s.Address! : Path.GetFileNameWithoutExtension(s.File.TrimEnd('\\', '/'));
+        var name = s.Kind switch
+        {
+            OutlookKind.Mailbox => s.Address!,
+            OutlookKind.Server => s.ServerUrl!.Host,
+            _ => Path.GetFileNameWithoutExtension(s.File.TrimEnd('\\', '/')),
+        };
         var safe = MailNames.Clean(MailNames.Replace(name));
         return safe.Length == 0 ? null : safe;
     }
@@ -52,14 +57,16 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
         s.Path = s.Kind == OutlookKind.Mailbox ? s.Address! : s.File ?? "";
     }
 
-    /// <summary>The sign-in fields and the calendar window are a mailbox's; a file has neither.</summary>
+    /// <summary>The sign-in fields and the calendar window are a mailbox's; a file has neither. The web session's fields show for Exchange Online, the Windows account's for a server.</summary>
     public bool IsVisible(object settings, string propertyName)
     {
         var s = (OutlookSettings)settings;
         return propertyName switch
         {
-            nameof(OutlookSettings.SignInMethod) or nameof(OutlookSettings.Cloud) or nameof(OutlookSettings.BrowserPath)
-                or nameof(OutlookSettings.CalendarMonthsBack) or nameof(OutlookSettings.CalendarMonthsAhead) => s.Kind is OutlookKind.Mailbox or OutlookKind.Server,
+            nameof(OutlookSettings.SignInMethod) or nameof(OutlookSettings.CalendarMonthsBack) or nameof(OutlookSettings.CalendarMonthsAhead) => s.Kind is OutlookKind.Mailbox or OutlookKind.Server,
+            nameof(OutlookSettings.Cloud) or nameof(OutlookSettings.BrowserPath) => s.Kind == OutlookKind.Mailbox,
+            nameof(OutlookSettings.Username) or nameof(OutlookSettings.Password) => s.Kind == OutlookKind.Server && s.EffectiveSignIn == OutlookSignIn.Windows,
+            nameof(OutlookSettings.TrustAnyCertificate) => s.Kind == OutlookKind.Server,
             _ => true,
         };
     }
@@ -73,10 +80,29 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
                 yield return new ValidationMessage("Give a mailbox's address, or the path of a .pst or .ost file.", nameof(OutlookSettings.Path));
                 break;
             case OutlookKind.None:
-                yield return new ValidationMessage("That is neither a mailbox's address (jane@contoso.com) nor an Outlook data file (one ends in .pst or .ost).", nameof(OutlookSettings.Path));
+                yield return new ValidationMessage("That is neither a mailbox's address (jane@contoso.com), nor a server's (https://mail.contoso.com), nor an Outlook data file (one ends in .pst or .ost).", nameof(OutlookSettings.Path));
                 break;
             case OutlookKind.Server:
-                yield return new ValidationMessage("Exchange servers (an EWS or Outlook on the web address) are not served yet: give a mailbox's address for Exchange Online, or the path of a .pst or .ost file.", nameof(OutlookSettings.Path));
+                if (string.Equals(s.SignInMethod?.Trim(), OutlookSettings.WebSession, StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return new ValidationMessage($"An Exchange server takes a Windows account: {OutlookSettings.WindowsCurrent}, or {OutlookSettings.Windows} with a user name and password. (The web session is for Exchange Online.)", nameof(OutlookSettings.SignInMethod), IsError: false);
+                }
+
+                foreach (var problem in WindowsAccount.Problems(s.IsWindowsCurrent, s.EffectiveSignIn == OutlookSignIn.Windows ? s.Username : null, s.EffectiveSignIn == OutlookSignIn.Windows ? s.Password : null, nameof(OutlookSettings.SignInMethod), nameof(OutlookSettings.Username)))
+                {
+                    yield return problem;
+                }
+
+                if (s.ServerUrl!.Scheme == "http" && !s.TrustAnyCertificate)
+                {
+                    yield return new ValidationMessage("The server's address is http: the sign-in and the mail would go unencrypted. Exchange serves EWS over https.", nameof(OutlookSettings.Path), IsError: false);
+                }
+
+                if (s.CalendarMonthsBack is < 0 or > 600 || s.CalendarMonthsAhead is < 1 or > 600)
+                {
+                    yield return new ValidationMessage("The calendar window is between 0 and 600 months back and 1 and 600 ahead.", nameof(OutlookSettings.CalendarMonthsBack));
+                }
+
                 break;
             case OutlookKind.DataFile when !File.Exists(s.File!):
                 yield return new ValidationMessage("No file at that path.", nameof(OutlookSettings.Path), IsError: false);

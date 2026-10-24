@@ -83,17 +83,21 @@ public sealed class OutlookSource : SourceBase
 
                 break;
             case OutlookKind.Mailbox:
+            case OutlookKind.Server:
                 {
+                    if (_settings.Kind == OutlookKind.Server && _settings.IsWindowsCurrent && !OperatingSystem.IsWindows())
+                    {
+                        throw new SourceFailedException("Signing in as yourself works on Windows only: choose Windows account and give a user name and password.", permanent: true);
+                    }
+
                     var (service, account, how) = await ConnectAsync(_settings, _standIn, Logger, interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
-                    _store = new EwsMailStore(service, account, _settings.ShowHidden, _settings.CalendarMonthsBack, _settings.CalendarMonthsAhead, Logger);
+                    _store = new EwsMailStore(service, _settings.Kind == OutlookKind.Server ? $"{account} on {_settings.ServerUrl!.Host}" : account, _settings.ShowHidden, _settings.CalendarMonthsBack, _settings.CalendarMonthsAhead, Logger);
                     Logger.LogInformation("outlook: signed in as {Account} {How}", account, how);
                     break;
                 }
 
-            case OutlookKind.Server:
-                throw new SourceFailedException("Exchange servers (an EWS or Outlook on the web address) are not served yet: give a mailbox's address for Exchange Online, or the path of a .pst or .ost file.", permanent: true);
             default:
-                throw new SourceFailedException($"{file} is neither a mailbox's address nor an Outlook data file (one ends in .pst or .ost).", permanent: true);
+                throw new SourceFailedException($"{file} is neither a mailbox's address, nor a server's, nor an Outlook data file (one ends in .pst or .ost).", permanent: true);
         }
 
         try
@@ -107,7 +111,8 @@ public sealed class OutlookSource : SourceBase
         }
         catch (EwsException ex)
         {
-            throw new SourceFailedException($"Listing the mailbox: {ex.Message}", permanent: false, ex);
+            // a Windows sign-in the server refuses is the settings' fault; the rest may pass
+            throw new SourceFailedException($"Listing the mailbox: {ex.Message}", permanent: ex.Code == "401" && _settings.Kind == OutlookKind.Server, ex);
         }
         catch (HttpRequestException ex)
         {
@@ -134,6 +139,17 @@ public sealed class OutlookSource : SourceBase
     /// </summary>
     internal static async Task<(IEwsService Service, string Account, string How)> ConnectAsync(OutlookSettings s, OutlookStandIn? standIn, ILogger logger, bool interactive, Action<string> progress, CancellationToken ct)
     {
+        if (s.Kind == OutlookKind.Server)
+        {
+            // an Exchange server: SOAP with a Windows sign-in, the person's own mailbox there
+            var url = s.EwsUrl!;
+            var who = WindowsAccount.Name(s.IsWindowsCurrent, s.EffectiveSignIn == OutlookSignIn.Windows ? s.Username : null);
+            var endpoint = standIn is null ? url : new Uri(standIn.Origin, url.PathAndQuery);
+            var soap = new SoapEwsService(endpoint, WindowsAccount.Credentials(s.IsWindowsCurrent, s.Username, s.Password), s.TrustAnyCertificate, standIn?.Handler(), $"{url.Host}|{who}", logger);
+            progress($"Signing in to {url.Host} as {who}");
+            return (soap, standIn?.Account ?? who, $"with a Windows account ({url.Host})");
+        }
+
         var address = s.Address ?? throw new SourceFailedException("The mailbox's address is missing.", permanent: true);
         if (standIn is not null)
         {

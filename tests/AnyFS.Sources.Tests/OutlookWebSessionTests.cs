@@ -22,7 +22,7 @@ public class OutlookWebSessionTests
     }
 
     [TestMethod]
-    public void AnAddressIsAMailboxAndAnAddressOfAServerIsNotYet()
+    public void AnAddressIsAMailboxAndAnAddressOfAServerIsAServer()
     {
         var plugin = new OutlookPlugin();
         var mailbox = new OutlookSettings { Path = " Jane@Contoso.com " };
@@ -36,7 +36,9 @@ public class OutlookWebSessionTests
 
         var server = new OutlookSettings { Path = "https://mail.contoso.com/EWS/Exchange.asmx" };
         Assert.AreEqual(OutlookKind.Server, server.Kind);
-        StringAssert.Contains(plugin.Validate(server).Single(m => m.IsError).Message, "not served yet");
+        Assert.AreEqual(OutlookSignIn.WindowsCurrent, server.EffectiveSignIn, "the web session is Exchange Online's; a server takes a Windows account");
+        Assert.IsFalse(plugin.Validate(server).Any(m => m.IsError));
+        Assert.IsFalse(plugin.IsVisible(server, nameof(OutlookSettings.Cloud)));
         Assert.AreEqual(OutlookKind.None, new OutlookSettings { Path = "not an address" }.Kind);
         Assert.AreEqual(OutlookKind.DataFile, new OutlookSettings { Path = @"C:\mail\archive.ost" }.Kind);
     }
