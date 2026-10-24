@@ -378,52 +378,13 @@ public sealed class ThreeDXSource : SourceBase, ICountable
             return Stream.Null;
         }
 
-        var body = await ResponseStream.OpenAsync(response, ct).ConfigureAwait(false);
-        if (offset == 0)
+        return await ResponseStream.FromOffsetAsync(response, offset, path, () =>
         {
-            return body;
-        }
-
-        try
-        {
-            if (response.StatusCode == HttpStatusCode.PartialContent)
-            {
-                if (response.Content.Headers.ContentRange?.From is { } from && from != offset)
-                {
-                    throw new VfsException(VfsError.IoError, $"'{path}': asked for byte {offset:N0} on, the file server sent from byte {from:N0}");
-                }
-
-                return body;
-            }
-
             if (_rangeIgnoredSaid.TryAdd(file.ContentKey, true))
             {
                 Logger.LogInformation("3dx: the file server sends '{Path}' whole when asked for a range; reading past the first {Offset:N0} bytes", path, offset);
             }
-
-            await SkipAsync(body, offset, ct).ConfigureAwait(false);
-            return body;
-        }
-        catch
-        {
-            await body.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-    }
-
-    private static async Task SkipAsync(Stream body, long count, CancellationToken ct)
-    {
-        var buffer = new byte[64 * 1024];
-        while (count > 0)
-        {
-            var n = await body.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, count)), ct).ConfigureAwait(false);
-            if (n <= 0)
-            {
-                throw new VfsException(VfsError.IoError, "the file ended before the place asked for");
-            }
-
-            count -= n;
-        }
+        }, ct).ConfigureAwait(false);
     }
 
     /// <summary>The length of a file 3DX gives no size for: from its download's headers (counted through when they give none), asked once.</summary>

@@ -1,3 +1,6 @@
+using System.Net;
+using AnyFS.Sdk;
+
 namespace AnyFS.Sources.Common;
 
 /// <summary>A response body stream that disposes its response with it: what a source hands a spool or a ranged reader.</summary>
@@ -14,6 +17,57 @@ public sealed class ResponseStream(HttpResponseMessage response, Stream body) : 
         {
             response.Dispose();
             throw;
+        }
+    }
+
+    /// <summary>
+    /// The body of <paramref name="response"/> to a request for a file from <paramref name="offset"/> on, as
+    /// <see cref="OpenAsync"/>: a 206's as it comes (refused when it starts elsewhere); a server that ignored the range
+    /// sends the whole file, and the part before the offset is read past, <paramref name="rangeIgnored"/> told first.
+    /// </summary>
+    public static async Task<Stream> FromOffsetAsync(HttpResponseMessage response, long offset, string path, Action? rangeIgnored, CancellationToken ct)
+    {
+        var body = await OpenAsync(response, ct).ConfigureAwait(false);
+        if (offset == 0)
+        {
+            return body;
+        }
+
+        try
+        {
+            if (response.StatusCode == HttpStatusCode.PartialContent)
+            {
+                if (response.Content.Headers.ContentRange?.From is { } from && from != offset)
+                {
+                    throw new VfsException(VfsError.IoError, $"'{path}': asked for byte {offset:N0} on, the server sent from byte {from:N0}");
+                }
+
+                return body;
+            }
+
+            rangeIgnored?.Invoke();
+            await SkipAsync(body, offset, ct).ConfigureAwait(false);
+            return body;
+        }
+        catch
+        {
+            await body.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private static async Task SkipAsync(Stream body, long count, CancellationToken ct)
+    {
+        var buffer = new byte[64 * 1024];
+        while (count > 0)
+        {
+            var n = await body.ReadAsync(buffer.AsMemory(0, (int)Math.Min(buffer.Length, count)), ct).ConfigureAwait(false);
+            if (n <= 0)
+            {
+                throw new VfsException(VfsError.IoError, "the file ended before the place asked for");
+            }
+
+            count -= n;
         }
     }
 

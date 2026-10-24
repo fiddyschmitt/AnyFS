@@ -59,6 +59,7 @@ public abstract class SharePointSource : SourceBase, ICountable
     // last sorted out (PruneTopsAsync); and the sites given that show below another, said once each
     private volatile bool _topsToPrune = true;
     private readonly ConcurrentDictionary<string, bool> _saidBelow = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, bool> _rangeIgnoredSaid = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, ItemRef> _items = new(StringComparer.OrdinalIgnoreCase);
     private readonly SemaphoreSlim _otherSitesGate = new(1, 1);
 
@@ -654,7 +655,14 @@ public abstract class SharePointSource : SourceBase, ICountable
                 return Stream.Null;
             }
 
-            return new ResponseStream(response, await response.Content.ReadAsStreamAsync(openCt).ConfigureAwait(false));
+            // a server (or a proxy before it) that ignores the range sends the whole file: read past the start
+            return await ResponseStream.FromOffsetAsync(response, offset, path, () =>
+            {
+                if (_rangeIgnoredSaid.TryAdd(item.Id, true))
+                {
+                    Logger.LogInformation("sharepoint: SharePoint sends '{Path}' whole when asked for a range; reading past the first {Offset:N0} bytes", path, offset);
+                }
+            }, openCt).ConfigureAwait(false);
         }, maxStreams: Math.Clamp(Connections, 1, 16), maxSkipBytes: 1 << 20);
     }
 

@@ -85,6 +85,29 @@ public class FakeSharePointTests
         Assert.IsTrue(fake.Requests.Any(r => r.Account == FakeSharePoint.FarmUser), "signed in, and taken for the test account");
     }
 
+    /// <summary>
+    /// A server, or a proxy before it, that ignores a Range sends the whole file: what is read from an offset is still the
+    /// file from there (it was the file from its start).
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
+    [DataRow(true, DisplayName = "tenant, Graph")]
+    public async Task AServerThatIgnoresRangesIsReadPastTheStart(bool tenant)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        var bytes = new byte[300_000];
+        new Random(3).NextBytes(bytes);
+        fake.Seed(fake.TestSite.Library("Documents"), "ranges/whole.bin", bytes);
+        fake.HonoursRanges = false;
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode, spoolBelowMiB: 0) : FarmSettings(fake, spoolBelowMiB: 0), context);
+
+        await using var file = await source.OpenAsync("Documents/ranges/whole.bin", VfsOpenMode.Read, None);
+        var middle = new byte[10_000];
+        Assert.AreEqual(middle.Length, await file.ReadFullyAsync(200_000, middle, None));
+        CollectionAssert.AreEqual(bytes[200_000..210_000], middle, "the file from the offset, not from its start");
+    }
+
     /// <summary>A web session that lapses is renewed without a window, and the write it refused goes through.</summary>
     [TestMethod]
     public async Task ALapsedWebSessionIsRenewedWithoutAWindow()
