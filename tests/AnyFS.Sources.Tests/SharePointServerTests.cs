@@ -209,53 +209,110 @@ public class SharePointServerPluginTests
 }
 
 /// <summary>
-/// Where the REST live tests run: ANYFS_TEST_SPS_SITE (http://192.168.0.92/sites/anyfs in the lab), _USER
-/// (ANYFS\sp_user), _PASSWORD and _LIBRARY (Documents). Without a site the live tests are inconclusive. The
-/// fixture tree is made by the tests through the source, as for SharePoint Online.
-///
-/// With ANYFS_TEST_SPS_SIGNIN=web the same tests run against SharePoint Online on a web session (the browser
-/// sign-in that needs no app registration): the site is a Microsoft 365 one, no user or password, and
-/// ANYFS_SHAREPOINT_PROFILES names where the signed-in browser profiles are kept, so a profile signed in once
-/// serves every run without a window.
+/// Where the REST suite runs, and what its tests share. Two targets, each the lab's or the sandbox's when the
+/// environment names it and the fake standing in otherwise (<see cref="SharePointFakes"/>):
+/// <list type="bullet">
+/// <item><see cref="Farm"/>, a farm with a Windows sign-in: ANYFS_TEST_SPS_SITE (http://192.168.0.92/sites/anyfs in the
+/// lab), _USER (ANYFS\sp_user), _PASSWORD, _LIBRARY (Documents), _SITE2 (the other farm's test site);</item>
+/// <item><see cref="OnlineRest"/>, SharePoint Online on a web session (the browser sign-in that needs no app
+/// registration): the same variables with ANYFS_TEST_SPS_SIGNIN=web and a Microsoft 365 site, no user or password;
+/// ANYFS_SHAREPOINT_PROFILES names where the signed-in browser profiles are kept, so a profile signed in once serves
+/// every run without a window.</item>
+/// </list>
+/// The fixture tree is made by the tests through the source, as for SharePoint Online.
 /// </summary>
 internal static class SpsTestServer
 {
     public static readonly byte[] ReadmeBytes = Encoding.UTF8.GetBytes("hello readme from sharepoint server\n");
 
-    /// <summary>
-    /// On SharePoint Online the Graph suite keeps its own anyfs-fixture in the same library, with a readme of the
-    /// same length ("online" and "server"), which the length-only fixture check would take for this one's.
-    /// </summary>
-    public static string FixtureFolder => WebSession ? "anyfs-fixture-rest" : "anyfs-fixture";
+    private static readonly Lazy<SharePointTarget> LazyFarm = new(FarmTarget);
+    private static readonly Lazy<SharePointTarget> LazyOnline = new(OnlineTarget);
 
-    public static string? Site => Env("ANYFS_TEST_SPS_SITE");
+    /// <summary>The farm: the lab's, or the fake farm.</summary>
+    public static SharePointTarget Farm => LazyFarm.Value;
 
-    public static string? User => Env("ANYFS_TEST_SPS_USER");
+    /// <summary>SharePoint Online on a web session: the sandbox, or the fake tenant.</summary>
+    public static SharePointTarget OnlineRest => LazyOnline.Value;
 
-    public static string? Password => Env("ANYFS_TEST_SPS_PASSWORD");
+    private static bool LabWebSession => string.Equals(Env("ANYFS_TEST_SPS_SIGNIN"), "web", StringComparison.OrdinalIgnoreCase);
 
-    public static string Library => Env("ANYFS_TEST_SPS_LIBRARY") ?? "Documents";
-
-    public static bool WebSession => string.Equals(Env("ANYFS_TEST_SPS_SIGNIN"), "web", StringComparison.OrdinalIgnoreCase);
-
-    public static void Require()
+    private static SharePointTarget FarmTarget()
     {
-        if (Site is null)
+        if (Env("ANYFS_TEST_SPS_SITE") is { } site && !LabWebSession)
         {
-            Assert.Inconclusive("no SharePoint REST test site: set ANYFS_TEST_SPS_SITE (and _USER, _PASSWORD, _LIBRARY; or _SIGNIN=web for a Microsoft 365 site)");
+            return new SharePointTarget
+            {
+                Description = $"the farm at {site}",
+                Site = site,
+                User = Env("ANYFS_TEST_SPS_USER"),
+                Password = Env("ANYFS_TEST_SPS_PASSWORD"),
+                Library = Env("ANYFS_TEST_SPS_LIBRARY") ?? "Documents",
+                SignInMethod = SharePointSettings.Automatic,
+                ReadmeBytes = ReadmeBytes,
+                OtherServerSite = Env("ANYFS_TEST_SPS_SITE2"),
+                LogVariable = "ANYFS_TEST_SPS_LOG",
+            };
         }
+
+        if (!SharePointFakes.Enabled)
+        {
+            return new SharePointTarget { Description = "no farm", Site = "", SignInMethod = SharePointSettings.Automatic, ReadmeBytes = ReadmeBytes, Missing = "no SharePoint REST test site: set ANYFS_TEST_SPS_SITE (and _USER, _PASSWORD, _LIBRARY), or let the fakes stand in" };
+        }
+
+        var fake = SharePointFakes.Farm;
+        return new SharePointTarget
+        {
+            Description = "the fake farm",
+            Site = fake.Origin + FakeSharePoint.TestSitePath,
+            User = FakeSharePoint.FarmUser,
+            Password = FakeSharePoint.FakePassword,
+            SignInMethod = SharePointSettings.Automatic,
+            ReadmeBytes = ReadmeBytes,
+            Fake = fake,
+            OtherServerSite = SharePointFakes.OtherFarm.Origin + FakeSharePoint.TestSitePath,
+            LogVariable = "ANYFS_TEST_SPS_LOG",
+        };
     }
 
-    public static SharePointSettings Settings(string? library = null, int spoolBelowMiB = 8) => new()
+    /// <summary>
+    /// On SharePoint Online the Graph suite keeps its own anyfs-fixture in the same library, with a readme of the same
+    /// length ("online" and "server"), which the length-only fixture check would take for this one's: this suite's is
+    /// anyfs-fixture-rest.
+    /// </summary>
+    private static SharePointTarget OnlineTarget()
     {
-        SiteUrl = Site!,
-        Library = library,
-        SignInMethod = WebSession ? SharePointSettings.WebSession : SharePointSettings.Automatic,
-        Username = WebSession ? null : User,
-        Password = WebSession ? null : Password,
-        SpoolBelowMiB = spoolBelowMiB,
-        TrustAnyCertificate = true,
-    };
+        if (Env("ANYFS_TEST_SPS_SITE") is { } site && LabWebSession)
+        {
+            return new SharePointTarget
+            {
+                Description = $"SharePoint Online at {site}, on a web session",
+                Site = site,
+                Library = Env("ANYFS_TEST_SPS_LIBRARY") ?? "Documents",
+                SignInMethod = SharePointSettings.WebSession,
+                FixtureFolder = "anyfs-fixture-rest",
+                ReadmeBytes = ReadmeBytes,
+                LogVariable = "ANYFS_TEST_SPS_LOG",
+            };
+        }
+
+        if (!SharePointFakes.Enabled)
+        {
+            return new SharePointTarget { Description = "no SharePoint Online", Site = "", SignInMethod = SharePointSettings.WebSession, ReadmeBytes = ReadmeBytes, Missing = "no SharePoint Online site for the web session: set ANYFS_TEST_SPS_SITE with ANYFS_TEST_SPS_SIGNIN=web, or let the fakes stand in" };
+        }
+
+        var fake = SharePointFakes.Tenant;
+        return new SharePointTarget
+        {
+            Description = "the fake tenant, on a web session",
+            Site = fake.Origin + FakeSharePoint.TestSitePath,
+            Account = FakeSharePoint.TenantUser,
+            SignInMethod = SharePointSettings.WebSession,
+            FixtureFolder = "anyfs-fixture-rest",
+            ReadmeBytes = ReadmeBytes,
+            Fake = fake,
+            LogVariable = "ANYFS_TEST_SPS_LOG",
+        };
+    }
 
     /// <summary>The subsite of the test site that the subsite tests work in (a team site with its Documents library).</summary>
     public const string Subsite = "anyfs-subsite";
@@ -420,21 +477,8 @@ internal static class SpsTestServer
         Assert.AreEqual(expectedLines.ElementAtOrDefault(1), actualLines.ElementAtOrDefault(1), actual);
     }
 
-    /// <summary>A second site on another server for the several-sites test (the other lab farm's test site), or null.</summary>
-    public static string? OtherServerSite => Env("ANYFS_TEST_SPS_SITE2");
-
     /// <summary>The name a site shows as among several: the last part of its address.</summary>
     public static string LastName(string siteUrl) => new Uri(siteUrl).AbsolutePath.TrimEnd('/').Split('/')[^1];
-
-    /// <summary>Starts a source of the settings with these sites, one per line, in the context given (the test context, or one holding a Microsoft sign-in).</summary>
-    public static async Task<SharePointSiteSource> StartSitesAsync(SharePointSettings settings, TestSourceContext context, params string[] sites)
-    {
-        settings.SiteUrl = string.Join("\n", sites);
-        var source = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-        await source.InitialiseAsync(context, timeout.Token);
-        return source;
-    }
 
     /// <summary>
     /// A source of the tenant's root site and the test site: the root site is the source's own (no folder named after the
@@ -502,104 +546,67 @@ internal static class SpsTestServer
         return names;
     }
 
-    public static async Task<SharePointSiteSource> StartWithFixtureAsync(SharePointSettings settings)
-    {
-        var source = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
-        var logPath = Environment.GetEnvironmentVariable("ANYFS_TEST_SPS_LOG");
-        var context = new TestSourceContext("sharepoint", string.IsNullOrWhiteSpace(logPath) ? null : new FileLogger(logPath));
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-        await source.InitialiseAsync(context, timeout.Token);
-        var root = settings.Library is null ? Library : "";
-        var fixture = VfsPath.Join(root, FixtureFolder);
-        await EnsureDirectoryAsync(source, fixture);
-        await EnsureDirectoryAsync(source, VfsPath.Join(fixture, "docs"));
-        await EnsureDirectoryAsync(source, VfsPath.Join(fixture, "scratch"));
-        await EnsureFileAsync(source, VfsPath.Join(fixture, "readme.txt"), ReadmeBytes);
-        await EnsureFileAsync(source, VfsPath.Join(fixture, "docs/a.txt"), "aaa"u8.ToArray());
-        await EnsureFileAsync(source, VfsPath.Join(fixture, "medium.bin"), SpoTestServer.MediumBytes());
-        return source;
-    }
-
-    private static async Task EnsureDirectoryAsync(ISource source, string path)
-    {
-        if (await source.StatAsync(path, CancellationToken.None) is null)
-        {
-            await source.CreateDirectoryAsync(path, CancellationToken.None);
-        }
-    }
-
-    private static async Task EnsureFileAsync(ISource source, string path, byte[] contents)
-    {
-        var existing = await source.StatAsync(path, CancellationToken.None);
-        if (existing is { IsDirectory: false } && existing.Length == contents.Length)
-        {
-            return;
-        }
-
-        await using var file = await source.OpenAsync(path, VfsOpenMode.Create, CancellationToken.None);
-        await file.WriteAsync(0, contents, CancellationToken.None);
-    }
-
     private static string? Env(string name)
     {
         var value = Environment.GetEnvironmentVariable(name);
         return string.IsNullOrWhiteSpace(value) ? null : value;
     }
-
-    private sealed class FileLogger(string path) : Microsoft.Extensions.Logging.ILogger
-    {
-        private static readonly object Gate = new();
-
-        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
-
-        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-        {
-            var line = $"{DateTime.Now:HH:mm:ss.fff} [{logLevel}] {formatter(state, exception)}{(exception is null ? "" : " :: " + exception)}{Environment.NewLine}";
-            lock (Gate)
-            {
-                File.AppendAllText(path, line);
-            }
-        }
-    }
 }
 
-/// <summary>The SDK's contract against the lab farm, libraries at the top level.</summary>
+/// <summary>The SDK's contract on the farm (the lab's, or the fake), libraries at the top level.</summary>
 [TestClass]
 public class SharePointServerContractTests : SourceContractTests
 {
-    protected override async Task<SourceContractSetup> SetUpAsync()
-    {
-        SpsTestServer.Require();
-        var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
-        var fixture = VfsPath.Join(SpsTestServer.Library, SpsTestServer.FixtureFolder);
-        return new SourceContractSetup(source, fixture, VfsPath.Join(fixture, "readme.txt"), SpsTestServer.ReadmeBytes, WritableDirectory: VfsPath.Join(fixture, "scratch"));
-    }
+    protected override Task<SourceContractSetup> SetUpAsync() => SpsTestServer.Farm.ContractSetupAsync(pinned: false);
 }
 
 /// <summary>The same contract with the library pinned and nothing spooled, so reads go through ranges.</summary>
 [TestClass]
 public class SharePointServerPinnedLibraryContractTests : SourceContractTests
 {
-    protected override async Task<SourceContractSetup> SetUpAsync()
-    {
-        SpsTestServer.Require();
-        var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings(library: SpsTestServer.Library, spoolBelowMiB: 0));
-        return new SourceContractSetup(source, SpsTestServer.FixtureFolder, VfsPath.Join(SpsTestServer.FixtureFolder, "readme.txt"), SpsTestServer.ReadmeBytes, WritableDirectory: VfsPath.Join(SpsTestServer.FixtureFolder, "scratch"));
-    }
+    protected override Task<SourceContractSetup> SetUpAsync() => SpsTestServer.Farm.ContractSetupAsync(pinned: true);
 }
 
+/// <summary>The SDK's contract on SharePoint Online through a web session (the sandbox, or the fake tenant), libraries at the top level.</summary>
 [TestClass]
-public class SharePointServerLiveTests
+public class SharePointOnlineRestContractTests : SourceContractTests
+{
+    protected override Task<SourceContractSetup> SetUpAsync() => SpsTestServer.OnlineRest.ContractSetupAsync(pinned: false);
+}
+
+/// <summary>The same contract with the library pinned and nothing spooled.</summary>
+[TestClass]
+public class SharePointOnlineRestPinnedLibraryContractTests : SourceContractTests
+{
+    protected override Task<SourceContractSetup> SetUpAsync() => SpsTestServer.OnlineRest.ContractSetupAsync(pinned: true);
+}
+
+/// <summary>The REST suite on a farm with a Windows sign-in: the lab's, or the fake farm.</summary>
+[TestClass]
+public class SharePointServerLiveTests : SharePointRestLiveTests
+{
+    internal override SharePointTarget Target => SpsTestServer.Farm;
+}
+
+/// <summary>The REST suite on SharePoint Online through a web session: the sandbox, or the fake tenant.</summary>
+[TestClass]
+public class SharePointOnlineRestLiveTests : SharePointRestLiveTests
+{
+    internal override SharePointTarget Target => SpsTestServer.OnlineRest;
+}
+
+/// <summary>What the REST suite checks, on whichever target (<see cref="SharePointTarget"/>).</summary>
+public abstract class SharePointRestLiveTests
 {
     private static readonly CancellationToken None = CancellationToken.None;
+
+    internal abstract SharePointTarget Target { get; }
 
     [TestMethod]
     public async Task LibrariesAreTheTopLevelFoldersAndFormsIsHidden()
     {
-        SpsTestServer.Require();
-        await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
+        Target.Require();
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
         var names = new List<string>();
         await foreach (var entry in source.ListAsync("", None))
         {
@@ -608,53 +615,63 @@ public class SharePointServerLiveTests
             names.Add(entry.Name);
         }
 
-        CollectionAssert.Contains(names, SpsTestServer.Library);
+        CollectionAssert.Contains(names, Target.Library);
         var top = new List<string>();
-        await foreach (var entry in source.ListAsync(SpsTestServer.Library, None))
+        await foreach (var entry in source.ListAsync(Target.Library, None))
         {
             top.Add(entry.Name);
         }
 
         CollectionAssert.DoesNotContain(top, "Forms", "the library's own Forms folder stays hidden");
-        CollectionAssert.Contains(top, SpsTestServer.FixtureFolder);
+        CollectionAssert.Contains(top, Target.FixtureFolder);
     }
 
     [TestMethod]
     public async Task ASubsiteIsAFolderWithItsOwnLibraries()
     {
-        SpsTestServer.Require();
-        await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
-        await SpsTestServer.EnsureSubsiteAsync(source);
+        Target.Require();
+        await using (var maker = await Target.StartWithFixtureAsync(Target.Settings()))
+        {
+            await SpsTestServer.EnsureSubsiteAsync(maker);
+        }
+
+        // a source started now lists the site with the subsite in it (one made since the start shows at the next walk)
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
         await SpsTestServer.CheckSubsiteAsync(source);
     }
 
     [TestMethod]
     public async Task TheSitesPagesAreReadOnlyMarkdown()
     {
-        SpsTestServer.Require();
-        await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
-        var page = await SpsTestServer.EnsurePageAsync(source);
-        await SpsTestServer.CheckPageAsync(source, SpsTestServer.Site!, page);
+        Target.Require();
+        string page;
+        await using (var maker = await Target.StartWithFixtureAsync(Target.Settings()))
+        {
+            page = await SpsTestServer.EnsurePageAsync(maker);
+        }
+
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
+        await SpsTestServer.CheckPageAsync(source, Target.Site, page);
     }
 
     [TestMethod]
     public async Task APageInTheSitesOwnFolderShowsAsMarkdown()
     {
-        SpsTestServer.Require();
-        await using (var single = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings()))
+        Target.Require();
+        await using (var single = await Target.StartWithFixtureAsync(Target.Settings()))
         {
             try
             {
                 await SpsTestServer.EnsureClassicPageAsync(single);
             }
-            catch (VfsException ex) when (SpsTestServer.WebSession)
+            catch (VfsException ex) when (Target.WebSession)
             {
                 Assert.Inconclusive($"SharePoint Online took no classic page in the site's own folder: {ex.Message}");
             }
         }
 
         // a source started now lists the site's folder with the page in it
-        await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
         var names = await SpsTestServer.NamesAsync(source, "");
         CollectionAssert.Contains(names, SpsTestServer.ClassicPageShown, string.Join(", ", names));
         var entry = await source.StatAsync(SpsTestServer.ClassicPageShown, None);
@@ -664,23 +681,23 @@ public class SharePointServerLiveTests
         Assert.AreEqual(back.Length, await file.ReadFullyAsync(0, back, None));
         var markdown = Encoding.UTF8.GetString(back);
         var lines = markdown.Split('\n', 3);
-        Assert.AreEqual($"{SpsTestServer.Site!.TrimEnd('/')}/{SpsTestServer.ClassicPage}", lines[0], true, "the page's address on the first line: " + markdown);
+        Assert.AreEqual($"{Target.Site.TrimEnd('/')}/{SpsTestServer.ClassicPage}", lines[0], true, "the page's address on the first line: " + markdown);
         StringAssert.StartsWith(lines.ElementAtOrDefault(2), "# AnyFS classic page\n", markdown);
         StringAssert.Contains(markdown, "## A classic page");
-        StringAssert.Contains(markdown, $"[link]({SpsTestServer.Site}/Lists/anyfs-nowhere)", "an address made absolute");
+        StringAssert.Contains(markdown, $"[link]({Target.Site}/Lists/anyfs-nowhere)", "an address made absolute");
         Assert.IsFalse(markdown.Contains("__VIEWSTATE", StringComparison.Ordinal), markdown);
     }
 
     [TestMethod]
     public async Task SeveralSitesAreTopLevelFolders()
     {
-        SpsTestServer.Require();
+        Target.Require();
         bool subsite;
-        await using (var single = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings()))
+        await using (var single = await Target.StartWithFixtureAsync(Target.Settings()))
         {
             // SharePoint Online makes no new subsites (EnsureSubsiteAsync); the rest holds without one
             subsite = await SpsTestServer.HasSubsiteAsync(single);
-            if (!subsite && !SpsTestServer.WebSession)
+            if (!subsite && !Target.WebSession)
             {
                 await SpsTestServer.EnsureSubsiteAsync(single);
                 subsite = true;
@@ -689,12 +706,12 @@ public class SharePointServerLiveTests
 
         // the test site, its subsite, an address below the test site that is no site (found by stepping back: the test site
         // again), and a site that is not there, which is left out
-        var site = SpsTestServer.Site!;
+        var site = Target.Site;
         var missing = $"{SpsTestServer.RootOf(site)}/sites/anyfs-no-such-site";
         string[] sites = subsite ? [site, $"{site}/{SpsTestServer.Subsite}", $"{site}/anyfs-not-a-site", missing] : [site, $"{site}/anyfs-not-a-site", missing];
-        var settings = SpsTestServer.Settings();
+        var settings = Target.Settings();
         settings.SiteUrl = string.Join("\n", sites);
-        var result = await new SharePointPlugin().TestAsync(settings, new Progress<string>(), None);
+        var result = await Target.TestAsync(settings);
         Assert.IsTrue(result.Success, result.Message);
         if (subsite)
         {
@@ -705,7 +722,7 @@ public class SharePointServerLiveTests
         StringAssert.Contains(result.Message[result.Message.IndexOf("\nLeft out", StringComparison.Ordinal)..], missing);
 
         using var context = new TestSourceContext("sharepoint");
-        await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, sites);
+        await using var source = await Target.StartSitesAsync(Target.Settings(), context, sites);
         var top = SpsTestServer.LastName(site);
         CollectionAssert.AreEqual(new[] { top }, await SpsTestServer.NamesAsync(source, ""), "the same site given twice is one folder, the subsite given shows among the site's subsites, and the site not there is left out");
         if (subsite)
@@ -715,74 +732,74 @@ public class SharePointServerLiveTests
             CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, below), "Documents", "the subsite once, where its site lists it");
         }
 
-        await SpsTestServer.CheckReadmeAsync(source, top, SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
+        await SpsTestServer.CheckReadmeAsync(source, top, Target.Library, Target.FixtureFolder, SpsTestServer.ReadmeBytes);
     }
 
     [TestMethod]
     public async Task ASiteWhoseServerDoesNotAnswerIsLeftOut()
     {
-        SpsTestServer.Require();
-        if (SpsTestServer.WebSession)
+        Target.Require();
+        if (Target.WebSession)
         {
             Assert.Inconclusive("a Windows sign-in, which reaches sites on several servers");
         }
 
         // 192.0.2.1 is TEST-NET-1 (RFC 5737), which nothing answers: neither Test nor the start waits on it for long, and
         // the source's health is none of its business
-        var site = SpsTestServer.Site!;
+        var site = Target.Site;
         const string silent = "http://192.0.2.1/sites/anyfs";
-        var settings = SpsTestServer.Settings();
+        var settings = Target.Settings();
         settings.SiteUrl = $"{site}\n{silent}";
         var watch = Stopwatch.StartNew();
-        var result = await new SharePointPlugin().TestAsync(settings, new Progress<string>(), None);
+        var result = await Target.TestAsync(settings);
         Assert.IsTrue(result.Success, result.Message);
         StringAssert.Contains(result.Message[result.Message.IndexOf("\nLeft out", StringComparison.Ordinal)..], silent);
         Assert.IsTrue(watch.Elapsed < TimeSpan.FromSeconds(45), $"Test took {watch.Elapsed}");
 
         using var context = new TestSourceContext("sharepoint");
         watch.Restart();
-        await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, site, silent);
+        await using var source = await Target.StartSitesAsync(Target.Settings(), context, site, silent);
         Assert.IsTrue(watch.Elapsed < TimeSpan.FromSeconds(45), $"the start took {watch.Elapsed}");
         CollectionAssert.AreEqual(new[] { SpsTestServer.LastName(site) }, await SpsTestServer.NamesAsync(source, ""));
-        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, SpsTestServer.LastName(site)), SpsTestServer.Library);
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, SpsTestServer.LastName(site)), Target.Library);
         Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth, string.Join("; ", context.HealthReports));
     }
 
     [TestMethod]
     public async Task SitesOnTwoServersAreNamedByTheirServers()
     {
-        SpsTestServer.Require();
-        var other = SpsTestServer.OtherServerSite;
-        if (other is null || SpsTestServer.WebSession)
+        Target.Require();
+        var other = Target.OtherServerSite;
+        if (other is null || Target.WebSession)
         {
             Assert.Inconclusive("a Windows sign-in with a second farm's test site in ANYFS_TEST_SPS_SITE2");
             return;
         }
 
-        var site = SpsTestServer.Site!;
+        var site = Target.Site;
         using var context = new TestSourceContext("sharepoint");
-        await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, site, other);
+        await using var source = await Target.StartSitesAsync(Target.Settings(), context, site, other);
         var names = await SpsTestServer.NamesAsync(source, "");
         var first = SpsTestServer.LastName(site) == SpsTestServer.LastName(other) ? $"{SpsTestServer.LastName(site)} ({new Uri(site).Host})" : SpsTestServer.LastName(site);
         Assert.AreEqual(2, names.Count, string.Join(", ", names));
         CollectionAssert.Contains(names, first);
-        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, names.Single(n => n != first)), SpsTestServer.Library, "the other server's site has its own libraries");
-        await SpsTestServer.CheckReadmeAsync(source, first, SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, names.Single(n => n != first)), Target.Library, "the other server's site has its own libraries");
+        await SpsTestServer.CheckReadmeAsync(source, first, Target.Library, Target.FixtureFolder, SpsTestServer.ReadmeBytes);
     }
 
     [TestMethod]
     public async Task ARootSiteAmongSeveralShowsTheOtherSites()
     {
-        SpsTestServer.Require();
-        await using (await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings()))
+        Target.Require();
+        await using (await Target.StartWithFixtureAsync(Target.Settings()))
         {
             // the fixture is in place in the test site
         }
 
-        var site = SpsTestServer.Site!;
+        var site = Target.Site;
         var root = SpsTestServer.RootOf(site);
         using var context = new TestSourceContext("sharepoint");
-        await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, root, site);
+        await using var source = await Target.StartSitesAsync(Target.Settings(), context, root, site);
         var names = await SpsTestServer.NamesAsync(source, "");
         if (names.SequenceEqual([SpsTestServer.LastName(site)]))
         {
@@ -790,22 +807,22 @@ public class SharePointServerLiveTests
             Assert.Inconclusive($"the test account may not open {root}, so it is left out (ARootSiteTheAccountMayNotOpenSaysSo)");
         }
 
-        await SpsTestServer.CheckRootAmongSitesAsync(source, root, site, SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
+        await SpsTestServer.CheckRootAmongSitesAsync(source, root, site, Target.Library, Target.FixtureFolder, SpsTestServer.ReadmeBytes);
     }
 
     [TestMethod]
     public async Task ASiteGivenIsKnownAsASiteCollectionOrASubsite()
     {
-        SpsTestServer.Require();
+        Target.Require();
         bool subsite;
-        await using (var single = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings()))
+        await using (var single = await Target.StartWithFixtureAsync(Target.Settings()))
         {
             subsite = await SpsTestServer.HasSubsiteAsync(single);
         }
 
-        var site = SpsTestServer.Site!;
+        var site = Target.Site;
         using var context = new TestSourceContext("sharepoint");
-        await using var source = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context, site, $"{site}/{SpsTestServer.Subsite}");
+        await using var source = await Target.StartSitesAsync(Target.Settings(), context, site, $"{site}/{SpsTestServer.Subsite}");
         Assert.IsTrue(SiteAddress.TryParse(site, out var address, out _));
         Assert.IsTrue((await source.Store.FindSiteAsync(address, None)).SiteCollection, "the test site is a site collection's own");
         if (!subsite)
@@ -820,15 +837,15 @@ public class SharePointServerLiveTests
     [TestMethod]
     public async Task TheTenantsRootSiteShowsItsOtherSites()
     {
-        SpsTestServer.Require();
-        await using (await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings()))
+        Target.Require();
+        await using (await Target.StartWithFixtureAsync(Target.Settings()))
         {
             // the fixture is in place in the test site
         }
 
-        var settings = SpsTestServer.Settings();
+        var settings = Target.Settings();
         settings.SiteUrl = SpsTestServer.RootOf(settings.SiteUrl);
-        await using var root = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
+        await using var root = Target.CreateSource(settings);
         using var context = new TestSourceContext("sharepoint");
         try
         {
@@ -840,60 +857,60 @@ public class SharePointServerLiveTests
             Assert.Inconclusive($"the test account may not open {settings.SiteUrl}: {ex.Message}");
         }
 
-        await SpsTestServer.CheckOtherSitesAsync(root, SpsTestServer.Site!, SpsTestServer.Library, SpsTestServer.FixtureFolder, SpsTestServer.ReadmeBytes);
+        await SpsTestServer.CheckOtherSitesAsync(root, Target.Site, Target.Library, Target.FixtureFolder, SpsTestServer.ReadmeBytes);
     }
 
     [TestMethod]
     public async Task ARootSiteTheAccountMayNotOpenSaysSo()
     {
-        SpsTestServer.Require();
-        if (SpsTestServer.WebSession)
+        Target.Require();
+        if (Target.WebSession)
         {
             Assert.Inconclusive("the Windows sign-in's answer; a Microsoft 365 root site is open to its members");
         }
 
         // the lab farms' root site belongs to the setup account; the test account may open only its test site
-        var settings = SpsTestServer.Settings();
+        var settings = Target.Settings();
         settings.SiteUrl = SpsTestServer.RootOf(settings.SiteUrl);
-        var result = await new SharePointPlugin().TestAsync(settings, new Progress<string>(), None);
+        var result = await Target.TestAsync(settings);
         if (result.Success)
         {
-            Assert.Inconclusive($"{SpsTestServer.User} may open {settings.SiteUrl} here: {result.Message}");
+            Assert.Inconclusive($"{Target.User} may open {settings.SiteUrl} here: {result.Message}");
         }
 
-        StringAssert.StartsWith(result.Message, $"Signed in as {SpsTestServer.User}, but access to '{settings.SiteUrl}/' was denied: ");
+        StringAssert.StartsWith(result.Message, $"Signed in as {Target.User}, but access to '{settings.SiteUrl}/' was denied: ");
         StringAssert.Contains(result.Message, "give the address of a site this account may open instead");
         Assert.IsFalse(result.Message.Contains("refused the sign-in", StringComparison.Ordinal), result.Message);
 
-        await using var root = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
+        await using var root = Target.CreateSource(settings);
         using var context = new TestSourceContext("sharepoint");
         var failed = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => root.InitialiseAsync(context, None));
         Assert.AreEqual(result.Message, failed.Message, "the source says what Test said");
         Assert.IsTrue(failed.Permanent, "no point retrying until someone changes the site's permissions or the address");
 
         // among several sites it is left out, and the others serve
-        var site = SpsTestServer.Site!;
-        var several = SpsTestServer.Settings();
+        var site = Target.Site;
+        var several = Target.Settings();
         several.SiteUrl = $"{settings.SiteUrl}\n{site}";
-        result = await new SharePointPlugin().TestAsync(several, new Progress<string>(), None);
+        result = await Target.TestAsync(several);
         Assert.IsTrue(result.Success, result.Message);
         StringAssert.Contains(result.Message, "\nLeft out, as SharePoint does not open it (tried again every few minutes):\n");
         StringAssert.Contains(result.Message[result.Message.IndexOf("\nLeft out", StringComparison.Ordinal)..], settings.SiteUrl);
         using var context2 = new TestSourceContext("sharepoint");
-        await using var both = await SpsTestServer.StartSitesAsync(SpsTestServer.Settings(), context2, settings.SiteUrl, site);
+        await using var both = await Target.StartSitesAsync(Target.Settings(), context2, settings.SiteUrl, site);
         CollectionAssert.AreEqual(new[] { SpsTestServer.LastName(site) }, await SpsTestServer.NamesAsync(both, ""));
-        CollectionAssert.Contains(await SpsTestServer.NamesAsync(both, SpsTestServer.LastName(site)), SpsTestServer.Library);
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(both, SpsTestServer.LastName(site)), Target.Library);
     }
 
     [TestMethod]
     public async Task RangedReadsAgreeWithTheWholeFileSpooledAndNot()
     {
-        SpsTestServer.Require();
+        Target.Require();
         var expected = SpoTestServer.MediumBytes();
         foreach (var spoolBelowMiB in new[] { 8, 0 })
         {
-            await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings(spoolBelowMiB: spoolBelowMiB));
-            var path = VfsPath.Join(VfsPath.Join(SpsTestServer.Library, SpsTestServer.FixtureFolder), "medium.bin");
+            await using var source = await Target.StartWithFixtureAsync(Target.Settings(spoolBelowMiB: spoolBelowMiB));
+            var path = VfsPath.Join(VfsPath.Join(Target.Library, Target.FixtureFolder), "medium.bin");
             await using var file = await source.OpenAsync(path, VfsOpenMode.Read, None);
             Assert.AreEqual(expected.Length, file.Length);
             var whole = new byte[expected.Length];
@@ -908,9 +925,9 @@ public class SharePointServerLiveTests
     [TestMethod]
     public async Task LargeUploadGoesInPieces()
     {
-        SpsTestServer.Require();
-        await using var source = await SpsTestServer.StartWithFixtureAsync(SpsTestServer.Settings());
-        var fixture = VfsPath.Join(SpsTestServer.Library, SpsTestServer.FixtureFolder);
+        Target.Require();
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
+        var fixture = VfsPath.Join(Target.Library, Target.FixtureFolder);
         var big = new byte[12 * 1024 * 1024];
         new Random(7).NextBytes(big);
         var path = VfsPath.Join(VfsPath.Join(fixture, "scratch"), $"big-{Guid.NewGuid():N}.bin");

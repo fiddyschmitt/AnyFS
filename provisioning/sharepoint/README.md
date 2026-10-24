@@ -6,6 +6,12 @@ app sign-in, or Online through its REST API on a web session) and SharePoint Ser
 through its REST API with a Windows account). Nothing here holds a password: sign-ins are done by a
 person at the keyboard, and the scripts print device codes for them.
 
+When the rigs are down, or the test variables do not name them, the suites run against fakes of both
+instead (`tests/AnyFS.Sources.Tests/FakeSharePoint/`, [developing.md](../../docs/developing.md)): a farm
+like `anyfs-sp-1` (its test site, its test account, its refusals, no search service) and a tenant like
+the sandbox below (its sites, the web session, Graph, the Embedded container type). What the rigs show
+that the fakes do not is worth adding to them.
+
 ## The shipped app registration
 
 AnyFS's app sign-in, for SharePoint Online and Embedded, goes through the Microsoft identity platform as a *public

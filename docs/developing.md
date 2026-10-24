@@ -89,6 +89,15 @@ sources keeping their sign-ins in the secret store while something holds secrets
 `ANYFS_TEST_UI_SHAREPOINT` (a SharePoint Server site, with `ANYFS_TEST_SPS_USER` and `_PASSWORD`) adds
 three sources of it to the window and measures it as they start.
 
+The SharePoint source's suites run against the lab's farms and the Microsoft 365 developer sandbox when
+`ANYFS_TEST_SPS_*`, `_SPO_*` and `_SPE_*` name them ([provisioning/sharepoint](../provisioning/sharepoint/README.md)),
+and otherwise against fakes made from what those were seen to answer (`tests/AnyFS.Sources.Tests/FakeSharePoint/`):
+a farm's REST API on 127.0.0.1 (Basic, or Windows' own sign-in on Windows) and a tenant's REST API, Graph and
+SharePoint Embedded in-process, so they need nothing outside either. `FakeSharePointTests` has what only a
+fake does on demand (throttling, a lapsed session or token, a server that ignores ranges, an answer that is not
+SharePoint's); `ANYFS_TEST_SHAREPOINT_FAKES=0` turns the fakes off, and the suites are then inconclusive without
+the lab.
+
 ## Publish
 
 ```

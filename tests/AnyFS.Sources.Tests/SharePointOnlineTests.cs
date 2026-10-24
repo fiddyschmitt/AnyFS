@@ -240,94 +240,65 @@ public class SharePointOnlinePluginTests
 }
 
 /// <summary>
-/// Where the live tests run: ANYFS_TEST_SPO_SITE (a site URL in a tenant the tests may write to), _LIBRARY
-/// (Documents), _ACCOUNT (the account the sign-in was made with) and _CACHE (the file tests/fixtures/SharePointSignIn
-/// wrote; its default location when unset). Without a site the live tests are inconclusive; without a sign-in
-/// file they say to run SharePointSignIn. The fixture (anyfs-fixture/ in the library) is made by the tests
-/// themselves through the source, so no other tool is needed on the SharePoint side.
+/// Where the Graph suite (an app sign-in) runs: the sandbox when ANYFS_TEST_SPO_SITE names a site in a tenant the tests
+/// may write to, with _LIBRARY (Documents), _ACCOUNT (the account the sign-in was made with) and _CACHE (the file
+/// tests/fixtures/SharePointSignIn wrote; its default location when unset), and without a sign-in file the tests say to
+/// run SharePointSignIn; otherwise the fake tenant (<see cref="SharePointFakes"/>). The fixture (anyfs-fixture/ in the
+/// library) is made by the tests themselves through the source, so no other tool is needed on the SharePoint side.
 /// </summary>
 internal static class SpoTestServer
 {
     public const string FixtureFolder = "anyfs-fixture";
     public static readonly byte[] ReadmeBytes = Encoding.UTF8.GetBytes("hello readme from sharepoint online\n");
 
-    public static string? Site => Env("ANYFS_TEST_SPO_SITE");
+    private static readonly Lazy<SharePointTarget> LazyTarget = new(MakeTarget);
 
-    public static string Library => Env("ANYFS_TEST_SPO_LIBRARY") ?? "Documents";
+    /// <summary>The sandbox, or the fake tenant.</summary>
+    public static SharePointTarget Target => LazyTarget.Value;
 
     public static string? Account => Env("ANYFS_TEST_SPO_ACCOUNT");
 
     public static string CachePath => Env("ANYFS_TEST_SPO_CACHE") ?? SignInCacheFile.DefaultPath;
 
-    public static void Require()
-    {
-        if (Site is null)
-        {
-            Assert.Inconclusive("no SharePoint Online test site: set ANYFS_TEST_SPO_SITE (and _LIBRARY, _ACCOUNT, _CACHE)");
-        }
-
-        if (!File.Exists(CachePath))
-        {
-            Assert.Inconclusive($"no sign-in at {CachePath}: run tests/fixtures/SharePointSignIn once (dotnet run --project tests/fixtures/SharePointSignIn -- --account {Account})");
-        }
-    }
-
     /// <summary>
     /// The sign-in method is the device code: the tests sign in silently from the saved cache, and when that has
-    /// lapsed a device-code attempt fails at once in a tenant that blocks it (or sits unanswered until the timeout
-    /// below), where the browser flow would open a browser on the test machine and wait for a person.
+    /// lapsed a device-code attempt fails at once in a tenant that blocks it (or sits unanswered until the timeout),
+    /// where the browser flow would open a browser on the test machine and wait for a person.
     /// </summary>
-    public static SharePointSettings Settings(string? library = null, int spoolBelowMiB = 8) => new()
+    private static SharePointTarget MakeTarget()
     {
-        SiteUrl = Site!,
-        Library = library,
-        Account = Account,
-        SpoolBelowMiB = spoolBelowMiB,
-        SignInMethod = SharePointSettings.AppDeviceCode,
-    };
-
-    /// <summary>A context whose secret store already holds the sign-in, so the source starts silently. ANYFS_TEST_SPO_LOG names a file that gets the source's log.</summary>
-    public static TestSourceContext Context()
-    {
-        var logPath = Environment.GetEnvironmentVariable("ANYFS_TEST_SPO_LOG");
-        var context = new TestSourceContext("sharepoint", string.IsNullOrWhiteSpace(logPath) ? null : new FileLogger(logPath));
-        var cache = SignInCacheFile.Read(CachePath);
-        if (cache is not null)
+        if (Env("ANYFS_TEST_SPO_SITE") is { } site)
         {
-            context.Secrets.Set("msal-cache", Convert.ToBase64String(cache));
+            return new SharePointTarget
+            {
+                Description = $"SharePoint Online at {site}, signed in as an app",
+                Site = site,
+                Library = Env("ANYFS_TEST_SPO_LIBRARY") ?? "Documents",
+                Account = Account,
+                SignInMethod = SharePointSettings.AppDeviceCode,
+                ReadmeBytes = ReadmeBytes,
+                CachePath = CachePath,
+                LogVariable = "ANYFS_TEST_SPO_LOG",
+                Missing = File.Exists(CachePath) ? null : $"no sign-in at {CachePath}: run tests/fixtures/SharePointSignIn once (dotnet run --project tests/fixtures/SharePointSignIn -- --account {Account})",
+            };
         }
 
-        return context;
-    }
-
-    /// <summary>Starts a source and makes sure the fixture tree exists in the library: readme.txt, medium.bin (50,000 bytes), docs/a.txt, scratch/.</summary>
-    public static async Task<SharePointSiteSource> StartWithFixtureAsync(SharePointSettings settings)
-    {
-        var source = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
-        var context = Context();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-        try
+        if (!SharePointFakes.Enabled)
         {
-            await source.InitialiseAsync(context, timeout.Token);
-        }
-        catch (SourceFailedException ex) when (ex.Message.Contains("sign", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("Conditional Access", StringComparison.Ordinal))
-        {
-            Assert.Inconclusive($"the saved sign-in did not work ({ex.Message}); run tests/fixtures/SharePointSignIn again");
-        }
-        catch (OperationCanceledException)
-        {
-            Assert.Inconclusive("the saved sign-in has lapsed and the source waited for a new one; run tests/fixtures/SharePointSignIn again");
+            return new SharePointTarget { Description = "no SharePoint Online", Site = "", SignInMethod = SharePointSettings.AppDeviceCode, ReadmeBytes = ReadmeBytes, Missing = "no SharePoint Online test site: set ANYFS_TEST_SPO_SITE (and _LIBRARY, _ACCOUNT, _CACHE), or let the fakes stand in" };
         }
 
-        var root = settings.Library is null ? Library : "";
-        var fixture = VfsPath.Join(root, FixtureFolder);
-        await EnsureDirectoryAsync(source, fixture);
-        await EnsureDirectoryAsync(source, VfsPath.Join(fixture, "docs"));
-        await EnsureDirectoryAsync(source, VfsPath.Join(fixture, "scratch"));
-        await EnsureFileAsync(source, VfsPath.Join(fixture, "readme.txt"), ReadmeBytes);
-        await EnsureFileAsync(source, VfsPath.Join(fixture, "docs/a.txt"), "aaa"u8.ToArray());
-        await EnsureFileAsync(source, VfsPath.Join(fixture, "medium.bin"), MediumBytes());
-        return source;
+        var fake = SharePointFakes.Tenant;
+        return new SharePointTarget
+        {
+            Description = "the fake tenant, signed in as an app",
+            Site = fake.Origin + FakeSharePoint.TestSitePath,
+            Account = FakeSharePoint.TenantUser,
+            SignInMethod = SharePointSettings.AppDeviceCode,
+            ReadmeBytes = ReadmeBytes,
+            Fake = fake,
+            LogVariable = "ANYFS_TEST_SPO_LOG",
+        };
     }
 
     /// <summary>
@@ -424,29 +395,18 @@ internal static class SpoTestServer
     }
 }
 
-/// <summary>The SDK's contract against the real tenant, libraries at the top level.</summary>
+/// <summary>The SDK's contract through Graph (the sandbox, or the fake tenant), libraries at the top level.</summary>
 [TestClass]
 public class SharePointOnlineContractTests : SourceContractTests
 {
-    protected override async Task<SourceContractSetup> SetUpAsync()
-    {
-        SpoTestServer.Require();
-        var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings());
-        var fixture = VfsPath.Join(SpoTestServer.Library, SpoTestServer.FixtureFolder);
-        return new SourceContractSetup(source, fixture, VfsPath.Join(fixture, "readme.txt"), SpoTestServer.ReadmeBytes, WritableDirectory: VfsPath.Join(fixture, "scratch"));
-    }
+    protected override Task<SourceContractSetup> SetUpAsync() => SpoTestServer.Target.ContractSetupAsync(pinned: false);
 }
 
 /// <summary>The same contract with the library pinned, so the fixture is at the source's root.</summary>
 [TestClass]
 public class SharePointOnlinePinnedLibraryContractTests : SourceContractTests
 {
-    protected override async Task<SourceContractSetup> SetUpAsync()
-    {
-        SpoTestServer.Require();
-        var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings(library: SpoTestServer.Library, spoolBelowMiB: 0));
-        return new SourceContractSetup(source, SpoTestServer.FixtureFolder, VfsPath.Join(SpoTestServer.FixtureFolder, "readme.txt"), SpoTestServer.ReadmeBytes, WritableDirectory: VfsPath.Join(SpoTestServer.FixtureFolder, "scratch"));
-    }
+    protected override Task<SourceContractSetup> SetUpAsync() => SpoTestServer.Target.ContractSetupAsync(pinned: true);
 }
 
 [TestClass]
@@ -454,11 +414,13 @@ public class SharePointOnlineLiveTests
 {
     private static readonly CancellationToken None = CancellationToken.None;
 
+    private static SharePointTarget Target => SpoTestServer.Target;
+
     [TestMethod]
     public async Task LibrariesAreTheTopLevelFolders()
     {
-        SpoTestServer.Require();
-        await using var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings());
+        Target.Require();
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
         var names = new List<string>();
         await foreach (var entry in source.ListAsync("", None))
         {
@@ -466,11 +428,11 @@ public class SharePointOnlineLiveTests
             names.Add(entry.Name);
         }
 
-        CollectionAssert.Contains(names, SpoTestServer.Library);
-        var library = await source.StatAsync(SpoTestServer.Library, None);
+        CollectionAssert.Contains(names, Target.Library);
+        var library = await source.StatAsync(Target.Library, None);
         Assert.IsNotNull(library);
         Assert.IsTrue(library.IsDirectory);
-        Assert.IsNotNull(await source.StatAsync(SpoTestServer.Library.ToUpperInvariant(), None), "library names are case-insensitive");
+        Assert.IsNotNull(await source.StatAsync(Target.Library.ToUpperInvariant(), None), "library names are case-insensitive");
 
         var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.OpenAsync("new-library-as-file.txt", VfsOpenMode.Create, None));
         Assert.AreEqual(VfsError.InvalidPath, ex.Error, "a file can't be created beside the libraries");
@@ -479,8 +441,8 @@ public class SharePointOnlineLiveTests
     [TestMethod]
     public async Task ASubsiteIsAFolderWithItsOwnLibraries()
     {
-        SpoTestServer.Require();
-        await using var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings());
+        Target.Require();
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
         if (!await SpsTestServer.HasSubsiteAsync(source))
         {
             Assert.Inconclusive($"the site has no subsite {SpsTestServer.Subsite}: the REST suite makes it (ASubsiteIsAFolderWithItsOwnLibraries on a web session against this site), since Graph cannot");
@@ -492,26 +454,32 @@ public class SharePointOnlineLiveTests
     [TestMethod]
     public async Task TheSitesPagesAreReadOnlyMarkdown()
     {
-        SpoTestServer.Require();
-        await using var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings());
-        var page = await SpoTestServer.EnsurePageAsync(source);
-        await SpsTestServer.CheckPageAsync(source, SpoTestServer.Site!, page);
+        Target.Require();
+        string page;
+        await using (var maker = await Target.StartWithFixtureAsync(Target.Settings()))
+        {
+            page = await SpoTestServer.EnsurePageAsync(maker);
+        }
+
+        // a source started now lists the page (one made since the start shows at the next walk)
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
+        await SpsTestServer.CheckPageAsync(source, Target.Site, page);
     }
 
     [TestMethod]
     public async Task ARootSiteAmongSeveralShowsTheOtherSites()
     {
-        SpoTestServer.Require();
-        await using (await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings()))
+        Target.Require();
+        await using (await Target.StartWithFixtureAsync(Target.Settings()))
         {
             // the fixture is in place in the test site
         }
 
-        var site = SpoTestServer.Site!;
+        var site = Target.Site;
         var root = SpsTestServer.RootOf(site);
-        using var context = SpoTestServer.Context();
-        await using var source = await SpsTestServer.StartSitesAsync(SpoTestServer.Settings(), context, root, site, $"{root}/sites/anyfs-no-such-site");
-        await SpsTestServer.CheckRootAmongSitesAsync(source, root, site, SpoTestServer.Library, SpoTestServer.FixtureFolder, SpoTestServer.ReadmeBytes);
+        using var context = Target.Context();
+        await using var source = await Target.StartSitesAsync(Target.Settings(), context, root, site, $"{root}/sites/anyfs-no-such-site");
+        await SpsTestServer.CheckRootAmongSitesAsync(source, root, site, Target.Library, SpoTestServer.FixtureFolder, SpoTestServer.ReadmeBytes);
         CollectionAssert.DoesNotContain(await SpsTestServer.NamesAsync(source, SharePointSource.SitesFolder), "anyfs-no-such-site", "the site not there is left out");
 
         Assert.IsTrue(SiteAddress.TryParse(site, out var address, out _));
@@ -521,29 +489,29 @@ public class SharePointOnlineLiveTests
     [TestMethod]
     public async Task TheTenantsRootSiteShowsItsOtherSites()
     {
-        SpoTestServer.Require();
-        await using (await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings()))
+        Target.Require();
+        await using (await Target.StartWithFixtureAsync(Target.Settings()))
         {
             // the fixture is in place in the test site
         }
 
-        var settings = SpoTestServer.Settings();
+        var settings = Target.Settings();
         settings.SiteUrl = SpsTestServer.RootOf(settings.SiteUrl);
-        await using var root = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
-        using var context = SpoTestServer.Context();
+        await using var root = Target.CreateSource(settings);
+        using var context = Target.Context();
         await root.InitialiseAsync(context, None);
-        await SpsTestServer.CheckOtherSitesAsync(root, SpoTestServer.Site!, SpoTestServer.Library, SpoTestServer.FixtureFolder, SpoTestServer.ReadmeBytes);
+        await SpsTestServer.CheckOtherSitesAsync(root, Target.Site, Target.Library, SpoTestServer.FixtureFolder, SpoTestServer.ReadmeBytes);
     }
 
     [TestMethod]
     public async Task RangedReadsAgreeWithTheWholeFileSpooledAndNot()
     {
-        SpoTestServer.Require();
+        Target.Require();
         var expected = SpoTestServer.MediumBytes();
         foreach (var spoolBelowMiB in new[] { 8, 0 })
         {
-            await using var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings(spoolBelowMiB: spoolBelowMiB));
-            var path = VfsPath.Join(VfsPath.Join(SpoTestServer.Library, SpoTestServer.FixtureFolder), "medium.bin");
+            await using var source = await Target.StartWithFixtureAsync(Target.Settings(spoolBelowMiB: spoolBelowMiB));
+            var path = VfsPath.Join(VfsPath.Join(Target.Library, SpoTestServer.FixtureFolder), "medium.bin");
             await using var file = await source.OpenAsync(path, VfsOpenMode.Read, None);
             Assert.AreEqual(expected.Length, file.Length);
 
@@ -568,9 +536,9 @@ public class SharePointOnlineLiveTests
     [TestMethod]
     public async Task NamesSharePointRefusesAreRefusedHere()
     {
-        SpoTestServer.Require();
-        await using var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings());
-        var scratch = VfsPath.Join(VfsPath.Join(SpoTestServer.Library, SpoTestServer.FixtureFolder), "scratch");
+        Target.Require();
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
+        var scratch = VfsPath.Join(VfsPath.Join(Target.Library, SpoTestServer.FixtureFolder), "scratch");
         var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.CreateDirectoryAsync(VfsPath.Join(scratch, "bad:name"), None));
         Assert.AreEqual(VfsError.InvalidPath, ex.Error);
         ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.OpenAsync(VfsPath.Join(scratch, "~$lock.docx"), VfsOpenMode.Create, None));
@@ -580,9 +548,9 @@ public class SharePointOnlineLiveTests
     [TestMethod]
     public async Task CaseInsensitiveLookupsAndLargeUpload()
     {
-        SpoTestServer.Require();
-        await using var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings());
-        var fixture = VfsPath.Join(SpoTestServer.Library, SpoTestServer.FixtureFolder);
+        Target.Require();
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
+        var fixture = VfsPath.Join(Target.Library, SpoTestServer.FixtureFolder);
         var upper = await source.StatAsync(VfsPath.Join(fixture, "README.TXT"), None);
         Assert.IsNotNull(upper);
         Assert.AreEqual("readme.txt", upper.Name, "the entry keeps SharePoint's spelling");
@@ -613,9 +581,9 @@ public class SharePointOnlineLiveTests
     [TestMethod]
     public async Task SpaceComesFromTheLibraryQuota()
     {
-        SpoTestServer.Require();
-        await using var source = await SpoTestServer.StartWithFixtureAsync(SpoTestServer.Settings());
-        var space = await source.GetSpaceAsync(SpoTestServer.Library, None);
+        Target.Require();
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
+        var space = await source.GetSpaceAsync(Target.Library, None);
         Assert.IsNotNull(space);
         Assert.IsTrue(space.TotalBytes > 0 && space.FreeBytes <= space.TotalBytes);
     }

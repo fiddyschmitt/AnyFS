@@ -80,14 +80,15 @@ public class BrowserSessionLiveTests
 {
     private static (string Browser, Uri Site) Require()
     {
-        SpsTestServer.Require();
-        if (!SpsTestServer.WebSession)
+        var target = SpsTestServer.OnlineRest;
+        target.Require();
+        if (target.IsFake)
         {
-            Assert.Inconclusive("the browser's live tests run with the web session: ANYFS_TEST_SPS_SIGNIN=web");
+            Assert.Inconclusive("the browser's live tests sign in to SharePoint Online itself, with the web session: ANYFS_TEST_SPS_SITE and ANYFS_TEST_SPS_SIGNIN=web");
         }
 
         var browser = BrowserLocator.Find(null, SharePointPlugin.BrowserVariable) ?? throw new AssertInconclusiveException("no Edge, Chrome or Chromium on this machine");
-        SiteAddress.TryParse(SpsTestServer.Site, out var site, out _);
+        SiteAddress.TryParse(target.Site, out var site, out _);
         return (browser, new Uri(site.Url));
     }
 

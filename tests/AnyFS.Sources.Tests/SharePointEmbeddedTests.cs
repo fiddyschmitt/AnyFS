@@ -134,78 +134,52 @@ public class ContainerListingTests
 /// </summary>
 internal static class SpeTestServer
 {
-    public static string? ContainerType => Env("ANYFS_TEST_SPE_CONTAINER_TYPE");
+    private static readonly Lazy<SharePointTarget> LazyTarget = new(MakeTarget);
 
-    public static string Container => Env("ANYFS_TEST_SPE_CONTAINER") ?? "anyfs-test";
+    /// <summary>The sandbox's container type, or the fake tenant's.</summary>
+    public static SharePointTarget Target => LazyTarget.Value;
 
-    public static string? Account => Env("ANYFS_TEST_SPE_ACCOUNT") ?? SpoTestServer.Account;
+    /// <summary>The container the fixture is in (and the pinned tests use).</summary>
+    public static string Container => Target.Library;
 
     public static string CachePath => Env("ANYFS_TEST_SPE_CACHE") ?? SpoTestServer.CachePath;
 
-    public static void Require()
-    {
-        if (ContainerType is null)
-        {
-            Assert.Inconclusive("no SharePoint Embedded container type: set ANYFS_TEST_SPE_CONTAINER_TYPE (and _CONTAINER, _ACCOUNT, _CACHE); provisioning/sharepoint/embedded-rig.ps1 makes one");
-        }
-
-        if (!File.Exists(CachePath))
-        {
-            Assert.Inconclusive($"no sign-in at {CachePath}: run tests/fixtures/SharePointSignIn once (dotnet run --project tests/fixtures/SharePointSignIn -- --account {Account})");
-        }
-    }
-
     /// <summary>Device code as the method, as for Online: a lapsed sign-in fails fast instead of opening a browser on the test machine.</summary>
-    public static SharePointSettings Settings(string? container = null, int spoolBelowMiB = 8) => new()
+    private static SharePointTarget MakeTarget()
     {
-        SiteUrl = ContainerType!,
-        Library = container,
-        Account = Account,
-        SpoolBelowMiB = spoolBelowMiB,
-        SignInMethod = SharePointSettings.AppDeviceCode,
-    };
-
-    public static TestSourceContext Context()
-    {
-        var logPath = Environment.GetEnvironmentVariable("ANYFS_TEST_SPE_LOG");
-        var context = new TestSourceContext("sharepoint", string.IsNullOrWhiteSpace(logPath) ? null : new SpoTestServer.FileLogger(logPath));
-        var cache = SignInCacheFile.Read(CachePath);
-        if (cache is not null)
+        var account = Env("ANYFS_TEST_SPE_ACCOUNT") ?? SpoTestServer.Account;
+        if (Env("ANYFS_TEST_SPE_CONTAINER_TYPE") is { } containerType)
         {
-            context.Secrets.Set("msal-cache", Convert.ToBase64String(cache));
+            return new SharePointTarget
+            {
+                Description = $"SharePoint Embedded's containers of type {containerType}",
+                Site = containerType,
+                Library = Env("ANYFS_TEST_SPE_CONTAINER") ?? "anyfs-test",
+                Account = account,
+                SignInMethod = SharePointSettings.AppDeviceCode,
+                ReadmeBytes = SpoTestServer.ReadmeBytes,
+                CachePath = CachePath,
+                LogVariable = "ANYFS_TEST_SPE_LOG",
+                Missing = File.Exists(CachePath) ? null : $"no sign-in at {CachePath}: run tests/fixtures/SharePointSignIn once (dotnet run --project tests/fixtures/SharePointSignIn -- --account {account})",
+            };
         }
 
-        return context;
-    }
-
-    /// <summary>Starts a source and makes sure the fixture tree exists in the container: the same tree as the Online tests use.</summary>
-    public static async Task<SharePointSiteSource> StartWithFixtureAsync(SharePointSettings settings)
-    {
-        var source = (SharePointSiteSource)new SharePointPlugin().CreateSource(settings);
-        var context = Context();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-        try
+        if (!SharePointFakes.Enabled)
         {
-            await source.InitialiseAsync(context, timeout.Token);
-        }
-        catch (SourceFailedException ex) when (ex.Message.Contains("sign", StringComparison.OrdinalIgnoreCase) || ex.Message.Contains("Conditional Access", StringComparison.Ordinal))
-        {
-            Assert.Inconclusive($"the saved sign-in did not work ({ex.Message}); run tests/fixtures/SharePointSignIn again");
-        }
-        catch (OperationCanceledException)
-        {
-            Assert.Inconclusive("the saved sign-in has lapsed and the source waited for a new one; run tests/fixtures/SharePointSignIn again");
+            return new SharePointTarget { Description = "no SharePoint Embedded", Site = "", SignInMethod = SharePointSettings.AppDeviceCode, ReadmeBytes = SpoTestServer.ReadmeBytes, Missing = "no SharePoint Embedded container type: set ANYFS_TEST_SPE_CONTAINER_TYPE (and _CONTAINER, _ACCOUNT, _CACHE; provisioning/sharepoint/embedded-rig.ps1 makes one), or let the fakes stand in" };
         }
 
-        var root = settings.Library is null ? Container : "";
-        var fixture = VfsPath.Join(root, SpoTestServer.FixtureFolder);
-        await SpoTestServer.EnsureDirectoryAsync(source, fixture);
-        await SpoTestServer.EnsureDirectoryAsync(source, VfsPath.Join(fixture, "docs"));
-        await SpoTestServer.EnsureDirectoryAsync(source, VfsPath.Join(fixture, "scratch"));
-        await SpoTestServer.EnsureFileAsync(source, VfsPath.Join(fixture, "readme.txt"), SpoTestServer.ReadmeBytes);
-        await SpoTestServer.EnsureFileAsync(source, VfsPath.Join(fixture, "docs/a.txt"), "aaa"u8.ToArray());
-        await SpoTestServer.EnsureFileAsync(source, VfsPath.Join(fixture, "medium.bin"), SpoTestServer.MediumBytes());
-        return source;
+        return new SharePointTarget
+        {
+            Description = "the fake tenant's containers",
+            Site = FakeSharePoint.ContainerType.ToString(),
+            Library = "anyfs-test",
+            Account = FakeSharePoint.TenantUser,
+            SignInMethod = SharePointSettings.AppDeviceCode,
+            ReadmeBytes = SpoTestServer.ReadmeBytes,
+            Fake = SharePointFakes.Tenant,
+            LogVariable = "ANYFS_TEST_SPE_LOG",
+        };
     }
 
     private static string? Env(string name)
@@ -215,29 +189,18 @@ internal static class SpeTestServer
     }
 }
 
-/// <summary>The SDK's contract against real containers, containers at the top level.</summary>
+/// <summary>The SDK's contract on containers (the sandbox's, or the fake tenant's), containers at the top level.</summary>
 [TestClass]
 public class SharePointEmbeddedContractTests : SourceContractTests
 {
-    protected override async Task<SourceContractSetup> SetUpAsync()
-    {
-        SpeTestServer.Require();
-        var source = await SpeTestServer.StartWithFixtureAsync(SpeTestServer.Settings());
-        var fixture = VfsPath.Join(SpeTestServer.Container, SpoTestServer.FixtureFolder);
-        return new SourceContractSetup(source, fixture, VfsPath.Join(fixture, "readme.txt"), SpoTestServer.ReadmeBytes, WritableDirectory: VfsPath.Join(fixture, "scratch"));
-    }
+    protected override Task<SourceContractSetup> SetUpAsync() => SpeTestServer.Target.ContractSetupAsync(pinned: false);
 }
 
 /// <summary>The same contract with one container pinned, nothing spooled.</summary>
 [TestClass]
 public class SharePointEmbeddedPinnedContainerContractTests : SourceContractTests
 {
-    protected override async Task<SourceContractSetup> SetUpAsync()
-    {
-        SpeTestServer.Require();
-        var source = await SpeTestServer.StartWithFixtureAsync(SpeTestServer.Settings(container: SpeTestServer.Container, spoolBelowMiB: 0));
-        return new SourceContractSetup(source, SpoTestServer.FixtureFolder, VfsPath.Join(SpoTestServer.FixtureFolder, "readme.txt"), SpoTestServer.ReadmeBytes, WritableDirectory: VfsPath.Join(SpoTestServer.FixtureFolder, "scratch"));
-    }
+    protected override Task<SourceContractSetup> SetUpAsync() => SpeTestServer.Target.ContractSetupAsync(pinned: true);
 }
 
 [TestClass]
@@ -245,11 +208,13 @@ public class SharePointEmbeddedLiveTests
 {
     private static readonly CancellationToken None = CancellationToken.None;
 
+    private static SharePointTarget Target => SpeTestServer.Target;
+
     [TestMethod]
     public async Task ContainersAreTheTopLevelFolders()
     {
-        SpeTestServer.Require();
-        await using var source = await SpeTestServer.StartWithFixtureAsync(SpeTestServer.Settings());
+        Target.Require();
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
         var names = new List<string>();
         await foreach (var entry in source.ListAsync("", None))
         {
@@ -270,9 +235,9 @@ public class SharePointEmbeddedLiveTests
     [TestMethod]
     public async Task RangedReadsAgreeWithTheWholeFile()
     {
-        SpeTestServer.Require();
+        Target.Require();
         var expected = SpoTestServer.MediumBytes();
-        await using var source = await SpeTestServer.StartWithFixtureAsync(SpeTestServer.Settings(spoolBelowMiB: 0));
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings(spoolBelowMiB: 0));
         var path = VfsPath.Join(VfsPath.Join(SpeTestServer.Container, SpoTestServer.FixtureFolder), "medium.bin");
         await using var file = await source.OpenAsync(path, VfsOpenMode.Read, None);
         Assert.AreEqual(expected.Length, file.Length);
@@ -287,8 +252,8 @@ public class SharePointEmbeddedLiveTests
     [TestMethod]
     public async Task LargeUploadRoundTrips()
     {
-        SpeTestServer.Require();
-        await using var source = await SpeTestServer.StartWithFixtureAsync(SpeTestServer.Settings());
+        Target.Require();
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
         var big = new byte[5 * 1024 * 1024];
         new Random(7).NextBytes(big);
         var path = VfsPath.Join(VfsPath.Join(VfsPath.Join(SpeTestServer.Container, SpoTestServer.FixtureFolder), "scratch"), $"big-{Guid.NewGuid():N}.bin");
@@ -314,12 +279,16 @@ public class SharePointEmbeddedLiveTests
     [TestMethod]
     public async Task TestButtonListsTheContainers()
     {
-        SpeTestServer.Require();
-        var settings = SpeTestServer.Settings();
-        // the Test button has only the process-wide cache (a source that signed in would have left it there)
-        EntraSignIn.Remember(settings.EffectiveClientId, settings.EffectiveTenant, settings.LoginHint, SignInCacheFile.Read(SpeTestServer.CachePath)!);
+        Target.Require();
+        var settings = Target.Settings();
+        if (!Target.IsFake)
+        {
+            // the Test button has only the process-wide cache (a source that signed in would have left it there)
+            EntraSignIn.Remember(settings.EffectiveClientId, settings.EffectiveTenant, settings.LoginHint, SignInCacheFile.Read(SpeTestServer.CachePath)!);
+        }
+
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-        var result = await new SharePointPlugin().TestAsync(settings, new Progress<string>(), timeout.Token);
+        var result = await Target.TestAsync(settings, timeout.Token);
         if (!result.Success && result.Message.Contains("sign-in", StringComparison.OrdinalIgnoreCase))
         {
             Assert.Inconclusive($"the saved sign-in did not work ({result.Message}); run tests/fixtures/SharePointSignIn again");
