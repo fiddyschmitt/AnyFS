@@ -337,7 +337,15 @@ internal sealed class GraphClient : IDisposable
             throw MapError(response.StatusCode, body, pathForErrors);
         }
 
-        return body.Length == 0 ? JsonDocument.Parse("{}") : JsonDocument.Parse(body);
+        try
+        {
+            return JsonDocument.Parse(body.Length == 0 ? "{}" : body);
+        }
+        catch (JsonException)
+        {
+            // a proxy's page, a captive portal's: something answering in Graph's place
+            throw VfsException.Unavailable($"'{pathForErrors}': Graph answered {(int)response.StatusCode} with something other than JSON ({response.Content.Headers.ContentType?.MediaType ?? "no content type"})");
+        }
     }
 
     /// <summary>

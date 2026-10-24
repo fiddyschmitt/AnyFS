@@ -439,7 +439,16 @@ internal sealed partial class SharePointRestClient : IDisposable
             throw MapError(response.StatusCode, body, pathForErrors, Challenge(response));
         }
 
-        return body.Length == 0 ? JsonDocument.Parse("{}") : JsonDocument.Parse(body);
+        try
+        {
+            return JsonDocument.Parse(body.Length == 0 ? "{}" : body);
+        }
+        catch (JsonException)
+        {
+            // a sign-in page, a proxy's or a captive portal's: something answering in SharePoint's place
+            var title = ErrorDetails(body).Message;
+            throw VfsException.Unavailable($"'{pathForErrors}': SharePoint answered {(int)response.StatusCode} with something other than JSON ({response.Content.Headers.ContentType?.MediaType ?? "no content type"}{(title.Length > 0 ? $", \"{title}\"" : "")})");
+        }
     }
 
     /// <summary>The request digest writes need, fetched from <c>contextinfo</c> and kept until it is about to expire.</summary>

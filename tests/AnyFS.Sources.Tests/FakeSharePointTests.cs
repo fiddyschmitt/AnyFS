@@ -154,6 +154,25 @@ public class FakeSharePointTests
         Assert.IsTrue(fake.Count(s => s.Path.Contains("/_api/search/query", StringComparison.OrdinalIgnoreCase)) > 0, "search was asked");
     }
 
+    /// <summary>A page that is not SharePoint's (a proxy's, a captive portal's: HTML with a 200) is said as such, by both APIs.</summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
+    [DataRow(true, DisplayName = "tenant, Graph")]
+    public async Task AnAnswerThatIsNotJsonIsSaidAsSuch(bool tenant)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        const string Portal = "<!DOCTYPE html><html><head><title>Sign in to the guest network</title></head><body><form method=\"post\"></form></body></html>";
+        fake.Fail(r => tenant ? r.IsGraph : r.RawPath.Contains("/_api/web", StringComparison.OrdinalIgnoreCase), 100, _ => FakeSharePoint.Response.Text(200, Portal, "text/html; charset=utf-8"));
+        var settings = tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode) : FarmSettings(fake);
+        var result = await new SharePointPlugin().TestAsync(settings, new Progress<string>(), tenant ? fake.StandIn() : null, None);
+        Assert.IsFalse(result.Success);
+        StringAssert.Contains(result.Message, "with something other than JSON (text/html");
+        if (!tenant)
+        {
+            StringAssert.Contains(result.Message, "Sign in to the guest network", "the page's title says whose it is");
+        }
+    }
+
     /// <summary>A web session that lapses is renewed without a window, and the write it refused goes through.</summary>
     [TestMethod]
     public async Task ALapsedWebSessionIsRenewedWithoutAWindow()
