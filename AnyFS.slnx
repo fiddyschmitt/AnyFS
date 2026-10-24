@@ -5,6 +5,9 @@
     <Project Path="src/AnyFS.Sdk.Testing/AnyFS.Sdk.Testing.csproj" />
     <Project Path="src/AnyFS.Sdk/AnyFS.Sdk.csproj" />
   </Folder>
+  <Folder Name="/src/LibOutlook/">
+    <Project Path="src/LibOutlook/LibOutlook.csproj" />
+  </Folder>
   <Folder Name="/src/Mounts/" />
   <Folder Name="/src/Mounts/Ftp/">
     <Project Path="src/Mounts/Ftp/AnyFS.Mounts.Ftp.csproj" />
@@ -47,6 +50,7 @@
     <Project Path="tests/AnyFS.Mounts.Tests/AnyFS.Mounts.Tests.csproj" />
     <Project Path="tests/AnyFS.Sdk.Tests/AnyFS.Sdk.Tests.csproj" />
     <Project Path="tests/AnyFS.Sources.Tests/AnyFS.Sources.Tests.csproj" />
+    <Project Path="tests/LibOutlook.Tests/LibOutlook.Tests.csproj" />
   </Folder>
   <Folder Name="/tests/fixtures/">
     <Project Path="tests/fixtures/MakeTree/MakeTree.csproj" />

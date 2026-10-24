@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- LibOutlook's tests run against files Outlook itself wrote (tests/LibOutlook.Tests/fixtures, see README.md there):
+       an ANSI PST and a Unicode PST, each with the same folders, mail, attachments, a contact and an appointment. The
+       4 KiB-page OST format is tested when a capture of the lab mailbox is on this machine (OstTests). -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>LibOutlook.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="MSTest" />
+    <PackageReference Include="coverlet.collector">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\LibOutlook\LibOutlook.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="fixtures\*.pst" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

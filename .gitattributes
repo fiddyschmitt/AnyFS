@@ -3,3 +3,5 @@
 *.sh text eol=lf
 *.png binary
 *.ico binary
+*.pst binary
+*.ost binary

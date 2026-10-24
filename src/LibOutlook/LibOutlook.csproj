@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- LibOutlook: a reader of Outlook's data files (PST and OST) in plain C#, from Microsoft's open specification
+       [MS-PST]: the ANSI, Unicode and Unicode 4 KiB-page (Outlook 2013+ OST) formats, read-only, through a memory-mapped
+       view so a file Outlook has open can be read too (Outlook byte-range-locks the header, which a mapped view ignores).
+       No dependencies, nothing of AnyFS's: meant to stand on its own as a NuGet package one day. -->
+  <PropertyGroup>
+    <AssemblyName>LibOutlook</AssemblyName>
+    <RootNamespace>LibOutlook</RootNamespace>
+    <PackageId>LibOutlook</PackageId>
+    <Description>Reads Outlook data files (PST and OST, ANSI and Unicode, Outlook 2013+ OST too) in pure C#: folders, messages, recipients, attachments, embedded messages, named properties, compressed RTF; works on a file Outlook has open.</Description>
+    <PackageTags>outlook;pst;ost;mapi;email</PackageTags>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <IsTrimmable>true</IsTrimmable>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="LibOutlook.Tests" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>
