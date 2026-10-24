@@ -135,6 +135,7 @@
     <ProjectReference Include="..\Sources\SharePoint\AnyFS.Sources.SharePoint.csproj" />
     <ProjectReference Include="..\Sources\Sshfs\AnyFS.Sources.Sshfs.csproj" />
     <ProjectReference Include="..\Sources\ThreeDX\AnyFS.Sources.ThreeDX.csproj" />
+    <ProjectReference Include="..\Sources\Outlook\AnyFS.Sources.Outlook.csproj" />
     <ProjectReference Include="..\Mounts\Http\AnyFS.Mounts.Http.csproj" />
     <ProjectReference Include="..\Mounts\WebDav\AnyFS.Mounts.WebDav.csproj" />
     <ProjectReference Include="..\Mounts\Ftp\AnyFS.Mounts.Ftp.csproj" />

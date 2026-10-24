@@ -6,6 +6,7 @@ using AnyFS.Mounts.Smb;
 using AnyFS.Mounts.WebDav;
 using AnyFS.Mounts.WinFsp;
 using AnyFS.Sources.Mirror;
+using AnyFS.Sources.Outlook;
 using AnyFS.Sources.SharePoint;
 using AnyFS.Sources.Sshfs;
 using AnyFS.Sources.ThreeDX;
@@ -22,6 +23,7 @@ public static class BuiltIns
         registry.AddBuiltIn(new SshfsPlugin());
         registry.AddBuiltIn(new SharePointPlugin());
         registry.AddBuiltIn(new ThreeDXPlugin());
+        registry.AddBuiltIn(new OutlookPlugin());
         registry.AddBuiltIn(new WinFspMountProvider());
         registry.AddBuiltIn(new FuseMountProvider());
         registry.AddBuiltIn(new SmbMountProvider());

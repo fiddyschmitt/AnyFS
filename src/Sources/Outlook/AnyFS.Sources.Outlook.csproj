@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The Outlook / Exchange source (spec 7.7): a mailbox as folders, a folder per message with the message as Markdown
+       and as .eml and its attachments beside it, contacts as .vcf, appointments as .ics. This release reads Outlook's
+       data files (PST, OST) through LibOutlook; the mailbox stores (Graph, the OWA web session, EWS) come next over the
+       same IMailStore. -->
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sources.Outlook</AssemblyName>
+    <RootNamespace>AnyFS.Sources.Outlook</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- ReverseMarkdown (MIT): a message's HTML body as Markdown, as the SharePoint source converts its pages -->
+    <PackageReference Include="ReverseMarkdown" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <ProjectReference Include="..\..\LibOutlook\LibOutlook.csproj" />
+    <!-- MemoryFile -->
+    <ProjectReference Include="..\Common\AnyFS.Sources.Common.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="AnyFS.Sources.Common" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
+  </ItemGroup>
+</Project>

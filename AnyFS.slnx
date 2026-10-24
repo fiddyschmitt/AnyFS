@@ -34,6 +34,9 @@
   <Folder Name="/src/Sources/Mirror/">
     <Project Path="src/Sources/Mirror/AnyFS.Sources.Mirror.csproj" />
   </Folder>
+  <Folder Name="/src/Sources/Outlook/">
+    <Project Path="src/Sources/Outlook/AnyFS.Sources.Outlook.csproj" />
+  </Folder>
   <Folder Name="/src/Sources/SharePoint/">
     <Project Path="src/Sources/SharePoint/AnyFS.Sources.SharePoint.csproj" />
   </Folder>

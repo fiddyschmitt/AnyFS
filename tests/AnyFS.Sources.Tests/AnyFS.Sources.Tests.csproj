@@ -20,7 +20,12 @@
     <ProjectReference Include="..\..\src\Sources\Common\AnyFS.Sources.Common.csproj" />
     <ProjectReference Include="..\..\src\Sources\SharePoint\AnyFS.Sources.SharePoint.csproj" />
     <ProjectReference Include="..\..\src\Sources\ThreeDX\AnyFS.Sources.ThreeDX.csproj" />
+    <ProjectReference Include="..\..\src\Sources\Outlook\AnyFS.Sources.Outlook.csproj" />
     <ProjectReference Include="..\fixtures\MakeTree\MakeTree.csproj" />
     <ProjectReference Include="..\fixtures\SharePointSignIn\SharePointSignIn.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- the Outlook source's tests read LibOutlook's PST fixtures (tests/LibOutlook.Tests/fixtures/README.md) -->
+    <None Include="..\LibOutlook.Tests\fixtures\*.pst" Link="fixtures\outlook\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
