@@ -24,8 +24,12 @@ internal sealed partial class SharePointRestClient : IDisposable
     /// <summary>The attempts a probe makes at a request (<see cref="Probe"/>).</summary>
     public const int ProbeAttempts = 2;
 
-    /// <summary>Files above this go up in pieces (StartUpload, ContinueUpload, FinishUpload); below, in one request.</summary>
-    public const long SimpleUploadLimit = 8 * 1024 * 1024;
+    /// <summary>
+    /// Files above this go up in pieces (StartUpload, ContinueUpload, FinishUpload); below, in one request. A piece's size:
+    /// StartUpload's piece is never the last (only FinishUpload makes the file), so a file sent in pieces needs two at
+    /// least, and one of 8 to 10 MiB was left empty while this was 8 MiB.
+    /// </summary>
+    public const long SimpleUploadLimit = UploadChunkSize;
 
     public const int UploadChunkSize = 10 * 1024 * 1024;
 

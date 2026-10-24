@@ -139,6 +139,37 @@ internal sealed class SharePointTarget
         return StartAsync(settings, context);
     }
 
+    /// <summary>A file of each size written into the fixture's scratch folder, its length and its end read back from SharePoint, and deleted.</summary>
+    public async Task UploadsRoundTripAsync(params long[] sizes)
+    {
+        Require();
+        await using var source = await StartWithFixtureAsync(Settings());
+        var scratch = VfsPath.Join(VfsPath.Join(Library, FixtureFolder), "scratch");
+        foreach (var size in sizes)
+        {
+            var bytes = new byte[size];
+            new Random((int)size).NextBytes(bytes);
+            var path = VfsPath.Join(scratch, $"size-{size}-{Guid.NewGuid():N}.bin");
+            await using (var file = await source.OpenAsync(path, VfsOpenMode.CreateNew, CancellationToken.None))
+            {
+                await file.WriteAsync(0, bytes, CancellationToken.None);
+            }
+
+            try
+            {
+                Assert.AreEqual(size, (await source.StatAsync(path, CancellationToken.None))?.Length, $"{size:N0} bytes");
+                await using var back = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
+                var tail = new byte[4096];
+                Assert.AreEqual(tail.Length, await back.ReadFullyAsync(size - tail.Length, tail, CancellationToken.None), $"{size:N0} bytes");
+                CollectionAssert.AreEqual(bytes[^tail.Length..], tail, $"the end of {size:N0} bytes");
+            }
+            finally
+            {
+                await source.DeleteAsync(path, CancellationToken.None);
+            }
+        }
+    }
+
     /// <summary>The SDK contract's setup on this target: libraries at the top, or the library pinned and nothing spooled.</summary>
     public async Task<SourceContractSetup> ContractSetupAsync(bool pinned)
     {

@@ -949,4 +949,12 @@ public abstract class SharePointRestLiveTests
         await source.DeleteAsync(path, None);
         Assert.IsNull(await source.StatAsync(path, None));
     }
+
+    /// <summary>
+    /// Files at the edges of the one-request upload and of its pieces. One of 8 to 10 MiB was left empty while the limit was
+    /// 8 MiB and the pieces 10: it went as StartUpload alone, which never makes the file (found by the fakes, 24-Oct-2026).
+    /// </summary>
+    [TestMethod]
+    public Task FilesAtTheUploadLimitsRoundTrip() => Target.UploadsRoundTripAsync(
+        9L << 20, SharePointRestClient.SimpleUploadLimit, SharePointRestClient.SimpleUploadLimit + 1, 2L * SharePointRestClient.UploadChunkSize + 1);
 }

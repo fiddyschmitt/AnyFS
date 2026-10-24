@@ -545,6 +545,11 @@ public class SharePointOnlineLiveTests
         Assert.AreEqual(VfsError.InvalidPath, ex.Error);
     }
 
+    /// <summary>Files at the edges of Graph's one-request upload and of an upload session's pieces (the last a single byte).</summary>
+    [TestMethod]
+    public Task FilesAtTheUploadLimitsRoundTrip() => Target.UploadsRoundTripAsync(
+        GraphClient.SimpleUploadLimit, GraphClient.SimpleUploadLimit + 1, GraphClient.UploadChunkSize, GraphClient.UploadChunkSize + 1);
+
     [TestMethod]
     public async Task CaseInsensitiveLookupsAndLargeUpload()
     {
