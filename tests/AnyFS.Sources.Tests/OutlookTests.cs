@@ -84,8 +84,8 @@ public class OutlookPluginTests
     public void ValidationNamesWhatIsWrong()
     {
         Assert.IsTrue(_plugin.Validate(new OutlookSettings()).Any(m => m.IsError && m.Property == nameof(OutlookSettings.Path)));
-        var mailbox = _plugin.Validate(new OutlookSettings { Path = "jane@contoso.com" }).Single(m => m.IsError);
-        StringAssert.Contains(mailbox.Message, "not served yet");
+        var server = _plugin.Validate(new OutlookSettings { Path = "https://mail.contoso.com/EWS/Exchange.asmx" }).Single(m => m.IsError);
+        StringAssert.Contains(server.Message, "not served yet");
         StringAssert.Contains(_plugin.Validate(new OutlookSettings { Path = @"C:\notes.txt" }).Single(m => m.IsError).Message, ".pst or .ost");
         var missing = _plugin.Validate(new OutlookSettings { Path = @"C:\no\such\file.pst" }).ToList();
         Assert.IsTrue(missing.Any(m => !m.IsError && m.Property == nameof(OutlookSettings.Path)), "a missing file is a warning: it may be on a drive not plugged in");
@@ -338,9 +338,13 @@ public class OutlookSourceTests
     public async Task AWrongFileFailsPermanentlyAndAMissingOneDoesNot()
     {
         using var context = new TestSourceContext("outlook");
-        var wrong = new OutlookSource(new OutlookSettings { Path = "jane@contoso.com" });
+        var wrong = new OutlookSource(new OutlookSettings { Path = "neither an address nor a file" });
         var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => wrong.InitialiseAsync(context, CancellationToken.None));
         Assert.IsTrue(ex.Permanent);
+        var server = new OutlookSource(new OutlookSettings { Path = "https://mail.contoso.com/EWS/Exchange.asmx" });
+        var notYet = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => server.InitialiseAsync(context, CancellationToken.None));
+        Assert.IsTrue(notYet.Permanent);
+        StringAssert.Contains(notYet.Message, "not served yet");
 
         var missing = new OutlookSource(new OutlookSettings { Path = @"C:\no\such\file.pst" });
         var gone = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => missing.InitialiseAsync(context, CancellationToken.None));

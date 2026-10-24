@@ -12,9 +12,14 @@ internal enum MailItemKind
 }
 
 /// <summary>A folder of the mailbox as the store lists it: its children and how many items it holds.</summary>
-/// <param name="Id">The store's id for it (a PST's node id), stable while the store is open.</param>
+/// <param name="Id">The store's id for it (a PST's node id, an EWS folder id), stable while the store is open.</param>
 /// <param name="ContainerClass">"IPF.Note", "IPF.Contact", "IPF.Appointment"...; null when the folder says nothing.</param>
-internal sealed record MailFolder(string Id, string Name, string? ContainerClass, IReadOnlyList<MailFolder> Folders, int ItemCount, DateTimeOffset? Created, DateTimeOffset? Modified);
+internal sealed record MailFolder(string Id, string Name, string? ContainerClass, IReadOnlyList<MailFolder> Folders, int ItemCount, DateTimeOffset? Created, DateTimeOffset? Modified)
+{
+    public bool IsCalendar => ContainerClass?.StartsWith("IPF.Appointment", StringComparison.OrdinalIgnoreCase) == true;
+
+    public bool IsContacts => ContainerClass?.StartsWith("IPF.Contact", StringComparison.OrdinalIgnoreCase) == true;
+}
 
 /// <summary>What a listing needs of an item without opening it: enough for its folder's name and dates.</summary>
 /// <param name="Date">The date the item is filed under: received, else sent, else last changed; an appointment's start.</param>
@@ -49,15 +54,15 @@ internal sealed record MailRecipient(MailRecipientKind Kind, MailAddress Address
 
 /// <summary>An attachment: a file, an inline image, or another message.</summary>
 /// <param name="Name">The file name as the message gives it (not yet made safe for a path, nor told apart from another of the name).</param>
-/// <param name="Open">The content, as a seekable stream; empty for an embedded message.</param>
+/// <param name="OpenAsync">The content, as a seekable stream; empty for an embedded message.</param>
 /// <param name="Embedded">The attached message, for an attachment that is one; null otherwise.</param>
-internal sealed record MailAttachment(string Name, string ContentType, string? ContentId, bool IsInline, long Size, Func<Stream> Open, Func<MailItem?>? Embedded, bool IsContactPhoto = false)
+internal sealed record MailAttachment(string Name, string ContentType, string? ContentId, bool IsInline, long Size, Func<CancellationToken, Task<Stream>> OpenAsync, Func<CancellationToken, Task<MailItem?>>? Embedded, bool IsContactPhoto = false)
 {
     public bool IsMessage => Embedded is not null;
 }
 
 /// <summary>What an appointment adds to a message.</summary>
-/// <param name="RecurrencePattern">Outlook's words for the recurrence ("every Monday"), for a recurring appointment; the occurrences are not expanded.</param>
+/// <param name="RecurrencePattern">Outlook's words for the recurrence ("every Monday"), for a recurring appointment; the occurrences are not expanded by the PST store.</param>
 internal sealed record AppointmentDetail(DateTimeOffset? Start, DateTimeOffset? End, bool AllDay, string? Location, bool IsRecurring, string? RecurrencePattern, string? BusyStatus, string? Uid);
 
 /// <summary>A contact's fields.</summary>
@@ -114,6 +119,9 @@ internal sealed class MailItem
 
     public string? BodyRtf { get; init; }
 
+    /// <summary>The message as the server holds it (RFC 5322), when the store has it: what the .eml is, lossless.</summary>
+    public byte[]? RawMime { get; init; }
+
     /// <summary>0 low, 1 normal, 2 high; null when unset.</summary>
     public int? Importance { get; init; }
 
@@ -139,25 +147,25 @@ internal sealed class MailItem
 }
 
 /// <summary>
-/// Where a mailbox's folders and items come from (spec 7.7): a PST or OST file now; a mailbox on its server (Graph, the
-/// web session, EWS) later, over the same shape. Read concurrently once made.
+/// Where a mailbox's folders and items come from (spec 7.7): a PST or OST file, or a mailbox on its server through
+/// Outlook on the web's service, over the same shape. Read concurrently once refreshed.
 /// </summary>
 internal interface IMailStore : IDisposable
 {
-    /// <summary>What to call the mailbox: the store's display name, the file's name.</summary>
+    /// <summary>What to call the mailbox: the store's display name, the file's name, the account.</summary>
     string Name { get; }
 
-    /// <summary>The mailbox's top-level folders (Inbox, Sent Items, Calendar...), each with its children.</summary>
+    /// <summary>The mailbox's top-level folders (Inbox, Sent Items, Calendar...), each with its children; empty before the first <see cref="RefreshAsync"/>.</summary>
     IReadOnlyList<MailFolder> Folders { get; }
 
     /// <summary>The items a folder holds, as a listing needs them.</summary>
-    IEnumerable<MailItemSummary> Items(MailFolder folder);
+    Task<IReadOnlyList<MailItemSummary>> ItemsAsync(MailFolder folder, CancellationToken ct);
 
     /// <summary>An item with everything in it; null when the store no longer has it.</summary>
-    MailItem? Open(string itemId);
+    Task<MailItem?> OpenAsync(string itemId, CancellationToken ct);
 
-    /// <summary>Takes in what changed upstream since the store was opened (the file grew): <see cref="Folders"/> is made again.</summary>
-    void Refresh();
+    /// <summary>Reads the folders (and what changed in them) afresh: the first call fills the store, later ones take in changes.</summary>
+    Task RefreshAsync(CancellationToken ct);
 }
 
 /// <summary>The kinds, from a message class ([MS-OXCMSG] 2.2.1.3).</summary>
@@ -192,5 +200,29 @@ internal static class MailItemKinds
         }
 
         return MailItemKind.Other;
+    }
+
+    /// <summary>Whether Outlook shows a folder of this class in its folder list: its own settings, caches and feeds it does not.</summary>
+    public static bool IsShownFolder(string? containerClass, string name)
+    {
+        var c = containerClass ?? "";
+        if (name.StartsWith('{') && name.EndsWith('}'))
+        {
+            return false;
+        }
+
+        if (c.Equals("IPF", StringComparison.OrdinalIgnoreCase) || c.StartsWith("IPF.Configuration", StringComparison.OrdinalIgnoreCase) || c.StartsWith("IPF.Files", StringComparison.OrdinalIgnoreCase)
+            || c.StartsWith("IPF.StoreItem", StringComparison.OrdinalIgnoreCase) || c.StartsWith("IPF.ShortcutFolder", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (c.StartsWith("IPF.Contact.", StringComparison.OrdinalIgnoreCase))
+        {
+            // the people caches Outlook keeps for itself; Companies and the like
+            return false;
+        }
+
+        return true;
     }
 }

@@ -1,0 +1,489 @@
+using System.Globalization;
+using System.Net;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.Extensions.Logging;
+
+namespace AnyFS.Sources.Outlook.Ews;
+
+/// <summary>
+/// Exchange Web Services as Outlook on the web speaks them (spec 7.7.2): JSON to <c>/owa/service.svc?action=…</c> with
+/// the operation in an <c>Action</c> header and the One Outlook Web bearer the web session skimmed. The shapes are EWS's
+/// with <c>:#Exchange</c> type tags (Spike 14, 24-Oct-2026: FindFolder deep, FindItem paged or over a CalendarView,
+/// GetItem with AllProperties and IncludeMimeContent, GetAttachment with no shape, SyncFolderItems; no
+/// SyncFolderHierarchy). A 401 asks the session for a fresh token once; 429 and 503 hold the mailbox's pace and try again.
+/// </summary>
+internal sealed class OwaJsonService : IEwsService, IDisposable
+{
+    private const int Attempts = 4;
+
+    private static readonly string[] ListingProperties =
+    [
+        "item:Subject", "item:DateTimeReceived", "item:DateTimeSent", "item:DateTimeCreated", "item:LastModifiedTime", "item:Size", "item:HasAttachments",
+        "item:ItemClass", "item:Importance", "item:DisplayTo", "message:From", "message:Sender", "message:IsRead", "message:InternetMessageId",
+    ];
+
+    private static readonly string[] CalendarProperties =
+    [
+        "item:Subject", "calendar:Start", "calendar:End", "calendar:Location", "calendar:IsAllDayEvent", "calendar:CalendarItemType", "calendar:Organizer",
+        "calendar:IsRecurring", "calendar:UID", "calendar:LegacyFreeBusyStatus", "item:ItemClass", "item:LastModifiedTime", "item:DateTimeCreated", "item:HasAttachments", "item:Size",
+    ];
+
+    private readonly Uri _origin;
+    private readonly Func<bool, CancellationToken, Task<string>> _token;
+    private readonly HttpClient _http;
+    private readonly MailboxPace _pace;
+    private readonly ILogger _logger;
+
+    /// <param name="origin">Outlook on the web's origin for the cloud (https://outlook.office.com).</param>
+    /// <param name="token">The bearer; true asks for a fresh one after a 401.</param>
+    /// <param name="handler">The handler requests go through: a test's fake; null for the network.</param>
+    public OwaJsonService(Uri origin, string mailbox, Func<bool, CancellationToken, Task<string>> token, HttpMessageHandler? handler, ILogger logger)
+    {
+        _origin = origin;
+        _token = token;
+        _pace = MailboxPace.For(mailbox);
+        _logger = logger;
+        _http = new HttpClient(handler ?? new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, UseCookies = false }) { Timeout = TimeSpan.FromSeconds(120) };
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0");
+        _http.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+    }
+
+    public void Dispose() => _http.Dispose();
+
+    // --- operations -------------------------------------------------------------------------------------------------------
+
+    public async Task<IReadOnlyList<EwsFolder>> FindFoldersAsync(CancellationToken ct)
+    {
+        var folders = new List<EwsFolder>();
+        var offset = 0;
+        while (true)
+        {
+            var message = await CallAsync("FindFolder", new JsonObject
+            {
+                ["__type"] = "FindFolderRequest:#Exchange",
+                ["FolderShape"] = new JsonObject
+                {
+                    ["__type"] = "FolderResponseShape:#Exchange",
+                    ["BaseShape"] = "Default",
+                    ["AdditionalProperties"] = Properties("folder:FolderClass", "folder:ParentFolderId", "folder:TotalCount", "folder:UnreadCount", "folder:ChildFolderCount", "folder:DistinguishedFolderId"),
+                },
+                ["ParentFolderIds"] = new JsonArray(Distinguished("msgfolderroot")),
+                ["Traversal"] = "Deep",
+                ["Paging"] = IndexedPage(offset, 1000),
+            }, ct).ConfigureAwait(false);
+            var root = message.GetProperty("RootFolder");
+            if (root.TryGetProperty("Folders", out var list))
+            {
+                foreach (var f in list.EnumerateArray())
+                {
+                    folders.Add(new EwsFolder(
+                        f.GetProperty("FolderId").GetProperty("Id").GetString()!,
+                        Str(f.GetProperty("FolderId"), "ChangeKey"),
+                        f.TryGetProperty("ParentFolderId", out var parent) ? Str(parent, "Id") : null,
+                        Str(f, "DisplayName") ?? "",
+                        Str(f, "FolderClass"),
+                        TypeOf(f),
+                        Int(f, "TotalCount"),
+                        Int(f, "UnreadCount"),
+                        Int(f, "ChildFolderCount"),
+                        Str(f, "DistinguishedFolderId")));
+                }
+
+                offset += list.GetArrayLength();
+            }
+
+            if (!root.TryGetProperty("IncludesLastItemInRange", out var last) || last.GetBoolean() || offset == 0)
+            {
+                return folders;
+            }
+        }
+    }
+
+    public async Task<EwsItemPage> FindItemsAsync(string folderId, int offset, int count, CancellationToken ct)
+    {
+        var message = await CallAsync("FindItem", new JsonObject
+        {
+            ["__type"] = "FindItemRequest:#Exchange",
+            ["ItemShape"] = new JsonObject { ["__type"] = "ItemResponseShape:#Exchange", ["BaseShape"] = "Default", ["AdditionalProperties"] = Properties(ListingProperties) },
+            ["ParentFolderIds"] = new JsonArray(FolderIdNode(folderId)),
+            ["Traversal"] = "Shallow",
+            ["Paging"] = IndexedPage(offset, count),
+            ["SortOrder"] = new JsonArray(new JsonObject { ["__type"] = "SortResults:#Exchange", ["Order"] = "Descending", ["Path"] = Property("item:DateTimeReceived") }),
+        }, ct).ConfigureAwait(false);
+        var root = message.GetProperty("RootFolder");
+        var items = root.TryGetProperty("Items", out var list) ? list.EnumerateArray().Select(ItemOf).ToList() : [];
+        return new EwsItemPage(items, Int(root, "TotalItemsInView"), !root.TryGetProperty("IncludesLastItemInRange", out var last) || last.GetBoolean());
+    }
+
+    public async Task<IReadOnlyList<EwsItem>> CalendarViewAsync(string folderId, DateTimeOffset from, DateTimeOffset to, CancellationToken ct)
+    {
+        var message = await CallAsync("FindItem", new JsonObject
+        {
+            ["__type"] = "FindItemRequest:#Exchange",
+            ["ItemShape"] = new JsonObject { ["__type"] = "ItemResponseShape:#Exchange", ["BaseShape"] = "IdOnly", ["AdditionalProperties"] = Properties(CalendarProperties) },
+            ["ParentFolderIds"] = new JsonArray(FolderIdNode(folderId)),
+            ["Traversal"] = "Shallow",
+            ["Paging"] = new JsonObject { ["__type"] = "CalendarPageView:#Exchange", ["StartDate"] = from.UtcDateTime.ToString("o"), ["EndDate"] = to.UtcDateTime.ToString("o"), ["MaxEntriesReturned"] = 1000 },
+        }, ct).ConfigureAwait(false);
+        var root = message.GetProperty("RootFolder");
+        var items = root.TryGetProperty("Items", out var list) ? list.EnumerateArray().Select(ItemOf).ToList() : [];
+        if (root.TryGetProperty("IncludesLastItemInRange", out var last) && !last.GetBoolean() && to - from > TimeSpan.FromDays(1))
+        {
+            // more than one answer holds: each half of the range on its own
+            var middle = from + (to - from) / 2;
+            var first = await CalendarViewAsync(folderId, from, middle, ct).ConfigureAwait(false);
+            var second = await CalendarViewAsync(folderId, middle, to, ct).ConfigureAwait(false);
+            return first.Concat(second).DistinctBy(i => i.Id).ToList();
+        }
+
+        return items;
+    }
+
+    public async Task<EwsSyncPage> SyncFolderItemsAsync(string folderId, string? syncState, int maxChanges, CancellationToken ct)
+    {
+        var message = await CallAsync("SyncFolderItems", new JsonObject
+        {
+            ["__type"] = "SyncFolderItemsRequest:#Exchange",
+            ["ItemShape"] = new JsonObject { ["__type"] = "ItemResponseShape:#Exchange", ["BaseShape"] = "Default", ["AdditionalProperties"] = Properties(ListingProperties) },
+            ["SyncFolderId"] = new JsonObject { ["__type"] = "TargetFolderId:#Exchange", ["BaseFolderId"] = FolderIdNode(folderId) },
+            ["SyncState"] = syncState,
+            ["MaxChangesReturned"] = Math.Clamp(maxChanges, 1, 512),
+        }, ct).ConfigureAwait(false);
+        var changes = new List<EwsChange>();
+        if (message.TryGetProperty("Changes", out var wrapper) && wrapper.TryGetProperty("Changes", out var list))
+        {
+            foreach (var c in list.EnumerateArray())
+            {
+                var kind = Str(c, "ChangeType") ?? TypeOf(c).Replace("SyncFolderItems", "", StringComparison.Ordinal).Replace("Type", "", StringComparison.Ordinal);
+                if (c.TryGetProperty("Item", out var item))
+                {
+                    var mapped = ItemOf(item);
+                    changes.Add(new EwsChange(kind, mapped.Id, mapped, null));
+                }
+                else if (c.TryGetProperty("ItemId", out var id))
+                {
+                    changes.Add(new EwsChange(kind, id.GetProperty("Id").GetString()!, null, c.TryGetProperty("IsRead", out var read) ? read.GetBoolean() : null));
+                }
+            }
+        }
+
+        return new EwsSyncPage(Str(message, "SyncState") ?? syncState ?? "", changes, !message.TryGetProperty("IncludesLastItemInRange", out var last) || last.GetBoolean());
+    }
+
+    public async Task<EwsItem?> GetItemAsync(string itemId, bool includeMime, CancellationToken ct)
+    {
+        JsonElement message;
+        try
+        {
+            message = await CallAsync("GetItem", new JsonObject
+            {
+                ["__type"] = "GetItemRequest:#Exchange",
+                ["ItemShape"] = new JsonObject { ["__type"] = "ItemResponseShape:#Exchange", ["BaseShape"] = "AllProperties", ["IncludeMimeContent"] = includeMime, ["BodyType"] = "HTML" },
+                ["ItemIds"] = new JsonArray(new JsonObject { ["__type"] = "ItemId:#Exchange", ["Id"] = itemId }),
+            }, ct).ConfigureAwait(false);
+        }
+        catch (EwsException ex) when (ex.IsNotFound)
+        {
+            return null;
+        }
+
+        return message.TryGetProperty("Items", out var items) && items.GetArrayLength() > 0 ? ItemOf(items[0]) : null;
+    }
+
+    public async Task<EwsAttachmentContent?> GetAttachmentAsync(string attachmentId, CancellationToken ct)
+    {
+        JsonElement message;
+        try
+        {
+            // OWA takes the request without a shape (Spike 14); an attached item comes with its MIME all the same
+            message = await CallAsync("GetAttachment", new JsonObject
+            {
+                ["__type"] = "GetAttachmentRequest:#Exchange",
+                ["AttachmentIds"] = new JsonArray(new JsonObject { ["__type"] = "AttachmentId:#Exchange", ["Id"] = attachmentId }),
+            }, ct).ConfigureAwait(false);
+        }
+        catch (EwsException ex) when (ex.IsNotFound)
+        {
+            return null;
+        }
+
+        if (!message.TryGetProperty("Attachments", out var attachments) || attachments.GetArrayLength() == 0)
+        {
+            return null;
+        }
+
+        var a = attachments[0];
+        var content = a.TryGetProperty("Content", out var c) && c.ValueKind == JsonValueKind.String ? Convert.FromBase64String(c.GetString()!) : null;
+        var item = a.TryGetProperty("Item", out var i) && i.ValueKind == JsonValueKind.Object ? ItemOf(i) : null;
+        return new EwsAttachmentContent(Str(a, "Name") ?? "", Str(a, "ContentType"), content, item);
+    }
+
+    // --- the call -----------------------------------------------------------------------------------------------------------
+
+    /// <summary>One operation: its first response message, checked. Paced, signed, tried again on a 401 (once, with a fresh token) and on a hold.</summary>
+    private async Task<JsonElement> CallAsync(string action, JsonObject body, CancellationToken ct)
+    {
+        var renew = false;
+        var envelope = Envelope(action, body);
+        for (var attempt = 1; ; attempt++)
+        {
+            using var slot = await _pace.EnterAsync(ct).ConfigureAwait(false);
+            var token = await _token(renew, ct).ConfigureAwait(false);
+            renew = false;
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{_origin.AbsoluteUri.TrimEnd('/')}/owa/service.svc?action={action}&app=Mail")
+            {
+                Content = new StringContent(envelope, Encoding.UTF8, "application/json"),
+            };
+            request.Headers.TryAddWithoutValidation("Action", action);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+            HttpResponseMessage response;
+            try
+            {
+                response = await _http.SendAsync(request, HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(false);
+            }
+            catch (HttpRequestException ex) when (attempt < Attempts)
+            {
+                _logger.LogInformation("outlook: {Action} to {Host} failed ({Error}); trying again", action, _origin.Host, ex.Message);
+                _pace.Hold(null);
+                continue;
+            }
+
+            using (response)
+            {
+                var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                if (response.StatusCode == HttpStatusCode.Unauthorized)
+                {
+                    if (attempt < Attempts && !renew)
+                    {
+                        _logger.LogInformation("outlook: {Host} refused the web session's token on {Action}; asking for a fresh one", _origin.Host, action);
+                        renew = true;
+                        continue;
+                    }
+
+                    throw new EwsException("401", $"{_origin.Host} refused the web session's token", transient: false);
+                }
+
+                if (response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout)
+                {
+                    _pace.Hold(response.Headers.RetryAfter?.Delta ?? (response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow));
+                    if (attempt < Attempts)
+                    {
+                        continue;
+                    }
+
+                    throw new EwsException(((int)response.StatusCode).ToString(CultureInfo.InvariantCulture), $"{_origin.Host} is busy ({(int)response.StatusCode}); try later", transient: true);
+                }
+
+                JsonDocument document;
+                try
+                {
+                    document = JsonDocument.Parse(text);
+                }
+                catch (JsonException)
+                {
+                    throw new EwsException(((int)response.StatusCode).ToString(CultureInfo.InvariantCulture), $"{_origin.Host} answered {action} with something other than JSON ({(int)response.StatusCode} {response.ReasonPhrase}; {Trim(text)})", transient: (int)response.StatusCode >= 500);
+                }
+
+                using (document)
+                {
+                    var root = document.RootElement;
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        // {"Body":{"ErrorCode":400,"ExceptionName":"...","FaultMessage":"...","IsTransient":false,"ResponseCode":"BadRequest"}}
+                        var fault = root.TryGetProperty("Body", out var b) ? b : root;
+                        var transient = fault.TryGetProperty("IsTransient", out var t) && t.ValueKind == JsonValueKind.True;
+                        if (transient && attempt < Attempts)
+                        {
+                            _pace.Hold(null);
+                            continue;
+                        }
+
+                        throw new EwsException(Str(fault, "ResponseCode") ?? ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture), $"{action}: {Str(fault, "FaultMessage") ?? Trim(text)}", transient);
+                    }
+
+                    if (!root.TryGetProperty("Body", out var responseBody) || !responseBody.TryGetProperty("ResponseMessages", out var messages) || !messages.TryGetProperty("Items", out var items) || items.GetArrayLength() == 0)
+                    {
+                        throw new EwsException("NoResponse", $"{action}: {_origin.Host} answered without a response message ({Trim(text)})");
+                    }
+
+                    var message = items[0];
+                    if (Str(message, "ResponseClass") is "Error")
+                    {
+                        var code = Str(message, "ResponseCode") ?? "Error";
+                        var transient = code is "ErrorServerBusy" or "ErrorTimeoutExpired" or "ErrorInternalServerTransientError" or "ErrorMailboxStoreUnavailable" or "ErrorTooManyObjectsOpened" or "ErrorConnectionFailed";
+                        if (transient && attempt < Attempts)
+                        {
+                            _pace.Hold(message.TryGetProperty("MessageXml", out _) ? null : TimeSpan.FromSeconds(10));
+                            continue;
+                        }
+
+                        throw new EwsException(code, $"{action}: {Str(message, "MessageText") ?? code}", transient);
+                    }
+
+                    return message.Clone();
+                }
+            }
+        }
+    }
+
+    private static string Envelope(string action, JsonObject body) => new JsonObject
+    {
+        ["__type"] = $"{action}JsonRequest:#Exchange",
+        ["Header"] = new JsonObject
+        {
+            ["__type"] = "JsonRequestHeaders:#Exchange",
+            ["RequestServerVersion"] = "Exchange2013",
+            ["TimeZoneContext"] = new JsonObject { ["__type"] = "TimeZoneContext:#Exchange", ["TimeZoneDefinition"] = new JsonObject { ["__type"] = "TimeZoneDefinitionType:#Exchange", ["Id"] = "UTC" } },
+        },
+        ["Body"] = body,
+    }.ToJsonString();
+
+    private static string Trim(string text)
+    {
+        text = text.ReplaceLineEndings(" ").Trim();
+        return text.Length <= 200 ? text : text[..200] + "…";
+    }
+
+    // --- request pieces ---------------------------------------------------------------------------------------------------
+
+    private static JsonObject Property(string fieldUri) => new() { ["__type"] = "PropertyUri:#Exchange", ["FieldURI"] = fieldUri };
+
+    private static JsonArray Properties(params string[] fieldUris) => new(fieldUris.Select(f => (JsonNode)Property(f)).ToArray());
+
+    private static JsonObject Distinguished(string id) => new() { ["__type"] = "DistinguishedFolderId:#Exchange", ["Id"] = id };
+
+    /// <summary>A folder id node: a distinguished name ("inbox") or an id.</summary>
+    private static JsonObject FolderIdNode(string folderId) => folderId.All(char.IsAsciiLetterLower) ? Distinguished(folderId) : new JsonObject { ["__type"] = "FolderId:#Exchange", ["Id"] = folderId };
+
+    private static JsonObject IndexedPage(int offset, int count) => new() { ["__type"] = "IndexedPageView:#Exchange", ["BasePoint"] = "Beginning", ["Offset"] = offset, ["MaxEntriesReturned"] = count };
+
+    // --- the answers' shapes --------------------------------------------------------------------------------------------------
+
+    /// <summary>An item as the JSON gives it, in every field the store reads.</summary>
+    internal static EwsItem ItemOf(JsonElement e)
+    {
+        var body = e.TryGetProperty("Body", out var b) && b.ValueKind == JsonValueKind.Object ? b : default;
+        var complete = e.TryGetProperty("CompleteName", out var cn) && cn.ValueKind == JsonValueKind.Object ? cn : default;
+        return new EwsItem
+        {
+            Id = e.GetProperty("ItemId").GetProperty("Id").GetString()!,
+            ChangeKey = Str(e.GetProperty("ItemId"), "ChangeKey"),
+            ParentFolderId = e.TryGetProperty("ParentFolderId", out var p) && p.ValueKind == JsonValueKind.Object ? Str(p, "Id") : null,
+            Type = TypeOf(e),
+            ItemClass = Str(e, "ItemClass"),
+            Subject = Str(e, "Subject"),
+            DateTimeReceived = Date(e, "DateTimeReceived"),
+            DateTimeSent = Date(e, "DateTimeSent"),
+            DateTimeCreated = Date(e, "DateTimeCreated"),
+            LastModifiedTime = Date(e, "LastModifiedTime"),
+            Size = Long(e, "Size"),
+            HasAttachments = Bool(e, "HasAttachments"),
+            IsRead = Bool(e, "IsRead"),
+            IsDraft = Bool(e, "IsDraft"),
+            Importance = Str(e, "Importance"),
+            InternetMessageId = Str(e, "InternetMessageId"),
+            InReplyTo = Str(e, "InReplyTo"),
+            References = Str(e, "References"),
+            DisplayTo = Str(e, "DisplayTo"),
+            DisplayCc = Str(e, "DisplayCc"),
+            From = Single(e, "From"),
+            Sender = Single(e, "Sender"),
+            ToRecipients = Mailboxes(e, "ToRecipients"),
+            CcRecipients = Mailboxes(e, "CcRecipients"),
+            BccRecipients = Mailboxes(e, "BccRecipients"),
+            Body = body.ValueKind == JsonValueKind.Object ? Str(body, "Value") : null,
+            BodyIsHtml = body.ValueKind == JsonValueKind.Object && Str(body, "BodyType") == "HTML",
+            Mime = e.TryGetProperty("MimeContent", out var m) && m.ValueKind == JsonValueKind.Object && Str(m, "Value") is { } mime ? Convert.FromBase64String(mime) : null,
+            Attachments = e.TryGetProperty("Attachments", out var attachments) && attachments.ValueKind == JsonValueKind.Array
+                ? attachments.EnumerateArray().Select(a => new EwsAttachmentInfo(
+                    a.GetProperty("AttachmentId").GetProperty("Id").GetString()!,
+                    Str(a, "Name") ?? "",
+                    Str(a, "ContentType"),
+                    Long(a, "Size"),
+                    Bool(a, "IsInline"),
+                    Str(a, "ContentId"),
+                    TypeOf(a).StartsWith("ItemAttachment", StringComparison.Ordinal),
+                    Bool(a, "IsContactPhoto"))).ToList()
+                : [],
+            Start = Date(e, "Start"),
+            End = Date(e, "End"),
+            IsAllDayEvent = Bool(e, "IsAllDayEvent"),
+            Location = Str(e, "Location"),
+            Organizer = Single(e, "Organizer"),
+            RequiredAttendees = Attendees(e, "RequiredAttendees"),
+            OptionalAttendees = Attendees(e, "OptionalAttendees"),
+            IsRecurring = Bool(e, "IsRecurring"),
+            CalendarItemType = Str(e, "CalendarItemType"),
+            Uid = Str(e, "UID"),
+            LegacyFreeBusyStatus = Str(e, "LegacyFreeBusyStatus"),
+            DisplayName = Str(e, "DisplayName"),
+            FileAs = Str(e, "FileAs"),
+            GivenName = Str(e, "GivenName") ?? (complete.ValueKind == JsonValueKind.Object ? Str(complete, "FirstName") : null),
+            MiddleName = Str(e, "MiddleName") ?? (complete.ValueKind == JsonValueKind.Object ? Str(complete, "MiddleName") : null),
+            Surname = Str(e, "Surname") ?? (complete.ValueKind == JsonValueKind.Object ? Str(complete, "LastName") : null),
+            Nickname = Str(e, "Nickname") ?? (complete.ValueKind == JsonValueKind.Object ? Str(complete, "Nickname") : null),
+            Generation = Str(e, "Generation") ?? (complete.ValueKind == JsonValueKind.Object ? Str(complete, "Suffix") : null),
+            Title = complete.ValueKind == JsonValueKind.Object ? Str(complete, "Title") : null,
+            CompanyName = Str(e, "CompanyName"),
+            JobTitle = Str(e, "JobTitle"),
+            Department = Str(e, "Department"),
+            EmailAddresses = Keyed(e, "EmailAddresses", "EmailAddress"),
+            PhoneNumbers = Keyed(e, "PhoneNumbers", "PhoneNumber"),
+            PhysicalAddresses = e.TryGetProperty("PhysicalAddresses", out var addresses) && addresses.ValueKind == JsonValueKind.Array
+                ? addresses.EnumerateArray().Select(a => new EwsPhysicalAddress(Str(a, "Key") ?? "", Str(a, "Street"), Str(a, "City"), Str(a, "State"), Str(a, "PostalCode"), Str(a, "CountryOrRegion"))).ToList()
+                : [],
+            BusinessHomePage = Str(e, "BusinessHomePage"),
+            ImAddresses = Keyed(e, "ImAddresses", "ImAddress").Select(k => k.Item2).ToList(),
+            Birthday = Date(e, "Birthday"),
+            WeddingAnniversary = Date(e, "WeddingAnniversary"),
+        };
+    }
+
+    private static string TypeOf(JsonElement e) => (Str(e, "__type") ?? "Item").Replace(":#Exchange", "", StringComparison.Ordinal);
+
+    private static string? Str(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static int Int(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : 0;
+
+    private static long Long(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var n) ? n : 0;
+
+    private static bool Bool(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
+
+    private static DateTimeOffset? Date(JsonElement e, string name)
+        => Str(e, name) is { } s && DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var d) ? d : null;
+
+    /// <summary>A SingleRecipient ({"Mailbox":{...}}) or a bare mailbox.</summary>
+    private static EwsMailbox? Single(JsonElement e, string name)
+    {
+        if (e.ValueKind != JsonValueKind.Object || !e.TryGetProperty(name, out var v) || v.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var mailbox = v.TryGetProperty("Mailbox", out var inner) && inner.ValueKind == JsonValueKind.Object ? inner : v;
+        var box = MailboxOf(mailbox);
+        return box.Name is null && box.Address is null ? null : box;
+    }
+
+    private static EwsMailbox MailboxOf(JsonElement mailbox) => new(Str(mailbox, "Name"), Str(mailbox, "EmailAddress"), Str(mailbox, "RoutingType"));
+
+    private static IReadOnlyList<EwsMailbox> Mailboxes(JsonElement e, string name)
+        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array
+            ? v.EnumerateArray().Select(r => MailboxOf(r.TryGetProperty("Mailbox", out var inner) && inner.ValueKind == JsonValueKind.Object ? inner : r)).ToList()
+            : [];
+
+    private static IReadOnlyList<EwsAttendee> Attendees(JsonElement e, string name)
+        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array
+            ? v.EnumerateArray().Select(a => new EwsAttendee(MailboxOf(a.TryGetProperty("Mailbox", out var inner) && inner.ValueKind == JsonValueKind.Object ? inner : a), Str(a, "ResponseType"))).ToList()
+            : [];
+
+    /// <summary>A keyed list ([{"Key":"EmailAddress1","EmailAddress":"…"}]) as (key, value) pairs, empty values left out.</summary>
+    private static IReadOnlyList<(string, string)> Keyed(JsonElement e, string name, string valueName)
+        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array
+            ? v.EnumerateArray().Select(k => (Str(k, "Key") ?? "", Str(k, valueName) ?? "")).Where(k => k.Item2.Length > 0).ToList()
+            : [];
+}

@@ -134,14 +134,19 @@ internal sealed class MailTree
     /// <summary>The files the items make (two per message, two per appointment, one per contact, one per other item), attachments not counted.</summary>
     public long FileCount { get; }
 
-    public static MailTree Build(IMailStore store)
+    /// <param name="progress">Told of each folder as it is listed (how many are done, how many there are, the folder's name); null for nobody.</param>
+    public static async Task<MailTree> BuildAsync(IMailStore store, CancellationToken ct, Action<int, int, string>? progress)
     {
         var root = new DirNode("", null, null, null);
-        AddFolders(root, store.Folders, store);
+        var total = CountFolders(store.Folders);
+        var done = 0;
+        await AddFoldersAsync(root, store.Folders, store, ct, name => progress?.Invoke(++done, total, name)).ConfigureAwait(false);
         var counts = new Counts();
         Count(root, counts);
         return new MailTree(root, counts.Folders, counts.Items, counts.Files);
     }
+
+    private static int CountFolders(IReadOnlyList<MailFolder> folders) => folders.Sum(f => 1 + CountFolders(f.Folders));
 
     /// <summary>What the tree holds: every folder (the mailbox's, years, months, items' folders) and the files the items make.</summary>
     private static void Count(DirNode dir, Counts counts)
@@ -192,14 +197,16 @@ internal sealed class MailTree
         return (node, new ArraySegment<string>(segments, i, segments.Length - i));
     }
 
-    private static void AddFolders(DirNode parent, IReadOnlyList<MailFolder> folders, IMailStore store)
+    private static async Task AddFoldersAsync(DirNode parent, IReadOnlyList<MailFolder> folders, IMailStore store, CancellationToken ct, Action<string> listed)
     {
         foreach (var folder in folders)
         {
+            ct.ThrowIfCancellationRequested();
             var dir = new DirNode(parent.Unique(MailNames.Folder(folder.Name), isFile: false), folder, folder.Created, folder.Modified);
             parent.Add(dir);
-            AddItems(dir, store.Items(folder));
-            AddFolders(dir, folder.Folders, store);
+            AddItems(dir, await store.ItemsAsync(folder, ct).ConfigureAwait(false));
+            listed(folder.Name);
+            await AddFoldersAsync(dir, folder.Folders, store, ct, listed).ConfigureAwait(false);
         }
     }
 

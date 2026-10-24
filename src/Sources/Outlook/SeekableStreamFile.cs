@@ -3,7 +3,7 @@ using AnyFS.Sdk;
 namespace AnyFS.Sources.Outlook;
 
 /// <summary>An attachment's content as a file: a seekable stream opened on the first read, positioned per read, read-only.</summary>
-internal sealed class SeekableStreamFile(long length, Func<Stream> open, string what) : IVfsFile
+internal sealed class SeekableStreamFile(long length, Func<CancellationToken, Task<Stream>> open, string what) : IVfsFile
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
     private Stream? _stream;
@@ -20,7 +20,7 @@ internal sealed class SeekableStreamFile(long length, Func<Stream> open, string 
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            _stream ??= open();
+            _stream ??= await open(ct).ConfigureAwait(false);
             _stream.Position = offset;
             var want = (int)Math.Min(buffer.Length, length - offset);
             var total = 0;

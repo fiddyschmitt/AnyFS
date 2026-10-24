@@ -38,7 +38,24 @@ internal sealed class PstMailStore : IMailStore
 
     public IReadOnlyList<MailFolder> Folders { get; private set; }
 
-    public IEnumerable<MailItemSummary> Items(MailFolder folder)
+    public Task<IReadOnlyList<MailItemSummary>> ItemsAsync(MailFolder folder, CancellationToken ct) => Task.FromResult<IReadOnlyList<MailItemSummary>>(Items(folder).ToList());
+
+    public Task<MailItem?> OpenAsync(string itemId, CancellationToken ct) => Task.FromResult(Open(itemId));
+
+    /// <summary>Reads the file's header and folders again (a file Outlook is writing).</summary>
+    public Task RefreshAsync(CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            _pst.Refresh();
+            _ids = new NamedIds(_pst.NamedProperties);
+            Folders = MapFolders(_pst.TopFolder);
+        }
+
+        return Task.CompletedTask;
+    }
+
+    internal IEnumerable<MailItemSummary> Items(MailFolder folder)
     {
         var pstFolder = _pst.GetFolder(ParseNid(folder.Id));
         if (pstFolder is null)
@@ -53,7 +70,7 @@ internal sealed class PstMailStore : IMailStore
         }
     }
 
-    public MailItem? Open(string itemId)
+    internal MailItem? Open(string itemId)
     {
         var parts = itemId.Split('/');
         var message = _pst.GetMessage(ParseNid(parts[0]));
@@ -67,16 +84,6 @@ internal sealed class PstMailStore : IMailStore
         }
 
         return message is null ? null : Build(message, id);
-    }
-
-    public void Refresh()
-    {
-        lock (_gate)
-        {
-            _pst.Refresh();
-            _ids = new NamedIds(_pst.NamedProperties);
-            Folders = MapFolders(_pst.TopFolder);
-        }
     }
 
     public void Dispose() => _pst.Dispose();
@@ -145,8 +152,8 @@ internal sealed class PstMailStore : IMailStore
                 Blank(a.ContentId),
                 a.IsInline,
                 embedded is not null ? 0 : a.Size,
-                a.OpenContent,
-                embedded is null ? null : () => Build(embedded, $"{id}/{embeddedIndex}"),
+                _ => Task.FromResult(a.OpenContent()),
+                embedded is null ? null : _ => Task.FromResult<MailItem?>(Build(embedded, $"{id}/{embeddedIndex}")),
                 a.Properties.GetBoolean(AttachmentContactPhoto) == true));
         }
 

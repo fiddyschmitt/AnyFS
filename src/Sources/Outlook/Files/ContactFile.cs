@@ -7,7 +7,7 @@ namespace AnyFS.Sources.Outlook.Files;
 /// <summary>A contact as a vCard (version 3.0, RFC 2426): name, organisation, emails, phones, addresses, web, birthday, notes, photo.</summary>
 internal static class ContactFile
 {
-    public static byte[] Build(MailItem item)
+    public static async Task<byte[]> BuildAsync(MailItem item, CancellationToken ct)
     {
         var c = item.Contact ?? new ContactDetail(item.Subject, null, null, null, null, null, null, null, null, null, [], [], [], null, null, null, null);
         var sb = new StringBuilder();
@@ -74,9 +74,9 @@ internal static class ContactFile
 
         if (item.Attachments.FirstOrDefault(a => a.IsContactPhoto) is { } photo)
         {
-            using var content = photo.Open();
+            using var content = await photo.OpenAsync(ct).ConfigureAwait(false);
             using var buffer = new MemoryStream();
-            content.CopyTo(buffer);
+            await content.CopyToAsync(buffer, ct).ConfigureAwait(false);
             var type = photo.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) ? photo.ContentType[6..].ToUpperInvariant() : "JPEG";
             CalendarFile.Line(sb, $"PHOTO;ENCODING=b;TYPE={type}:" + Convert.ToBase64String(buffer.ToArray()));
         }

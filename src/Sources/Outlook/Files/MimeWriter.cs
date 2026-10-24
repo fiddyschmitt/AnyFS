@@ -306,7 +306,7 @@ internal static class MimeWriter
             var parts = new List<Part> { content };
             foreach (var a in rest)
             {
-                if (a.IsMessage && depth < MaxDepth && a.Embedded!() is { } embedded)
+                if (a.IsMessage && depth < MaxDepth && a.Embedded!(CancellationToken.None).GetAwaiter().GetResult() is { } embedded)
                 {
                     parts.Add(new MessagePart(embedded, fileNameOf(a), depth + 1));
                 }
@@ -356,7 +356,8 @@ internal static class MimeWriter
 
         public override void WriteContent(Stream s)
         {
-            using var content = attachment.Open();
+            // the PST store's streams come at once; a server's attachment is in hand by the time its message is written
+            using var content = attachment.OpenAsync(CancellationToken.None).GetAwaiter().GetResult();
             Base64(s, content);
         }
     }
@@ -370,7 +371,17 @@ internal static class MimeWriter
             Ascii(s, "Content-Transfer-Encoding: 7bit\r\n");
         }
 
-        public override void WriteContent(Stream s) => WriteMessage(s, embedded, depth);
+        public override void WriteContent(Stream s)
+        {
+            if (embedded.RawMime is { } raw)
+            {
+                s.Write(raw, 0, raw.Length);
+            }
+            else
+            {
+                WriteMessage(s, embedded, depth);
+            }
+        }
     }
 
     private sealed class Multipart(string subtype, IReadOnlyList<Part> parts) : Part

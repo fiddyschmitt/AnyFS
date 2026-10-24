@@ -24,7 +24,8 @@ internal sealed class ItemFile(string name, long length, byte[]? bytes, MailAtta
 /// <summary>
 /// What an item's folder holds (spec 7.7): for a message "name.md" and "name.eml", for an appointment event.md and
 /// event.ics, for a task or note "name.md"; and, when the item has attachments, an "attachments" folder with every one
-/// of them (inline images too), an attached message as a nested .eml. Made once per open item and kept a while.
+/// of them (inline images too), an attached message as a nested .eml. Made once per open item and kept a while. The
+/// .eml is the message as its server holds it where the store has that; else it is made from the properties.
 /// </summary>
 internal sealed class ItemFiles
 {
@@ -58,7 +59,7 @@ internal sealed class ItemFiles
     public VfsEntry AttachmentsEntry => VfsEntry.Directory(MailNames.AttachmentsFolder, Modified, Created);
 
     /// <param name="folderName">The item's folder name: the stem of its .md and .eml.</param>
-    public static ItemFiles Build(MailItem item, string folderName)
+    public static async Task<ItemFiles> BuildAsync(MailItem item, string folderName, CancellationToken ct)
     {
         // the attachments' names, fixed first so the Markdown's links, the .eml's parts and the attachments folder agree
         var named = AttachmentNames.For(item.Attachments);
@@ -70,11 +71,11 @@ internal sealed class ItemFiles
                 files.Add(Made(MailNames.EventCalendar, CalendarFile.Build(item), "an appointment as iCalendar"));
                 break;
             case MailItemKind.Contact:
-                files.Add(Made(folderName, ContactFile.Build(item), "a contact as a vCard"));
+                files.Add(Made(folderName, await ContactFile.BuildAsync(item, ct).ConfigureAwait(false), "a contact as a vCard"));
                 break;
             case MailItemKind.Message:
                 files.Add(Made(folderName + ".md", MessageMarkdown.Build(item, named), "a message as Markdown"));
-                files.Add(Made(folderName + ".eml", MimeWriter.Build(item), "a message as .eml"));
+                files.Add(Made(folderName + ".eml", item.RawMime ?? MimeWriter.Build(item), "a message as .eml"));
                 break;
             default:
                 files.Add(Made(folderName + ".md", MessageMarkdown.Build(item, named), "an item as Markdown"));
@@ -86,10 +87,10 @@ internal sealed class ItemFiles
         {
             if (attachment.IsMessage)
             {
-                var embedded = attachment.Embedded!();
+                var embedded = await attachment.Embedded!(ct).ConfigureAwait(false);
                 if (embedded is not null)
                 {
-                    attachments.Add(Made(name, MimeWriter.Build(embedded), "an attached message as .eml"));
+                    attachments.Add(Made(name, embedded.RawMime ?? MimeWriter.Build(embedded), "an attached message as .eml"));
                 }
             }
             else

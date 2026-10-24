@@ -1,21 +1,25 @@
 using System.Diagnostics.CodeAnalysis;
 using AnyFS.Sdk;
+using AnyFS.Sources.Outlook.Ews;
 using AnyFS.Sources.Outlook.Mail;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Sources.Outlook;
 
 /// <summary>
 /// Outlook / Exchange (type <c>outlook</c>, folder <c>outlook</c>, spec 7.7): a mailbox as folders, a folder per message
 /// holding the message as Markdown and as .eml with its attachments, contacts as .vcf, appointments as .ics. Read-only.
-/// This release reads Outlook's data files (PST and OST); mailboxes on their servers follow.
+/// A mailbox on Exchange Online through the web session (Outlook on the web, no app registration), or an Outlook data
+/// file (PST, OST); Exchange servers follow.
 /// </summary>
-public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable
+public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISettingVisibility
 {
     public string TypeId => "outlook";
 
     public string DisplayName => "Outlook";
 
-    public string Description => "A mailbox from an Outlook data file (.pst or .ost, read while Outlook has it open): its folders by year and month, a folder per message with the message as Markdown and .eml and its attachments, contacts as .vcf, appointments as .ics. Read-only.";
+    public string Description => "A mailbox (Exchange Online, through Outlook on the web with no app registration) or an Outlook data file (.pst or .ost, read while Outlook has it open): its folders by year and month, a folder per message with the message as Markdown and .eml and its attachments, contacts as .vcf, appointments as .ics. Read-only.";
 
     public string TypeFolder => "outlook";
 
@@ -28,16 +32,16 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable
 
     public ISource CreateSource(object settings) => new OutlookSource((OutlookSettings)settings);
 
-    /// <summary>The file's name without its extension ("archive" for archive.pst), or the mailbox address an OST is named after.</summary>
+    /// <summary>The mailbox's address, or the file's name without its extension ("archive" for archive.pst).</summary>
     public string? SuggestName(object settings)
     {
-        var file = ((OutlookSettings)settings).File;
-        if (file is null)
+        var s = (OutlookSettings)settings;
+        if (s.File is null)
         {
             return null;
         }
 
-        var name = Path.GetFileNameWithoutExtension(file.TrimEnd('\\', '/'));
+        var name = s.Kind == OutlookKind.Mailbox ? s.Address! : Path.GetFileNameWithoutExtension(s.File.TrimEnd('\\', '/'));
         var safe = MailNames.Clean(MailNames.Replace(name));
         return safe.Length == 0 ? null : safe;
     }
@@ -45,27 +49,60 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable
     public void NormaliseSettings(object settings)
     {
         var s = (OutlookSettings)settings;
-        s.Path = s.File ?? "";
+        s.Path = s.Kind == OutlookKind.Mailbox ? s.Address! : s.File ?? "";
+    }
+
+    /// <summary>The sign-in fields and the calendar window are a mailbox's; a file has neither.</summary>
+    public bool IsVisible(object settings, string propertyName)
+    {
+        var s = (OutlookSettings)settings;
+        return propertyName switch
+        {
+            nameof(OutlookSettings.SignInMethod) or nameof(OutlookSettings.Cloud) or nameof(OutlookSettings.BrowserPath)
+                or nameof(OutlookSettings.CalendarMonthsBack) or nameof(OutlookSettings.CalendarMonthsAhead) => s.Kind is OutlookKind.Mailbox or OutlookKind.Server,
+            _ => true,
+        };
     }
 
     public IEnumerable<ValidationMessage> Validate(object settings)
     {
         var s = (OutlookSettings)settings;
-        if (s.File is null)
+        switch (s.Kind)
         {
-            yield return new ValidationMessage("Give the path of a .pst or .ost file.", nameof(OutlookSettings.Path));
-        }
-        else if (s.LooksLikeAMailbox)
-        {
-            yield return new ValidationMessage("Mailboxes on a server (an address, Exchange Online, an Exchange server) are not served yet: give the path of a .pst or .ost file. Outlook's offline copy of a mailbox is the .ost under %LOCALAPPDATA%\\Microsoft\\Outlook.", nameof(OutlookSettings.Path));
-        }
-        else if (!s.IsDataFile)
-        {
-            yield return new ValidationMessage("An Outlook data file ends in .pst or .ost.", nameof(OutlookSettings.Path));
-        }
-        else if (!File.Exists(s.File))
-        {
-            yield return new ValidationMessage("No file at that path.", nameof(OutlookSettings.Path), IsError: false);
+            case OutlookKind.None when s.File is null:
+                yield return new ValidationMessage("Give a mailbox's address, or the path of a .pst or .ost file.", nameof(OutlookSettings.Path));
+                break;
+            case OutlookKind.None:
+                yield return new ValidationMessage("That is neither a mailbox's address (jane@contoso.com) nor an Outlook data file (one ends in .pst or .ost).", nameof(OutlookSettings.Path));
+                break;
+            case OutlookKind.Server:
+                yield return new ValidationMessage("Exchange servers (an EWS or Outlook on the web address) are not served yet: give a mailbox's address for Exchange Online, or the path of a .pst or .ost file.", nameof(OutlookSettings.Path));
+                break;
+            case OutlookKind.DataFile when !File.Exists(s.File!):
+                yield return new ValidationMessage("No file at that path.", nameof(OutlookSettings.Path), IsError: false);
+                break;
+            case OutlookKind.Mailbox:
+                if (!string.Equals(s.SignInMethod, OutlookSettings.WebSession, StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return new ValidationMessage($"Sign in with {OutlookSettings.WebSession}.", nameof(OutlookSettings.SignInMethod));
+                }
+
+                if (OwaOrigins.FromChoice(s.Cloud) is null && !string.Equals(s.Cloud?.Trim(), OutlookSettings.CloudAutomatic, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(s.Cloud))
+                {
+                    yield return new ValidationMessage($"Cloud is one of {OutlookSettings.CloudAutomatic}, {OutlookSettings.CloudGlobal}, {OutlookSettings.CloudUsGovernment}.", nameof(OutlookSettings.Cloud));
+                }
+
+                if (s.Browser is { } browser && !File.Exists(browser))
+                {
+                    yield return new ValidationMessage("No browser at that path; leave it empty to find Edge or Chrome automatically.", nameof(OutlookSettings.BrowserPath), IsError: false);
+                }
+
+                if (s.CalendarMonthsBack is < 0 or > 600 || s.CalendarMonthsAhead is < 1 or > 600)
+                {
+                    yield return new ValidationMessage("The calendar window is between 0 and 600 months back and 1 and 600 ahead.", nameof(OutlookSettings.CalendarMonthsBack));
+                }
+
+                break;
         }
 
         if (s.RefreshMinutes is < 0 or > 10080)
@@ -74,61 +111,104 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable
         }
     }
 
-    /// <summary>Opens the file as the source will and says what it holds.</summary>
-    public Task<TestResult> TestAsync(object settings, IProgress<string> progress, CancellationToken ct)
+    public Task<TestResult> TestAsync(object settings, IProgress<string> progress, CancellationToken ct) => TestAsync(settings, progress, null, ct);
+
+    /// <summary>Opens the file, or signs in to the mailbox as the source will (a window where the saved sign-in has lapsed), and says what it holds.</summary>
+    internal async Task<TestResult> TestAsync(object settings, IProgress<string> progress, OutlookStandIn? standIn, CancellationToken ct)
     {
         var s = (OutlookSettings)settings;
         if (Validate(s).FirstOrDefault(m => m.IsError) is { } problem)
         {
-            return Task.FromResult(new TestResult(false, problem.Message));
+            return new TestResult(false, problem.Message);
         }
 
-        if (!File.Exists(s.File!))
+        if (s.Kind == OutlookKind.DataFile)
         {
-            return Task.FromResult(new TestResult(false, $"No file at {s.File}."));
+            return File.Exists(s.File!) ? await Task.Run(() => TestFile(s, progress), ct).ConfigureAwait(false) : new TestResult(false, $"No file at {s.File}.");
         }
 
-        return Task.Run(() =>
+        try
         {
-            try
+            var (service, account, how) = await OutlookSource.ConnectAsync(s, standIn, NullLogger.Instance, interactive: true, progress.Report, ct).ConfigureAwait(false);
+            using (service as IDisposable)
             {
-                progress.Report($"Reading {Path.GetFileName(s.File!)}");
-                using var store = new PstMailStore(s.File!, s.ShowHidden);
-                var folders = 0;
-                var items = 0L;
-                void Count(IReadOnlyList<MailFolder> list)
-                {
-                    foreach (var folder in list)
-                    {
-                        folders++;
-                        items += folder.ItemCount;
-                        Count(folder.Folders);
-                    }
-                }
-
-                Count(store.Folders);
-                var kind = store.Format switch
-                {
-                    LibOutlook.PstFormat.Ansi => "an ANSI PST (Outlook 97-2002)",
-                    LibOutlook.PstFormat.Unicode => "a Unicode PST",
-                    _ => "an OST (Outlook 2013 or later)",
-                };
-                var top = string.Join(", ", store.Folders.Take(6).Select(f => f.Name)) + (store.Folders.Count > 6 ? ", …" : "");
-                return new TestResult(folders > 0, $"{store.Name}: {kind} with {folders:N0} folder{(folders == 1 ? "" : "s")} and {items:N0} item{(items == 1 ? "" : "s")}{(top.Length == 0 ? "" : $" ({top})")}."
-                    + (folders == 0 ? " The source would show nothing." : ""));
+                progress.Report($"Signed in as {account}; listing the folders");
+                var folders = await service.FindFoldersAsync(ct).ConfigureAwait(false);
+                var shown = folders.Where(f => MailItemKinds.IsShownFolder(f.FolderClass, f.Name)).ToList();
+                var inbox = folders.FirstOrDefault(f => f.DistinguishedId == "inbox");
+                var top = string.Join(", ", shown.Where(f => f.ParentId == shown.FirstOrDefault(x => x.DistinguishedId == "inbox")?.ParentId).Take(6).Select(f => f.Name));
+                return new TestResult(folders.Count > 0, $"Signed in as {account} {how}. The mailbox has {shown.Count:N0} folder{(shown.Count == 1 ? "" : "s")}"
+                    + (inbox is null ? "" : $"; the Inbox holds {inbox.TotalCount:N0} item{(inbox.TotalCount == 1 ? "" : "s")}") + (top.Length == 0 ? "." : $" ({top}).")
+                    + (folders.Count == 0 ? " The source would show nothing." : ""));
             }
-            catch (LibOutlook.PstException ex)
-            {
-                return new TestResult(false, $"{Path.GetFileName(s.File!)} could not be read as an Outlook data file: {ex.Message}");
-            }
-            catch (IOException ex)
-            {
-                return new TestResult(false, ex.Message);
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                return new TestResult(false, ex.Message);
-            }
-        }, ct);
+        }
+        catch (SignInRequiredException ex)
+        {
+            return new TestResult(false, ex.Message);
+        }
+        catch (EwsException ex)
+        {
+            return new TestResult(false, ex.Message);
+        }
+        catch (HttpRequestException ex)
+        {
+            return new TestResult(false, ex.Message);
+        }
+        catch (SourceFailedException ex)
+        {
+            return new TestResult(false, ex.Message);
+        }
     }
+
+    private static TestResult TestFile(OutlookSettings s, IProgress<string> progress)
+    {
+        try
+        {
+            progress.Report($"Reading {Path.GetFileName(s.File!)}");
+            using var store = new PstMailStore(s.File!, s.ShowHidden);
+            var folders = 0;
+            var items = 0L;
+            void Count(IReadOnlyList<MailFolder> list)
+            {
+                foreach (var folder in list)
+                {
+                    folders++;
+                    items += folder.ItemCount;
+                    Count(folder.Folders);
+                }
+            }
+
+            Count(store.Folders);
+            var kind = store.Format switch
+            {
+                LibOutlook.PstFormat.Ansi => "an ANSI PST (Outlook 97-2002)",
+                LibOutlook.PstFormat.Unicode => "a Unicode PST",
+                _ => "an OST (Outlook 2013 or later)",
+            };
+            var top = string.Join(", ", store.Folders.Take(6).Select(f => f.Name)) + (store.Folders.Count > 6 ? ", …" : "");
+            return new TestResult(folders > 0, $"{store.Name}: {kind} with {folders:N0} folder{(folders == 1 ? "" : "s")} and {items:N0} item{(items == 1 ? "" : "s")}{(top.Length == 0 ? "" : $" ({top})")}."
+                + (folders == 0 ? " The source would show nothing." : ""));
+        }
+        catch (LibOutlook.PstException ex)
+        {
+            return new TestResult(false, $"{Path.GetFileName(s.File!)} could not be read as an Outlook data file: {ex.Message}");
+        }
+        catch (IOException ex)
+        {
+            return new TestResult(false, ex.Message);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return new TestResult(false, ex.Message);
+        }
+    }
+
+    /// <summary>Where a mailbox's web-session profile lives: one per address.</summary>
+    internal static string ProfileDir(string address) => WebSignInTarget.ProfileFor("outlook-browser", address, "ANYFS_OUTLOOK_PROFILES");
+
+    /// <summary>The browser the web session drives, or null when there is none.</summary>
+    internal static string? BrowserFor(OutlookSettings s) => BrowserLocator.Find(s.Browser, "ANYFS_OUTLOOK_BROWSER");
+
+    /// <summary>A logger for the plugin's own work.</summary>
+    internal static ILogger NoLogger => NullLogger.Instance;
 }

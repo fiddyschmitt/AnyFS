@@ -1,0 +1,309 @@
+using System.Net;
+using System.Text;
+using AnyFS.Sdk;
+using AnyFS.Sdk.Testing;
+using AnyFS.Sources.Outlook;
+using AnyFS.Sources.Outlook.Ews;
+
+namespace AnyFS.Sources.Tests;
+
+/// <summary>The mailbox store over the fake Exchange: the web session's shapes (spec 7.7.2) without the sandbox.</summary>
+[TestClass]
+public class OutlookWebSessionTests
+{
+    private static OutlookSettings Settings(bool hidden = false) => new() { Path = FakeExchange.Account, ShowHidden = hidden, RefreshMinutes = 0, CalendarMonthsBack = 12, CalendarMonthsAhead = 3 };
+
+    private static async Task<(OutlookSource Source, TestSourceContext Context)> StartAsync(FakeExchange fake, bool hidden = false)
+    {
+        var context = new TestSourceContext("outlook");
+        var source = new OutlookSource(Settings(hidden), fake.StandIn());
+        await source.InitialiseAsync(context, CancellationToken.None);
+        return (source, context);
+    }
+
+    [TestMethod]
+    public void AnAddressIsAMailboxAndAnAddressOfAServerIsNotYet()
+    {
+        var plugin = new OutlookPlugin();
+        var mailbox = new OutlookSettings { Path = " Jane@Contoso.com " };
+        Assert.AreEqual(OutlookKind.Mailbox, mailbox.Kind);
+        Assert.AreEqual("jane@contoso.com", plugin.SuggestName(mailbox));
+        plugin.NormaliseSettings(mailbox);
+        Assert.AreEqual("jane@contoso.com", mailbox.Path);
+        Assert.AreEqual(0, plugin.Validate(mailbox).Count(m => m.IsError), string.Join("; ", plugin.Validate(mailbox).Select(m => m.Message)));
+        Assert.IsTrue(plugin.IsVisible(mailbox, nameof(OutlookSettings.Cloud)));
+        Assert.IsFalse(plugin.IsVisible(new OutlookSettings { Path = @"C:\a.pst" }, nameof(OutlookSettings.Cloud)));
+
+        var server = new OutlookSettings { Path = "https://mail.contoso.com/EWS/Exchange.asmx" };
+        Assert.AreEqual(OutlookKind.Server, server.Kind);
+        StringAssert.Contains(plugin.Validate(server).Single(m => m.IsError).Message, "not served yet");
+        Assert.AreEqual(OutlookKind.None, new OutlookSettings { Path = "not an address" }.Kind);
+        Assert.AreEqual(OutlookKind.DataFile, new OutlookSettings { Path = @"C:\mail\archive.ost" }.Kind);
+    }
+
+    [TestMethod]
+    public async Task TheTestButtonSignsInAndCountsTheFolders()
+    {
+        var fake = FakeExchange.Mailbox();
+        var result = await new OutlookPlugin().TestAsync(Settings(), new Progress<string>(), fake.StandIn(), CancellationToken.None);
+        Assert.IsTrue(result.Success, result.Message);
+        StringAssert.StartsWith(result.Message, $"Signed in as {FakeExchange.Account} through the web session");
+        StringAssert.Contains(result.Message, "the Inbox holds 3 items");
+        StringAssert.Contains(result.Message, "Inbox");
+        CollectionAssert.AreEqual(new[] { "FindFolder" }, fake.Actions);
+    }
+
+    [TestMethod]
+    public async Task TheMailboxTreeLeavesOutlooksOwnFoldersOut()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            Assert.IsFalse(fake.Actions.Contains("GetItem"), "no item is opened to build the tree");
+            Assert.AreEqual(1, fake.Actions.Count(a => a == "FindFolder"));
+            Assert.AreEqual(6, fake.Actions.Count(a => a == "SyncFolderItems"), "each shown folder but the calendar was synced once: " + string.Join(",", fake.Actions));
+            Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+            var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
+            CollectionAssert.AreEquivalent(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, root);
+            CollectionAssert.AreEquivalent(new[] { "Adele Vance.vcf" }, (await OutlookFixtures.ListAsync(source, "Contacts")).Select(e => e.Name).ToList(), "the Recipient Cache under Contacts is Outlook's own");
+            Assert.AreEqual(1, fake.Actions.Count(a => a == "GetItem"), "a contact is opened for its card's size when its folder is listed");
+            CollectionAssert.AreEquivalent(new[] { "2026", "Projects" }, (await OutlookFixtures.ListAsync(source, "Inbox")).Select(e => e.Name).ToList());
+            CollectionAssert.AreEquivalent(new[] { "03", "04" }, (await OutlookFixtures.ListAsync(source, "Inbox/2026")).Select(e => e.Name).ToList());
+        }
+
+        var (all, context2) = await StartAsync(fake, hidden: true);
+        await using (all)
+        using (context2)
+        {
+            var root = (await OutlookFixtures.ListAsync(all, "")).Select(e => e.Name).ToList();
+            CollectionAssert.IsSubsetOf(new[] { "Conversation Action Settings", "Yammer Root" }, root);
+            CollectionAssert.Contains((await OutlookFixtures.ListAsync(all, "Contacts")).Select(e => e.Name).ToList(), "Recipient Cache");
+        }
+    }
+
+    [TestMethod]
+    public async Task AMessageIsServedWithTheServersOwnMime()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            var month = await OutlookFixtures.ListAsync(source, "Inbox/2026/03");
+            Assert.AreEqual(2, month.Count);
+            var figures = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
+            StringAssert.Contains(VfsPath.Name(figures), " - Adele Vance - ");
+            var name = VfsPath.Name(figures);
+            var files = await OutlookFixtures.ListAsync(source, figures);
+            CollectionAssert.AreEquivalent(new[] { name + ".md", name + ".eml", "attachments" }, files.Select(e => e.Name).ToList());
+
+            var eml = await OutlookFixtures.ReadAsync(source, $"{figures}/{name}.eml");
+            var text = Encoding.ASCII.GetString(eml);
+            StringAssert.Contains(text, "\r\nSubject: Quarterly figures\r\n");
+            StringAssert.Contains(text, "From: Adele Vance <adelev@fake.test>");
+            StringAssert.Contains(text, Convert.ToBase64String(Encoding.ASCII.GetBytes("quarter,amount\nQ3,42\nQ4,58\n")), "the MIME came from the server whole");
+            Assert.AreEqual(1, fake.Actions.Count(a => a == "GetItem"), "one GetItem, MIME included, serves the folder");
+
+            var markdown = await OutlookFixtures.TextAsync(source, $"{figures}/{name}.md");
+            StringAssert.Contains(markdown, "**From:** Adele Vance <adelev@fake.test>");
+            StringAssert.Contains(markdown, "**To:** Jane <jane@fake.test>");
+            StringAssert.Contains(markdown, "[figures.csv](attachments/figures.csv) (27 bytes)");
+            StringAssert.Contains(markdown, "\n---\n\nFigures attached.");
+
+            var csv = await OutlookFixtures.ReadAsync(source, $"{figures}/attachments/figures.csv");
+            Assert.AreEqual("quarter,amount\nQ3,42\nQ4,58\n", Encoding.ASCII.GetString(csv));
+            Assert.AreEqual(1, fake.Actions.Count(a => a == "GetAttachment"), "the attachment is fetched when read, not when listed");
+            Assert.IsNull(await source.StatAsync("Inbox/2026/03/nothing here", CancellationToken.None));
+        }
+    }
+
+    [TestMethod]
+    public async Task InlineImagesAndAttachedMessagesComeFromTheServer()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            var photo = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Photo from the site visit");
+            var markdown = await OutlookFixtures.TextAsync(source, $"{photo}/{VfsPath.Name(photo)}.md");
+            StringAssert.Contains(markdown, "![](attachments/dot.png)");
+            Assert.AreEqual(70, (await OutlookFixtures.ReadAsync(source, $"{photo}/attachments/dot.png")).Length);
+
+            var forwarded = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/04", "Fwd: Photo from the site visit");
+            var attachments = await OutlookFixtures.ListAsync(source, $"{forwarded}/attachments");
+            Assert.AreEqual("Photo from the site visit.eml", attachments.Single().Name);
+            var nested = await OutlookFixtures.TextAsync(source, $"{forwarded}/attachments/Photo from the site visit.eml");
+            StringAssert.Contains(nested, "\r\nSubject: Photo from the site visit\r\n");
+            StringAssert.Contains(nested, "Content-ID: <site-dot>");
+        }
+    }
+
+    [TestMethod]
+    public async Task TheCalendarIsAViewOfOccurrencesAndContactsAreCards()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            var october = await OutlookFixtures.ListAsync(source, "Calendar/2026/10");
+            Assert.AreEqual(4, october.Count, string.Join(", ", october.Select(e => e.Name)));
+            Assert.AreEqual(3, october.Count(e => e.Name.EndsWith(" - Stand-up", StringComparison.Ordinal)), "each occurrence the server expanded is a folder");
+            var review = await OutlookFixtures.ItemFolderAsync(source, "Calendar/2026/10", "Design review");
+            // folded at 75 octets as RFC 5545 asks; unfolded here to read it whole
+            var ics = (await OutlookFixtures.TextAsync(source, $"{review}/event.ics")).Replace("\r\n ", "", StringComparison.Ordinal);
+            StringAssert.Contains(ics, "\r\nSUMMARY:Design review\r\n");
+            StringAssert.Contains(ics, "\r\nLOCATION:Room 4\r\n");
+            StringAssert.Contains(ics, "\r\nDTSTART:20261027T040000Z\r\n");
+            StringAssert.Contains(ics, "\r\nORGANIZER;CN=\"Adele Vance\":mailto:adelev@fake.test\r\n");
+            StringAssert.Contains(ics, "ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED;CN=\"Jane\":mailto:jane@fake.test");
+            var md = await OutlookFixtures.TextAsync(source, $"{review}/event.md");
+            StringAssert.Contains(md, "**Attendees:** Jane <jane@fake.test> (accepted)");
+            Assert.IsTrue(fake.Actions.Count(a => a == "FindItem") >= 2, "a calendar view a year at a time");
+
+            var card = await OutlookFixtures.TextAsync(source, "Contacts/Adele Vance.vcf");
+            StringAssert.Contains(card, "\r\nFN:Adele Vance\r\n");
+            StringAssert.Contains(card, "\r\nEMAIL;TYPE=INTERNET,PREF:adelev@fake.test\r\n");
+            StringAssert.Contains(card, "\r\nTEL;TYPE=WORK,VOICE:+1 555 0100\r\n");
+            StringAssert.Contains(card, "\r\nORG:Contoso\r\n");
+        }
+    }
+
+    [TestMethod]
+    public async Task ARefreshTakesInWhatChangedThroughTheFolderDelta()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            var before = await OutlookFixtures.ListAsync(source, "Inbox/2026/04");
+            Assert.AreEqual(1, before.Count);
+            var syncsBefore = fake.Actions.Count(a => a == "SyncFolderItems");
+
+            var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
+            var added = fake.AddMessage(inbox, "New since the start", ("Alex Wilber", "alexw@fake.test"), new DateTimeOffset(2026, 4, 20, 12, 0, 0, TimeSpan.Zero), "<p>News.</p>", []);
+            await source.RefreshAsync(CancellationToken.None);
+            var after = (await OutlookFixtures.ListAsync(source, "Inbox/2026/04")).Select(e => e.Name).ToList();
+            Assert.AreEqual(2, after.Count, string.Join(", ", after));
+            Assert.IsTrue(after.Any(n => n.EndsWith(" - Alex Wilber - New since the start", StringComparison.Ordinal)));
+            Assert.AreEqual(syncsBefore + 6, fake.Actions.Count(a => a == "SyncFolderItems"), "one delta call per synced folder (the calendar is a view), no full listing");
+            Assert.AreEqual(2, fake.Actions.Count(a => a == "FindFolder"));
+
+            fake.Delete(added);
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(1, (await OutlookFixtures.ListAsync(source, "Inbox/2026/04")).Count);
+        }
+    }
+
+    [TestMethod]
+    public async Task ARefusedTokenIsRenewedOnceAndAHoldIsWaitedOut()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            fake.RotateToken();
+            var folder = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
+            var eml = await OutlookFixtures.TextAsync(source, $"{folder}/{VfsPath.Name(folder)}.eml");
+            StringAssert.Contains(eml, "Subject: Quarterly figures");
+            Assert.AreEqual(1, fake.Refusals, "the old token was refused once; the stand-in handed over the new one");
+            Assert.AreEqual(ComponentHealth.Ready, context.LastHealth ?? ComponentHealth.Ready);
+
+            var held = 0;
+            fake.Intercept = (request, action) =>
+            {
+                if (action == "GetAttachment" && held++ == 0)
+                {
+                    var busy = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+                    busy.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(200));
+                    return busy;
+                }
+
+                return null;
+            };
+            var csv = await OutlookFixtures.ReadAsync(source, $"{folder}/attachments/figures.csv");
+            Assert.AreEqual(27, csv.Length);
+            Assert.AreEqual(2, held, "the request was held once and then sent again");
+        }
+    }
+
+    [TestMethod]
+    public async Task AnItemThatIsGoneIsNotFoundAndATokenRefusedForGoodIsDegraded()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            var folder = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
+            var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
+            var figures = inbox.Changes.Select(c => c.ItemId).First();
+            fake.Delete(new FakeExchange.Item(figures, inbox.Id, "Message", "IPM.Note"));
+            var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, $"{folder}/{VfsPath.Name(folder)}.eml"));
+            Assert.AreEqual(VfsError.NotFound, ex.Error);
+
+            fake.Intercept = (_, _) =>
+            {
+                var refused = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+                refused.Headers.WwwAuthenticate.ParseAdd("Bearer");
+                return refused;
+            };
+            var other = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Photo from the site visit");
+            var refusedTwice = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, $"{other}/{VfsPath.Name(other)}.eml"));
+            Assert.AreEqual(VfsError.Unavailable, refusedTwice.Error);
+            Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+        }
+    }
+
+    [TestMethod]
+    public void TheTokensClaimsAreRead()
+    {
+        static string Jwt(string payloadJson) => "h." + Convert.ToBase64String(Encoding.UTF8.GetBytes(payloadJson)).TrimEnd('=').Replace('+', '-').Replace('/', '_') + ".s";
+        var (account, expires) = OwaTokenSession.Claims(Jwt("""{"upn":"jane@contoso.com","exp":1800000000}"""));
+        Assert.AreEqual("jane@contoso.com", account);
+        Assert.AreEqual(DateTimeOffset.FromUnixTimeSeconds(1800000000), expires);
+        Assert.AreEqual(("jane@contoso.com", (DateTimeOffset?)null), OwaTokenSession.Claims(Jwt("""{"preferred_username":"jane@contoso.com"}""")));
+        Assert.AreEqual(((string?)null, (DateTimeOffset?)null), OwaTokenSession.Claims("not a token"));
+    }
+
+    [TestMethod]
+    public void TheCloudComesFromTheChoiceOrTheAddress()
+    {
+        Assert.AreEqual(OwaOrigins.Global, OwaOrigins.FromChoice(OutlookSettings.CloudGlobal));
+        Assert.AreEqual(OwaOrigins.UsGovernment, OwaOrigins.FromChoice(OutlookSettings.CloudUsGovernment));
+        Assert.IsNull(OwaOrigins.FromChoice(OutlookSettings.CloudAutomatic));
+        Assert.AreEqual(OwaOrigins.UsGovernment, OwaOrigins.DetectAsync("jane@contoso.onmicrosoft.us", null, CancellationToken.None).Result, "a .onmicrosoft.us address needs no lookup");
+    }
+
+    /// <summary>The sandbox mailbox through a real browser profile: set ANYFS_TEST_OWA_MAILBOX (the address) and ANYFS_OUTLOOK_PROFILES (where a signed-in profile for it is).</summary>
+    [TestMethod]
+    public async Task TheSandboxMailboxIsServedThroughTheWebSession()
+    {
+        var address = Environment.GetEnvironmentVariable("ANYFS_TEST_OWA_MAILBOX");
+        if (string.IsNullOrEmpty(address) || string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ANYFS_OUTLOOK_PROFILES")))
+        {
+            Assert.Inconclusive("set ANYFS_TEST_OWA_MAILBOX and ANYFS_OUTLOOK_PROFILES to run against a signed-in profile");
+        }
+
+        using var context = new TestSourceContext("outlook");
+        await using var source = new OutlookSource(new OutlookSettings { Path = address!, RefreshMinutes = 0, CalendarMonthsBack = 12, CalendarMonthsAhead = 3 });
+        await source.InitialiseAsync(context, CancellationToken.None);
+        var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
+        CollectionAssert.IsSubsetOf(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, root);
+        var years = await OutlookFixtures.ListAsync(source, "Inbox");
+        Assert.IsTrue(years.Count > 0);
+        var months = await OutlookFixtures.ListAsync(source, VfsPath.Join("Inbox", years.First(e => e.Name.Length == 4).Name));
+        var items = await OutlookFixtures.ListAsync(source, VfsPath.Join(VfsPath.Join("Inbox", years.First(e => e.Name.Length == 4).Name), months[0].Name));
+        Assert.IsTrue(items.Count > 0);
+        var first = VfsPath.Join(VfsPath.Join(VfsPath.Join("Inbox", years.First(e => e.Name.Length == 4).Name), months[0].Name), items[0].Name);
+        var files = await OutlookFixtures.ListAsync(source, first);
+        var eml = files.Single(f => f.Name.EndsWith(".eml", StringComparison.Ordinal));
+        var text = await OutlookFixtures.TextAsync(source, VfsPath.Join(first, eml.Name));
+        StringAssert.Contains(text, "\r\nSubject: ");
+    }
+}
