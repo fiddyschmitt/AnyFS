@@ -747,7 +747,7 @@ internal sealed partial class ThreeDXClient
         var detail = Detail(body);
         return status switch
         {
-            HttpStatusCode.NotFound => new VfsException(VfsError.NotFound, $"3DX has no {what}{detail}"),
+            HttpStatusCode.NotFound => new VfsException(VfsError.NotFound, $"3DX answered the request for {what} with 404 (not found){detail}"),
             HttpStatusCode.Forbidden or HttpStatusCode.Unauthorized => new VfsException(VfsError.AccessDenied, $"3DX refused the request for {what} ({(int)status}){detail}"),
             HttpStatusCode.BadRequest => new VfsException(VfsError.InvalidPath, $"3DX rejected the request for {what}{detail}"),
             _ when (int)status >= 500 || status == HttpStatusCode.TooManyRequests => VfsException.Unavailable($"3DX answered the request for {what} with {(int)status}{detail}"),
