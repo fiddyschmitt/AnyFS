@@ -28,30 +28,52 @@ internal enum CellKind
 /// A table context ([MS-PST] 2.3.4): rows of fixed layout (the TCINFO's columns), each with a cell-existence bitmap,
 /// kept in the node's heap when small or in a subnode's data blocks when not; a row index BTH maps row ids to rows.
 /// Folder hierarchies and contents, recipients and attachments are such tables.
+///
+/// In the 4 KiB OST format Outlook keeps some columns of a folder's contents table (the sender's name and the
+/// conversation id: what its views group and sort by) in a <em>column store</em>: a subnode of the table holding a
+/// heap of client signature 0xA5 with one allocation per value, the row's cell an HID into that heap rather than the
+/// table's own. [MS-PST] does not describe it, and a 7C column definition has no room to name its store (libpff's
+/// notes on the 0xAC table show the shape with a store named per column), so each store is placed from the rows
+/// themselves: see <see cref="FindStores"/>. Read as the table's heap, such a cell gives another value or none: a
+/// real OST listed one sender in five as another mail's subject or as noise (25-Oct-2026).
 /// </summary>
 internal sealed class TableContext
 {
     private const byte ClientSignature = 0x7C;
+    private const byte StoreSignature = 0xA5;
+
+    /// <summary>The subnode ids Outlook has been seen to keep column stores under, for a table whose rows cannot place them (an empty folder's, a damaged item's).</summary>
+    private static readonly Dictionary<uint, ushort> KnownStores = new()
+    {
+        [0x521] = 0x3013,   // PidTagConversationId
+        [0x541] = 0x0042,   // PidTagSentRepresentingName
+    };
 
     private readonly NodeContext _node;
     private readonly HeapNode _heap;
+    private readonly Func<uint, IPropertySource?>? _openRow;
     private readonly List<TableColumn> _columns = [];
     private readonly Dictionary<ushort, TableColumn> _byId = [];
     private readonly int _rowSize;
     private readonly int _bitmapOffset;
     private readonly uint _rowsHnid;
     private readonly Lazy<List<(uint RowId, byte[] Block, int Offset)>> _rows;
+    private readonly Lazy<Dictionary<ushort, HeapNode>> _stores;
 
-    public TableContext(NodeContext node)
-        : this(node, HeapOf(node))
+    /// <param name="node">The table's node.</param>
+    /// <param name="openRow">A row's own properties by its row id (an item's, for a folder's table), for placing the table's column stores; null when the rows are no nodes of their own.</param>
+    public TableContext(NodeContext node, Func<uint, IPropertySource?>? openRow = null)
+        : this(node, HeapOf(node), openRow)
     {
     }
 
     /// <summary>Reads the table's columns and row index; a fault says which node it is in.</summary>
-    private TableContext(NodeContext node, HeapNode heap)
+    private TableContext(NodeContext node, HeapNode heap, Func<uint, IPropertySource?>? openRow)
     {
         _node = node;
         _heap = heap;
+        _openRow = openRow;
+        _stores = new Lazy<Dictionary<ushort, HeapNode>>(FindStores);
         try
         {
             if (_heap.ClientSignature != ClientSignature)
@@ -100,10 +122,10 @@ internal sealed class TableContext
     }
 
     /// <summary>The node's table, or null when the node holds some other kind of heap (a search folder's contents are not a TC).</summary>
-    public static TableContext? TryOpen(NodeContext node)
+    public static TableContext? TryOpen(NodeContext node, Func<uint, IPropertySource?>? openRow = null)
     {
         var heap = HeapOf(node);
-        return heap.ClientSignature == ClientSignature ? new TableContext(node, heap) : null;
+        return heap.ClientSignature == ClientSignature ? new TableContext(node, heap, openRow) : null;
     }
 
     private static HeapNode HeapOf(NodeContext node)
@@ -179,7 +201,9 @@ internal sealed class TableContext
         var hnid = BinaryPrimitives.ReadUInt32LittleEndian(block.AsSpan(at));
         try
         {
-            return (CellKind.Value, PropertyContext.ResolveHnid(_node, _heap, hnid));
+            // a column with a store of its own: the cell's HID is into the store's heap, not the table's
+            var heap = (hnid & 0x1F) == 0 && _stores.Value.TryGetValue(id, out var store) ? store : _heap;
+            return (CellKind.Value, PropertyContext.ResolveHnid(_node, heap, hnid));
         }
         catch (PstException ex)
         {
@@ -188,9 +212,158 @@ internal sealed class TableContext
         }
     }
 
+    /// <summary>A set cell's first four bytes as stored, for diagnostics.</summary>
+    internal uint? CellReference(byte[] block, int rowOffset, ushort id)
+    {
+        if (!_byId.TryGetValue(id, out var column) || !HasCell(block, rowOffset, id) || column.Size < 4 || rowOffset + column.Offset + 4 > block.Length)
+        {
+            return null;
+        }
+
+        return BinaryPrimitives.ReadUInt32LittleEndian(block.AsSpan(rowOffset + column.Offset));
+    }
+
+    /// <summary>The row blocks' sizes and the row size, for diagnostics.</summary>
+    internal (int RowSize, IReadOnlyList<int> BlockSizes) RowLayout => (_rowSize, _rows.Value.Select(r => r.Block).Distinct().Select(b => b.Length).ToList());
+
     internal ushort TypeOf(ushort id) => _byId.TryGetValue(id, out var c) ? c.Type : (ushort)0;
 
     internal bool HasColumn(ushort id) => _byId.ContainsKey(id);
+
+    /// <summary>
+    /// The table's column stores, by column. Each store is placed from the rows: a column whose set cell, taken as an
+    /// HID into the store, gives the row's own value of the property while the table's heap gives something else or
+    /// nothing is the store's (three rows are asked, the first that read). A store the rows cannot place (an empty
+    /// folder's, rows that do not read) takes the subnode id Outlook has been seen to use; one that neither places is
+    /// noted among the table's missing values and left, its column's cells read from the table's heap as before.
+    /// </summary>
+    private Dictionary<ushort, HeapNode> FindStores()
+    {
+        var found = new Dictionary<ushort, HeapNode>();
+        List<(uint Nid, HeapNode Heap)> stores;
+        try
+        {
+            stores = ColumnStores();
+        }
+        catch (PstException)
+        {
+            return found;
+        }
+
+        if (stores.Count == 0)
+        {
+            return found;
+        }
+
+        var candidates = _columns.Where(c => c.Size == 4 && PropertyValues.FixedSize(c.Type) is 0 or > 8).ToList();
+        var votes = new Dictionary<(uint Nid, ushort Column), int>();
+        try
+        {
+            var sampled = 0;
+            foreach (var (rowId, block, offset) in _rows.Value)
+            {
+                if (sampled >= 3 || _openRow is null)
+                {
+                    break;
+                }
+
+                var own = _openRow(rowId);
+                if (own is null)
+                {
+                    continue;
+                }
+
+                sampled++;
+                foreach (var column in candidates)
+                {
+                    if (!HasCell(block, offset, column.Id))
+                    {
+                        continue;
+                    }
+
+                    var hnid = BinaryPrimitives.ReadUInt32LittleEndian(block.AsSpan(offset + column.Offset));
+                    if (hnid == 0 || (hnid & 0x1F) != 0 || own.Get(column.Id)?.Bytes is not { } value)
+                    {
+                        continue;
+                    }
+
+                    foreach (var (nid, heap) in stores)
+                    {
+                        if (Resolves(heap, hnid) is { } fromStore && fromStore.AsSpan().SequenceEqual(value) && !(Resolves(_heap, hnid) is { } fromTable && fromTable.AsSpan().SequenceEqual(value)))
+                        {
+                            votes[(nid, column.Id)] = votes.GetValueOrDefault((nid, column.Id)) + 1;
+                        }
+                    }
+                }
+            }
+        }
+        catch (PstException)
+        {
+            // what was sampled before the fault still counts
+        }
+
+        foreach (var (nid, heap) in stores)
+        {
+            var placed = votes.Where(v => v.Key.Nid == nid).OrderByDescending(v => v.Value).Select(v => v.Key.Column).ToList();
+            ushort? column = placed.Count switch
+            {
+                1 => placed[0],
+                > 1 when votes[(nid, placed[0])] > votes[(nid, placed[1])] => placed[0],
+                _ => null,
+            };
+            column ??= KnownStores.TryGetValue(nid, out var known) && _byId.ContainsKey(known) ? known : null;
+            if (column is { } id && !found.ContainsKey(id))
+            {
+                found[id] = heap;
+            }
+            else
+            {
+                _node.Missing.Add($"{_node.Where}: a column store (subnode 0x{nid:X}, {heap.Pages().Sum(p => p.Allocations)} values) that no column could be placed in, so its column's cells read from the table's heap");
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>The table's column stores as they are in the file: its internal subnodes holding a heap of client signature 0xA5 with values in it.</summary>
+    private List<(uint Nid, HeapNode Heap)> ColumnStores()
+    {
+        var stores = new List<(uint, HeapNode)>();
+        foreach (var (nid, entry) in _node.Subnodes)
+        {
+            if (NodeId.TypeOf(nid) != NodeId.TypeInternal)
+            {
+                continue;
+            }
+
+            var blocks = _node.Blocks.ReadDataBlocks(entry.BidData);
+            if (blocks.Count == 0 || blocks[0].Length < 12 || blocks[0][2] != 0xEC || blocks[0][3] != StoreSignature)
+            {
+                continue;
+            }
+
+            var heap = new HeapNode(blocks, _node.WideHids);
+            if (heap.Pages().Any(p => p.Allocations > 0))
+            {
+                stores.Add((nid, heap));
+            }
+        }
+
+        return stores;
+    }
+
+    /// <summary>What an HID names in a heap, or null when it names nothing there.</summary>
+    private static byte[]? Resolves(HeapNode heap, uint hid)
+    {
+        try
+        {
+            return heap.Get(hid).ToArray();
+        }
+        catch (PstException)
+        {
+            return null;
+        }
+    }
 
     private List<(uint RowId, byte[] Block, int Offset)> LocateRows(BTreeOnHeap rowIndex)
     {
@@ -291,6 +464,9 @@ internal sealed class TableRow : IPropertySource
 
     /// <summary>Whether the table has the column and whether the row's cell is set, its value not read (Value for a set cell).</summary>
     public CellKind State(ushort id) => !_table.HasColumn(id) ? CellKind.NoColumn : _table.HasCell(_block, _offset, id) ? CellKind.Value : CellKind.Unset;
+
+    /// <summary>The cell's four bytes as stored (an HNID for a variable-size column), for diagnostics; null when the cell is not set.</summary>
+    internal uint? Reference(ushort id) => _table.CellReference(_block, _offset, id);
 
     public IEnumerable<RawProperty> All()
     {

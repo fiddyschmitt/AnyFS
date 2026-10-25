@@ -169,6 +169,18 @@ internal sealed class HeapNode
         return new ArraySegment<byte>(block, start, end - start);
     }
 
+    /// <summary>The heap's blocks as pages: each one's size, how many allocations its page map counts and how many of them are freed (for diagnostics).</summary>
+    internal IEnumerable<(int Index, int Size, int Allocations, int Freed)> Pages()
+    {
+        for (var b = 0; b < _blocks.Count; b++)
+        {
+            var block = _blocks[b];
+            int map = block.Length >= 2 ? BinaryPrimitives.ReadUInt16LittleEndian(block) : 0;
+            var inRange = map + 4 <= block.Length;
+            yield return (b, block.Length, inRange ? BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(map)) : -1, inRange ? BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(map + 2)) : -1);
+        }
+    }
+
     /// <summary>
     /// For an HID past its block's allocations, what the heap's other blocks hold of that number, to tell where such
     /// references point: " (a heap of 12 blocks; allocation 675 is in blocks 3 (52 bytes), 7 (18 bytes))".

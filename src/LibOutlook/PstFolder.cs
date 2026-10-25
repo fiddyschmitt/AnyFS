@@ -121,6 +121,19 @@ public sealed class PstFolder
     private TableContext? Table(uint type)
     {
         var node = _file.FindNode(NodeId.WithType(Nid, type));
-        return node is null ? null : TableContext.TryOpen(_file.Context(node.Value));
+        return node is null ? null : TableContext.TryOpen(_file.Context(node.Value), OpenRow);
+    }
+
+    /// <summary>A row's own properties (an item's, a subfolder's), for a table to place its column stores by; null when the row is no node, or does not read.</summary>
+    private IPropertySource? OpenRow(uint nid)
+    {
+        try
+        {
+            return _file.FindNode(nid) is { } node ? new PropertyContext(_file.Context(node)) : null;
+        }
+        catch (PstException)
+        {
+            return null;
+        }
     }
 }

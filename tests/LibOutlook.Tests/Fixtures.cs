@@ -22,6 +22,9 @@ internal static class Fixtures
         return LabCapture("anyfs-tester-clean.ost");
     }
 
+    /// <summary>The OST copied after Outlook quit, whatever LIBOUTLOOK_TEST_OST says, when the capture is on this machine.</summary>
+    public static string? CleanOst() => LabCapture("anyfs-tester-clean.ost");
+
     /// <summary>The same OST copied while Outlook had it open (through a mapped view), when the capture is on this machine.</summary>
     public static string? LiveOst() => LabCapture("anyfs-tester-live.ost");
 
