@@ -255,7 +255,8 @@ public class OutlookGraphTests
     /// <summary>
     /// The sandbox's test mailbox through Graph: set ANYFS_TEST_GRAPH_MAILBOX (anyfs-tester@…), and sign in once with
     /// tests/fixtures/SharePointSignIn --account &lt;it&gt; --scopes mail (ANYFS_TEST_GRAPH_CACHE names the file, else its
-    /// default). The sandbox's administrator must have consented to Mail.Read, Calendars.Read and Contacts.Read for AnyFS.
+    /// default; ANYFS_TEST_GRAPH_LOG names a file for the source's log). The sandbox's administrator must have consented to
+    /// Mail.Read, Calendars.Read and Contacts.Read for AnyFS.
     /// </summary>
     [TestMethod]
     public async Task TheSandboxMailboxIsServedThroughGraph()
@@ -276,7 +277,7 @@ public class OutlookGraphTests
 
         var settings = new OutlookSettings { Path = address!, SignInMethod = OutlookSettings.AppDeviceCode, RefreshMinutes = 0, CalendarMonthsBack = 12, CalendarMonthsAhead = 3 };
         EntraSignIn.Remember(settings.EffectiveClientId, settings.TenantIn(MicrosoftCloud.Global), settings.Address, saved);
-        using var context = new TestSourceContext("outlook");
+        using var context = new TestSourceContext("outlook", Environment.GetEnvironmentVariable("ANYFS_TEST_GRAPH_LOG") is { Length: > 0 } log ? new SpoTestServer.FileLogger(log) : null);
         await using var source = new OutlookSource(settings);
         await source.InitialiseAsync(context, CancellationToken.None);
         CollectionAssert.IsSubsetOf(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList());

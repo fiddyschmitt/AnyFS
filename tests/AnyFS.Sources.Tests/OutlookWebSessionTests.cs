@@ -285,7 +285,7 @@ public class OutlookWebSessionTests
         Assert.AreSame(MicrosoftCloud.UsGovernment, MicrosoftCloud.FindAsync("jane@contoso.onmicrosoft.us", null, CancellationToken.None).Result, "a .onmicrosoft.us address needs no lookup");
     }
 
-    /// <summary>The sandbox mailbox through a real browser profile: set ANYFS_TEST_OWA_MAILBOX (the address) and ANYFS_OUTLOOK_PROFILES (where a signed-in profile for it is).</summary>
+    /// <summary>The sandbox mailbox through a real browser profile: set ANYFS_TEST_OWA_MAILBOX (the address) and ANYFS_OUTLOOK_PROFILES (where a signed-in profile for it is); ANYFS_TEST_OWA_LOG names a file for the source's log.</summary>
     [TestMethod]
     public async Task TheSandboxMailboxIsServedThroughTheWebSession()
     {
@@ -295,7 +295,7 @@ public class OutlookWebSessionTests
             Assert.Inconclusive("set ANYFS_TEST_OWA_MAILBOX and ANYFS_OUTLOOK_PROFILES to run against a signed-in profile");
         }
 
-        using var context = new TestSourceContext("outlook");
+        using var context = new TestSourceContext("outlook", Environment.GetEnvironmentVariable("ANYFS_TEST_OWA_LOG") is { Length: > 0 } log ? new SpoTestServer.FileLogger(log) : null);
         await using var source = new OutlookSource(new OutlookSettings { Path = address!, RefreshMinutes = 0, CalendarMonthsBack = 12, CalendarMonthsAhead = 3 });
         await source.InitialiseAsync(context, CancellationToken.None);
         var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
