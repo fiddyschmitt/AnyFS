@@ -368,8 +368,9 @@ public class OutlookSourceTests
     public async Task ADamagedFileIsServedAllButWhatDoesNotRead()
     {
         // damaged.pst (LibOutlook's tests make it): unicode.pst whose Inbox\Projects folder and "Plain note" mail have their
-        // own values damaged and whose Contacts folder's contents table does not read, as a real OST of years failed whole
-        // ("HID 0x0000CD20 names allocation 1641 of 616 in heap block 0")
+        // own properties damaged, whose Contacts folder's contents table does not read, and whose Projects folder's contents
+        // table names values it does not hold, as a real OST of years failed whole ("HID 0x0000CD20 names allocation 1641 of
+        // 616 in heap block 0"), its contents tables' cells by the hundred
         var log = new LineLogger();
         using var context = new TestSourceContext("outlook", log);
         await using var source = new OutlookSource(new OutlookSettings { Path = OutlookFixtures.Pst("damaged.pst"), RefreshMinutes = 0 });
@@ -378,7 +379,7 @@ public class OutlookSourceTests
         CollectionAssert.AreEquivalent(new[] { "2026", "Projects" }, (await OutlookFixtures.ListAsync(source, "Inbox")).Select(e => e.Name).ToList(), "Projects keeps its place, named from the Inbox's table");
         CollectionAssert.AreEqual(new[] { "2026" }, (await OutlookFixtures.ListAsync(source, "Inbox/Projects")).Select(e => e.Name).ToList(), "and its mail, in a table of its own");
         var month = await OutlookFixtures.ListAsync(source, "Inbox/2026/10");
-        Assert.AreEqual(5, month.Count, "the damaged mail is listed as the Inbox's table lists it: " + string.Join(", ", month.Select(e => e.Name)));
+        Assert.AreEqual(5, month.Count, "the damaged mail is listed from the Inbox's table, its own properties not read: " + string.Join(", ", month.Select(e => e.Name)));
         Assert.AreEqual(0, (await OutlookFixtures.ListAsync(source, "Contacts")).Count, "a contents table that does not read lists nothing");
         Assert.IsTrue((await OutlookFixtures.ListAsync(source, "Calendar")).Count > 0, "the other folders are whole");
 
@@ -394,9 +395,17 @@ public class OutlookSourceTests
 
         var lines = log.Lines;
         Assert.IsTrue(lines.Any(l => l.Contains("the folder 'Projects' in damaged.pst is shown with what reads of it", StringComparison.Ordinal)), log.ToString());
-        Assert.IsTrue(lines.Any(l => l.Contains("'Plain note", StringComparison.Ordinal) && l.Contains("is listed as its folder's table lists it", StringComparison.Ordinal)), log.ToString());
+        Assert.IsFalse(lines.Any(l => l.Contains("'Plain note", StringComparison.Ordinal)), "the damaged mail lists from its row alone: nothing to say until it is opened");
         Assert.IsTrue(lines.Any(l => l.Contains("the items of 'Contacts' in damaged.pst could not all be read, 0 are listed: the contents table of folder 0x", StringComparison.Ordinal)), log.ToString());
-        Assert.IsTrue(lines.Any(l => l.Contains("3 places of damaged.pst do not read in full", StringComparison.Ordinal)), log.ToString());
+        Assert.IsTrue(lines.Any(l => l.Contains("2 places of damaged.pst do not read in full", StringComparison.Ordinal)), log.ToString());
+
+        // the Projects folder's table names values it does not hold (as a real OST's did, hundreds of cells): its mail is
+        // listed with them read from the mail itself, and one line says so
+        var projects = await OutlookFixtures.ListAsync(source, "Inbox/Projects/2026/10");
+        Assert.AreEqual(1, projects.Count);
+        StringAssert.EndsWith(projects[0].Name, " - RE_ Project kick-off");
+        var missing = lines.Single(l => l.Contains("cells of the table of 'Projects' in damaged.pst name values the table does not hold", StringComparison.Ordinal));
+        StringAssert.Contains(missing, "(Subject) of type 0x001F in a cell of 4 bytes: HID 0x");
     }
 
     /// <summary>The OST capture, where it is on this machine (see LibOutlook's tests): a whole mailbox's tree.</summary>
