@@ -10,6 +10,9 @@
   <ItemGroup>
     <!-- ReverseMarkdown (MIT): a message's HTML body as Markdown, as the SharePoint source converts its pages -->
     <PackageReference Include="ReverseMarkdown" />
+    <!-- S/MIME mail: its MIME parsed (MimeKitLite), its CMS decrypted and its signature checked (System.Security.Cryptography.Pkcs) -->
+    <PackageReference Include="MimeKitLite" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />

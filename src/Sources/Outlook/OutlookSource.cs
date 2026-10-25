@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using AnyFS.Sdk;
 using AnyFS.Sources.Outlook.Ews;
+using AnyFS.Sources.Outlook.Files;
 using AnyFS.Sources.Outlook.Mail;
 using LibOutlook;
 using Microsoft.Extensions.Logging;
@@ -34,6 +35,9 @@ public sealed class OutlookSource : SourceBase
     private (long Length, DateTime Written) _seen;
     private bool _degraded;
 
+    /// <summary>What encrypted S/MIME mail is opened with (the user's certificates; for tests, <see cref="SmimeCertificates"/> too).</summary>
+    private SmimeKeys? _keys;
+
     /// <summary>The mailbox store's revision its listing was last kept at (<see cref="KeepListingAsync"/>).</summary>
     private long _keptRevision = -1;
 
@@ -50,6 +54,11 @@ public sealed class OutlookSource : SourceBase
     }
 
     public override SourceCapabilities Capabilities => new(CanWrite: false, CaseInsensitive: true);
+
+    /// <summary>Certificates (with their private keys) that open encrypted S/MIME mail as well as the user's (for tests).</summary>
+    internal System.Security.Cryptography.X509Certificates.X509Certificate2Collection? SmimeCertificates { get; init; }
+
+    private SmimeKeys _smimeKeys => _keys ??= new SmimeKeys(SmimeCertificates);
 
     /// <summary>The tree served now (for tests).</summary>
     internal MailTree Tree => _tree;
@@ -580,7 +589,7 @@ public sealed class OutlookSource : SourceBase
         var lazy = new Lazy<Task<ItemFiles>>(async () =>
         {
             var opened = await Store.OpenAsync(item.Id, CancellationToken.None).ConfigureAwait(false) ?? throw VfsException.NotFound(folderName);
-            return await ItemFiles.BuildAsync(opened, item, folderName, CancellationToken.None).ConfigureAwait(false);
+            return await ItemFiles.BuildAsync(opened, item, folderName, CancellationToken.None, _smimeKeys).ConfigureAwait(false);
         });
         _items[item.Id] = (lazy, now);
         return lazy.Value;

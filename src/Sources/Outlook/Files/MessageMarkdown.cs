@@ -70,6 +70,7 @@ internal static partial class MessageMarkdown
 
             Line(sb, "Importance", item.Importance switch { 2 => "high", 0 => "low", _ => null });
             Line(sb, "Status", item.IsDraft ? "draft, never sent" : null);
+            Line(sb, "Security", item.Security);
         }
 
         var shown = attachments.Where(a => !a.Attachment.IsContactPhoto).ToList();

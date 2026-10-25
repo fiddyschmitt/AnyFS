@@ -473,6 +473,55 @@ public class OutlookSourceTests
     }
 
     /// <summary>
+    /// S/MIME mail from a data file opened for its Markdown and attachments folder (smime.pst, made by Outlook): the signed
+    /// message's signature checked against the content Outlook kept and its real attachment listed (not the signed entity);
+    /// the encrypted one, which no certificate here opens (its key is the lab's), says so and keeps its smime.p7m. With the
+    /// lab's test key (ANYFS_TEST_SMIME_PFX, kept outside the repository) the encrypted one opens too.
+    /// </summary>
+    [TestMethod]
+    public async Task SmimeMailIsOpenedForItsMarkdown()
+    {
+        var pfx = Environment.GetEnvironmentVariable("ANYFS_TEST_SMIME_PFX");
+        var keys = new System.Security.Cryptography.X509Certificates.X509Certificate2Collection();
+        if (!string.IsNullOrEmpty(pfx))
+        {
+            keys.Add(System.Security.Cryptography.X509Certificates.X509CertificateLoader.LoadPkcs12FromFile(pfx, null, System.Security.Cryptography.X509Certificates.X509KeyStorageFlags.Exportable));
+        }
+
+        var context = new TestSourceContext("outlook");
+        var source = new OutlookSource(new OutlookSettings { Path = OutlookFixtures.Pst("smime.pst"), RefreshMinutes = 0 }) { SmimeCertificates = keys };
+        await source.InitialiseAsync(context, CancellationToken.None);
+        await using (source)
+        using (context)
+        {
+            var year = (await OutlookFixtures.ListAsync(source, "Inbox")).Single().Name;
+            var month = $"Inbox/{year}/{(await OutlookFixtures.ListAsync(source, $"Inbox/{year}")).Single().Name}";
+
+            var signed = await OutlookFixtures.ItemFolderAsync(source, month, "AnyFS lab: a signed message");
+            var md = await OutlookFixtures.TextAsync(source, $"{signed}/message.md");
+            StringAssert.Contains(md, "**Security:** signed by AnyFS lab S/MIME <anyfs-tester@y0w7606wv.onmicrosoft.com>; the signature holds, but the certificate is not trusted here");
+            StringAssert.Contains(md, "The body of the signed message, made in the AnyFS lab.");
+            var files = await OutlookFixtures.ListAsync(source, $"{signed}/attachments");
+            Assert.AreEqual(("report.bin", 2000L), (files.Single().Name, files.Single().Length), "the attachment inside the signed message");
+
+            var encrypted = await OutlookFixtures.ItemFolderAsync(source, month, "AnyFS lab: an encrypted message");
+            var sealedMd = await OutlookFixtures.TextAsync(source, $"{encrypted}/message.md");
+            if (keys.Count == 0)
+            {
+                StringAssert.Contains(sealedMd, "**Security:** encrypted, and none of the certificates on this computer can open it");
+                Assert.AreEqual("smime.p7m", (await OutlookFixtures.ListAsync(source, $"{encrypted}/attachments")).Single().Name);
+            }
+            else
+            {
+                StringAssert.Contains(sealedMd, "**Security:** encrypted for you, opened with your certificate");
+                StringAssert.Contains(sealedMd, "The body of the encrypted message, made in the AnyFS lab.");
+                var inside = await OutlookFixtures.ListAsync(source, $"{encrypted}/attachments");
+                Assert.AreEqual(("report.bin", 2000L), (inside.Single().Name, inside.Single().Length));
+            }
+        }
+    }
+
+    /// <summary>
     /// A data file's recurring appointments are listed as their occurrences, as a mailbox's calendar is (recurrence.pst,
     /// made by Outlook in the Pacific zone; LibOutlook's tests check the expansion against Outlook's own): each occurrence
     /// an event folder at its own time, a deleted one left out, a moved one at its new time under its own subject and

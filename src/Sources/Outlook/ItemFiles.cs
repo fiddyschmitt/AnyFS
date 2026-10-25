@@ -76,11 +76,25 @@ internal sealed class ItemFiles
 
     /// <param name="listed">The item as its folder lists it (an event or not, and the date it is filed under).</param>
     /// <param name="folderName">The item's folder name: a contact's file name.</param>
-    public static async Task<ItemFiles> BuildAsync(MailItem item, MailItemSummary listed, string folderName, CancellationToken ct)
+    /// <param name="keys">What encrypted S/MIME mail is opened with; null opens none.</param>
+    public static async Task<ItemFiles> BuildAsync(MailItem item, MailItemSummary listed, string folderName, CancellationToken ct, SmimeKeys? keys = null)
     {
-        // the attachments' names, fixed first so the Markdown's links, the .eml's parts and the attachments folder agree;
-        // a contact's (its photo) are the vCard's business alone
-        var named = AttachmentNames.For(item.Kind == MailItemKind.Contact ? item.Attachments : await SettleAsync(item.Attachments, ct).ConfigureAwait(false));
+        // a message's .eml is the message as it came; S/MIME mail is opened from it for the Markdown and the attachments
+        // folder (signed: the content and its signature checked; encrypted: decrypted with the user's certificate)
+        byte[]? eml = null;
+        var shown = item;
+        if (!listed.IsEvent && item.Kind is MailItemKind.Message or MailItemKind.Appointment)
+        {
+            eml = item.RawMime ?? MimeWriter.Build(item);
+            if (SmimeReader.IsSmime(item))
+            {
+                shown = SmimeReader.Open(item, eml, keys ?? new SmimeKeys());
+            }
+        }
+
+        // the attachments' names, fixed first so the Markdown's links and the attachments folder agree; a contact's (its
+        // photo) are the vCard's business alone
+        var named = AttachmentNames.For(shown.Kind == MailItemKind.Contact ? shown.Attachments : await SettleAsync(shown.Attachments, ct).ConfigureAwait(false));
         var files = new List<ItemFile>();
         if (listed.IsEvent)
         {
@@ -96,8 +110,8 @@ internal sealed class ItemFiles
                     break;
                 case MailItemKind.Message:
                 case MailItemKind.Appointment:
-                    files.Add(Made(MailNames.MessageMarkdown, MessageMarkdown.Build(item, named), "a message as Markdown"));
-                    files.Add(Made(MailNames.MessageMime, item.RawMime ?? MimeWriter.Build(item), "a message as .eml"));
+                    files.Add(Made(MailNames.MessageMarkdown, MessageMarkdown.Build(shown, named), "a message as Markdown"));
+                    files.Add(Made(MailNames.MessageMime, eml!, "a message as .eml"));
                     if (item.Kind == MailItemKind.Appointment)
                     {
                         // a meeting request, answer or cancellation: the meeting it is about, to import

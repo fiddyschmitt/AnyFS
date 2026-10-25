@@ -19,6 +19,10 @@
          the version ReverseMarkdown is built against) -->
     <PackageVersion Include="ReverseMarkdown" Version="6.2.1" />
     <PackageVersion Include="AngleSharp" Version="1.5.2" />
+    <!-- the Outlook source's S/MIME mail (spec 7.7): MimeKitLite (MIT, .NET Foundation) parses the MIME inside, with no
+         cryptography of its own; the CMS package decrypts it with the user's certificate and checks its signature -->
+    <PackageVersion Include="MimeKitLite" Version="4.18.1" />
+    <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="10.0.13" />
     <PackageVersion Include="System.Threading.RateLimiting" Version="10.0.13" />
     <!-- the E2E tests read provisioning/settings.yml -->
     <PackageVersion Include="YamlDotNet" Version="18.1.0" />

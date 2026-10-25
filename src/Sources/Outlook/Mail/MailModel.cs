@@ -101,8 +101,8 @@ internal sealed record ContactDetail(
     DateTimeOffset? Birthday,
     DateTimeOffset? Anniversary);
 
-/// <summary>An item opened: everything the files made of it need.</summary>
-internal sealed class MailItem
+/// <summary>An item opened: everything the files made of it need. A record, so a view of it (an S/MIME message opened) is a copy with what differs.</summary>
+internal sealed record MailItem
 {
     public required MailItemSummary Summary { get; init; }
 
@@ -156,6 +156,12 @@ internal sealed class MailItem
     public AppointmentDetail? Appointment { get; init; }
 
     public ContactDetail? Contact { get; init; }
+
+    /// <summary>
+    /// What the message's S/MIME protection is and what came of opening it ("encrypted for you, opened with your certificate
+    /// Jane Doe; signed by Jane Doe &lt;jane@contoso.com&gt;, the signature holds"), for the Markdown; null for a message without.
+    /// </summary>
+    public string? Security { get; init; }
 
     public MailItemKind Kind => Summary.Kind;
 

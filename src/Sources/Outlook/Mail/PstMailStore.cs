@@ -363,18 +363,9 @@ internal sealed class PstMailStore : IMailStore
         }
 
         var item = Build(series, id, occurrence);
-        if (occurrence.Exception is { HasOwnBody: true } && ExceptionMessage(series, occurrence) is { } own)
-        {
-            return new MailItem
-            {
-                Summary = item.Summary, MessageClass = item.MessageClass, From = item.From, Recipients = item.Recipients, Sent = item.Sent, Received = item.Received,
-                Created = item.Created, Modified = item.Modified, InternetMessageId = item.InternetMessageId, Importance = item.Importance, IsRead = item.IsRead,
-                Attachments = item.Attachments, Appointment = item.Appointment,
-                BodyText = Blank(own.Body), BodyHtml = Blank(own.BodyHtml), BodyRtf = Blank(own.BodyRtf),
-            };
-        }
-
-        return item;
+        return occurrence.Exception is { HasOwnBody: true } && ExceptionMessage(series, occurrence) is { } own
+            ? item with { BodyText = Blank(own.Body), BodyHtml = Blank(own.BodyHtml), BodyRtf = Blank(own.BodyRtf) }
+            : item;
     }
 
     /// <summary>The embedded message a series keeps for a changed occurrence: the exception attachment whose message replaces that start (PidLidExceptionReplaceTime, UTC).</summary>
