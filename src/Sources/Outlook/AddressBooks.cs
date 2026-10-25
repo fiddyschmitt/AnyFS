@@ -262,24 +262,11 @@ internal sealed class AddressBooks
             return view;
         }
 
-        AddressListMembers? kept;
-        lock (_gate)
-        {
-            _kept.Remove(list.Id, out kept);
-        }
-
-        if (kept is not null)
-        {
-            view = _views.GetOrAdd(list.Id, _ => new AddressListView(list, kept.Taken, kept.Entries));
-            RenewIfOld(view);
-            return view;
-        }
-
-        // the first reading: who asks meanwhile waits for the same one; one that failed is tried again at the next ask
-        var reading = _reading.GetOrAdd(list.Id, _ => new Lazy<Task<AddressListView>>(() => _views.TryGetValue(list.Id, out var read) ? Task.FromResult(read) : ReadAsync(list, null, _stopping)));
+        // the first ask: who asks meanwhile waits for the same one; one that failed is tried again at the next ask
+        var reading = _reading.GetOrAdd(list.Id, _ => new Lazy<Task<AddressListView>>(() => FirstAsync(list)));
         try
         {
-            return await reading.Value.WaitAsync(ct).ConfigureAwait(false);
+            view = await reading.Value.WaitAsync(ct).ConfigureAwait(false);
         }
         finally
         {
@@ -288,6 +275,27 @@ internal sealed class AddressBooks
                 _reading.TryRemove(new KeyValuePair<string, Lazy<Task<AddressListView>>>(list.Id, reading));
             }
         }
+
+        RenewIfOld(view);
+        return view;
+    }
+
+    /// <summary>A list's entries the first time they are asked for: as kept at the last start, else read.</summary>
+    private Task<AddressListView> FirstAsync(AddressList list)
+    {
+        if (_views.TryGetValue(list.Id, out var view))
+        {
+            return Task.FromResult(view);
+        }
+
+        AddressListMembers? kept;
+        lock (_gate)
+        {
+            _kept.Remove(list.Id, out kept);
+        }
+
+        // a big list's files take a moment to make (every card's length): off the asker's thread
+        return kept is null ? ReadAsync(list, null, _stopping) : Task.Run(() => _views.GetOrAdd(list.Id, _ => new AddressListView(list, kept.Taken, kept.Entries)));
     }
 
     /// <summary>Reads a list's entries whole, dates them (an entry as it was keeps its date), and serves and keeps them.</summary>
