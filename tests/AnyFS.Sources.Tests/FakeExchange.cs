@@ -158,6 +158,36 @@ internal sealed partial class FakeExchange
         }
     }
 
+    /// <summary>A meeting request as it sits in a mail folder: a message from the organiser that carries the meeting's start, end and location.</summary>
+    public Item AddMeetingRequest(Folder folder, string subject, (string Name, string Address) organizer, DateTimeOffset received, DateTimeOffset start, TimeSpan length, string location)
+    {
+        lock (_gate)
+        {
+            var item = new Item($"i{++_next}", folder.Id, "MeetingRequest", "IPM.Schedule.Meeting.Request")
+            {
+                Subject = subject,
+                From = organizer,
+                Organizer = organizer,
+                Received = received,
+                Sent = received - TimeSpan.FromSeconds(30),
+                Created = received,
+                Modified = received,
+                Start = start,
+                End = start + length,
+                Location = location,
+                BodyHtml = "<p>Please come.</p>",
+                To = [("Jane", Account)],
+                InternetMessageId = $"<{Guid.NewGuid():N}@fake.test>",
+                Uid = Guid.NewGuid().ToString("N"),
+            };
+            item.Mime = Mime(item);
+            item.Size = item.Mime.Length;
+            _items[item.Id] = item;
+            folder.Log("Create", item.Id);
+            return item;
+        }
+    }
+
     public Item AddAppointment(Folder folder, string subject, DateTimeOffset start, TimeSpan length, string location, (string Name, string Address) organizer)
     {
         lock (_gate)
@@ -471,7 +501,7 @@ internal sealed partial class FakeExchange
             ["LastModifiedTime"] = Stamp(i.Modified),
             ["DateTimeCreated"] = Stamp(i.Created),
         };
-        if (i.Type == "Message")
+        if (i.Type is "Message" or "MeetingRequest")
         {
             json["DateTimeReceived"] = Stamp(i.Received);
             json["DateTimeSent"] = Stamp(i.Sent);
@@ -493,7 +523,7 @@ internal sealed partial class FakeExchange
                 json["CcRecipients"] = new JsonArray(i.Cc.Select(t => (JsonNode)Mailbox(t)).ToArray());
             }
         }
-        else if (i.Type == "CalendarItem")
+        if (i.Type is "CalendarItem" or "MeetingRequest")
         {
             json["Start"] = Stamp(i.Start);
             json["End"] = Stamp(i.End);
@@ -799,7 +829,7 @@ internal sealed partial class FakeExchange
                 new System.Xml.Linq.XElement(T + "IsInline", a.IsInline ? "true" : "false")))));
         }
 
-        if (i.Type == "Message")
+        if (i.Type is "Message" or "MeetingRequest")
         {
             xml.Add(new System.Xml.Linq.XElement(T + "DateTimeReceived", Stamp(i.Received)), new System.Xml.Linq.XElement(T + "DateTimeSent", Stamp(i.Sent)),
                 new System.Xml.Linq.XElement(T + "IsRead", i.IsRead ? "true" : "false"), new System.Xml.Linq.XElement(T + "IsDraft", "false"), new System.Xml.Linq.XElement(T + "Importance", "Normal"),
@@ -814,7 +844,7 @@ internal sealed partial class FakeExchange
                 xml.Add(new System.Xml.Linq.XElement(T + "ToRecipients", i.To.Select(MailboxXml)), new System.Xml.Linq.XElement(T + "CcRecipients", i.Cc.Select(MailboxXml)));
             }
         }
-        else if (i.Type == "CalendarItem")
+        if (i.Type is "CalendarItem" or "MeetingRequest")
         {
             xml.Add(new System.Xml.Linq.XElement(T + "UID", i.Uid), new System.Xml.Linq.XElement(T + "Start", Stamp(i.Start)), new System.Xml.Linq.XElement(T + "End", Stamp(i.End)), new System.Xml.Linq.XElement(T + "IsAllDayEvent", "false"),
                 new System.Xml.Linq.XElement(T + "LegacyFreeBusyStatus", "Busy"), new System.Xml.Linq.XElement(T + "Location", i.Location), new System.Xml.Linq.XElement(T + "IsRecurring", i.IsRecurring ? "true" : "false"), new System.Xml.Linq.XElement(T + "CalendarItemType", i.CalendarItemType));

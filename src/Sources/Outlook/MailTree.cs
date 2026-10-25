@@ -131,7 +131,7 @@ internal sealed class MailTree
 
     public long ItemCount { get; }
 
-    /// <summary>The files the items make (two per message, two per appointment, one per contact, one per other item), attachments not counted.</summary>
+    /// <summary>The files the items make (<see cref="ItemFiles.CountOf"/>: two per message, two per event, one per contact), attachments not counted.</summary>
     public long FileCount { get; }
 
     /// <param name="progress">Told of each folder as it is listed (how many are done, how many there are, the folder's name); null for nobody.</param>
@@ -162,7 +162,7 @@ internal sealed class MailTree
                 case ItemNode item:
                     counts.Folders++;
                     counts.Items++;
-                    counts.Files += item.Item.Kind is MailItemKind.Message or MailItemKind.Appointment ? 2 : 1;
+                    counts.Files += ItemFiles.CountOf(item.Item);
                     break;
                 case ContactNode:
                     counts.Items++;
@@ -223,12 +223,12 @@ internal sealed class MailTree
             var (year, month) = MailNames.Period(item.Date);
             var yearDir = dir.GetOrAddPeriod(year);
             var monthDir = month is null ? yearDir : yearDir.GetOrAddPeriod(month);
-            var name = item.Kind switch
-            {
-                MailItemKind.Appointment => MailNames.AppointmentFolder(item.Date, item.Subject),
-                MailItemKind.Message => MailNames.MessageFolder(item.Date, item.Sender, item.Subject),
-                _ => MailNames.ItemFolder(item.Date, item.Subject),
-            };
+            // an event by its start; a message, and a meeting request or answer in a mail folder, by when it came and whom from
+            var name = item.IsEvent
+                ? MailNames.AppointmentFolder(item.Date, item.Subject)
+                : item.Kind is MailItemKind.Message or MailItemKind.Appointment
+                    ? MailNames.MessageFolder(item.Date, item.Sender, item.Subject)
+                    : MailNames.ItemFolder(item.Date, item.Subject);
             monthDir.Add(new ItemNode(monthDir.Unique(name, isFile: false), item));
             yearDir.Touch(item.Date);
             monthDir.Touch(item.Date);

@@ -77,10 +77,10 @@ public class OutlookExchangeServerTests
 
             var figures = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
             var name = VfsPath.Name(figures);
-            var eml = await OutlookFixtures.TextAsync(source, $"{figures}/{name}.eml");
+            var eml = await OutlookFixtures.TextAsync(source, $"{figures}/message.eml");
             StringAssert.Contains(eml, "\r\nSubject: Quarterly figures\r\n");
             StringAssert.Contains(eml, Convert.ToBase64String(Encoding.ASCII.GetBytes("quarter,amount\nQ3,42\nQ4,58\n")), "the MIME came from the server whole");
-            var markdown = await OutlookFixtures.TextAsync(source, $"{figures}/{name}.md");
+            var markdown = await OutlookFixtures.TextAsync(source, $"{figures}/message.md");
             StringAssert.Contains(markdown, "**From:** Adele Vance <adelev@fake.test>");
             StringAssert.Contains(markdown, "\n---\n\nFigures attached.");
             Assert.AreEqual("quarter,amount\nQ3,42\nQ4,58\n", Encoding.ASCII.GetString(await OutlookFixtures.ReadAsync(source, $"{figures}/attachments/figures.csv")));
@@ -145,7 +145,7 @@ public class OutlookExchangeServerTests
                 return null;
             };
             var figures = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
-            var eml = await OutlookFixtures.TextAsync(source, $"{figures}/{VfsPath.Name(figures)}.eml");
+            var eml = await OutlookFixtures.TextAsync(source, $"{figures}/message.eml");
             StringAssert.Contains(eml, "Subject: Quarterly figures");
             Assert.AreEqual(2, busy);
 

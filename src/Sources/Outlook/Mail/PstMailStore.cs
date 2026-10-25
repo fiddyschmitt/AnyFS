@@ -127,7 +127,7 @@ internal sealed class PstMailStore : IMailStore
 
         if (_pst.MissingValues > missing && _missingSaid.TryAdd($"{what}:{folder.Id}", true))
         {
-            _logger.LogWarning("outlook: {Count} cells of the table of '{Folder}' in {File} name values the table does not hold, so those properties were read from the items themselves (libpff takes such cells as unset); the latest: {Example}",
+            _logger.LogWarning("outlook: {Count:N0} cells of the table of '{Folder}' in {File} name values the table does not hold, so those properties were read from the items themselves (libpff takes such cells as unset); the latest: {Example}",
                 _pst.MissingValues - missing, folder.Name, FileName, _pst.MissingValueExamples[^1]);
         }
     }
@@ -137,7 +137,7 @@ internal sealed class PstMailStore : IMailStore
         var id = message.Nid.ToString("X", CultureInfo.InvariantCulture);
         try
         {
-            return Summarise(message, id);
+            return Summarise(message, id, folder);
         }
         catch (PstException ex)
         {
@@ -145,7 +145,7 @@ internal sealed class PstMailStore : IMailStore
             {
                 try
                 {
-                    var summary = Summarise(listed, id);
+                    var summary = Summarise(listed, id, folder);
                     Say($"item:{id}", "outlook: '{Subject}' in '{Folder}' of {File} is listed as its folder's table lists it; its own properties do not read: {Error}", summary.Subject, folder.Name, FileName, ex.Message);
                     return summary;
                 }
@@ -264,26 +264,30 @@ internal sealed class PstMailStore : IMailStore
     /// <summary>
     /// An item's summary, from its folder's table where the table has it: a mail's date, sender, subject, size and flags are
     /// all columns there, so a mailbox's mail lists without one item read (the item's own creation time, which no table
-    /// holds, is not asked for: when the item came is). Drafts, appointments and contacts read the item for what is not.
+    /// holds, is not asked for: when the item came is). Drafts, events and contacts read the item for what is not. An
+    /// appointment is an event in a calendar folder (dated by its start); in a mail folder it is a meeting request or
+    /// answer, dated by its arrival as the mail around it is.
     /// </summary>
-    private MailItemSummary Summarise(PstMessage message, string id)
+    /// <param name="folder">The folder the item is listed from; null for one opened by id, whose listing says what it is.</param>
+    private MailItemSummary Summarise(PstMessage message, string id, MailFolder? folder)
     {
         var kind = MailItemKinds.From(message.MessageClass);
+        var isEvent = kind == MailItemKind.Appointment && folder?.IsCalendar == true;
         var p = message.Properties;
         var arrived = Utc(message.MessageDeliveryTime) ?? Utc(message.ClientSubmitTime);
-        DateTimeOffset? date = kind == MailItemKind.Appointment
+        DateTimeOffset? date = isEvent
             ? Utc(Get(p, _ids.AppointmentStart)?.Value as DateTime?) ?? Utc(message.CreationTime) ?? Utc(message.LastModificationTime)
             : arrived ?? Utc(message.CreationTime) ?? Utc(message.LastModificationTime);
         // a draft or a sent item of one's own may name no sender: the first recipient stands in, as Outlook's Drafts view shows the To
         var sender = Blank(p.GetString(PstPropertyIds.SentRepresentingName)) ?? Blank(message.SenderName) ?? Blank(message.SentRepresentingEmailAddress) ?? Blank(message.SenderEmailAddress)
             ?? Blank(message.DisplayTo?.Split(';', 2, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).FirstOrDefault());
         var subject = Blank(message.Subject) ?? (kind == MailItemKind.Contact ? Blank(p.GetString(PstPropertyIds.DisplayName)) : null) ?? "";
-        return new MailItemSummary(id, kind, subject, sender, date, arrived ?? date, Utc(message.LastModificationTime), message.Size, message.HasAttachments);
+        return new MailItemSummary(id, kind, subject, sender, date, arrived ?? date, Utc(message.LastModificationTime), message.Size, message.HasAttachments) { IsEvent = isEvent };
     }
 
     private MailItem Build(PstMessage message, string id)
     {
-        var summary = Summarise(message, id);
+        var summary = Summarise(message, id, null);
         var p = message.Properties;
         var attachments = new List<MailAttachment>();
         var all = message.Attachments;

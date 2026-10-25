@@ -161,11 +161,11 @@ public class OutlookSourceTests
             var folder = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/10", "Quarterly figures");
             var name = VfsPath.Name(folder);
             var files = await OutlookFixtures.ListAsync(source, folder);
-            CollectionAssert.AreEquivalent(new[] { name + ".md", name + ".eml", "attachments" }, files.Select(e => e.Name).ToList());
+            CollectionAssert.AreEquivalent(new[] { "message.md", "message.eml", "attachments" }, files.Select(e => e.Name).ToList());
             Assert.IsTrue(files.Single(e => e.Name == "attachments").IsDirectory);
             Assert.IsTrue(files.Where(e => !e.IsDirectory).All(e => e.Length > 100), "the files have their real sizes in the listing");
 
-            var markdown = await OutlookFixtures.TextAsync(source, $"{folder}/{name}.md");
+            var markdown = await OutlookFixtures.TextAsync(source, $"{folder}/message.md");
             StringAssert.StartsWith(markdown, "# Quarterly figures\n");
             Assert.IsFalse(markdown.Contains("**From:**", StringComparison.Ordinal), "a draft has no sender");
             StringAssert.Contains(markdown, "**To:** anyfs-tester@y0w7606wv.onmicrosoft.com");
@@ -174,7 +174,7 @@ public class OutlookSourceTests
             StringAssert.Contains(markdown, "[figures.csv](attachments/figures.csv) (27 bytes)");
             StringAssert.Contains(markdown, "\n---\n\nFigures attached.");
 
-            var eml = await OutlookFixtures.TextAsync(source, $"{folder}/{name}.eml");
+            var eml = await OutlookFixtures.TextAsync(source, $"{folder}/message.eml");
             StringAssert.Contains(eml, "\r\nSubject: Quarterly figures\r\n");
             StringAssert.Contains(eml, "\r\nX-Unsent: 1\r\n");
             StringAssert.Contains(eml, "\r\nImportance: High\r\n");
@@ -206,9 +206,9 @@ public class OutlookSourceTests
         using (context)
         {
             var photo = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/10", "Photo from the site visit");
-            var markdown = await OutlookFixtures.TextAsync(source, $"{photo}/{VfsPath.Name(photo)}.md");
+            var markdown = await OutlookFixtures.TextAsync(source, $"{photo}/message.md");
             StringAssert.Contains(markdown, "![](attachments/dot.png)", "cid: rewritten to the attachments folder");
-            var eml = await OutlookFixtures.TextAsync(source, $"{photo}/{VfsPath.Name(photo)}.eml");
+            var eml = await OutlookFixtures.TextAsync(source, $"{photo}/message.eml");
             StringAssert.Contains(eml, "Content-Type: multipart/related; boundary=");
             StringAssert.Contains(eml, "Content-ID: <anyfs-dot>");
             StringAssert.Contains(eml, "Content-Disposition: inline; filename=\"dot.png\"; size=70");
@@ -222,7 +222,7 @@ public class OutlookSourceTests
             var nested = await OutlookFixtures.TextAsync(source, $"{forwarded}/attachments/Photo from the site visit.eml");
             StringAssert.Contains(nested, "\r\nSubject: Photo from the site visit\r\n");
             StringAssert.Contains(nested, "Content-ID: <anyfs-dot>");
-            var outer = await OutlookFixtures.TextAsync(source, $"{forwarded}/{VfsPath.Name(forwarded)}.eml");
+            var outer = await OutlookFixtures.TextAsync(source, $"{forwarded}/message.eml");
             StringAssert.Contains(outer, "Content-Type: message/rfc822; name=\"Photo from the site visit.eml\"");
             StringAssert.Contains(outer, "\r\nSubject: Photo from the site visit\r\n", "the attached message is inside the .eml");
         }
@@ -258,20 +258,20 @@ public class OutlookSourceTests
         using (context)
         {
             var note = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/10", "Plain note_ ümlauts & _quotes_ _ slashes_ kept_");
-            var markdown = await OutlookFixtures.TextAsync(source, $"{note}/{VfsPath.Name(note)}.md");
+            var markdown = await OutlookFixtures.TextAsync(source, $"{note}/message.md");
             StringAssert.Contains(markdown, "# Plain note: ümlauts & \"quotes\" / slashes: kept?\n");
             StringAssert.Contains(markdown, "\n---\n\nName edge cases. naïve café – 日本語");
-            var eml = await OutlookFixtures.TextAsync(source, $"{note}/{VfsPath.Name(note)}.eml");
+            var eml = await OutlookFixtures.TextAsync(source, $"{note}/message.eml");
             StringAssert.Contains(eml, "Subject: =?utf-8?B?", "a subject beyond ASCII is an encoded word");
             StringAssert.Contains(eml, "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable");
             StringAssert.Contains(eml, "na=C3=AFve caf=C3=A9", "UTF-8, quoted-printable");
 
             var kickOff = await OutlookFixtures.ItemFolderAsync(source, "Inbox/Projects/2026/10", "RE: Project kick-off");
-            var rich = await OutlookFixtures.TextAsync(source, $"{kickOff}/{VfsPath.Name(kickOff)}.md");
+            var rich = await OutlookFixtures.TextAsync(source, $"{kickOff}/message.md");
             StringAssert.Contains(rich, "**To:** AnyFS tester <anyfs-tester@y0w7606wv.onmicrosoft.com>; adelev@example.test");
             StringAssert.Contains(rich, "**Cc:** megan.bowen@example.test");
             StringAssert.Contains(rich, "\n---\n\nIn a subfolder.", "the rich-text body as text");
-            var richEml = await OutlookFixtures.TextAsync(source, $"{kickOff}/{VfsPath.Name(kickOff)}.eml");
+            var richEml = await OutlookFixtures.TextAsync(source, $"{kickOff}/message.eml");
             StringAssert.StartsWith(richEml, "To: AnyFS tester <anyfs-tester@y0w7606wv.onmicrosoft.com>,\r\n adelev@example.test\r\nCc: megan.bowen@example.test\r\nSubject: RE: Project kick-off\r\n");
             StringAssert.Contains(richEml, "\r\n\r\nIn a subfolder.\r\n", "the rich text as a text part, nothing after it");
             StringAssert.EndsWith(richEml, "In a subfolder.\r\n");
@@ -390,7 +390,7 @@ public class OutlookSourceTests
         StringAssert.Contains(ex.Message, "message 0x");
         StringAssert.Contains(ex.Message, " names allocation ");
         var figures = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/10", "Quarterly figures");
-        StringAssert.StartsWith(await OutlookFixtures.TextAsync(source, $"{figures}/{VfsPath.Name(figures)}.md"), "# Quarterly figures\n");
+        StringAssert.StartsWith(await OutlookFixtures.TextAsync(source, $"{figures}/message.md"), "# Quarterly figures\n");
         Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth ?? ComponentHealth.Ready);
 
         var lines = log.Lines;

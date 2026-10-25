@@ -131,19 +131,19 @@ public class OutlookGraphTests
         {
             var figures = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
             var name = VfsPath.Name(figures);
-            CollectionAssert.AreEquivalent(new[] { name + ".md", name + ".eml", "attachments" }, (await OutlookFixtures.ListAsync(source, figures)).Select(e => e.Name).ToList());
-            var eml = Encoding.ASCII.GetString(await OutlookFixtures.ReadAsync(source, $"{figures}/{name}.eml"));
+            CollectionAssert.AreEquivalent(new[] { "message.md", "message.eml", "attachments" }, (await OutlookFixtures.ListAsync(source, figures)).Select(e => e.Name).ToList());
+            var eml = Encoding.ASCII.GetString(await OutlookFixtures.ReadAsync(source, $"{figures}/message.eml"));
             StringAssert.Contains(eml, "\r\nSubject: Quarterly figures\r\n");
             Assert.AreEqual(1, Count(fake, p => p.StartsWith("me/messages/", StringComparison.Ordinal) && p.EndsWith("/$value", StringComparison.Ordinal) && !p.Contains("/attachments/", StringComparison.Ordinal)), "the .eml is the server's MIME");
 
-            var markdown = await OutlookFixtures.TextAsync(source, $"{figures}/{name}.md");
+            var markdown = await OutlookFixtures.TextAsync(source, $"{figures}/message.md");
             StringAssert.Contains(markdown, "**From:** Adele Vance <adelev@fake.test>");
             StringAssert.Contains(markdown, "[figures.csv](attachments/figures.csv) (27 bytes)", "the content's size, not Graph's, which counts the attachment's properties too");
             Assert.AreEqual(27, (await OutlookFixtures.ListAsync(source, $"{figures}/attachments")).Single().Length);
             Assert.AreEqual("quarter,amount\nQ3,42\nQ4,58\n", Encoding.ASCII.GetString(await OutlookFixtures.ReadAsync(source, $"{figures}/attachments/figures.csv")));
 
             var photo = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Photo from the site visit");
-            StringAssert.Contains(await OutlookFixtures.TextAsync(source, $"{photo}/{VfsPath.Name(photo)}.md"), "![](attachments/dot.png)", "the inline image, by its content id");
+            StringAssert.Contains(await OutlookFixtures.TextAsync(source, $"{photo}/message.md"), "![](attachments/dot.png)", "the inline image, by its content id");
             Assert.AreEqual(70, (await OutlookFixtures.ReadAsync(source, $"{photo}/attachments/dot.png")).Length);
 
             var forwarded = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/04", "Fwd: Photo from the site visit");
@@ -229,7 +229,7 @@ public class OutlookGraphTests
                 return null;
             };
             var figures = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
-            StringAssert.Contains(await OutlookFixtures.TextAsync(source, $"{figures}/{VfsPath.Name(figures)}.eml"), "Subject: Quarterly figures");
+            StringAssert.Contains(await OutlookFixtures.TextAsync(source, $"{figures}/message.eml"), "Subject: Quarterly figures");
             Assert.AreEqual(1, fake.Refusals, "the old token was refused once; the client asked for a fresh one");
             Assert.AreEqual(2, throttled, "the throttled listing waited out its Retry-After and went again");
             Assert.AreEqual(ComponentHealth.Ready, context.LastHealth ?? ComponentHealth.Ready);
@@ -247,7 +247,7 @@ public class OutlookGraphTests
             var folder = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
             var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
             fake.Delete(new FakeExchange.Item(inbox.Changes.Select(c => c.ItemId).First(), inbox.Id, "Message", "IPM.Note"));
-            var gone = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, $"{folder}/{VfsPath.Name(folder)}.eml"));
+            var gone = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, $"{folder}/message.eml"));
             Assert.AreEqual(VfsError.NotFound, gone.Error, gone.Message);
         }
     }
@@ -292,7 +292,7 @@ public class OutlookGraphTests
                 {
                     var folder = $"Inbox/{year.Name}/{month.Name}/{item.Name}";
                     var files = await OutlookFixtures.ListAsync(source, folder);
-                    StringAssert.Contains(await OutlookFixtures.TextAsync(source, $"{folder}/{item.Name}.eml"), "MIME-Version", StringComparison.OrdinalIgnoreCase, "the server's MIME");
+                    StringAssert.Contains(await OutlookFixtures.TextAsync(source, $"{folder}/message.eml"), "MIME-Version", StringComparison.OrdinalIgnoreCase, "the server's MIME");
                     foreach (var attachment in files.Any(f => f.Name == "attachments") ? await OutlookFixtures.ListAsync(source, $"{folder}/attachments") : [])
                     {
                         Assert.AreEqual(attachment.Length, (await OutlookFixtures.ReadAsync(source, $"{folder}/attachments/{attachment.Name}")).Length, attachment.Name);

@@ -131,7 +131,7 @@ public sealed class OutlookSource : SourceBase
 
         if (_store is PstMailStore { Damaged: > 0 } damaged)
         {
-            Logger.LogWarning("outlook: {Count} places of {File} do not read in full (each named above); the rest of the file is served", damaged.Damaged, Path.GetFileName(file));
+            Logger.LogWarning("outlook: {Count:N0} places of {File} do not read in full (each named above); the rest of the file is served", damaged.Damaged, Path.GetFileName(file));
         }
 
         if (RefreshEvery > TimeSpan.Zero)
@@ -140,7 +140,7 @@ public sealed class OutlookSource : SourceBase
             _refreshing = Task.Run(() => RefreshLoopAsync(stopping), CancellationToken.None);
         }
 
-        Logger.LogInformation("outlook: serving {Name}: {Folders} folders, {Items} items", _store.Name, _tree.FolderCount, _tree.ItemCount);
+        Logger.LogInformation("outlook: serving {Name}: {Folders:N0} folders, {Items:N0} items", _store.Name, _tree.FolderCount, _tree.ItemCount);
     }
 
     /// <summary>What an app sign-in needs from where it runs: the saved sign-in (the source's secret store) and a way to show a device code; the Test button has neither.</summary>
@@ -296,7 +296,7 @@ public sealed class OutlookSource : SourceBase
             await Store.RefreshAsync(ct).ConfigureAwait(false);
             Swap(await MailTree.BuildAsync(Store, ct, null).ConfigureAwait(false));
             _items.Clear();
-            Logger.LogInformation("outlook: {Name} read again in {Seconds:F1} s: {Folders} folders, {Items} items", Store.Name, Stopwatch.GetElapsedTime(started).TotalSeconds, _tree.FolderCount, _tree.ItemCount);
+            Logger.LogInformation("outlook: {Name} read again in {Seconds:F1} s: {Folders:N0} folders, {Items:N0} items", Store.Name, Stopwatch.GetElapsedTime(started).TotalSeconds, _tree.FolderCount, _tree.ItemCount);
             MarkHealthy();
         }
         finally
@@ -508,7 +508,7 @@ public sealed class OutlookSource : SourceBase
         var lazy = new Lazy<Task<ItemFiles>>(async () =>
         {
             var opened = await Store.OpenAsync(item.Id, CancellationToken.None).ConfigureAwait(false) ?? throw VfsException.NotFound(folderName);
-            return await ItemFiles.BuildAsync(opened, folderName, CancellationToken.None).ConfigureAwait(false);
+            return await ItemFiles.BuildAsync(opened, item, folderName, CancellationToken.None).ConfigureAwait(false);
         });
         _items[item.Id] = (lazy, now);
         return lazy.Value;

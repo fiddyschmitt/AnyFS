@@ -1,13 +1,16 @@
 using System.Buffers;
 using System.Globalization;
+using AnyFS.Sources.Outlook.Mail;
 
 namespace AnyFS.Sources.Outlook;
 
 /// <summary>
 /// The names items show as (spec 7.7): a message is the folder "yyyy-MM-dd HHmmss - Sender - Subject" (local time), an
-/// appointment "yyyy-MM-dd HHmm - Subject", a contact the file "Name.vcf". A character no Windows file name takes becomes
-/// an underscore, a name never ends in a dot or a space, and a long one is cut (a folder's at 120 characters, a file's at
-/// 150 with its extension kept), leaving room in a path for the " (2)" a name shared by two gets.
+/// event "yyyy-MM-dd HHmm - Subject", a contact the file "Name.vcf". The files in an item's folder have fixed short names
+/// (message.md, message.eml, event.ics), so that a path stays well inside Windows' limit with a long subject. A character
+/// no Windows file name takes becomes an underscore, a name never ends in a dot or a space, and a long one is cut (a
+/// folder's at 120 characters, a file's at 150 with its extension kept), leaving room in a path for the " (2)" a name
+/// shared by two gets.
 /// </summary>
 internal static class MailNames
 {
@@ -17,9 +20,21 @@ internal static class MailNames
     /// <summary>The folder in an item's folder that holds its attachments.</summary>
     public const string AttachmentsFolder = "attachments";
 
-    /// <summary>An appointment's files.</summary>
+    /// <summary>A message's files: the readable form, and the MIME as a mail client opens it (an .eml is a message on disk, in Outlook's and Exchange's words too).</summary>
+    public const string MessageMarkdown = "message.md";
+    public const string MessageMime = "message.eml";
+
+    /// <summary>An event's files; event.ics is also beside a meeting request's or answer's message files, the meeting it is about.</summary>
     public const string EventMarkdown = "event.md";
     public const string EventCalendar = "event.ics";
+
+    /// <summary>A task's, a note's or any other item's one file.</summary>
+    public static string ItemMarkdown(MailItemKind kind) => kind switch
+    {
+        MailItemKind.Task => "task.md",
+        MailItemKind.Note => "note.md",
+        _ => "item.md",
+    };
 
     public const string NoSubject = "(no subject)";
     public const string NoSender = "(no sender)";
@@ -37,7 +52,7 @@ internal static class MailNames
         return Folder($"{when} - {who} - {what}");
     }
 
-    /// <summary>"2026-10-27 1400 - Design review": an appointment's folder.</summary>
+    /// <summary>"2026-10-27 1400 - Design review": an event's folder, by its start (an appointment starts on the minute, so no seconds).</summary>
     public static string AppointmentFolder(DateTimeOffset? start, string? subject)
     {
         var when = start is { } d ? d.ToLocalTime().ToString("yyyy-MM-dd HHmm", CultureInfo.InvariantCulture) : "undated";

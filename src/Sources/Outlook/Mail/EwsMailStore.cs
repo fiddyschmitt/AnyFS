@@ -164,13 +164,13 @@ internal sealed class EwsMailStore : IMailStore
                         case "Update":
                             if (change.Item is { } item)
                             {
-                                if (state.Items.TryAdd(item.Id, Summarise(item, item.Id)))
+                                if (state.Items.TryAdd(item.Id, Summarise(item, item.Id, inCalendar: false)))
                                 {
                                     created++;
                                 }
                                 else
                                 {
-                                    state.Items[item.Id] = Summarise(item, item.Id);
+                                    state.Items[item.Id] = Summarise(item, item.Id, inCalendar: false);
                                 }
                             }
 
@@ -194,7 +194,7 @@ internal sealed class EwsMailStore : IMailStore
 
             if (!state.Complete)
             {
-                _logger.LogInformation("outlook: '{Folder}': {Count} items", state.Folder.Name, state.Items.Count);
+                _logger.LogInformation("outlook: '{Folder}': {Count:N0} items", state.Folder.Name, state.Items.Count);
             }
             else if (created + deleted > 0)
             {
@@ -221,17 +221,18 @@ internal sealed class EwsMailStore : IMailStore
             var end = start + TimeSpan.FromDays(365) < to ? start + TimeSpan.FromDays(365) : to;
             foreach (var item in await _ews.CalendarViewAsync(folder.Id, start, end, ct).ConfigureAwait(false))
             {
-                items.TryAdd(item.Id, Summarise(item, item.Id));
+                items.TryAdd(item.Id, Summarise(item, item.Id, inCalendar: true));
             }
         }
 
-        _logger.LogInformation("outlook: '{Folder}': {Count} appointments between {From:yyyy-MM-dd} and {To:yyyy-MM-dd}", folder.Name, items.Count, from, to);
+        _logger.LogInformation("outlook: '{Folder}': {Count:N0} appointments between {From:yyyy-MM-dd} and {To:yyyy-MM-dd}", folder.Name, items.Count, from, to);
         return items.Values.OrderBy(i => i.Date).ToList();
     }
 
     // --- mapping ----------------------------------------------------------------------------------------------------------
 
-    private static MailItemSummary Summarise(EwsItem item, string id)
+    /// <param name="inCalendar">Whether the item is listed from a calendar folder: an appointment there is an event, dated by its start; a meeting request in a mail folder is dated by its arrival.</param>
+    private static MailItemSummary Summarise(EwsItem item, string id, bool inCalendar)
     {
         var kind = MailItemKinds.From(item.ItemClass ?? item.Type switch
         {
@@ -245,15 +246,16 @@ internal sealed class EwsMailStore : IMailStore
         var sender = Blank(item.From?.Name) ?? Blank(item.Sender?.Name) ?? Blank(item.Organizer?.Name) ?? item.From?.Smtp ?? item.Sender?.Smtp
             ?? Blank(item.DisplayTo?.Split(';', 2, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).FirstOrDefault())
             ?? Blank(item.ToRecipients.FirstOrDefault()?.Name) ?? item.ToRecipients.FirstOrDefault()?.Smtp;
-        var date = kind == MailItemKind.Appointment
+        var isEvent = kind == MailItemKind.Appointment && inCalendar;
+        var date = isEvent
             ? item.Start ?? item.DateTimeCreated ?? item.LastModifiedTime
             : item.DateTimeReceived ?? item.DateTimeSent ?? item.DateTimeCreated ?? item.LastModifiedTime;
-        return new MailItemSummary(id, kind, subject, sender, date, item.DateTimeCreated, item.LastModifiedTime, item.Size, item.HasAttachments);
+        return new MailItemSummary(id, kind, subject, sender, date, item.DateTimeCreated, item.LastModifiedTime, item.Size, item.HasAttachments) { IsEvent = isEvent };
     }
 
     private MailItem Build(EwsItem item, string id)
     {
-        var summary = Summarise(item, id);
+        var summary = Summarise(item, id, inCalendar: false);
         var attachments = item.Attachments.Select(a => new MailAttachment(
             a.IsItem && !a.Name.EndsWith(".eml", StringComparison.OrdinalIgnoreCase) ? a.Name + ".eml" : a.Name,
             a.IsItem ? "message/rfc822" : Blank(a.ContentType) ?? ContentTypes.FromName(a.Name),

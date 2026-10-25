@@ -22,8 +22,16 @@ internal sealed record MailFolder(string Id, string Name, string? ContainerClass
 }
 
 /// <summary>What a listing needs of an item without opening it: enough for its folder's name and dates.</summary>
-/// <param name="Date">The date the item is filed under: received, else sent, else last changed; an appointment's start.</param>
-internal sealed record MailItemSummary(string Id, MailItemKind Kind, string Subject, string? Sender, DateTimeOffset? Date, DateTimeOffset? Created, DateTimeOffset? Modified, long Size, bool HasAttachments);
+/// <param name="Date">The date the item is filed under: received, else sent, else last changed; an event's start.</param>
+internal sealed record MailItemSummary(string Id, MailItemKind Kind, string Subject, string? Sender, DateTimeOffset? Date, DateTimeOffset? Created, DateTimeOffset? Modified, long Size, bool HasAttachments)
+{
+    /// <summary>
+    /// Whether the item is an event: an appointment in a calendar folder, named and dated by its start ("2026-10-27 1400 -
+    /// Design review", with event.md and event.ics). A meeting request, answer or cancellation in a mail folder is not: it
+    /// is a message, filed by when it came and named by its sender, with the meeting's calendar file beside its own.
+    /// </summary>
+    public bool IsEvent { get; init; }
+}
 
 /// <summary>A name and an address, either of which may be missing.</summary>
 internal sealed record MailAddress(string? Name, string? Address)
