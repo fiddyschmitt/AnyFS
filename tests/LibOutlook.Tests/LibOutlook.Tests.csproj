@@ -20,5 +20,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="fixtures\*.pst" CopyToOutputDirectory="PreserveNewest" />
+    <!-- Outlook's own expansion of recurrence.pst's calendar: the recurrence tests' oracle -->
+    <None Include="fixtures\*.occurrences.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

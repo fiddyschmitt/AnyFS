@@ -28,6 +28,9 @@ public sealed class PstNamedProperties : IReadOnlyCollection<PstNamedProperty>
     /// <summary>PS_PUBLIC_STRINGS.</summary>
     public static readonly Guid PublicStringsPropertySet = new("00020329-0000-0000-C000-000000000046");
 
+    /// <summary>PSETID_Appointment: an appointment's start and end, its recurrence and time zones ([MS-OXOCAL]).</summary>
+    public static readonly Guid AppointmentPropertySet = new("00062002-0000-0000-C000-000000000046");
+
     private readonly Dictionary<ushort, PstNamedProperty> _byId = [];
 
     internal PstNamedProperties(PstFile file)

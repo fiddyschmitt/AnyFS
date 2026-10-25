@@ -20,6 +20,10 @@ dependencies, no MAPI, no Outlook: it reads the file itself, on any platform .NE
   libpff reads it, the item's own property standing in (`PstFile.MissingValues` counts them, with examples).
 - Listing a folder reads its contents table alone where the table has what is asked: an unset cell is a property the
   item has not, so a mailbox's mail lists without each message being read.
+- Recurring appointments: `PstMessage.Recurrence` reads the series ([MS-OXOCAL] 2.2.1.44: daily, weekly, monthly,
+  nth-weekday and yearly patterns, the deleted and modified occurrences with their own subject and place) and
+  `Occurrences(until)` lists them as Outlook does, in UTC by the time zone the appointment keeps (`PstTimeZone`, from its
+  TZDEFINITION or TZREG, whatever the system's zone database says): checked against Outlook's own expansion.
 - The 4 KiB OST format's *column stores*, which [MS-PST] does not describe: Outlook keeps some columns of a contents
   table (the sender's name, the conversation id) in a heap of their own, a subnode of the table, and the row's cell
   points into that heap rather than the table's. Read as the table's heap, such a cell gives another row's subject, or

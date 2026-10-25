@@ -160,6 +160,38 @@ public sealed class PstMessage
         }
     }
 
+    /// <summary>
+    /// The series a recurring appointment repeats in (PidLidAppointmentRecur, [MS-OXOCAL] 2.2.1.44), its local times in
+    /// the zone the appointment keeps for its recurrence (PidLidAppointmentTimeZoneDefinitionRecur, else
+    /// PidLidTimeZoneStruct, else the offset its first occurrence shows against PidLidAppointmentStartWhole); null for an
+    /// item that does not recur. A pattern that does not read is a <see cref="PstException"/>.
+    /// </summary>
+    public AppointmentRecurrence? Recurrence
+    {
+        get
+        {
+            var named = _file.NamedProperties;
+            ushort? Id(uint lid) => named.Find(PstNamedProperties.AppointmentPropertySet, lid)?.PropertyId;
+            if (Id(0x8223) is { } recurring && Properties.GetBoolean(recurring) == false)
+            {
+                return null;
+            }
+
+            if (Id(0x8216) is not { } pattern || Properties.GetBinary(pattern) is not { Length: > 0 } blob)
+            {
+                return null;
+            }
+
+            var recurrence = AppointmentRecurrence.Parse(blob, Properties.CodePage);
+            recurrence.TimeZone = (Id(0x8260) is { } definition && Properties.GetBinary(definition) is { } d ? PstTimeZone.FromDefinition(d) : null)
+                ?? (Id(0x8233) is { } zone && Properties.GetBinary(zone) is { } z ? PstTimeZone.FromStruct(z) : null)
+                ?? (Id(0x820D) is { } startWhole && Properties.GetDateTime(startWhole) is { } utc
+                    ? PstTimeZone.Fixed(recurrence.StartDate.AddMinutes(recurrence.StartTimeOffset) - DateTime.SpecifyKind(utc, DateTimeKind.Unspecified))
+                    : null);
+            return recurrence;
+        }
+    }
+
     /// <summary>The recipients, in the order stored.</summary>
     public IReadOnlyList<PstRecipient> Recipients => _recipients.Value;
 

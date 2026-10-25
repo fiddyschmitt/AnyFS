@@ -299,6 +299,9 @@ public static class PstPropertyIds
     /// <summary>PidTagAttachmentHidden: an attachment not to be shown in the list (an inline image).</summary>
     public const ushort AttachmentHidden = 0x7FFE;
 
+    /// <summary>PidTagAttachmentFlags: 0x2 (afException) for a recurring series' modified occurrence ([MS-OXOCAL] 2.2.10.1).</summary>
+    public const ushort AttachmentFlags = 0x7FFD;
+
     private static readonly FrozenDictionary<ushort, string> Names = new Dictionary<ushort, string>
     {
         [Importance] = nameof(Importance),
@@ -398,6 +401,7 @@ public static class PstPropertyIds
         [LtpRowId] = nameof(LtpRowId),
         [LtpRowVer] = nameof(LtpRowVer),
         [AttachmentHidden] = nameof(AttachmentHidden),
+        [AttachmentFlags] = nameof(AttachmentFlags),
     }.ToFrozenDictionary();
 
     /// <summary>The name of a property id this class knows, or null.</summary>

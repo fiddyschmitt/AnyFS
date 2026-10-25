@@ -39,6 +39,19 @@ self-signed lab certificate, each carrying an HTML body and a 2,000-byte random 
 
 The scripts that make it, `make-smime.ps1` and `make-smime-pst.ps1`, are kept with the lab tooling as well.
 
+`recurrence.pst` (Unicode, made by Outlook the same way on 25-Oct-2026 in the lab VM's zone, Pacific; store "AnyFS
+recurrence fixture") holds a `Calendar` of recurring series of every kind Outlook's object model offers, plus one single
+appointment ("One-off", 3 November 2026 14:00): "Weekly sync" (Tuesday and Thursday 10:00, 20 occurrences from
+1 September 2026, the 17 September one deleted, the 13 October one moved to 11:00-11:45 as "Weekly sync (moved)" in
+Room 9), "Every other day" (08:15, 20 October to 10 November), "Month end review" (day 31 of each month, ten from
+January: the last day of shorter months), "Last Friday" (no end), "Quarterly planning" (the first weekday every three
+months), "Anniversary" (all day, 15 March each year, no end), "Fourth Thursday dinner" (yearly, three), "Weekday
+standup" (Monday to Friday for two weeks) and "Every third Wednesday" (eight, the 23 September one moved to the 24th).
+They cross the change to standard time on 1 November 2026. `recurrence.occurrences.txt` is Outlook's own expansion of
+that calendar (`Items.IncludeRecurrences`, every occurrence starting in 2026 or 2027 local time: start and end in UTC,
+all-day or timed, subject, location), the oracle the recurrence tests are checked against. The script that makes both is
+`make-recurrence-pst.ps1`, with the lab tooling.
+
 `damaged.pst` is `unicode.pst` with four heaps damaged the way a real OST's were (records naming allocations their
 heap's page map does not list: "HID 0x0000CD20 names allocation 1641 of 616 in heap block 0", by the hundred in its
 contents tables' cells), each block's CRC made again so that only the heap is wrong: the Inbox's Projects folder claims

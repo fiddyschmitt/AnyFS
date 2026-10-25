@@ -94,6 +94,12 @@ public sealed class PstAttachment
     /// <summary>Where in the body the attachment is rendered; -1 when it is not.</summary>
     public int RenderingPosition => Properties.GetInt32(PstPropertyIds.RenderingPosition) ?? -1;
 
+    /// <summary>
+    /// Whether the attachment holds a modified occurrence of a recurring series (PidTagAttachmentFlags afException,
+    /// [MS-OXOCAL] 2.2.10.1): an embedded message Outlook keeps for the series, never listed as an attachment.
+    /// </summary>
+    public bool IsRecurrenceException => ((Properties.GetInt32(PstPropertyIds.AttachmentFlags) ?? 0) & 0x2) != 0;
+
     /// <summary>Whether the attachment is an image the HTML body shows in place rather than a file to list.</summary>
     public bool IsInline => ContentId is not null && (IsHidden || (Flags & 0x4) != 0);
 
