@@ -67,13 +67,18 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
         s.Path = s.Kind == OutlookKind.Mailbox ? s.Address! : s.File ?? "";
     }
 
-    /// <summary>The sign-in fields and the calendar window are a mailbox's; a file has neither. The web session's and the app sign-in's fields show for Exchange Online, the Windows account's for a server.</summary>
+    /// <summary>
+    /// The sign-in fields and the calendar window are a mailbox's; a file has none of the sign-in fields and of the
+    /// window only the months ahead (how far a recurring series without an end is listed). The web session's and the app
+    /// sign-in's fields show for Exchange Online, the Windows account's for a server.
+    /// </summary>
     public bool IsVisible(object settings, string propertyName)
     {
         var s = (OutlookSettings)settings;
         return propertyName switch
         {
-            nameof(OutlookSettings.SignInMethod) or nameof(OutlookSettings.CalendarMonthsBack) or nameof(OutlookSettings.CalendarMonthsAhead) => s.Kind is OutlookKind.Mailbox or OutlookKind.Server,
+            nameof(OutlookSettings.SignInMethod) or nameof(OutlookSettings.CalendarMonthsBack) => s.Kind is OutlookKind.Mailbox or OutlookKind.Server,
+            nameof(OutlookSettings.CalendarMonthsAhead) => s.Kind is OutlookKind.Mailbox or OutlookKind.Server or OutlookKind.DataFile,
             nameof(OutlookSettings.Cloud) => s.Kind == OutlookKind.Mailbox,
             nameof(OutlookSettings.BrowserPath) => s.Kind == OutlookKind.Mailbox && !s.IsAppSignIn,
             nameof(OutlookSettings.Tenant) or nameof(OutlookSettings.ClientId) => s.Kind == OutlookKind.Mailbox && s.IsAppSignIn,
@@ -116,8 +121,17 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
                 }
 
                 break;
-            case OutlookKind.DataFile when !File.Exists(s.File!):
-                yield return new ValidationMessage("No file at that path.", nameof(OutlookSettings.Path), IsError: false);
+            case OutlookKind.DataFile:
+                if (!File.Exists(s.File!))
+                {
+                    yield return new ValidationMessage("No file at that path.", nameof(OutlookSettings.Path), IsError: false);
+                }
+
+                if (s.CalendarMonthsAhead is < 1 or > 600)
+                {
+                    yield return new ValidationMessage("Calendar: months ahead is between 1 and 600.", nameof(OutlookSettings.CalendarMonthsAhead));
+                }
+
                 break;
             case OutlookKind.Mailbox:
                 if (s.EffectiveSignIn == OutlookSignIn.WebSession && !string.Equals(s.SignInMethod?.Trim(), OutlookSettings.WebSession, StringComparison.OrdinalIgnoreCase))

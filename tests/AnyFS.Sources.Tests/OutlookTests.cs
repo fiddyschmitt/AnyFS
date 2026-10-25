@@ -472,6 +472,65 @@ public class OutlookSourceTests
         }
     }
 
+    /// <summary>
+    /// A data file's recurring appointments are listed as their occurrences, as a mailbox's calendar is (recurrence.pst,
+    /// made by Outlook in the Pacific zone; LibOutlook's tests check the expansion against Outlook's own): each occurrence
+    /// an event folder at its own time, a deleted one left out, a moved one at its new time under its own subject and
+    /// place, a finite series whole, one without an end a year ahead; the changed occurrences Outlook keeps for a series
+    /// are no attachments of it.
+    /// </summary>
+    [TestMethod]
+    public async Task RecurringAppointmentsAreListedAsTheirOccurrences()
+    {
+        var (source, context) = await OutlookFixtures.StartAsync("recurrence.pst");
+        await using (source)
+        using (context)
+        {
+            var folders = new List<string>();
+            foreach (var year in await OutlookFixtures.ListAsync(source, "Calendar"))
+            {
+                foreach (var month in await OutlookFixtures.ListAsync(source, $"Calendar/{year.Name}"))
+                {
+                    folders.AddRange((await OutlookFixtures.ListAsync(source, $"Calendar/{year.Name}/{month.Name}")).Select(e => $"Calendar/{year.Name}/{month.Name}/{e.Name}"));
+                }
+            }
+
+            int Count(string subject) => folders.Count(f => VfsPath.Name(f).EndsWith(" - " + subject, StringComparison.Ordinal));
+            string? Find(DateTimeOffset start, string subject) => folders.SingleOrDefault(f => VfsPath.Name(f) == MailNames.AppointmentFolder(start, subject));
+
+            Assert.AreEqual(19, Count("Weekly sync") + Count("Weekly sync (moved)"), "twenty occurrences, one deleted");
+            Assert.IsNull(Find(new DateTimeOffset(2026, 9, 17, 17, 0, 0, TimeSpan.Zero), "Weekly sync"), "the deleted occurrence");
+            Assert.IsNotNull(Find(new DateTimeOffset(2026, 10, 29, 17, 0, 0, TimeSpan.Zero), "Weekly sync"), "10:00 in daylight time");
+            Assert.IsNotNull(Find(new DateTimeOffset(2026, 11, 3, 18, 0, 0, TimeSpan.Zero), "Weekly sync"), "10:00 in standard time");
+            Assert.AreEqual(10, Count("Month end review"), "a finite series whole");
+            Assert.AreEqual(1, Count("One-off"));
+            Assert.IsTrue(Count("Last Friday") >= 12, "a series without an end, a year ahead");
+
+            var moved = new DateTimeOffset(2026, 10, 13, 18, 0, 0, TimeSpan.Zero);
+            var movedFolder = Find(moved, "Weekly sync (moved)");
+            Assert.IsNotNull(movedFolder, "the moved occurrence at its new time, under its own subject");
+            var (movedYear, movedMonth) = MailNames.Period(moved);
+            Assert.AreEqual($"Calendar/{movedYear}/{movedMonth}", movedFolder[..movedFolder.LastIndexOf('/')]);
+            CollectionAssert.AreEquivalent(new[] { "event.md", "event.ics" }, (await OutlookFixtures.ListAsync(source, movedFolder)).Select(e => e.Name).ToList(),
+                "the series' exception attachments are no attachments of it");
+            var ics = (await OutlookFixtures.TextAsync(source, $"{movedFolder}/event.ics")).Replace("\r\n ", "", StringComparison.Ordinal);
+            StringAssert.Contains(ics, "\r\nDTSTART:20261013T180000Z\r\n");
+            StringAssert.Contains(ics, "\r\nDTEND:20261013T184500Z\r\n");
+            StringAssert.Contains(ics, "\r\nSUMMARY:Weekly sync (moved)\r\n");
+            StringAssert.Contains(ics, "\r\nLOCATION:Room 9\r\n");
+            var md = await OutlookFixtures.TextAsync(source, $"{movedFolder}/event.md");
+            StringAssert.StartsWith(md, "# Weekly sync (moved)\n");
+            StringAssert.Contains(md, "**Where:** Room 9");
+            StringAssert.Contains(md, "**Repeats:** ");
+
+            // an occurrence as the series has it
+            var first = Find(new DateTimeOffset(2026, 9, 1, 17, 0, 0, TimeSpan.Zero), "Weekly sync")!;
+            var firstIcs = (await OutlookFixtures.TextAsync(source, $"{first}/event.ics")).Replace("\r\n ", "", StringComparison.Ordinal);
+            StringAssert.Contains(firstIcs, "\r\nDTSTART:20260901T170000Z\r\n");
+            StringAssert.Contains(firstIcs, "\r\nLOCATION:Room 4\r\n");
+        }
+    }
+
     /// <summary>The OST capture, where it is on this machine (see LibOutlook's tests): a whole mailbox's tree.</summary>
     [TestMethod]
     public async Task AnOstServesTheMailboxTree()

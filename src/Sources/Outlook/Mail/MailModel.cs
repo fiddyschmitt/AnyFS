@@ -74,7 +74,7 @@ internal sealed record MailAttachment(string Name, string ContentType, string? C
 }
 
 /// <summary>What an appointment adds to a message.</summary>
-/// <param name="RecurrencePattern">Outlook's words for the recurrence ("every Monday"), for a recurring appointment; the occurrences are not expanded by the PST store.</param>
+/// <param name="RecurrencePattern">Outlook's words for the recurrence ("every Monday"), for a recurring appointment, or for one occurrence of it.</param>
 internal sealed record AppointmentDetail(DateTimeOffset? Start, DateTimeOffset? End, bool AllDay, string? Location, bool IsRecurring, string? RecurrencePattern, string? BusyStatus, string? Uid);
 
 /// <summary>A contact's fields.</summary>

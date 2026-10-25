@@ -78,10 +78,11 @@ public sealed class OutlookSettings
     public int RefreshMinutes { get; set; } = 5;
 
     [Setting("Calendar: months back", Advanced = true, Order = 13,
-        Hint = "How far back a mailbox's calendars are listed, counted from the start of this month; recurring appointments appear as their occurrences. (An Outlook data file lists every appointment it holds.)")]
+        Hint = "How far back a mailbox's calendars are listed, counted from the start of this month; recurring appointments appear as their occurrences. (An Outlook data file lists every appointment it holds, a recurring one as each of its occurrences.)")]
     public int CalendarMonthsBack { get; set; } = 24;
 
-    [Setting("Calendar: months ahead", Advanced = true, Order = 14, Hint = "How far ahead a mailbox's calendars are listed.")]
+    [Setting("Calendar: months ahead", Advanced = true, Order = 14,
+        Hint = "How far ahead a mailbox's calendars are listed. In an Outlook data file, how far ahead a recurring appointment without an end date is listed.")]
     public int CalendarMonthsAhead { get; set; } = 12;
 
     [Setting("Trust any certificate", Advanced = true, Order = 15,

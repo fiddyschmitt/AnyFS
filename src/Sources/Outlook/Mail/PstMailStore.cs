@@ -31,14 +31,20 @@ internal sealed class PstMailStore : IMailStore
     private readonly object _gate = new();
     private readonly ConcurrentDictionary<string, bool> _said = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _missingSaid = new(StringComparer.Ordinal);
+    /// <summary>The most occurrences one series lists (a daily one of 27 years).</summary>
+    private const int MaxOccurrences = 10_000;
+
+    private readonly int _monthsAhead;
     private PstFile _pst;
     private NamedIds _ids;
 
-    public PstMailStore(string path, bool includeHidden, ILogger? logger = null)
+    /// <param name="calendarMonthsAhead">How far ahead of today a recurring series without an end is listed.</param>
+    public PstMailStore(string path, bool includeHidden, ILogger? logger = null, int calendarMonthsAhead = 12)
     {
         _path = path;
         _hidden = includeHidden;
         _logger = logger ?? NullLogger.Instance;
+        _monthsAhead = calendarMonthsAhead;
         _pst = PstFile.Open(path);
         _ids = ReadNamedIds();
         Folders = MapFolders(_pst.TopFolder);
@@ -116,7 +122,14 @@ internal sealed class PstMailStore : IMailStore
             {
                 if (Summary(message, folder) is { } summary)
                 {
-                    into.Add(summary);
+                    if (summary.IsEvent && Occurrences(message, summary, folder) is { } occurrences)
+                    {
+                        into.AddRange(occurrences);
+                    }
+                    else
+                    {
+                        into.Add(summary);
+                    }
                 }
             }
         }
@@ -182,9 +195,60 @@ internal sealed class PstMailStore : IMailStore
         }
     }
 
+    /// <summary>
+    /// A recurring event's occurrences, each listed as an event of its own as a mailbox's calendar view lists them: the
+    /// series' id with the occurrence's original start ("2000A4@202610131000"), the occurrence's start as its date and a
+    /// changed occurrence's own subject. A series without an end is listed to <see cref="_monthsAhead"/> months from today.
+    /// Null for an event that does not recur, a pattern this cannot list (a Hijri one), or one that does not read (logged
+    /// once): the event is then listed once, as it was.
+    /// </summary>
+    private List<MailItemSummary>? Occurrences(PstMessage message, MailItemSummary series, MailFolder folder)
+    {
+        AppointmentRecurrence? recurrence;
+        try
+        {
+            recurrence = message.Recurrence;
+        }
+        catch (PstException ex)
+        {
+            Say($"recurrence:{series.Id}", "outlook: the recurrence of '{Subject}' in '{Folder}' of {File} does not read, so it is listed once: {Error}", series.Subject, folder.Name, FileName, ex.Message);
+            return null;
+        }
+
+        if (recurrence is null || !recurrence.CanExpand)
+        {
+            return null;
+        }
+
+        var until = recurrence.EndType == RecurrenceEnd.Never ? DateTimeOffset.UtcNow.AddMonths(_monthsAhead) : DateTimeOffset.MaxValue;
+        return [.. recurrence.Occurrences(until, MaxOccurrences).Select(o => series with
+        {
+            Id = OccurrenceId(series.Id, o.OriginalStart),
+            Subject = Blank(o.Exception?.Subject) ?? series.Subject,
+            Date = o.Start,
+        })];
+    }
+
+    /// <summary>An occurrence's id: its series' with the start the pattern gave it, local to the series' zone.</summary>
+    private static string OccurrenceId(string seriesId, DateTime originalStart) => $"{seriesId}@{originalStart.ToString("yyyyMMddHHmm", CultureInfo.InvariantCulture)}";
+
     internal MailItem? Open(string itemId)
     {
         var parts = itemId.Split('/');
+
+        // an occurrence of a recurring event: "series@yyyyMMddHHmm"; an attachment of one is its series'
+        var at = parts[0].IndexOf('@');
+        if (at >= 0)
+        {
+            var series = _pst.GetMessage(ParseNid(parts[0][..at]));
+            if (parts.Length == 1)
+            {
+                return series is null ? null : OpenOccurrence(series, parts[0], parts[0][(at + 1)..]);
+            }
+
+            parts[0] = parts[0][..at];
+        }
+
         var message = _pst.GetMessage(ParseNid(parts[0]));
         var id = parts[0];
         for (var i = 1; message is not null && i < parts.Length; i++)
@@ -285,15 +349,71 @@ internal sealed class PstMailStore : IMailStore
         return new MailItemSummary(id, kind, subject, sender, date, arrived ?? date, Utc(message.LastModificationTime), message.Size, message.HasAttachments) { IsEvent = isEvent };
     }
 
-    private MailItem Build(PstMessage message, string id)
+    /// <summary>
+    /// An occurrence of a recurring event as an item of its own: the series with the occurrence's start and end, and
+    /// what a changed occurrence has of its own (subject, location, free/busy, and its body when it was given one of
+    /// its own, from its exception's embedded message). Null when the series has no such occurrence (any more).
+    /// </summary>
+    private MailItem? OpenOccurrence(PstMessage series, string id, string key)
+    {
+        if (!DateTime.TryParseExact(key, "yyyyMMddHHmm", CultureInfo.InvariantCulture, DateTimeStyles.None, out var originalStart)
+            || series.Recurrence?.Occurrence(originalStart) is not { } occurrence)
+        {
+            return null;
+        }
+
+        var item = Build(series, id, occurrence);
+        if (occurrence.Exception is { HasOwnBody: true } && ExceptionMessage(series, occurrence) is { } own)
+        {
+            return new MailItem
+            {
+                Summary = item.Summary, MessageClass = item.MessageClass, From = item.From, Recipients = item.Recipients, Sent = item.Sent, Received = item.Received,
+                Created = item.Created, Modified = item.Modified, InternetMessageId = item.InternetMessageId, Importance = item.Importance, IsRead = item.IsRead,
+                Attachments = item.Attachments, Appointment = item.Appointment,
+                BodyText = Blank(own.Body), BodyHtml = Blank(own.BodyHtml), BodyRtf = Blank(own.BodyRtf),
+            };
+        }
+
+        return item;
+    }
+
+    /// <summary>The embedded message a series keeps for a changed occurrence: the exception attachment whose message replaces that start (PidLidExceptionReplaceTime, UTC).</summary>
+    private PstMessage? ExceptionMessage(PstMessage series, AppointmentOccurrence occurrence)
+    {
+        var replaced = series.Recurrence?.TimeZone?.ToUtc(occurrence.OriginalStart).UtcDateTime ?? occurrence.OriginalStart;
+        foreach (var attachment in series.Attachments)
+        {
+            if (attachment.IsRecurrenceException && attachment.EmbeddedMessage is { } message
+                && Get(message.Properties, _ids.ExceptionReplaceTime)?.Value is DateTime time && Math.Abs((time - replaced).TotalMinutes) < 1)
+            {
+                return message;
+            }
+        }
+
+        return null;
+    }
+
+    /// <param name="occurrence">The occurrence of a recurring event the item is; null for an item as it is.</param>
+    private MailItem Build(PstMessage message, string id, AppointmentOccurrence? occurrence = null)
     {
         var summary = Summarise(message, id, null);
+        if (occurrence is not null)
+        {
+            summary = summary with { Subject = Blank(occurrence.Exception?.Subject) ?? summary.Subject, Date = occurrence.Start };
+        }
+
         var p = message.Properties;
         var attachments = new List<MailAttachment>();
         var all = message.Attachments;
         for (var i = 0; i < all.Count; i++)
         {
             var a = all[i];
+            if (a.IsRecurrenceException)
+            {
+                // a changed occurrence Outlook keeps for its series, never an attachment of the event
+                continue;
+            }
+
             var embeddedIndex = i;
             var embedded = a.Method == PstAttachMethod.EmbeddedMessage ? a.EmbeddedMessage : null;
             var name = Blank(a.FileName) ?? (embedded is not null ? Blank(embedded.Subject) ?? "message" : "attachment") ;
@@ -337,7 +457,7 @@ internal sealed class PstMailStore : IMailStore
             IsRead = message.IsRead,
             IsDraft = message.IsUnsent,
             Attachments = attachments,
-            Appointment = summary.Kind == MailItemKind.Appointment ? AppointmentOf(p) : null,
+            Appointment = summary.Kind == MailItemKind.Appointment ? AppointmentOf(p, occurrence) : null,
             Contact = summary.Kind == MailItemKind.Contact ? ContactOf(p) : null,
             InternetContentType = Blank(Get(p, _ids.ContentType)?.Value as string),
         };
@@ -362,9 +482,10 @@ internal sealed class PstMailStore : IMailStore
         return new MailRecipient(kind, new MailAddress(Blank(r.DisplayName), Smtp(r.SmtpAddress, r.EmailAddress, r.AddressType)), response);
     }
 
-    private AppointmentDetail AppointmentOf(PstProperties p)
+    /// <param name="occurrence">For an occurrence of a recurring event: its start and end, and a changed one's own location and free/busy.</param>
+    private AppointmentDetail AppointmentOf(PstProperties p, AppointmentOccurrence? occurrence)
     {
-        var busy = (Get(p, _ids.BusyStatus)?.Value as int?) switch
+        var busy = (occurrence?.Exception?.BusyStatus ?? Get(p, _ids.BusyStatus)?.Value as int?) switch
         {
             0 => "free",
             1 => "tentative",
@@ -375,10 +496,10 @@ internal sealed class PstMailStore : IMailStore
         };
         var uid = Get(p, _ids.CleanGlobalObjectId)?.Value as byte[] ?? Get(p, _ids.GlobalObjectId)?.Value as byte[];
         return new AppointmentDetail(
-            Utc(Get(p, _ids.AppointmentStart)?.Value as DateTime?),
-            Utc(Get(p, _ids.AppointmentEnd)?.Value as DateTime?),
+            occurrence?.Start ?? Utc(Get(p, _ids.AppointmentStart)?.Value as DateTime?),
+            occurrence?.End ?? Utc(Get(p, _ids.AppointmentEnd)?.Value as DateTime?),
             Get(p, _ids.AllDay)?.Value is bool allDay && allDay,
-            Blank(Get(p, _ids.Location)?.Value as string),
+            Blank(occurrence?.Exception?.Location) ?? Blank(Get(p, _ids.Location)?.Value as string),
             Get(p, _ids.IsRecurring)?.Value is bool recurring && recurring,
             Blank(Get(p, _ids.RecurrencePattern)?.Value as string),
             busy,
@@ -502,6 +623,7 @@ internal sealed class PstMailStore : IMailStore
             BusyStatus = named.Find(Appointment, 0x8205)?.PropertyId;
             GlobalObjectId = named.Find(Meeting, 0x0003)?.PropertyId;
             CleanGlobalObjectId = named.Find(Meeting, 0x0023)?.PropertyId;
+            ExceptionReplaceTime = named.Find(Appointment, 0x8228)?.PropertyId;
             FileUnder = named.Find(Address, 0x8005)?.PropertyId;
             Email1Address = named.Find(Address, 0x8083)?.PropertyId;
             Email2Address = named.Find(Address, 0x8093)?.PropertyId;
@@ -536,6 +658,9 @@ internal sealed class PstMailStore : IMailStore
         public ushort? GlobalObjectId { get; }
 
         public ushort? CleanGlobalObjectId { get; }
+
+        /// <summary>PidLidExceptionReplaceTime: the start (UTC) a changed occurrence's embedded message replaces.</summary>
+        public ushort? ExceptionReplaceTime { get; }
 
         public ushort? FileUnder { get; }
 

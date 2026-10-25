@@ -70,7 +70,7 @@ public sealed class OutlookSource : SourceBase
                 Context.ReportProgress($"Reading {Path.GetFileName(file)}");
                 try
                 {
-                    _store = await Task.Run(() => new PstMailStore(file, _settings.ShowHidden, Logger), ct).ConfigureAwait(false);
+                    _store = await Task.Run(() => new PstMailStore(file, _settings.ShowHidden, Logger, _settings.CalendarMonthsAhead), ct).ConfigureAwait(false);
                     _seen = Stamp(file);
                 }
                 catch (PstException ex)
