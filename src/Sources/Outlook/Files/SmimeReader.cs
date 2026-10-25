@@ -10,7 +10,8 @@ namespace AnyFS.Sources.Outlook.Files;
 /// The keys an Outlook source opens encrypted S/MIME mail with: the user's certificates in the system's personal stores
 /// (a smart card's appear there while it is in, and its driver asks for the PIN, as it does for Outlook) and, for tests,
 /// certificates of their own. A decryption the user declined (the PIN prompt cancelled) is not tried again for a while,
-/// so browsing encrypted mail does not ask again at every message.
+/// so browsing encrypted mail does not ask again at every message. Where no PIN can be asked for (a service, a remote
+/// shell: no screen to ask on), only keys that need none are tried: a card's prompt would wait there for no one.
 /// </summary>
 internal sealed class SmimeKeys(X509Certificate2Collection? extra = null)
 {
@@ -19,6 +20,99 @@ internal sealed class SmimeKeys(X509Certificate2Collection? extra = null)
 
     /// <summary>Certificates (with their private keys) tried as well as the system's.</summary>
     public X509Certificate2Collection Extra { get; } = extra ?? [];
+
+    /// <summary>Whether a PIN prompt can be shown here: a desktop session, not a service or a remote shell.</summary>
+    public bool CanPrompt { get; init; } = Environment.UserInteractive;
+
+    /// <summary>Whether a certificate's private key asks for a PIN when used: on a smart card, a token or other hardware.</summary>
+    public Func<X509Certificate2, bool> NeedsPin { get; init; } = OnDevice;
+
+    /// <summary>The certificates with private keys that a recipient of an encrypted message names: <see cref="Extra"/>'s first, then the personal stores' (the user's, the computer's).</summary>
+    public IEnumerable<X509Certificate2> CertificatesFor(SubjectIdentifier recipient)
+    {
+        foreach (var certificate in Extra)
+        {
+            if (certificate.HasPrivateKey && Names(recipient, certificate))
+            {
+                yield return certificate;
+            }
+        }
+
+        foreach (var location in new[] { StoreLocation.CurrentUser, StoreLocation.LocalMachine })
+        {
+            foreach (var certificate in Personal(location))
+            {
+                if (certificate.HasPrivateKey && Names(recipient, certificate))
+                {
+                    yield return certificate;
+                }
+            }
+        }
+    }
+
+    private static X509Certificate2Collection Personal(StoreLocation location)
+    {
+        try
+        {
+            using var store = new X509Store(StoreName.My, location);
+            store.Open(OpenFlags.ReadOnly | OpenFlags.OpenExistingOnly);
+            return store.Certificates;
+        }
+        catch (CryptographicException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>Whether a recipient identifier names the certificate: by its serial number, or by its subject key identifier.</summary>
+    private static bool Names(SubjectIdentifier recipient, X509Certificate2 certificate) => recipient.Value switch
+    {
+        System.Security.Cryptography.Xml.X509IssuerSerial issuerSerial => certificate.SerialNumber.Equals(issuerSerial.SerialNumber, StringComparison.OrdinalIgnoreCase),
+        string keyIdentifier => certificate.Extensions.OfType<X509SubjectKeyIdentifierExtension>().Any(e => string.Equals(e.SubjectKeyIdentifier, keyIdentifier, StringComparison.OrdinalIgnoreCase)),
+        _ => false,
+    };
+
+    /// <summary>
+    /// Whether using a certificate's key may ask for something (Windows: a key in any provider but Microsoft's software
+    /// ones, which covers smart cards, tokens and the TPM, or a software key protected by a prompt). A key that cannot be
+    /// looked at counts as one; elsewhere the personal store holds keys in software.
+    /// </summary>
+    private static bool OnDevice(X509Certificate2 certificate)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        try
+        {
+            using var rsa = certificate.GetRSAPrivateKey();
+            using var ec = rsa is null ? certificate.GetECDiffieHellmanPrivateKey() : null;
+            if (((rsa as RSACng)?.Key ?? (ec as ECDiffieHellmanCng)?.Key) is { } key)
+            {
+                return !SoftwareProviders.Contains(key.Provider?.Provider ?? "", StringComparer.OrdinalIgnoreCase) || key.UIPolicy.ProtectionLevel != CngUIProtectionLevels.None;
+            }
+
+            if (rsa is RSACryptoServiceProvider csp)
+            {
+                var info = csp.CspKeyContainerInfo;
+                return info.HardwareDevice || info.Removable || info.Protected || !SoftwareProviders.Contains(info.ProviderName ?? "", StringComparer.OrdinalIgnoreCase);
+            }
+
+            return true;
+        }
+        catch (CryptographicException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>Microsoft's providers that keep keys in software (CNG's, then CryptoAPI's).</summary>
+    private static readonly string[] SoftwareProviders =
+    [
+        "Microsoft Software Key Storage Provider", "Microsoft Enhanced RSA and AES Cryptographic Provider", "Microsoft Enhanced Cryptographic Provider v1.0",
+        "Microsoft Base Cryptographic Provider v1.0", "Microsoft Strong Cryptographic Provider", "Microsoft RSA SChannel Cryptographic Provider",
+    ];
 
     /// <summary>Whether a decryption was declined a short while ago.</summary>
     public bool Paused => DateTime.UtcNow.Ticks < Interlocked.Read(ref _declinedUntil);
@@ -117,7 +211,14 @@ internal static class SmimeReader
         envelope.Decode(der);
         try
         {
-            envelope.Decrypt(keys.Extra);
+            if (keys.CanPrompt)
+            {
+                envelope.Decrypt(keys.Extra);
+            }
+            else if (!DecryptWithoutPrompt(envelope, keys, notes))
+            {
+                return null;
+            }
         }
         catch (CryptographicException ex) when (Declined(ex))
         {
@@ -135,6 +236,34 @@ internal static class SmimeReader
 
         notes.Add("encrypted for you, opened with your certificate");
         return envelope.ContentInfo.Content;
+    }
+
+    /// <summary>
+    /// Decrypts where no PIN can be asked for: only with a key that needs none, since a smart card's prompt would wait
+    /// there for no one. False, with a note, when no such key opens the message.
+    /// </summary>
+    private static bool DecryptWithoutPrompt(EnvelopedCms envelope, SmimeKeys keys, List<string> notes)
+    {
+        var onCard = false;
+        foreach (var recipient in envelope.RecipientInfos)
+        {
+            foreach (var certificate in keys.CertificatesFor(recipient.RecipientIdentifier))
+            {
+                if (keys.NeedsPin(certificate))
+                {
+                    onCard = true;
+                    continue;
+                }
+
+                envelope.Decrypt(recipient, [certificate]);
+                return true;
+            }
+        }
+
+        notes.Add(onCard
+            ? "encrypted to your smart card, whose PIN cannot be asked for here, with no screen to ask on (message.eml opens in Outlook, which decrypts it)"
+            : "encrypted, and none of the certificates on this computer can open it (message.eml opens in Outlook where the right one is)");
+        return false;
     }
 
     /// <summary>A decryption the user declined: the smart card's PIN prompt cancelled.</summary>

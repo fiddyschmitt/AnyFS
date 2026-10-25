@@ -108,6 +108,23 @@ public class OutlookSmimeTests
     }
 
     [TestMethod]
+    public async Task WithoutAScreenOnlyAKeyThatNeedsNoPinOpensEncryptedMail()
+    {
+        using var mine = Certificate("Sam", "sam@contoso.test");
+        var item = Item("IPM.Note.SMIME", "smime.p7m", "application/pkcs7-mime", Encrypt(Inner, mine));
+
+        // a service or a remote shell: a key in software opens it with no one to ask
+        var (markdown, _, attachments) = await FilesAsync(item, new SmimeKeys([mine]) { CanPrompt = false });
+        StringAssert.Contains(markdown, "**Security:** encrypted for you, opened with your certificate");
+        CollectionAssert.AreEquivalent(new[] { "report.bin" }, attachments.Keys.ToList());
+
+        // a smart card's is not tried there: its PIN prompt would wait for no one
+        var (onCard, _, kept) = await FilesAsync(item, new SmimeKeys([mine]) { CanPrompt = false, NeedsPin = _ => true });
+        StringAssert.Contains(onCard, "**Security:** encrypted to your smart card, whose PIN cannot be asked for here");
+        CollectionAssert.AreEquivalent(new[] { "smime.p7m" }, kept.Keys.ToList(), "what it is, as it is");
+    }
+
+    [TestMethod]
     public async Task ASignedMessageShowsItsContentAndWhetherItsSignatureHolds()
     {
         using var jane = Certificate("Jane Doe", "jane@contoso.test");
