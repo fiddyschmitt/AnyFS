@@ -208,6 +208,56 @@ public class OutlookWebSessionTests
         }
     }
 
+    /// <summary>
+    /// A mailbox's listing is kept between starts: a restart serves the last listing at once and asks the server only what
+    /// changed since, from each folder's sync state, never every folder whole; a listing kept under other settings is not used.
+    /// </summary>
+    [TestMethod]
+    public async Task ARestartServesTheKeptListingAndAsksOnlyWhatChanged()
+    {
+        var fake = FakeExchange.Mailbox();
+        byte[] listing;
+        var (first, firstContext) = await StartAsync(fake);
+        await using (first)
+        using (firstContext)
+        {
+            Assert.IsTrue(fake.FullSyncs > 0, "the first start lists each folder whole");
+            var kept = Path.Combine(firstContext.StateDirectory, "mailbox.json.gz");
+            Assert.IsTrue(File.Exists(kept), "the listing is kept in the state folder");
+            listing = await File.ReadAllBytesAsync(kept);
+        }
+
+        var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
+        fake.AddMessage(inbox, "While AnyFS was off", ("Alex Wilber", "alexw@fake.test"), new DateTimeOffset(2026, 4, 21, 9, 0, 0, TimeSpan.Zero), "<p>News.</p>", []);
+        var full = fake.FullSyncs;
+        using (var context = new TestSourceContext("outlook"))
+        {
+            await File.WriteAllBytesAsync(Path.Combine(context.StateDirectory, "mailbox.json.gz"), listing);
+            var source = new OutlookSource(Settings(), fake.StandIn());
+            await source.InitialiseAsync(context, CancellationToken.None);
+            await using (source)
+            {
+                Assert.AreEqual(full, fake.FullSyncs, "the restart lists no folder whole");
+                await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
+                await source.RefreshAsync(CancellationToken.None);
+                var april = (await OutlookFixtures.ListAsync(source, "Inbox/2026/04")).Select(e => e.Name).ToList();
+                Assert.IsTrue(april.Any(n => n.EndsWith(" - Alex Wilber - While AnyFS was off", StringComparison.Ordinal)), "what changed since is taken in: " + string.Join(", ", april));
+                Assert.AreEqual(full, fake.FullSyncs, "by the folders' deltas alone");
+            }
+        }
+
+        using (var other = new TestSourceContext("outlook"))
+        {
+            await File.WriteAllBytesAsync(Path.Combine(other.StateDirectory, "mailbox.json.gz"), listing);
+            var shown = new OutlookSource(Settings(hidden: true), fake.StandIn());
+            await shown.InitialiseAsync(other, CancellationToken.None);
+            await using (shown)
+            {
+                Assert.IsTrue(fake.FullSyncs > full, "with hidden folders shown the kept listing is not this one's: the mailbox is listed whole");
+            }
+        }
+    }
+
     [TestMethod]
     public async Task ARefreshTakesInWhatChangedThroughTheFolderDelta()
     {

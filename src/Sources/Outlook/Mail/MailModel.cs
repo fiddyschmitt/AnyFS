@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace AnyFS.Sources.Outlook.Mail;
 
 /// <summary>What kind of item a message is, by its message class.</summary>
@@ -16,8 +18,10 @@ internal enum MailItemKind
 /// <param name="ContainerClass">"IPF.Note", "IPF.Contact", "IPF.Appointment"...; null when the folder says nothing.</param>
 internal sealed record MailFolder(string Id, string Name, string? ContainerClass, IReadOnlyList<MailFolder> Folders, int ItemCount, DateTimeOffset? Created, DateTimeOffset? Modified)
 {
+    [JsonIgnore]
     public bool IsCalendar => ContainerClass?.StartsWith("IPF.Appointment", StringComparison.OrdinalIgnoreCase) == true;
 
+    [JsonIgnore]
     public bool IsContacts => ContainerClass?.StartsWith("IPF.Contact", StringComparison.OrdinalIgnoreCase) == true;
 }
 

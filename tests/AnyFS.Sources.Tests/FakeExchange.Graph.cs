@@ -159,6 +159,11 @@ internal sealed partial class FakeExchange
             return GraphError(404, "ErrorItemNotFound", "The specified object was not found in the store.");
         }
 
+        if ((query["$skiptoken"] ?? query["$deltatoken"]) is null)
+        {
+            FullSyncs++;
+        }
+
         var since = 0;
         if ((query["$skiptoken"] ?? query["$deltatoken"]) is { } token)
         {

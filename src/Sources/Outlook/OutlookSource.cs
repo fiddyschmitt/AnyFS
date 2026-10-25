@@ -34,6 +34,9 @@ public sealed class OutlookSource : SourceBase
     private (long Length, DateTime Written) _seen;
     private bool _degraded;
 
+    /// <summary>The mailbox store's revision its listing was last kept at (<see cref="KeepListingAsync"/>).</summary>
+    private long _keptRevision = -1;
+
     public OutlookSource(OutlookSettings settings)
         : this(settings, null)
     {
@@ -106,10 +109,29 @@ public sealed class OutlookSource : SourceBase
                 throw new SourceFailedException($"{file} is neither a mailbox's address, nor a server's, nor an Outlook data file (one ends in .pst or .ost).", permanent: true);
         }
 
+        // a mailbox listed before starts from that listing and asks for what changed since in the background
+        var kept = _store is EwsMailStore mailbox ? MailboxIndexFile.Load(IndexPath, mailbox.Name, IndexShape) : null;
+        if (kept is not null)
+        {
+            ((EwsMailStore)_store).Import(kept);
+        }
+
         try
         {
-            await _store.RefreshAsync(ct).ConfigureAwait(false);
+            if (kept is null)
+            {
+                await _store.RefreshAsync(ct).ConfigureAwait(false);
+            }
+
             Swap(await MailTree.BuildAsync(_store, ct, (done, total, name) => Context.ReportProgress($"Listing {name} ({done} of {total} folders)", total == 0 ? null : (double)done / total)).ConfigureAwait(false));
+            if (kept is null)
+            {
+                await KeepListingAsync(ct).ConfigureAwait(false);
+            }
+            else
+            {
+                _keptRevision = ((EwsMailStore)_store).Revision;
+            }
         }
         catch (SignInRequiredException ex)
         {
@@ -134,13 +156,51 @@ public sealed class OutlookSource : SourceBase
             Logger.LogWarning("outlook: {Count:N0} places of {File} do not read in full (each named above); the rest of the file is served", damaged.Damaged, Path.GetFileName(file));
         }
 
-        if (RefreshEvery > TimeSpan.Zero)
+        if (RefreshEvery > TimeSpan.Zero || kept is not null)
         {
             var stopping = _stopping.Token;
-            _refreshing = Task.Run(() => RefreshLoopAsync(stopping), CancellationToken.None);
+            _refreshing = Task.Run(() => RefreshLoopAsync(refreshNow: kept is not null, stopping), CancellationToken.None);
         }
 
-        Logger.LogInformation("outlook: serving {Name}: {Folders:N0} folders, {Items:N0} items", _store.Name, _tree.FolderCount, _tree.ItemCount);
+        if (kept is not null)
+        {
+            Logger.LogInformation("outlook: serving {Name} as listed {Minutes:F0} minutes ago: {Folders:N0} folders, {Items:N0} items; asking what changed since, in the background",
+                _store.Name, (DateTimeOffset.UtcNow - kept.Taken).TotalMinutes, _tree.FolderCount, _tree.ItemCount);
+        }
+        else
+        {
+            Logger.LogInformation("outlook: serving {Name}: {Folders:N0} folders, {Items:N0} items", _store.Name, _tree.FolderCount, _tree.ItemCount);
+        }
+    }
+
+    /// <summary>Where a mailbox's listing is kept between starts.</summary>
+    private string IndexPath => Path.Combine(Context.StateDirectory, MailboxIndexFile.FileName);
+
+    /// <summary>The settings a mailbox's listing depends on: one kept under others is not used.</summary>
+    private string IndexShape => FormattableString.Invariant($"{_settings.Kind}|hidden={_settings.ShowHidden}|back={_settings.CalendarMonthsBack}|ahead={_settings.CalendarMonthsAhead}");
+
+    /// <summary>
+    /// Keeps a mailbox's listing for the next start when it changed since it was last kept (spec 7.7: the listing index
+    /// in the state folder, subjects and dates only, never a message). A file that cannot be written is said and left.
+    /// </summary>
+    private async Task KeepListingAsync(CancellationToken ct)
+    {
+        if (_store is not EwsMailStore mailbox || mailbox.Revision == _keptRevision)
+        {
+            return;
+        }
+
+        var revision = mailbox.Revision;
+        var index = await mailbox.ExportAsync(IndexShape, ct).ConfigureAwait(false);
+        try
+        {
+            await Task.Run(() => MailboxIndexFile.Save(IndexPath, index), ct).ConfigureAwait(false);
+            _keptRevision = revision;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Logger.LogWarning("outlook: the listing of {Name} could not be kept for the next start: {Error}", mailbox.Name, ex.Message);
+        }
     }
 
     /// <summary>What an app sign-in needs from where it runs: the saved sign-in (the source's secret store) and a way to show a device code; the Test button has neither.</summary>
@@ -297,6 +357,7 @@ public sealed class OutlookSource : SourceBase
             Swap(await MailTree.BuildAsync(Store, ct, null).ConfigureAwait(false));
             _items.Clear();
             Logger.LogInformation("outlook: {Name} read again in {Seconds:F1} s: {Folders:N0} folders, {Items:N0} items", Store.Name, Stopwatch.GetElapsedTime(started).TotalSeconds, _tree.FolderCount, _tree.ItemCount);
+            await KeepListingAsync(ct).ConfigureAwait(false);
             MarkHealthy();
         }
         finally
@@ -305,13 +366,24 @@ public sealed class OutlookSource : SourceBase
         }
     }
 
-    private async Task RefreshLoopAsync(CancellationToken ct)
+    /// <param name="refreshNow">Whether to ask for what changed at once (a mailbox served from its kept listing), and then every <see cref="RefreshEvery"/> when that is set.</param>
+    private async Task RefreshLoopAsync(bool refreshNow, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                await Task.Delay(RefreshEvery, ct).ConfigureAwait(false);
+                if (!refreshNow)
+                {
+                    if (RefreshEvery <= TimeSpan.Zero)
+                    {
+                        break;
+                    }
+
+                    await Task.Delay(RefreshEvery, ct).ConfigureAwait(false);
+                }
+
+                refreshNow = false;
                 await RefreshAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)

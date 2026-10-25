@@ -46,6 +46,9 @@ internal sealed partial class FakeExchange
     /// <summary>How many requests were refused for their token.</summary>
     public int Refusals { get; private set; }
 
+    /// <summary>How many times a folder's items were asked for whole (a sync with no state, a delta with no token): what a listing kept between starts spares.</summary>
+    public int FullSyncs { get; private set; }
+
     /// <summary>Answers a request instead of the fake when it returns one (a 429 with Retry-After, say).</summary>
     public Func<HttpRequestMessage, string, HttpResponseMessage?>? Intercept { get; set; }
 
@@ -420,6 +423,11 @@ internal sealed partial class FakeExchange
         }
 
         var state = body["SyncState"]?.GetValue<string>();
+        if (state is null)
+        {
+            FullSyncs++;
+        }
+
         var since = 0;
         if (state is not null)
         {
@@ -734,6 +742,11 @@ internal sealed partial class FakeExchange
         }
 
         var state = operation.Element(M + "SyncState")?.Value;
+        if (string.IsNullOrEmpty(state))
+        {
+            FullSyncs++;
+        }
+
         var since = 0;
         if (!string.IsNullOrEmpty(state))
         {

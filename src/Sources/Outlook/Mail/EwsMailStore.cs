@@ -41,12 +41,90 @@ internal sealed class EwsMailStore : IMailStore
     /// <summary>How many items the synced folders hold between them (for logs and tests).</summary>
     public int ItemsKnown => _states.Values.Sum(s => s.Items.Count);
 
+    /// <summary>Counts the changes to what the store knows (its folders, items and calendar views), so its listing is kept again only when it changed.</summary>
+    public long Revision => Interlocked.Read(ref _revision);
+
+    private long _revision;
+
+    /// <summary>What the store knows, to keep for the next start: the folder tree, each synced folder's items and sync state, each calendar's last view.</summary>
+    /// <param name="shape">The settings the listing depends on, kept with it.</param>
+    public async Task<MailboxIndex> ExportAsync(string shape, CancellationToken ct)
+    {
+        var states = new List<FolderIndex>();
+        foreach (var state in _states.Values)
+        {
+            await state.Gate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                if (state.Folder.IsCalendar && state.Calendar is { } view)
+                {
+                    states.Add(new FolderIndex(state.Folder.Id, null, view, IsCalendarView: true));
+                }
+                else if (!state.Folder.IsCalendar && state.Complete)
+                {
+                    states.Add(new FolderIndex(state.Folder.Id, state.SyncState, [.. state.Items.Values], IsCalendarView: false));
+                }
+            }
+            finally
+            {
+                state.Gate.Release();
+            }
+        }
+
+        return new MailboxIndex(MailboxIndexFile.Version, Name, shape, DateTimeOffset.UtcNow, Folders, states);
+    }
+
+    /// <summary>
+    /// Takes in a kept listing: its folders, and each folder's items and sync state, are served from it, a calendar's
+    /// last view too, until <see cref="RefreshAsync"/> asks the server what changed since.
+    /// </summary>
+    public void Import(MailboxIndex index)
+    {
+        Folders = index.Folders;
+        var byId = new Dictionary<string, MailFolder>(StringComparer.Ordinal);
+        void Collect(IReadOnlyList<MailFolder> folders)
+        {
+            foreach (var folder in folders)
+            {
+                byId[folder.Id] = folder;
+                Collect(folder.Folders);
+            }
+        }
+
+        Collect(index.Folders);
+        foreach (var kept in index.States)
+        {
+            if (!byId.TryGetValue(kept.FolderId, out var folder))
+            {
+                continue;
+            }
+
+            var view = kept.IsCalendarView ? kept.Items : null;
+            var state = new FolderState(folder) { SyncState = kept.SyncState, Complete = !kept.IsCalendarView, Calendar = view, Kept = view };
+            if (!kept.IsCalendarView)
+            {
+                foreach (var item in kept.Items)
+                {
+                    state.Items[item.Id] = item;
+                }
+            }
+
+            _states[folder.Id] = state;
+        }
+    }
+
     public async Task RefreshAsync(CancellationToken ct)
     {
         var all = await _ews.FindFoldersAsync(ct).ConfigureAwait(false);
         var ids = new HashSet<string>(all.Select(f => f.Id), StringComparer.Ordinal);
         var byParent = all.GroupBy(f => f.ParentId is { } p && ids.Contains(p) ? p : "").ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
-        Folders = Map(byParent.GetValueOrDefault("") ?? [], byParent);
+        var folders = Map(byParent.GetValueOrDefault("") ?? [], byParent);
+        if (Signature(folders) != Signature(Folders))
+        {
+            Interlocked.Increment(ref _revision);
+        }
+
+        Folders = folders;
 
         // folders that are gone take their state with them; the ones read before take in what changed
         foreach (var gone in _states.Keys.Where(k => !ids.Contains(k)).ToList())
@@ -74,7 +152,18 @@ internal sealed class EwsMailStore : IMailStore
         state.Folder = folder;
         if (folder.IsCalendar)
         {
-            return state.Calendar ??= await CalendarAsync(folder, ct).ConfigureAwait(false);
+            if (state.Calendar is null)
+            {
+                var view = await CalendarAsync(folder, ct).ConfigureAwait(false);
+                if (state.Kept is not { } kept || !kept.SequenceEqual(view))
+                {
+                    Interlocked.Increment(ref _revision);
+                }
+
+                state.Calendar = state.Kept = view;
+            }
+
+            return state.Calendar;
         }
 
         if (!state.Complete)
@@ -106,6 +195,10 @@ internal sealed class EwsMailStore : IMailStore
     }
 
     // --- folders ----------------------------------------------------------------------------------------------------------
+
+    /// <summary>The folder tree as one string: what tells a changed tree from the same one.</summary>
+    private static string Signature(IReadOnlyList<MailFolder> folders)
+        => string.Join(';', folders.Select(f => $"{f.Id}|{f.Name}|{f.ContainerClass}|{f.ItemCount}[{Signature(f.Folders)}]"));
 
     private IReadOnlyList<MailFolder> Map(List<EwsFolder> folders, Dictionary<string, List<EwsFolder>> byParent)
     {
@@ -140,6 +233,7 @@ internal sealed class EwsMailStore : IMailStore
         try
         {
             var created = 0;
+            var updated = 0;
             var deleted = 0;
             for (var attempt = 0; ; attempt++)
             {
@@ -171,6 +265,7 @@ internal sealed class EwsMailStore : IMailStore
                                 else
                                 {
                                     state.Items[item.Id] = Summarise(item, item.Id, inCalendar: false);
+                                    updated++;
                                 }
                             }
 
@@ -199,6 +294,11 @@ internal sealed class EwsMailStore : IMailStore
             else if (created + deleted > 0)
             {
                 _logger.LogInformation("outlook: '{Folder}': {Created} new, {Deleted} gone", state.Folder.Name, created, deleted);
+            }
+
+            if (created + updated + deleted > 0)
+            {
+                Interlocked.Increment(ref _revision);
             }
 
             state.Complete = true;
@@ -370,6 +470,9 @@ internal sealed class EwsMailStore : IMailStore
         public string? SyncState;
         public bool Complete;
         public IReadOnlyList<MailItemSummary>? Calendar;
+
+        /// <summary>The calendar view last read (or kept from the last start), to tell a changed view from the same one.</summary>
+        public IReadOnlyList<MailItemSummary>? Kept;
         public readonly Dictionary<string, MailItemSummary> Items = new(StringComparer.Ordinal);
         public readonly SemaphoreSlim Gate = new(1, 1);
     }
