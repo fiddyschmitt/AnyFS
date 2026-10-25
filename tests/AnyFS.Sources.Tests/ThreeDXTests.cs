@@ -835,7 +835,9 @@ public class ThreeDXSourceTests
         using var context = new TestSourceContext("3dx", log);
         await using var source = await StartAsync(ThreeDXSignInTests.Settings(fake), context);
         Assert.AreEqual(2, (await ListAsync(source, "")).Count);
-        Assert.AreEqual(1, log.Lines.Count(l => l.Contains("the request for 2 documents was answered 500: An unexpected error has occurred; trying again", StringComparison.Ordinal)), log.ToString());
+        var said = log.Lines.Single(l => l.Contains("the request for 2 documents was answered", StringComparison.Ordinal));
+        StringAssert.Contains(said, "answered HTTP 500, application/json, ");
+        StringAssert.Contains(said, "success false, statusCode 500, \"An unexpected error has occurred\", fields success statusCode error; trying again");
     }
 
     [TestMethod]

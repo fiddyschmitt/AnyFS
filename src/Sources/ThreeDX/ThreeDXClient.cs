@@ -488,8 +488,9 @@ internal sealed partial class ThreeDXClient
     }
 
     /// <summary>
-    /// What an answer that should have held a ticket held instead, for the log and the error: its status, type and length,
-    /// 3DX's own success, statusCode and message, and the names of what came (never their values, which may be a ticket's).
+    /// What 3DX answered, for the log and errors (a 5xx tried again, an answer that should have held a ticket): its status,
+    /// type and length, 3DX's own success, statusCode and message, and the names of what came (never their values, which
+    /// may be a ticket's).
     /// </summary>
     private static string Gist(HttpResponseMessage response, string body)
     {
@@ -680,8 +681,8 @@ internal sealed partial class ThreeDXClient
 
             if (((int)response.StatusCode >= 500 || response.StatusCode == HttpStatusCode.TooManyRequests) && attempt < MaxAttempts)
             {
-                var detail = Detail(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
-                _logger.LogWarning("3dx: the request for {What} was answered {Status}{Detail}; trying again", what, (int)response.StatusCode, detail);
+                var answer = Gist(response, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+                _logger.LogWarning("3dx: the request for {What} was answered {Answer}; trying again", what, answer);
                 _onTrouble?.Invoke($"3DX answered {(int)response.StatusCode}");
                 response.Dispose();
                 await Task.Delay(Backoff(attempt), ct).ConfigureAwait(false);
