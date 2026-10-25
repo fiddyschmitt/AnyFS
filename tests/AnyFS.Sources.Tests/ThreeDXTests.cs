@@ -812,7 +812,7 @@ public class ThreeDXSourceTests
         var said = log.Lines.Single(l => l.Contains("no download ticket for", StringComparison.Ordinal));
         StringAssert.Contains(said, "HTTP 200, application/json");
         StringAssert.Contains(said, "success false, statusCode 500, \"No file server for the file's store\"");
-        StringAssert.Contains(said, "fields success statusCode error");
+        StringAssert.Contains(said, "fields success statusCode error); its document, asked for afresh, still holds the file as listed; asking again");
         CollectionAssert.AreEqual(new[] { null, "VPLMProjectLeader.Company Name.Common Space" }, fake.TicketContexts.ToArray(), "asked as Mount3DX asks, then with the security context");
 
         // none when asked again either: the open fails saying what 3DX answered; the renewed session is asked its security context again
@@ -822,7 +822,39 @@ public class ThreeDXSourceTests
         var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => ReadAllAsync(source, "DOC-N Rev 1 (No ticket)/b.pdf"));
         StringAssert.Contains(ex.Message, "3DX gave no download ticket for 'DOC-N Rev 1 (No ticket)/b.pdf', also when asked again");
         StringAssert.Contains(ex.Message, "No file server for the file's store");
+        StringAssert.Contains(ex.Message, "its document, asked for afresh, still holds the file as listed");
         Assert.AreEqual(persons + 1, fake.PersonRequests, "a new session's security context");
+    }
+
+    [TestMethod]
+    public async Task AFileThatChangedSinceTheListWasMadeIsSaidAsSuch()
+    {
+        using var fake = new Fake3DX();
+        var content = Bytes(300, 15);
+        var doc = fake.Add("DOC-V", "1", "Versions", "Document", ("plan.pdf", content), ("gone.pdf", content));
+        var other = fake.Add("DOC-W", "1", "Withdrawn", "Document", ("w.pdf", content));
+        using var context = new TestSourceContext("3dx");
+        await using var source = await StartAsync(ThreeDXSignInTests.Settings(fake), context);
+
+        // after the listing: a new version of plan.pdf (a file of its own in 3DX), gone.pdf taken off, DOC-W withdrawn; 3DX has no ticket for what the list holds
+        doc.Files[0] = doc.Files[0] with { Id = Fake3DX.NewId() };
+        doc.Files.RemoveAt(1);
+        lock (fake.Documents)
+        {
+            fake.Documents.Remove(other);
+        }
+
+        var changed = await Assert.ThrowsExactlyAsync<VfsException>(() => ReadAllAsync(source, "DOC-V Rev 1 (Versions)/plan.pdf"));
+        StringAssert.Contains(changed.Message, "'DOC-V Rev 1 (Versions)/plan.pdf' is another file in 3DX now than the one listed (a new version, most likely");
+        StringAssert.Contains(changed.Message, "the next listing brings it");
+        var gone = await Assert.ThrowsExactlyAsync<VfsException>(() => ReadAllAsync(source, "DOC-V Rev 1 (Versions)/gone.pdf"));
+        StringAssert.Contains(gone.Message, "is no longer among its document's files in 3DX");
+        var withdrawn = await Assert.ThrowsExactlyAsync<VfsException>(() => ReadAllAsync(source, "DOC-W Rev 1 (Withdrawn)/w.pdf"));
+        StringAssert.Contains(withdrawn.Message, "3DX no longer gives the document of 'DOC-W Rev 1 (Withdrawn)/w.pdf'");
+
+        // the next listing brings the new version
+        await source.RefreshAsync(report: false, CancellationToken.None);
+        CollectionAssert.AreEqual(content, await ReadAllAsync(source, "DOC-V Rev 1 (Versions)/plan.pdf"));
     }
 
     [TestMethod]

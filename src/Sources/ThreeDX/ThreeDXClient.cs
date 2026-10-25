@@ -373,9 +373,10 @@ internal sealed partial class ThreeDXClient
     /// PUT that carries a CSRF token it has just given), then the file server's answer to a GET of the ticket, with a Range
     /// when the offset is not 0. The answer may be the whole file (206 not given): the caller skips to the offset then.
     /// </summary>
-    public async Task<HttpResponseMessage> OpenFileAsync(string documentId, string fileId, long offset, string path, CancellationToken ct)
+    /// <param name="file">The file as the list holds it.</param>
+    public async Task<HttpResponseMessage> OpenFileAsync(string documentId, DxFile file, long offset, string path, CancellationToken ct)
     {
-        var ticket = await TicketAsync(documentId, fileId, path, ct).ConfigureAwait(false);
+        var ticket = await TicketAsync(documentId, file, path, ct).ConfigureAwait(false);
         for (var hop = 0; ; hop++)
         {
             var request = new HttpRequestMessage(HttpMethod.Get, ticket);
@@ -421,12 +422,15 @@ internal sealed partial class ThreeDXClient
     /// The download ticket's address (<c>DownloadTicket</c>'s <c>data[0].dataelements.ticketURL</c>), asked as Mount3DX asks
     /// it: a PUT carrying a CSRF token 3DSpace has just given (<see cref="CsrfAsync"/>), so the token is the session's as it is
     /// when the PUT goes, a session renewed on the way included. A PUT refused, or answered without a ticket, is logged with
-    /// what 3DX answered and asked once more, with a new token and the person's security context (as 3DX's own pages send it).
+    /// what 3DX answered; the file is looked up afresh in its document (<see cref="RecheckAsync"/>: the list may be older than
+    /// the file), and the ticket asked once more, with a new token and the person's security context (as 3DX's own pages send
+    /// it). 3DX in trouble (a 5xx, after its tries) is said at once.
     /// </summary>
-    private async Task<Uri> TicketAsync(string documentId, string fileId, string path, CancellationToken ct)
+    private async Task<Uri> TicketAsync(string documentId, DxFile file, string path, CancellationToken ct)
     {
-        var url = new Uri(Space, $"resources/v1/modeler/documents/{Uri.EscapeDataString(documentId)}/files/{Uri.EscapeDataString(fileId)}/DownloadTicket");
+        var url = new Uri(Space, $"resources/v1/modeler/documents/{Uri.EscapeDataString(documentId)}/files/{Uri.EscapeDataString(file.Id)}/DownloadTicket");
         var what = $"a download ticket for '{path}'";
+        var found = "";
         for (var attempt = 1; ; attempt++)
         {
             var context = attempt > 1 ? await SecurityContextAsync(ct).ConfigureAwait(false) : null;
@@ -447,9 +451,14 @@ internal sealed partial class ThreeDXClient
             if (!response.IsSuccessStatusCode)
             {
                 var error = Error(response.StatusCode, body, what);
-                if (attempt > 1 || error.Error is not (VfsError.AccessDenied or VfsError.InvalidPath))
+                if (error.Error == VfsError.Unavailable)
                 {
                     throw error;
+                }
+
+                if (attempt > 1)
+                {
+                    throw new VfsException(error.Error, error.Message + found, error);
                 }
 
                 problem = error.Message;
@@ -460,15 +469,48 @@ internal sealed partial class ThreeDXClient
             }
             else if (attempt > 1)
             {
-                throw new VfsException(VfsError.IoError, $"3DX gave no download ticket for '{path}', also when asked again ({Gist(response, body)})");
+                throw new VfsException(VfsError.IoError, $"3DX gave no download ticket for '{path}', also when asked again ({Gist(response, body)}){found}");
             }
             else
             {
                 problem = $"3DX answered without one ({Gist(response, body)})";
             }
 
-            _logger.LogInformation("3dx: no download ticket for '{Path}': {Problem}; asking again with a new CSRF token and your security context", path, problem);
+            found = await RecheckAsync(documentId, file, path, ct).ConfigureAwait(false);
+            _logger.LogInformation("3dx: no download ticket for '{Path}': {Problem}{Found}; asking again with a new CSRF token and your security context", path, problem, found);
         }
+    }
+
+    /// <summary>
+    /// After 3DX gave no ticket for a file: whether it is still the file the list holds, from its document asked for afresh
+    /// (one request). A document or file 3DX no longer gives, or another file in its place (a new version), is said as such:
+    /// the next listing brings the change. Otherwise what was found, for the log and the error.
+    /// </summary>
+    private async Task<string> RecheckAsync(string documentId, DxFile file, string path, CancellationToken ct)
+    {
+        IReadOnlyList<DxDocument> now;
+        try
+        {
+            now = await DocumentsAsync([documentId], ct).ConfigureAwait(false);
+        }
+        catch (VfsException ex)
+        {
+            return $"; its document could not be asked for afresh ({ex.Message})";
+        }
+
+        if (now.Count == 0)
+        {
+            throw new VfsException(VfsError.NotFound, $"3DX no longer gives the document of '{path}'; the next listing takes it out");
+        }
+
+        if (now[0].Files.Any(f => f.Id == file.Id))
+        {
+            return "; its document, asked for afresh, still holds the file as listed";
+        }
+
+        throw now[0].Files.FirstOrDefault(f => string.Equals(f.Title, file.Title, StringComparison.OrdinalIgnoreCase)) is { } other
+            ? new VfsException(VfsError.IoError, $"'{path}' is another file in 3DX now than the one listed (a new version, most likely: file {other.Id}, listed as {file.Id}); the next listing brings it")
+            : new VfsException(VfsError.NotFound, $"'{path}' is no longer among its document's files in 3DX; the next listing takes it out");
     }
 
     /// <summary>The ticket's address in <c>DownloadTicket</c>'s answer, resolved against 3DSpace; null when it holds none.</summary>

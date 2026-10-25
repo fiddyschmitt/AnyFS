@@ -371,7 +371,7 @@ public sealed class ThreeDXSource : SourceBase, ICountable
     /// </summary>
     private async Task<Stream> OpenAtAsync(DocumentFolder folder, FolderFile file, long offset, string path, CancellationToken ct)
     {
-        var response = await Run(() => Client.OpenFileAsync(folder.Document.Id, file.File!.Id, offset, path, ct)).ConfigureAwait(false);
+        var response = await Run(() => Client.OpenFileAsync(folder.Document.Id, file.File!, offset, path, ct)).ConfigureAwait(false);
         if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
             response.Dispose();
@@ -395,7 +395,7 @@ public sealed class ThreeDXSource : SourceBase, ICountable
             return known;
         }
 
-        using var response = await Run(() => Client.OpenFileAsync(folder.Document.Id, file.File!.Id, 0, path, ct)).ConfigureAwait(false);
+        using var response = await Run(() => Client.OpenFileAsync(folder.Document.Id, file.File!, 0, path, ct)).ConfigureAwait(false);
         var length = response.Content.Headers.ContentLength ?? -1;
         if (length < 0)
         {
