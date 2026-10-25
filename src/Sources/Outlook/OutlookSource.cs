@@ -31,6 +31,7 @@ public sealed class OutlookSource : SourceBase
     private readonly ConcurrentDictionary<string, (Lazy<Task<ItemFiles>> Files, DateTime At)> _items = new(StringComparer.Ordinal);
     private volatile MailTree _tree = MailTree.Empty;
     private IMailStore? _store;
+    private AddressBooks? _books;
     private Task _refreshing = Task.CompletedTask;
     private (long Length, DateTime Written) _seen;
     private bool _degraded;
@@ -59,6 +60,9 @@ public sealed class OutlookSource : SourceBase
     internal System.Security.Cryptography.X509Certificates.X509Certificate2Collection? SmimeCertificates { get; init; }
 
     private SmimeKeys _smimeKeys => _keys ??= new SmimeKeys(SmimeCertificates);
+
+    /// <summary>How long an address list that answered nothing waits to be asked once more (for tests: none).</summary>
+    internal TimeSpan DirectoryColdPause { get; init; } = TimeSpan.FromSeconds(2);
 
     /// <summary>The tree served now (for tests).</summary>
     internal MailTree Tree => _tree;
@@ -110,6 +114,13 @@ public sealed class OutlookSource : SourceBase
                         (title, message) => Context.PromptAsync(new PromptRequest(PromptKind.YesNo, title, message), ct));
                     var (service, account, how) = await ConnectAsync(_settings, _standIn, Logger, interactive: true, message => Context.ReportProgress(message), hooks, ct).ConfigureAwait(false);
                     _store = new EwsMailStore(service, _settings.Kind == OutlookKind.Server ? $"{account} on {_settings.ServerUrl!.Host}" : account, _settings.ShowHidden, _settings.CalendarMonthsBack, _settings.CalendarMonthsAhead, Logger);
+                    if (service is IAddressBookService directory)
+                    {
+                        // the organisation's address lists, where the service reaches them (the web session's People)
+                        _books = new AddressBooks(directory, _store.Name, Path.Combine(Context.StateDirectory, AddressBookIndexFile.FileName), Logger, DirectoryColdPause, _stopping.Token);
+                        _books.Updated += Count;
+                    }
+
                     Logger.LogInformation("outlook: signed in as {Account} {How}", account, how);
                     break;
                 }
@@ -132,7 +143,13 @@ public sealed class OutlookSource : SourceBase
                 await _store.RefreshAsync(ct).ConfigureAwait(false);
             }
 
-            Swap(await MailTree.BuildAsync(_store, ct, (done, total, name) => Context.ReportProgress($"Listing {name} ({done} of {total} folders)", total == 0 ? null : (double)done / total)).ConfigureAwait(false));
+            if (_books is not null)
+            {
+                Context.ReportProgress("Reading the address lists");
+                await _books.StartAsync(ct).ConfigureAwait(false);
+            }
+
+            Swap(await MailTree.BuildAsync(_store, ct, (done, total, name) => Context.ReportProgress($"Listing {name} ({done} of {total} folders)", total == 0 ? null : (double)done / total), _books?.Node).ConfigureAwait(false));
             if (kept is null)
             {
                 await KeepListingAsync(ct).ConfigureAwait(false);
@@ -363,7 +380,12 @@ public sealed class OutlookSource : SourceBase
 
             var started = Stopwatch.GetTimestamp();
             await Store.RefreshAsync(ct).ConfigureAwait(false);
-            Swap(await MailTree.BuildAsync(Store, ct, null).ConfigureAwait(false));
+            if (_books is not null)
+            {
+                await _books.RefreshAsync(ct).ConfigureAwait(false);
+            }
+
+            Swap(await MailTree.BuildAsync(Store, ct, null, _books?.Node).ConfigureAwait(false));
             _items.Clear();
             Logger.LogInformation("outlook: {Name} read again in {Seconds:F1} s: {Folders:N0} folders, {Items:N0} items", Store.Name, Stopwatch.GetElapsedTime(started).TotalSeconds, _tree.FolderCount, _tree.ItemCount);
             await KeepListingAsync(ct).ConfigureAwait(false);
@@ -410,7 +432,14 @@ public sealed class OutlookSource : SourceBase
     private void Swap(MailTree tree)
     {
         _tree = tree;
-        Counters.Set(tree.FileCount, tree.FolderCount, EnumerationState.Complete);
+        Count();
+    }
+
+    /// <summary>The counts: the tree's, and the address books' entries read so far.</summary>
+    private void Count()
+    {
+        var tree = _tree;
+        Counters.Set(tree.FileCount + (_books?.FileCount ?? 0), tree.FolderCount + (_books?.FolderCount ?? 0), EnumerationState.Complete);
     }
 
     // --- listing and stat -------------------------------------------------------------------------------------------------
@@ -433,6 +462,8 @@ public sealed class OutlookSource : SourceBase
         {
             case DirNode dir:
                 return dir.Entry;
+            case AddressBooksNode { Books: var books }:
+                return books.HasLists ? await RunAsync(() => books.StatAsync(rest, ct)).ConfigureAwait(false) : null;
             case ContactNode contact:
                 return rest.Count == 0 ? await RunAsync(() => CardEntryAsync(contact, ct)).ConfigureAwait(false) : null;
             case ItemNode item when rest.Count == 0:
@@ -468,10 +499,31 @@ public sealed class OutlookSource : SourceBase
             case DirNode dir:
                 foreach (var child in dir.Children)
                 {
+                    if (child is AddressBooksNode { Books.HasLists: false })
+                    {
+                        continue;
+                    }
+
                     yield return child is ContactNode contact ? await RunAsync(() => CardEntryAsync(contact, ct)).ConfigureAwait(false) : child.Entry;
                 }
 
                 break;
+            case AddressBooksNode { Books: var books }:
+                {
+                    var entries = books.HasLists ? await RunAsync(() => books.ListAsync(rest, ct)).ConfigureAwait(false) : null;
+                    if (entries is null)
+                    {
+                        throw books.HasLists && await RunAsync(() => books.StatAsync(rest, ct)).ConfigureAwait(false) is { IsDirectory: false } ? VfsException.NotADirectory(path) : VfsException.NotFound(path);
+                    }
+
+                    foreach (var entry in entries)
+                    {
+                        yield return entry;
+                    }
+
+                    break;
+                }
+
             case ContactNode:
                 throw VfsException.NotADirectory(path);
             case ItemNode item:
@@ -530,6 +582,17 @@ public sealed class OutlookSource : SourceBase
         {
             case DirNode:
                 throw VfsException.IsADirectory(path);
+            case AddressBooksNode { Books: var books }:
+                {
+                    var vcard = books.HasLists ? await RunAsync(() => books.CardAsync(rest, ct)).ConfigureAwait(false) : null;
+                    if (vcard is null)
+                    {
+                        throw books.HasLists && (rest.Count == 0 || rest.Count == 1 && books.Folder(rest[0]) is not null) ? VfsException.IsADirectory(path) : VfsException.NotFound(path);
+                    }
+
+                    return new MemoryFile(vcard, "an address book's entry as a vCard");
+                }
+
             case ContactNode contact:
                 if (rest.Count > 0)
                 {

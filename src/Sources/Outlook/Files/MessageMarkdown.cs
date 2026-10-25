@@ -45,6 +45,7 @@ internal static partial class MessageMarkdown
             Line(sb, "Name", string.Join(" ", new[] { contact.Prefix, contact.GivenName, contact.MiddleName, contact.Surname, contact.Suffix }.Where(s => !string.IsNullOrWhiteSpace(s))));
             Line(sb, "Company", contact.Company);
             Line(sb, "Title", string.Join(", ", new[] { contact.JobTitle, contact.Department }.Where(s => !string.IsNullOrWhiteSpace(s))));
+            Line(sb, "Office", contact.Office);
             Line(sb, "Email", contact.Emails.Count == 0 ? null : string.Join("; ", contact.Emails));
             Line(sb, "Phone", contact.Phones.Count == 0 ? null : string.Join("; ", contact.Phones.Select(p => $"{p.Number} ({p.Type.ToLowerInvariant().Replace(",voice", "", StringComparison.Ordinal)})")));
             foreach (var a in contact.Addresses)

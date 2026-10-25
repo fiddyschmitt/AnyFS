@@ -325,6 +325,8 @@ internal sealed partial class FakeExchange
                 "GetAttachment" => GetAttachment(requestBody),
                 "SyncFolderItems" => Ok(action, SyncFolderItems(requestBody)),
                 "GetFolder" => Ok(action, GetFolder(requestBody)),
+                "GetPeopleFilters" => GetPeopleFilters(query["app"] ?? ""),
+                "FindPeople" => FindPeople(query["app"] ?? "", requestBody),
                 _ => Text(500, $"OWA service API '{action}' does not exist in the service method map."),
             };
         }

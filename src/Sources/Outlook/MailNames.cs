@@ -20,6 +20,9 @@ internal static class MailNames
     /// <summary>The folder in an item's folder that holds its attachments.</summary>
     public const string AttachmentsFolder = "attachments";
 
+    /// <summary>The folder at the mailbox's root that holds the organisation's address lists (spec 7.7, address books).</summary>
+    public const string AddressBooksFolder = "Address Books";
+
     /// <summary>A message's files: the readable form, and the MIME as a mail client opens it (an .eml is a message on disk, in Outlook's and Exchange's words too).</summary>
     public const string MessageMarkdown = "message.md";
     public const string MessageMime = "message.eml";

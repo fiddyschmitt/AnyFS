@@ -392,5 +392,15 @@ public class OutlookWebSessionTests
         var eml = files.Single(f => f.Name.EndsWith(".eml", StringComparison.Ordinal));
         var text = await OutlookFixtures.TextAsync(source, VfsPath.Join(first, eml.Name));
         StringAssert.Contains(text, "\r\nSubject: ");
+
+        // the organisation's address lists (the sandbox's: the Default Global Address List and nine more, Spike 11)
+        CollectionAssert.Contains(root, "Address Books");
+        CollectionAssert.Contains((await OutlookFixtures.ListAsync(source, "Address Books")).Select(e => e.Name).ToList(), "Default Global Address List");
+        var cards = await OutlookFixtures.ListAsync(source, "Address Books/Default Global Address List");
+        Assert.IsTrue(cards.Count > 0, "the sandbox's global list has people");
+        var card = await OutlookFixtures.TextAsync(source, "Address Books/Default Global Address List/" + cards[0].Name);
+        StringAssert.StartsWith(card, "BEGIN:VCARD\r\n");
+        StringAssert.Contains(card, "\r\nEMAIL;TYPE=INTERNET,PREF:");
+        Assert.AreEqual(cards[0].Length, Encoding.UTF8.GetByteCount(card));
     }
 }

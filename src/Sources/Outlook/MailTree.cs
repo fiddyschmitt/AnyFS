@@ -108,7 +108,8 @@ internal sealed class ContactNode(string name, MailItemSummary item) : TreeNode(
 
 /// <summary>
 /// The tree an Outlook source serves (spec 7.7): the mailbox's folders as they are; under each, its items by year and
-/// month, a folder per message named by date, sender and subject; contacts as .vcf files in their folder. Immutable:
+/// month, a folder per message named by date, sender and subject; contacts as .vcf files in their folder; the address
+/// books beside them where the mailbox reaches its organisation's (<see cref="AddressBooks"/>). Immutable:
 /// a refresh builds a new tree and the source swaps it in whole. Items are named from their listing cells alone; the
 /// store opens none while the tree is built.
 /// </summary>
@@ -135,9 +136,15 @@ internal sealed class MailTree
     public long FileCount { get; }
 
     /// <param name="progress">Told of each folder as it is listed (how many are done, how many there are, the folder's name); null for nobody.</param>
-    public static async Task<MailTree> BuildAsync(IMailStore store, CancellationToken ct, Action<int, int, string>? progress)
+    /// <param name="addressBooks">The address books' folder, put at the root first (a mailbox folder of its name is numbered); null for none.</param>
+    public static async Task<MailTree> BuildAsync(IMailStore store, CancellationToken ct, Action<int, int, string>? progress, AddressBooksNode? addressBooks = null)
     {
         var root = new DirNode("", null, null, null);
+        if (addressBooks is not null)
+        {
+            root.Add(addressBooks);
+        }
+
         var total = CountFolders(store.Folders);
         var done = 0;
         await AddFoldersAsync(root, store.Folders, store, ct, name => progress?.Invoke(++done, total, name)).ConfigureAwait(false);

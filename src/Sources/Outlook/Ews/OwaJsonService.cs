@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AnyFS.Sources.Outlook.Mail;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.Outlook.Ews;
@@ -15,7 +16,7 @@ namespace AnyFS.Sources.Outlook.Ews;
 /// GetItem with AllProperties and IncludeMimeContent, GetAttachment with no shape, SyncFolderItems; no
 /// SyncFolderHierarchy). A 401 asks the session for a fresh token once; 429 and 503 hold the mailbox's pace and try again.
 /// </summary>
-internal sealed class OwaJsonService : IEwsService, IDisposable
+internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDisposable
 {
     private const int Attempts = 4;
 
@@ -221,19 +222,217 @@ internal sealed class OwaJsonService : IEwsService, IDisposable
         return new EwsAttachmentContent(Str(a, "Name") ?? "", Str(a, "ContentType"), content, item);
     }
 
+    // --- the directory (address books) ------------------------------------------------------------------------------------
+
+    public async Task<IReadOnlyList<AddressList>> AddressListsAsync(CancellationToken ct)
+    {
+        // GetPeopleFilters takes no envelope (Spike 11: a body of "{}") and answers the People page's filters: the mailbox's
+        // own contact folders (a folder id with a parent folder) and then the organisation's address lists (a GUID, no parent)
+        var answer = await SendAsync("GetPeopleFilters", "{}", "People", whole: true, ct).ConfigureAwait(false);
+        var filters = answer.ValueKind == JsonValueKind.Array ? answer : Values(answer, "Body").Any() ? answer.GetProperty("Body") : default;
+        var lists = new List<AddressList>();
+        if (filters.ValueKind != JsonValueKind.Array)
+        {
+            return lists;
+        }
+
+        foreach (var f in filters.EnumerateArray())
+        {
+            var folder = f.ValueKind == JsonValueKind.Object && f.TryGetProperty("FolderId", out var id) && id.ValueKind == JsonValueKind.Object ? id : default;
+            var hasParent = f.ValueKind == JsonValueKind.Object && f.TryGetProperty("ParentFolderId", out var parent) && parent.ValueKind == JsonValueKind.Object;
+            var isList = folder.ValueKind == JsonValueKind.Object && (TypeOf(folder).StartsWith("AddressListId", StringComparison.Ordinal) || !hasParent && Guid.TryParse(Str(folder, "Id"), out _));
+            if (isList && Str(folder, "Id") is { Length: > 0 } listId && Blank(Str(f, "DisplayName")) is { } name)
+            {
+                lists.Add(new AddressList(listId, name));
+            }
+        }
+
+        return lists;
+    }
+
+    public async Task<DirectoryPage> AddressListPageAsync(string listId, int offset, int count, CancellationToken ct)
+    {
+        var request = new JsonObject
+        {
+            ["__type"] = "FindPeopleRequest:#Exchange",
+            ["IndexedPageItemView"] = IndexedPage(offset, count),
+            ["QueryString"] = null,
+            ["ParentFolderId"] = new JsonObject { ["__type"] = "TargetFolderId:#Exchange", ["BaseFolderId"] = new JsonObject { ["__type"] = "AddressListId:#Exchange", ["Id"] = listId } },
+            ["PersonaShape"] = new JsonObject { ["__type"] = "PersonaResponseShape:#Exchange", ["BaseShape"] = "Default" },
+            ["ShouldResolveOneOffEmailAddress"] = false,
+        };
+        var answer = await SendAsync("FindPeople", Envelope("FindPeople", request), "People", whole: true, ct).ConfigureAwait(false);
+        var body = answer.ValueKind == JsonValueKind.Object && answer.TryGetProperty("Body", out var b) && b.ValueKind == JsonValueKind.Object ? b : answer;
+        var entries = Values(body, "ResultSet").Select(PersonaOf).OfType<DirectoryEntry>().ToList();
+        return new DirectoryPage(entries, Int(body, "TotalNumberOfPeopleInView"));
+    }
+
+    /// <summary>
+    /// A persona as FindPeople gives it (its default shape, and the attributed, many-valued fields where a server adds
+    /// them: "Titles": [{"Value": …}]) as a directory entry; null for one with neither a name nor an address. Only SMTP
+    /// addresses are kept: an X.500 one opens nothing outside Exchange.
+    /// </summary>
+    internal static DirectoryEntry? PersonaOf(JsonElement p)
+    {
+        if (p.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var emails = new List<string>();
+        void Email(JsonElement e)
+        {
+            var box = Inner(e);
+            if (Blank(Str(box, "EmailAddress")) is { } address && address.Contains('@') && Str(box, "RoutingType") is null or "SMTP" && !emails.Contains(address, StringComparer.OrdinalIgnoreCase))
+            {
+                emails.Add(address);
+            }
+        }
+
+        if (p.TryGetProperty("EmailAddress", out var primary))
+        {
+            Email(primary);
+        }
+
+        foreach (var list in new[] { "EmailAddresses", "Emails1", "Emails2", "Emails3" })
+        {
+            foreach (var e in Values(p, list))
+            {
+                Email(e);
+            }
+        }
+
+        var name = Text(p, "DisplayName", "DisplayNames") ?? Text(p, "DisplayNameFirstLast") ?? Text(p, "FileAs", "FileAses") ?? emails.FirstOrDefault();
+        if (name is null)
+        {
+            return null;
+        }
+
+        var phones = new List<DirectoryPhone>();
+        void Phone(string type, JsonElement e)
+        {
+            var value = Inner(e);
+            var number = value.ValueKind == JsonValueKind.String ? value.GetString() : Str(value, "Number");
+            if (Blank(number) is { } n && !phones.Any(x => x.Number == n))
+            {
+                phones.Add(new DirectoryPhone(PhoneTypeOf(Str(value, "Type")) ?? type, n));
+            }
+        }
+
+        if (p.TryGetProperty("PhoneNumber", out var phone))
+        {
+            Phone("WORK,VOICE", phone);
+        }
+
+        foreach (var (list, type) in new[]
+        {
+            ("BusinessPhoneNumbers", "WORK,VOICE"), ("BusinessPhoneNumbers2", "WORK,VOICE"), ("MobilePhones", "CELL,VOICE"), ("MobilePhones2", "CELL,VOICE"),
+            ("HomePhones", "HOME,VOICE"), ("HomePhones2", "HOME,VOICE"), ("WorkFaxes", "WORK,FAX"), ("HomeFaxes", "HOME,FAX"), ("Pagers", "PAGER"), ("OtherTelephones", "VOICE"),
+        })
+        {
+            foreach (var e in Values(p, list))
+            {
+                Phone(type, e);
+            }
+        }
+
+        var addresses = new List<DirectoryAddress>();
+        foreach (var (list, type) in new[] { ("BusinessAddresses", "WORK"), ("HomeAddresses", "HOME"), ("OtherAddresses", "POSTAL") })
+        {
+            foreach (var e in Values(p, list))
+            {
+                var a = Inner(e);
+                var address = new DirectoryAddress(type, Blank(Str(a, "Street")), Blank(Str(a, "City")), Blank(Str(a, "State")), Blank(Str(a, "PostalCode")), Blank(Str(a, "Country")));
+                if ((address.Street ?? address.City ?? address.State ?? address.PostalCode ?? address.Country) is not null && !addresses.Contains(address))
+                {
+                    addresses.Add(address);
+                }
+            }
+        }
+
+        if (Text(p, "WorkCity") is { } city && !addresses.Any(a => a.Type == "WORK"))
+        {
+            addresses.Add(new DirectoryAddress("WORK", null, city, null, null, null));
+        }
+
+        var id = p.TryGetProperty("PersonaId", out var persona) && persona.ValueKind == JsonValueKind.Object ? Str(persona, "Id") : null;
+        return new DirectoryEntry(Blank(id) ?? emails.FirstOrDefault() ?? name, name, Blank(Str(p, "PersonaType")))
+        {
+            GivenName = Text(p, "GivenName", "GivenNames"),
+            MiddleName = Text(p, "MiddleName", "MiddleNames"),
+            Surname = Text(p, "Surname", "Surnames"),
+            Nickname = Text(p, "Nickname", "Nicknames"),
+            Company = Text(p, "CompanyName", "CompanyNames"),
+            Department = Text(p, "Department", "Departments"),
+            JobTitle = Text(p, "Title", "Titles"),
+            Office = Text(p, "OfficeLocation", "OfficeLocations"),
+            Emails = emails,
+            Phones = phones,
+            Addresses = addresses,
+            ImAddress = Text(p, "ImAddress", "ImAddresses"),
+        };
+    }
+
+    /// <summary>An attributed value's value ({"Value": …, "Attributions": […]}), or the element itself.</summary>
+    private static JsonElement Inner(JsonElement e) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty("Value", out var v) && v.ValueKind is JsonValueKind.Object or JsonValueKind.String ? v : e;
+
+    /// <summary>A persona's string field, or else the first of its attributed values.</summary>
+    private static string? Text(JsonElement p, string single, string? many = null)
+    {
+        if (Blank(Str(p, single)) is { } text)
+        {
+            return text;
+        }
+
+        foreach (var e in many is null ? [] : Values(p, many))
+        {
+            var value = Inner(e);
+            if (Blank(value.ValueKind == JsonValueKind.String ? value.GetString() : null) is { } found)
+            {
+                return found;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>A persona's phone type ("Business", "Mobile", "HomeFax") as a vCard's; null for none it names.</summary>
+    private static string? PhoneTypeOf(string? type) => type switch
+    {
+        null or "" => null,
+        _ when type.Contains("Fax", StringComparison.OrdinalIgnoreCase) => type.StartsWith("Home", StringComparison.OrdinalIgnoreCase) ? "HOME,FAX" : "WORK,FAX",
+        _ when type.Contains("Mobile", StringComparison.OrdinalIgnoreCase) || type.Contains("Cell", StringComparison.OrdinalIgnoreCase) || type.Contains("Car", StringComparison.OrdinalIgnoreCase) => "CELL,VOICE",
+        _ when type.StartsWith("Home", StringComparison.OrdinalIgnoreCase) => "HOME,VOICE",
+        _ when type.Contains("Pager", StringComparison.OrdinalIgnoreCase) => "PAGER",
+        _ when type.StartsWith("Business", StringComparison.OrdinalIgnoreCase) || type.StartsWith("Work", StringComparison.OrdinalIgnoreCase) || type.StartsWith("Office", StringComparison.OrdinalIgnoreCase)
+            || type.StartsWith("Company", StringComparison.OrdinalIgnoreCase) || type.StartsWith("Assistant", StringComparison.OrdinalIgnoreCase) => "WORK,VOICE",
+        _ => "VOICE",
+    };
+
+    private static IEnumerable<JsonElement> Values(JsonElement e, string name)
+        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array ? v.EnumerateArray() : [];
+
+    private static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
     // --- the call -----------------------------------------------------------------------------------------------------------
 
-    /// <summary>One operation: its first response message, checked. Paced, signed, tried again on a 401 (once, with a fresh token) and on a hold.</summary>
-    private async Task<JsonElement> CallAsync(string action, JsonObject body, CancellationToken ct)
+    /// <summary>One operation: its first response message, checked.</summary>
+    private Task<JsonElement> CallAsync(string action, JsonObject body, CancellationToken ct) => SendAsync(action, Envelope(action, body), "Mail", whole: false, ct);
+
+    /// <summary>
+    /// One request: its first response message, checked; or with <paramref name="whole"/> the answer as it is, checked for
+    /// an error (People's operations answer no response message). Paced, signed, tried again on a 401 (once, with a fresh
+    /// token) and on a hold.
+    /// </summary>
+    private async Task<JsonElement> SendAsync(string action, string envelope, string app, bool whole, CancellationToken ct)
     {
         var renew = false;
-        var envelope = Envelope(action, body);
         for (var attempt = 1; ; attempt++)
         {
             using var slot = await _pace.EnterAsync(ct).ConfigureAwait(false);
             var token = await _token(renew, ct).ConfigureAwait(false);
             renew = false;
-            using var request = new HttpRequestMessage(HttpMethod.Post, $"{_origin.AbsoluteUri.TrimEnd('/')}/owa/service.svc?action={action}&app=Mail")
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"{_origin.AbsoluteUri.TrimEnd('/')}/owa/service.svc?action={action}&app={app}")
             {
                 Content = new StringContent(envelope, Encoding.UTF8, "application/json"),
             };
@@ -303,6 +502,17 @@ internal sealed class OwaJsonService : IEwsService, IDisposable
                         }
 
                         throw new EwsException(Str(fault, "ResponseCode") ?? ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture), $"{action}: {Str(fault, "FaultMessage") ?? Trim(text)}", transient);
+                    }
+
+                    if (whole)
+                    {
+                        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("Body", out var answer) && answer.ValueKind == JsonValueKind.Object && Str(answer, "ResponseClass") is "Error")
+                        {
+                            var code = Str(answer, "ResponseCode") ?? "Error";
+                            throw new EwsException(code, $"{action}: {Str(answer, "MessageText") ?? code}");
+                        }
+
+                        return root.Clone();
                     }
 
                     if (!root.TryGetProperty("Body", out var responseBody) || !responseBody.TryGetProperty("ResponseMessages", out var messages) || !messages.TryGetProperty("Items", out var items) || items.GetArrayLength() == 0)

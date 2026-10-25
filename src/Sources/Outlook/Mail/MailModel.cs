@@ -99,7 +99,11 @@ internal sealed record ContactDetail(
     string? WebPage,
     string? ImAddress,
     DateTimeOffset? Birthday,
-    DateTimeOffset? Anniversary);
+    DateTimeOffset? Anniversary)
+{
+    /// <summary>The office ("Building 4, 2.10"), as a directory gives it.</summary>
+    public string? Office { get; init; }
+}
 
 /// <summary>An item opened: everything the files made of it need. A record, so a view of it (an S/MIME message opened) is a copy with what differs.</summary>
 internal sealed record MailItem
