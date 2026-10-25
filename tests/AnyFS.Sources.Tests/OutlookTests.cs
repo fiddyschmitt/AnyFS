@@ -420,6 +420,58 @@ public class OutlookSourceTests
         StringAssert.Contains(missing, "(Subject) of type 0x001F in a cell of 4 bytes: HID 0x");
     }
 
+    /// <summary>
+    /// S/MIME mail as Outlook keeps it in a data file (smime.pst, made by Outlook): a clear-signed message is one nameless
+    /// multipart/signed attachment beside the body Outlook promoted, an encrypted one a smime.p7m and no body at all. Each
+    /// message.eml is the message as it came: the signed entity byte for byte, or the CMS under an S/MIME Content-Type,
+    /// so Outlook checks the signature or decrypts it (a real OST's encrypted mail opened with a blank body, 25-Oct-2026).
+    /// </summary>
+    [TestMethod]
+    public async Task SmimeMailIsServedAsTheSignedOrEncryptedMessageItCameAs()
+    {
+        // what the file holds, as LibOutlook reads it
+        byte[] entity;
+        byte[] cms;
+        using (var pst = LibOutlook.PstFile.Open(OutlookFixtures.Pst("smime.pst")))
+        {
+            var inbox = pst.TopFolder.FindFolder("Inbox")!;
+            var signed = inbox.Messages.Single(m => m.Subject == "AnyFS lab: a signed message");
+            Assert.AreEqual("IPM.Note.SMIME.MultipartSigned", signed.MessageClass);
+            Assert.AreEqual("multipart/signed", signed.Attachments.Single().MimeTag);
+            entity = signed.Attachments.Single().GetContent();
+            var encrypted = inbox.Messages.Single(m => m.Subject == "AnyFS lab: an encrypted message");
+            Assert.AreEqual("IPM.Note.SMIME", encrypted.MessageClass);
+            Assert.IsTrue(encrypted.Body is null && encrypted.BodyHtml is null && encrypted.BodyRtf is null, "an encrypted message has no body of its own");
+            cms = encrypted.Attachments.Single().GetContent();
+        }
+
+        var (source, context) = await OutlookFixtures.StartAsync("smime.pst");
+        await using (source)
+        using (context)
+        {
+            var year = (await OutlookFixtures.ListAsync(source, "Inbox")).Single().Name;
+            var month = $"Inbox/{year}/{(await OutlookFixtures.ListAsync(source, $"Inbox/{year}")).Single().Name}";
+
+            var signedFolder = await OutlookFixtures.ItemFolderAsync(source, month, "AnyFS lab: a signed message");
+            var eml = await OutlookFixtures.ReadAsync(source, $"{signedFolder}/message.eml");
+            var text = Encoding.ASCII.GetString(eml);
+            var headerEnd = text.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+            StringAssert.Contains(text[..headerEnd], "\r\nSubject: AnyFS lab: a signed message\r\n");
+            StringAssert.Contains(text[..headerEnd], "\r\nContent-Type: multipart/signed;");
+            Assert.AreEqual(1, System.Text.RegularExpressions.Regex.Matches(text[..headerEnd], "^MIME-Version:", System.Text.RegularExpressions.RegexOptions.Multiline).Count);
+            var entityBody = Encoding.ASCII.GetString(entity).IndexOf("\r\n\r\n", StringComparison.Ordinal) + 4;
+            CollectionAssert.AreEqual(entity[entityBody..], eml[(headerEnd + 4)..], "the signed body as Outlook keeps it, byte for byte");
+
+            var encryptedFolder = await OutlookFixtures.ItemFolderAsync(source, month, "AnyFS lab: an encrypted message");
+            var sealedText = await OutlookFixtures.TextAsync(source, $"{encryptedFolder}/message.eml");
+            var sealedEnd = sealedText.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+            StringAssert.Contains(sealedText[..sealedEnd], "\r\nSubject: AnyFS lab: an encrypted message\r\n");
+            StringAssert.Matches(sealedText[..sealedEnd], new System.Text.RegularExpressions.Regex(@"\r\nContent-Type: application/(x-)?pkcs7-mime;[^\r]*(\r\n [^\r]*)*smime-type=enveloped-data"));
+            StringAssert.Contains(sealedText[..sealedEnd], "\r\nContent-Transfer-Encoding: base64");
+            CollectionAssert.AreEqual(cms, Convert.FromBase64String(sealedText[(sealedEnd + 4)..]), "the CMS as Outlook keeps it");
+        }
+    }
+
     /// <summary>The OST capture, where it is on this machine (see LibOutlook's tests): a whole mailbox's tree.</summary>
     [TestMethod]
     public async Task AnOstServesTheMailboxTree()
@@ -541,5 +593,111 @@ public class MimeWriterTests
         Assert.AreEqual(1, System.Text.RegularExpressions.Regex.Matches(eml, "^MIME-Version:", System.Text.RegularExpressions.RegexOptions.Multiline).Count);
         StringAssert.Contains(eml, "\r\n\r\nHi there\r\n");
         StringAssert.Contains(eml, "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n");
+    }
+
+    // --- S/MIME as a data file keeps it ([MS-OXOSMIME] 2.1.3) -------------------------------------------------------------
+
+    /// <summary>The signed entity as Outlook stores it: the whole multipart/signed entity, its own MIME-Version first, the Content-Type folded.</summary>
+    private const string SignedEntity =
+        "MIME-Version: 1.0\r\nContent-Type: multipart/signed;\r\n\tprotocol=\"application/pkcs7-signature\";\r\n\tmicalg=sha-256;\r\n\tboundary=\"outer-1\"\r\n\r\n"
+        + "This is an S/MIME signed message\r\n\r\n--outer-1\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: 7bit\r\n\r\n<p>Signed.</p>\r\n"
+        + "--outer-1\r\nContent-Type: application/pkcs7-signature; name=\"smime.p7s\"\r\nContent-Transfer-Encoding: base64\r\n\r\nMIIBsignature\r\n--outer-1--\r\n";
+
+    /// <summary>The start of a CMS ContentInfo holding enveloped data (1.2.840.113549.1.7.3), indefinite length, then some bytes.</summary>
+    private static readonly byte[] EnvelopedCms = [0x30, 0x80, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x03, 0xA0, 0x80, .. Enumerable.Range(0, 300).Select(i => (byte)(i * 7))];
+
+    private static MailItem Smime(string messageClass, MailAttachment attachment, string? bodyHtml = null, string? internetContentType = null) => new()
+    {
+        Summary = new MailItemSummary("1", MailItemKind.Message, "Secret", "Jane", null, null, null, 0, true),
+        MessageClass = messageClass,
+        From = new MailAddress("Jane Doe", "jane@example.test"),
+        Recipients = [new MailRecipient(MailRecipientKind.To, new MailAddress("Sam", "sam@example.test"))],
+        Sent = new DateTimeOffset(2026, 10, 25, 9, 30, 0, TimeSpan.Zero),
+        TransportHeaders = "Received: from a by b\r\nSubject: Secret\r\nMIME-Version: 1.0\r\nContent-Type: multipart/signed; boundary=\"outer-1\"\r\n",
+        BodyHtml = bodyHtml,
+        Attachments = [attachment],
+        InternetContentType = internetContentType,
+    };
+
+    private static MailAttachment File(string name, string contentType, byte[] content)
+        => new(name, contentType, null, false, content.Length, _ => Task.FromResult<Stream>(new MemoryStream(content)), null);
+
+    [TestMethod]
+    public void AClearSignedMessageIsItsSignedEntityWithTheMessagesHeaders()
+    {
+        // Outlook keeps it as IPM.Note.SMIME.MultipartSigned, one nameless multipart/signed attachment, the body promoted
+        var entity = Encoding.ASCII.GetBytes(SignedEntity);
+        var eml = MimeWriter.Build(Smime("IPM.Note.SMIME.MultipartSigned", File("attachment", "multipart/signed", entity), bodyHtml: "<p>Signed.</p>"));
+        var text = Encoding.ASCII.GetString(eml);
+
+        StringAssert.StartsWith(text, "Received: from a by b\r\nSubject: Secret\r\nFrom: Jane Doe <jane@example.test>\r\nTo: Sam <sam@example.test>\r\n");
+        var headerEnd = text.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+        StringAssert.EndsWith(text[..headerEnd], "MIME-Version: 1.0\r\nContent-Type: multipart/signed;\r\n\tprotocol=\"application/pkcs7-signature\";\r\n\tmicalg=sha-256;\r\n\tboundary=\"outer-1\"",
+            "the entity's own Content-Type, folded as it was, is the message's");
+        Assert.AreEqual(1, System.Text.RegularExpressions.Regex.Matches(text, "^MIME-Version:", System.Text.RegularExpressions.RegexOptions.Multiline).Count, "the entity's MIME-Version is dropped");
+        Assert.AreEqual(1, System.Text.RegularExpressions.Regex.Matches(text, "^Content-Type: multipart/signed", System.Text.RegularExpressions.RegexOptions.Multiline).Count, "the transport headers' Content-Type is dropped");
+        var entityBody = entity.AsSpan(SignedEntity.IndexOf("\r\n\r\n", StringComparison.Ordinal) + 4);
+        CollectionAssert.AreEqual(entityBody.ToArray(), eml.AsSpan(headerEnd + 4).ToArray(), "the signed body byte for byte, so the signature holds");
+        Assert.IsFalse(text.Contains("multipart/mixed", StringComparison.Ordinal), "no wrapper and no copy of the promoted body");
+    }
+
+    [TestMethod]
+    public void AClearSignedMessageWhoseAttachmentHasNoTypeIsKnownByItsClass()
+    {
+        var entity = Encoding.ASCII.GetBytes(SignedEntity);
+        var text = Encoding.ASCII.GetString(MimeWriter.Build(Smime("IPM.Note.SMIME.MultipartSigned", File("attachment", "application/octet-stream", entity))));
+        StringAssert.Contains(text, "\r\nContent-Type: multipart/signed;\r\n\tprotocol=");
+        StringAssert.EndsWith(text, "--outer-1--\r\n");
+    }
+
+    [TestMethod]
+    public void AnEncryptedMessageIsItsCmsUnderTheContentTypeItCameWith()
+    {
+        var eml = Encoding.ASCII.GetString(MimeWriter.Build(Smime("IPM.Note.SMIME", File("smime.p7m", "application/pkcs7-mime", EnvelopedCms),
+            internetContentType: "application/x-pkcs7-mime;\r\n\tsmime-type=enveloped-data;\r\n\tname=\"smime.p7m\"")));
+        StringAssert.Contains(eml, "\r\nMIME-Version: 1.0\r\nContent-Type: application/x-pkcs7-mime; smime-type=enveloped-data;\r\n name=\"smime.p7m\"\r\nContent-Disposition: attachment; filename=\"smime.p7m\"\r\nContent-Transfer-Encoding: base64\r\n\r\n");
+        var body = eml[(eml.IndexOf("\r\n\r\n", StringComparison.Ordinal) + 4)..];
+        CollectionAssert.AreEqual(EnvelopedCms, Convert.FromBase64String(body), "the CMS as it is stored");
+        Assert.IsTrue(body.Split("\r\n", StringSplitOptions.RemoveEmptyEntries).All(l => l.Length <= 76), "base64 in 76-character lines");
+        Assert.IsFalse(eml.Contains("multipart/", StringComparison.Ordinal), "the message is the CMS alone: no empty body beside it");
+    }
+
+    [TestMethod]
+    public void AnEncryptedMessageWithoutItsContentTypeGetsOneFromTheCms()
+    {
+        var eml = Encoding.ASCII.GetString(MimeWriter.Build(Smime("IPM.Note.SMIME", File("attachment", "application/pkcs7-mime", EnvelopedCms))));
+        StringAssert.Contains(eml, "\r\nContent-Type: application/pkcs7-mime; smime-type=enveloped-data;\r\n name=\"smime.p7m\"\r\nContent-Disposition: attachment; filename=\"smime.p7m\"\r\n");
+        Assert.AreEqual("enveloped-data", MimeWriter.SmimeType(EnvelopedCms));
+        Assert.AreEqual("signed-data", MimeWriter.SmimeType([0x30, 0x82, 0x01, 0x00, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02]));
+        Assert.IsNull(MimeWriter.SmimeType("Content-Type: text/plain"u8));
+    }
+
+    [TestMethod]
+    public void AnSmimeMessageAttachedToAnotherIsWrittenSoInside()
+    {
+        var inner = Smime("IPM.Note.SMIME", File("smime.p7m", "application/pkcs7-mime", EnvelopedCms));
+        var outer = new MailItem
+        {
+            Summary = new MailItemSummary("2", MailItemKind.Message, "Fwd: Secret", "Sam", null, null, null, 0, true),
+            MessageClass = "IPM.Note",
+            BodyText = "See below.",
+            Attachments = [new MailAttachment("Secret.eml", "message/rfc822", null, false, 0, _ => Task.FromResult(Stream.Null), _ => Task.FromResult<MailItem?>(inner))],
+        };
+        var eml = Encoding.ASCII.GetString(MimeWriter.Build(outer));
+        StringAssert.Contains(eml, "Content-Type: message/rfc822; name=\"Secret.eml\"");
+        StringAssert.Contains(eml, "Content-Type: application/pkcs7-mime; smime-type=enveloped-data;\r\n name=\"smime.p7m\"\r\n");
+    }
+
+    [TestMethod]
+    public void AMessageClassedSmimeButNotShapedSoIsWrittenAsAnyOther()
+    {
+        var item = Smime("IPM.Note.SMIME", File("report.pdf", "application/pdf", [1, 2, 3]), bodyHtml: "<p>Hi</p>");
+        var eml = Encoding.ASCII.GetString(MimeWriter.Build(item));
+        StringAssert.Contains(eml, "Content-Type: multipart/mixed; boundary=");
+        StringAssert.Contains(eml, "Content-Disposition: attachment; filename=\"report.pdf\"");
+
+        // an entity without a multipart/signed header is no signed message either
+        var odd = Encoding.ASCII.GetString(MimeWriter.Build(Smime("IPM.Note.SMIME.MultipartSigned", File("attachment", "multipart/signed", "no header block at all"u8.ToArray()))));
+        StringAssert.Contains(odd, "Content-Type: multipart/mixed; boundary=");
     }
 }

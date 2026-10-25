@@ -134,6 +134,12 @@ internal sealed class MailItem
     /// <summary>The message as the server holds it (RFC 5322), when the store has it: what the .eml is, lossless.</summary>
     public byte[]? RawMime { get; init; }
 
+    /// <summary>
+    /// The Content-Type header the message came with, where the store keeps it (a data file's PS_INTERNET_HEADERS
+    /// "Content-Type" property, [MS-OXOSMIME] 2.1.3.2): what an encrypted S/MIME message's .eml declares its body as.
+    /// </summary>
+    public string? InternetContentType { get; init; }
+
     /// <summary>0 low, 1 normal, 2 high; null when unset.</summary>
     public int? Importance { get; init; }
 

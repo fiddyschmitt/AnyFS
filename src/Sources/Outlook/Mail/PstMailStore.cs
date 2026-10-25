@@ -339,6 +339,7 @@ internal sealed class PstMailStore : IMailStore
             Attachments = attachments,
             Appointment = summary.Kind == MailItemKind.Appointment ? AppointmentOf(p) : null,
             Contact = summary.Kind == MailItemKind.Contact ? ContactOf(p) : null,
+            InternetContentType = Blank(Get(p, _ids.ContentType)?.Value as string),
         };
     }
 
@@ -484,6 +485,7 @@ internal sealed class PstMailStore : IMailStore
         private static readonly Guid Appointment = new("00062002-0000-0000-C000-000000000046");
         private static readonly Guid Meeting = new("6ED8DA90-450B-101B-98DA-00AA003F1305");
         private static readonly Guid Address = new("00062004-0000-0000-C000-000000000046");
+        private static readonly Guid InternetHeaders = new("00020386-0000-0000-C000-000000000046");
 
         private NamedIds()
         {
@@ -511,6 +513,7 @@ internal sealed class PstMailStore : IMailStore
             WorkAddressCountry = named.Find(Address, 0x8049)?.PropertyId;
             ImAddress = named.Find(Address, 0x8062)?.PropertyId;
             WebPage = named.Find(Address, 0x802B)?.PropertyId;
+            ContentType = named.Find(InternetHeaders, "content-type")?.PropertyId;
         }
 
         /// <summary>None known: a file whose named-property map does not read.</summary>
@@ -555,6 +558,9 @@ internal sealed class PstMailStore : IMailStore
         public ushort? ImAddress { get; }
 
         public ushort? WebPage { get; }
+
+        /// <summary>The Content-Type header a message came with (PS_INTERNET_HEADERS "content-type"): an encrypted S/MIME message's.</summary>
+        public ushort? ContentType { get; }
     }
 }
 

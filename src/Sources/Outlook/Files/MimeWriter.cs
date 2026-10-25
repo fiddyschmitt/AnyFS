@@ -8,7 +8,9 @@ namespace AnyFS.Sources.Outlook.Files;
 /// An item as an Internet message (.eml, RFC 5322 and MIME): the headers it came with (a received message's transport
 /// headers, less the content ones) or headers made from its properties, then the body as multipart/mixed over
 /// multipart/related over multipart/alternative as the parts call for: text and HTML quoted-printable in UTF-8, files
-/// base64, inline images with their Content-ID, attached messages as message/rfc822 inside.
+/// base64, inline images with their Content-ID, attached messages as message/rfc822 inside. An S/MIME message, which a
+/// data file keeps as one attachment holding the signed or encrypted content, is written back as that content
+/// ([MS-OXOSMIME] 2.1.3), so a mail client checks the signature or decrypts it as it does the original.
 /// </summary>
 internal static class MimeWriter
 {
@@ -35,10 +37,122 @@ internal static class MimeWriter
             Ascii(s, "\r\n");
         }
 
-        var body = BodyOf(item, AttachmentNames.LookupFor(item.Attachments), depth);
+        var body = SmimeBody(item) ?? BodyOf(item, AttachmentNames.LookupFor(item.Attachments), depth);
         body.WriteHeaders(s);
         Ascii(s, "\r\n");
         body.WriteContent(s);
+    }
+
+    // --- S/MIME -----------------------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// An S/MIME message's body as the message came, from the one attachment a data file keeps it in ([MS-OXOSMIME]
+    /// 2.1.3; a real OST's encrypted mail opened in Outlook from AnyFS's .eml with a blank body until 25-Oct-2026):
+    /// <list type="bullet">
+    /// <item>Clear-signed (IPM.Note.SMIME.MultipartSigned; the attachment multipart/signed, often nameless): the attachment
+    /// is the signed entity. Its header fields are dropped but the last Content-Type, its body is written byte for byte,
+    /// so the signature still holds (2.1.3.1.2.3). The body the store promoted for display is not written twice.</item>
+    /// <item>Encrypted or opaque-signed (IPM.Note.SMIME; the attachment application/pkcs7-mime, or a .p7m file): the
+    /// attachment is the CMS, written base64 under the Content-Type the message came with, else one made from the
+    /// attachment's type and name (2.1.3.2.2.3), with the smime-type the CMS shows.</item>
+    /// </list>
+    /// Null for any other message, and for an S/MIME message not shaped so (more attachments, an entity with no
+    /// multipart/signed header): those are written as any message is.
+    /// </summary>
+    private static Part? SmimeBody(MailItem item)
+    {
+        if (!item.MessageClass.StartsWith("IPM.Note.SMIME", StringComparison.OrdinalIgnoreCase) || item.Attachments.Count != 1 || item.Attachments[0].IsMessage)
+        {
+            return null;
+        }
+
+        var attachment = item.Attachments[0];
+        var type = MediaType(attachment.ContentType);
+        var opaque = type is "application/pkcs7-mime" or "application/x-pkcs7-mime"
+            || type == "application/octet-stream" && attachment.Name.EndsWith(".p7m", StringComparison.OrdinalIgnoreCase);
+        var signed = type == "multipart/signed" || !opaque && item.MessageClass.EndsWith(".MultipartSigned", StringComparison.OrdinalIgnoreCase);
+        if (!opaque && !signed)
+        {
+            return null;
+        }
+
+        var content = ReadAll(attachment);
+        if (signed)
+        {
+            return SignedPart.From(content);
+        }
+
+        return new OpaquePart(content, OpaqueContentType(item.InternetContentType, attachment, content), OpaqueFileName(attachment));
+    }
+
+    /// <summary>"multipart/signed" of "Multipart/Signed; boundary=..."; "" for nothing.</summary>
+    private static string MediaType(string? contentType) => (contentType ?? "").Split(';', 2)[0].Trim().ToLowerInvariant();
+
+    private static byte[] ReadAll(MailAttachment attachment)
+    {
+        // the PST store's streams come at once; a server's attachment is in hand by the time its message is written
+        using var content = attachment.OpenAsync(CancellationToken.None).GetAwaiter().GetResult();
+        using var copy = new MemoryStream();
+        content.CopyTo(copy);
+        return copy.ToArray();
+    }
+
+    /// <summary>The name an encrypted message's body goes under: the attachment's when it is a .p7m, else smime.p7m (RFC 8551).</summary>
+    private static string OpaqueFileName(MailAttachment attachment)
+        => attachment.Name.EndsWith(".p7m", StringComparison.OrdinalIgnoreCase) ? attachment.Name : "smime.p7m";
+
+    /// <summary>
+    /// The Content-Type of an encrypted message's body: the one it came with, unfolded, when that is an S/MIME type; else
+    /// the attachment's type with the smime-type the CMS shows and the file's name.
+    /// </summary>
+    private static string OpaqueContentType(string? received, MailAttachment attachment, byte[] content)
+    {
+        if (received is not null)
+        {
+            var unfolded = string.Join(' ', received.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+            if (MediaType(unfolded) is "application/pkcs7-mime" or "application/x-pkcs7-mime" or "application/octet-stream")
+            {
+                return unfolded;
+            }
+        }
+
+        var type = MediaType(attachment.ContentType) is { Length: > 0 } t && t != "application/octet-stream" ? t : "application/pkcs7-mime";
+        var smimeType = SmimeType(content);
+        return $"{type}; {(smimeType is null ? "" : $"smime-type={smimeType}; ")}{ParameterValue("name", OpaqueFileName(attachment))}";
+    }
+
+    /// <summary>
+    /// What a CMS ContentInfo holds, by its content type ([RFC 8551] 3.2.2): enveloped-data, signed-data,
+    /// authEnveloped-data or compressed-data; null when the bytes are no CMS or another kind.
+    /// </summary>
+    internal static string? SmimeType(ReadOnlySpan<byte> der)
+    {
+        // ContentInfo ::= SEQUENCE { contentType OBJECT IDENTIFIER, ... }, definite or indefinite length
+        if (der.Length < 4 || der[0] != 0x30)
+        {
+            return null;
+        }
+
+        var at = 1 + ((der[1] & 0x80) != 0 ? 1 + (der[1] & 0x7F) : 1);
+        if (at + 2 > der.Length || der[at] != 0x06)
+        {
+            return null;
+        }
+
+        var oid = der.Slice(at + 2, Math.Min(der[at + 1], der.Length - at - 2));
+        ReadOnlySpan<byte> pkcs7 = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07];          // 1.2.840.113549.1.7
+        ReadOnlySpan<byte> smime = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x10, 0x01]; // 1.2.840.113549.1.9.16.1
+        if (oid.Length == pkcs7.Length + 1 && oid.StartsWith(pkcs7))
+        {
+            return oid[^1] switch { 0x03 => "enveloped-data", 0x02 => "signed-data", _ => null };
+        }
+
+        if (oid.Length == smime.Length + 1 && oid.StartsWith(smime))
+        {
+            return oid[^1] switch { 0x17 => "authEnveloped-data", 0x09 => "compressed-data", _ => null };
+        }
+
+        return null;
     }
 
     // --- headers ----------------------------------------------------------------------------------------------------------
@@ -382,6 +496,74 @@ internal static class MimeWriter
                 WriteMessage(s, embedded, depth);
             }
         }
+    }
+
+    /// <summary>A clear-signed message's body: the signed entity's last Content-Type field, then its body byte for byte.</summary>
+    private sealed class SignedPart(string contentType, byte[] entity, int bodyStart) : Part
+    {
+        /// <summary>The entity's parts, or null when it has no header block ending in an empty line, or no multipart/signed Content-Type.</summary>
+        public static SignedPart? From(byte[] entity)
+        {
+            // the header block ends at the first empty line: CRLF CRLF, or LF LF in an entity kept with bare line feeds
+            var span = entity.AsSpan();
+            var crlf = span.IndexOf("\r\n\r\n"u8);
+            var lf = span.IndexOf("\n\n"u8);
+            var (end, separator) = lf >= 0 && (crlf < 0 || lf < crlf) ? (lf, 2) : (crlf, 4);
+            if (end < 0)
+            {
+                return null;
+            }
+
+            // header fields with their continuation lines; the last Content-Type is the one kept (2.1.3.1.2.3)
+            string? contentType = null;
+            var current = new StringBuilder();
+            foreach (var raw in Encoding.Latin1.GetString(entity, 0, end).Split('\n'))
+            {
+                var line = raw.TrimEnd('\r');
+                if (line.Length > 0 && line[0] is ' ' or '\t')
+                {
+                    current.Append("\r\n").Append(line);
+                    continue;
+                }
+
+                if (current.Length > 0 && current.ToString().StartsWith("Content-Type:", StringComparison.OrdinalIgnoreCase))
+                {
+                    contentType = current.ToString();
+                }
+
+                current.Clear().Append(line);
+            }
+
+            if (current.Length > 0 && current.ToString().StartsWith("Content-Type:", StringComparison.OrdinalIgnoreCase))
+            {
+                contentType = current.ToString();
+            }
+
+            return contentType is not null && MediaType(contentType["Content-Type:".Length..]) == "multipart/signed"
+                ? new SignedPart(contentType, entity, end + separator)
+                : null;
+        }
+
+        public override void WriteHeaders(Stream s)
+        {
+            var field = Encoding.Latin1.GetBytes(contentType + "\r\n");
+            s.Write(field, 0, field.Length);
+        }
+
+        public override void WriteContent(Stream s) => s.Write(entity, bodyStart, entity.Length - bodyStart);
+    }
+
+    /// <summary>An encrypted or opaque-signed message's body: the CMS, base64, as the attachment it is to a mail client.</summary>
+    private sealed class OpaquePart(byte[] cms, string contentType, string fileName) : Part
+    {
+        public override void WriteHeaders(Stream s)
+        {
+            Ascii(s, Fold("Content-Type: " + contentType) + "\r\n");
+            Ascii(s, $"Content-Disposition: attachment; {ParameterValue("filename", fileName)}\r\n");
+            Ascii(s, "Content-Transfer-Encoding: base64\r\n");
+        }
+
+        public override void WriteContent(Stream s) => Base64(s, new MemoryStream(cms, writable: false));
     }
 
     private sealed class Multipart(string subtype, IReadOnlyList<Part> parts) : Part
