@@ -55,6 +55,12 @@ public sealed class EntraSignIn
     /// <summary>The AnyFS app registration (provisioning/sharepoint/README.md): a multi-tenant public client with delegated Graph scopes, in the global cloud only.</summary>
     public const string DefaultClientId = "824dc5b9-f3c4-42b7-871d-6f0de8bc0a4a";
 
+    /// <summary>The settings choice of the app sign-in in the browser, as every Microsoft 365 source names it.</summary>
+    public const string WithBrowser = "App sign-in, browser";
+
+    /// <summary>The settings choice of the app sign-in with a device code.</summary>
+    public const string WithDeviceCode = "App sign-in, device code";
+
     private static readonly TimeSpan InteractiveTimeout = TimeSpan.FromMinutes(10);
     private static readonly ConcurrentDictionary<string, byte[]> RecentCaches = new(StringComparer.Ordinal);
 

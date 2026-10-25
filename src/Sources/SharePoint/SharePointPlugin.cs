@@ -38,8 +38,8 @@ internal enum SharePointSignIn
 public sealed class SharePointSettings
 {
     public const string Automatic = "Automatic";
-    public const string AppBrowser = "App sign-in, browser";
-    public const string AppDeviceCode = "App sign-in, device code";
+    public const string AppBrowser = EntraSignIn.WithBrowser;
+    public const string AppDeviceCode = EntraSignIn.WithDeviceCode;
     public const string WebSession = "Web session, no app registration";
     public const string WindowsCurrent = Common.WindowsAccount.AsYourself;
     public const string Windows = Common.WindowsAccount.WithPassword;

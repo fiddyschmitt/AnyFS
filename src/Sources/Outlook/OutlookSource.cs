@@ -10,12 +10,13 @@ using Microsoft.Extensions.Logging;
 namespace AnyFS.Sources.Outlook;
 
 /// <summary>
-/// An Outlook source (spec 7.7): a mailbox on Exchange Online through the web session, or a PST or OST file; either
-/// way a mail store (<see cref="IMailStore"/>) whose folders and item names make the tree (<see cref="MailTree"/>),
-/// kept in memory, and whose items are opened when their folder is, each item a folder with the item as Markdown and
-/// .eml (or .ics, or a .vcf for a contact) and its attachments. Nothing of a message is written to disk. Every
-/// <see cref="OutlookSettings.RefreshMinutes"/> the store is asked what changed (a file: when it changed on disk; a
-/// mailbox: each folder's delta) and the tree swapped whole. Trouble upstream shows as Degraded until a read succeeds.
+/// An Outlook source (spec 7.7): a mailbox on Exchange Online through the web session or an app sign-in, a mailbox on
+/// an Exchange server, or a PST or OST file; either way a mail store (<see cref="IMailStore"/>) whose folders and item
+/// names make the tree (<see cref="MailTree"/>), kept in memory, and whose items are opened when their folder is, each
+/// item a folder with the item as Markdown and .eml (or .ics, or a .vcf for a contact) and its attachments. Nothing of a
+/// message is written to disk. Every <see cref="OutlookSettings.RefreshMinutes"/> the store is asked what changed (a
+/// file: when it changed on disk; a mailbox: each folder's delta) and the tree swapped whole. Trouble upstream shows as
+/// Degraded until a read succeeds.
 /// </summary>
 public sealed class OutlookSource : SourceBase
 {
@@ -90,7 +91,12 @@ public sealed class OutlookSource : SourceBase
                         throw new SourceFailedException("Signing in as yourself works on Windows only: choose Windows account and give a user name and password.", permanent: true);
                     }
 
-                    var (service, account, how) = await ConnectAsync(_settings, _standIn, Logger, interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
+                    var secrets = Context.Secrets;
+                    var hooks = new SignInHooks(
+                        () => secrets.Get("msal-cache") is { } saved ? Convert.FromBase64String(saved) : null,
+                        bytes => secrets.Set("msal-cache", Convert.ToBase64String(bytes)),
+                        (title, message) => Context.PromptAsync(new PromptRequest(PromptKind.YesNo, title, message), ct));
+                    var (service, account, how) = await ConnectAsync(_settings, _standIn, Logger, interactive: true, message => Context.ReportProgress(message), hooks, ct).ConfigureAwait(false);
                     _store = new EwsMailStore(service, _settings.Kind == OutlookKind.Server ? $"{account} on {_settings.ServerUrl!.Host}" : account, _settings.ShowHidden, _settings.CalendarMonthsBack, _settings.CalendarMonthsAhead, Logger);
                     Logger.LogInformation("outlook: signed in as {Account} {How}", account, how);
                     break;
@@ -111,8 +117,8 @@ public sealed class OutlookSource : SourceBase
         }
         catch (EwsException ex)
         {
-            // a Windows sign-in the server refuses is the settings' fault; the rest may pass
-            throw new SourceFailedException($"Listing the mailbox: {ex.Message}", permanent: ex.Code == "401" && _settings.Kind == OutlookKind.Server, ex);
+            // a Windows sign-in the server refuses is the settings' fault, as is an app Graph will not let read the mailbox; the rest may pass
+            throw new SourceFailedException($"Listing the mailbox: {ex.Message}", permanent: ex.Code == "401" && _settings.Kind == OutlookKind.Server || ex.Code == "ErrorAccessDenied" && _settings.IsAppSignIn, ex);
         }
         catch (HttpRequestException ex)
         {
@@ -132,12 +138,15 @@ public sealed class OutlookSource : SourceBase
         Logger.LogInformation("outlook: serving {Name}: {Folders} folders, {Items} items", _store.Name, _tree.FolderCount, _tree.ItemCount);
     }
 
+    /// <summary>What an app sign-in needs from where it runs: the saved sign-in (the source's secret store) and a way to show a device code; the Test button has neither.</summary>
+    internal sealed record SignInHooks(Func<byte[]?> LoadCache, Action<byte[]> SaveCache, Func<string, string, Task>? Prompt);
+
     /// <summary>
-    /// The EWS service for a mailbox, signed in: through the test's stand-in, or the web session's token read from
-    /// the browser (a window when <paramref name="interactive"/> and the saved sign-in has lapsed). Also who the account
-    /// is and how it signed in, for messages.
+    /// The EWS service for a mailbox, signed in: through the test's stand-in, the web session's token read from the
+    /// browser (a window when <paramref name="interactive"/> and the saved sign-in has lapsed), an app sign-in and
+    /// Microsoft Graph, or a Windows account to a server. Also who the account is and how it signed in, for messages.
     /// </summary>
-    internal static async Task<(IEwsService Service, string Account, string How)> ConnectAsync(OutlookSettings s, OutlookStandIn? standIn, ILogger logger, bool interactive, Action<string> progress, CancellationToken ct)
+    internal static async Task<(IEwsService Service, string Account, string How)> ConnectAsync(OutlookSettings s, OutlookStandIn? standIn, ILogger logger, bool interactive, Action<string> progress, SignInHooks? hooks, CancellationToken ct)
     {
         if (s.Kind == OutlookKind.Server)
         {
@@ -151,6 +160,11 @@ public sealed class OutlookSource : SourceBase
         }
 
         var address = s.Address ?? throw new SourceFailedException("The mailbox's address is missing.", permanent: true);
+        if (s.IsAppSignIn)
+        {
+            return await ConnectGraphAsync(s, address, standIn, logger, progress, hooks, ct).ConfigureAwait(false);
+        }
+
         if (standIn is not null)
         {
             var service = new OwaJsonService(standIn.Origin, address, standIn.Token, standIn.Handler(), logger);
@@ -181,6 +195,64 @@ public sealed class OutlookSource : SourceBase
         }, null, logger);
         _ = first;
         return (live, account, $"through the web session ({session.BrowserName}, {origin.Host})");
+    }
+
+    /// <summary>
+    /// Exchange Online after an app sign-in (spec 7.7.1): the cloud from the settings or the realm lookup, AnyFS's app or
+    /// the organisation's own signed in to there (silently from the saved sign-in when it can, else the browser or a
+    /// device code), then Microsoft Graph at the mailbox's pace.
+    /// </summary>
+    private static async Task<(IEwsService Service, string Account, string How)> ConnectGraphAsync(OutlookSettings s, string address, OutlookStandIn? standIn, ILogger logger, Action<string> progress, SignInHooks? hooks, CancellationToken ct)
+    {
+        var cloud = s.KnownCloud;
+        if (cloud is null)
+        {
+            progress($"Finding {address}'s cloud");
+            cloud = standIn is null ? await MicrosoftCloud.FindAsync(address, null, ct).ConfigureAwait(false) : MicrosoftCloud.Global;
+        }
+        if (!Guid.TryParse(s.EffectiveClientId, out _))
+        {
+            throw new SourceFailedException("The client ID is not a GUID.", permanent: true);
+        }
+
+        // the settings dialog checks this too, but not for a cloud only the lookup tells, nor for a source edited by hand
+        if (CloudSettings.NeedsOwnRegistration(cloud, s.EffectiveClientId))
+        {
+            throw new SourceFailedException(CloudSettings.OwnRegistrationNeeded(cloud, OutlookPlugin.MailPermissions), permanent: true);
+        }
+
+        AppSignIn signIn;
+        if (standIn is not null)
+        {
+            signIn = new AppSignIn(standIn.Account, (c, renew) => standIn.Token(renew, c));
+        }
+        else
+        {
+            var tenant = s.TenantIn(cloud);
+            var entra = new EntraSignIn(new SignInOptions(OutlookPlugin.Service, s.EffectiveClientId, tenant, address, s.Method, OutlookPlugin.MailScopes, progress,
+                hooks?.Prompt, hooks?.LoadCache ?? (() => EntraSignIn.RecentCache(s.EffectiveClientId, tenant, address)), hooks?.SaveCache ?? (_ => { }), Cloud: cloud), logger);
+            progress(cloud.IsGlobal ? "Signing in to Exchange Online" : $"Signing in to Exchange Online in the {cloud.Name} cloud");
+            try
+            {
+                await entra.SignInAsync(ct).ConfigureAwait(false);
+            }
+            catch (SignInRequiredException ex)
+            {
+                throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
+            }
+
+            signIn = new AppSignIn(entra.Username, entra.GetAccessTokenAsync);
+        }
+
+        var account = signIn.Username ?? address;
+        if (!string.Equals(account, address, StringComparison.OrdinalIgnoreCase))
+        {
+            // Graph reads the signed-in account's own mailbox (me/), whatever the address says
+            logger.LogWarning("outlook: the app sign-in for {Address} is {Account}, whose mailbox is the one read", address, account);
+        }
+
+        var graph = new GraphClient(signIn.Token, logger, OutlookPlugin.Service, handler: standIn?.Handler(), cloud: cloud, pace: RequestPace.For(GraphEwsService.PaceKey(cloud, address)));
+        return (new GraphEwsService(graph, address, s.ShowHidden, logger), account, cloud.IsGlobal ? "with an app sign-in (Microsoft Graph)" : $"with an app sign-in (Microsoft Graph, {cloud.Name})");
     }
 
     // --- refresh ----------------------------------------------------------------------------------------------------------

@@ -16,7 +16,7 @@ namespace AnyFS.Sources.Tests;
 /// a bearer it checks (so a token renewal can be tested), a change log per folder (so a delta can be), and a hook for
 /// answering a request otherwise (a 429, say).
 /// </summary>
-internal sealed class FakeExchange
+internal sealed partial class FakeExchange
 {
     public const string Account = "jane@fake.test";
 
@@ -241,6 +241,11 @@ internal sealed class FakeExchange
 
     private HttpResponseMessage Serve(HttpRequestMessage request, string body)
     {
+        if (request.RequestUri?.Host == GraphHost)
+        {
+            return ServeGraph(request);
+        }
+
         if (request.RequestUri?.AbsolutePath.EndsWith("/EWS/Exchange.asmx", StringComparison.OrdinalIgnoreCase) == true)
         {
             return ServeSoap(request, body);

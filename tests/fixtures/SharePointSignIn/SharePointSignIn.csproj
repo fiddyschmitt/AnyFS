@@ -15,5 +15,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\..\src\Sources\Microsoft365\AnyFS.Sources.Microsoft365.csproj" />
     <ProjectReference Include="..\..\..\src\Sources\SharePoint\AnyFS.Sources.SharePoint.csproj" />
+    <!-- the mail scopes the Outlook source's app sign-in asks for (the "mail" scopes choice) -->
+    <ProjectReference Include="..\..\..\src\Sources\Outlook\AnyFS.Sources.Outlook.csproj" />
   </ItemGroup>
 </Project>

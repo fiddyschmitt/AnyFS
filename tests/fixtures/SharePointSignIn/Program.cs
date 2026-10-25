@@ -3,14 +3,16 @@
 // live tests load into their source's secret store. DPAPI-protected on Windows; elsewhere the file is plain and
 // made private, so keep it out of shared folders. Run it again when the tests report the sign-in has lapsed.
 //
-// usage: SharePointSignIn [--account name@tenant] [--tenant organizations|<domain>|<id>] [--scopes site|containers|all] [--device-code] [--force-login] [--print-url] [--out <file>] [--get <graph path>]... [--cloud global|usgov] [--client-id <id>]
+// usage: SharePointSignIn [--account name@tenant] [--tenant organizations|<domain>|<id>] [--scopes site|containers|all|mail] [--device-code] [--force-login] [--print-url] [--out <file>] [--get <graph path>]... [--cloud global|usgov] [--client-id <id>]
 //
 // --cloud usgov signs in to the US Government cloud (GCC High) and asks its Graph; AnyFS's own registration does
 // not exist there, so it needs --client-id with the organisation's own (and usually --tenant contoso.onmicrosoft.us).
 // --print-url prints the sign-in page's address instead of opening a browser, for signing in from another
 // browser or machine (the reply still arrives on this machine's loopback port). The default file is what the
 // tests look for when ANYFS_TEST_SPO_CACHE is not set. The sign-in asks for the SharePoint Online and the
-// SharePoint Embedded scopes together (--scopes narrows it), so one cache serves both sets of live tests.
+// SharePoint Embedded scopes together (--scopes narrows it), so one cache serves both sets of live tests. --scopes mail
+// asks for the Outlook source's (its Graph store's live test, OutlookGraphTests), which the tenant's administrator must
+// have consented to first; the sign-in goes into the same file beside the others.
 // --get prints what Graph answers for a path (relative to v1.0) with that sign-in: for looking at the rig.
 // --force-login makes the sign-in page ask for credentials instead of offering the browser's own signed-in
 // accounts (18-Oct-2026: a sign-in meant for the test account came back as the administrator twice); with
@@ -20,6 +22,7 @@ using System.Security.Cryptography;
 using AnyFS.Sdk;
 using AnyFS.Sources.Common;
 using AnyFS.Sources.Microsoft365;
+using AnyFS.Sources.Outlook;
 using AnyFS.Sources.SharePoint;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -45,7 +48,8 @@ for (var i = 0; i < args.Length; i++)
                 "site" => SharePointPlugin.SiteScopes,
                 "containers" => SharePointPlugin.ContainerScopes,
                 "all" => scopes,
-                var other => throw new ArgumentException($"--scopes {other}: site, containers or all"),
+                "mail" => OutlookPlugin.MailScopes,
+                var other => throw new ArgumentException($"--scopes {other}: site, containers, all or mail"),
             };
             break;
         case "--device-code": deviceCode = true; break;

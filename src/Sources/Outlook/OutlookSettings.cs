@@ -17,6 +17,12 @@ internal enum OutlookSignIn
     /// <summary>Outlook on the web in a browser of AnyFS's own: Exchange Online.</summary>
     WebSession,
 
+    /// <summary>A Microsoft sign-in as a registered app in the browser, then Microsoft Graph: Exchange Online.</summary>
+    AppBrowser,
+
+    /// <summary>The same with a device code.</summary>
+    AppDeviceCode,
+
     /// <summary>As the person is signed in to Windows: an Exchange server.</summary>
     WindowsCurrent,
 
@@ -27,6 +33,8 @@ internal enum OutlookSignIn
 public sealed class OutlookSettings
 {
     public const string WebSession = "Web session (Outlook on the web, no app registration)";
+    public const string AppBrowser = EntraSignIn.WithBrowser;
+    public const string AppDeviceCode = EntraSignIn.WithDeviceCode;
     public const string WindowsCurrent = WindowsAccount.AsYourself;
     public const string Windows = WindowsAccount.WithPassword;
 
@@ -34,8 +42,8 @@ public sealed class OutlookSettings
         Hint = "A mailbox's address (Exchange Online, signed in through Outlook on the web in a browser window of AnyFS's own); an Exchange server's address (its Outlook on the web or EWS address, signed in with a Windows account: your own mailbox there); or an Outlook data file, a .pst (an archive, an exported mailbox) or a .ost (Outlook's offline copy of a mailbox, read while Outlook has it open).")]
     public string Path { get; set; } = "";
 
-    [Setting("Sign in with", Order = 1, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [WebSession, WindowsCurrent, Windows],
-        Hint = "A mailbox on Exchange Online: the web session. AnyFS opens Outlook on the web in a browser profile of its own, you sign in there once, and AnyFS reads the mailbox the way that page does, with no app registration and nothing for an administrator to approve; a window opens again only when the sign-in lapses. An Exchange server: a Windows account, as you are signed in to Windows (nothing to type) or with a user name and password.")]
+    [Setting("Sign in with", Order = 1, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [WebSession, AppBrowser, AppDeviceCode, WindowsCurrent, Windows],
+        Hint = "A mailbox on Exchange Online: the web session, or an app sign-in. The web session: AnyFS opens Outlook on the web in a browser profile of its own, you sign in there once, and AnyFS reads the mailbox the way that page does, with no app registration and nothing for an administrator to approve; a window opens again only when the sign-in lapses. App sign-in: AnyFS signs in as a registered app, in the browser or with a device code, and reads the mailbox through Microsoft Graph; an administrator must first approve AnyFS's app (or your organisation's own, under Advanced) for reading mail, calendars and contacts. An Exchange server: a Windows account, as you are signed in to Windows (nothing to type) or with a user name and password.")]
     public string SignInMethod { get; set; } = WebSession;
 
     [Setting("Cloud", Order = 2, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [MicrosoftCloud.AutomaticName, MicrosoftCloud.GlobalName, MicrosoftCloud.UsGovernmentName],
@@ -48,6 +56,14 @@ public sealed class OutlookSettings
 
     [Setting("Password", Secret = true, Order = 4, Group = "Sign-in")]
     public string? Password { get; set; }
+
+    [Setting("Tenant", Advanced = true, Order = 8, Group = "Sign-in",
+        Hint = "For an app sign-in: organizations (any work or school account), or your tenant's domain or id when the sign-in needs steering to it. In the US Government cloud, organizations means the mailbox's own domain.")]
+    public string Tenant { get; set; } = "organizations";
+
+    [Setting("Client ID", Advanced = true, Order = 9, Group = "Sign-in",
+        Hint = "For an app sign-in: the app registration AnyFS signs in as. Leave the default unless your organisation registered its own for AnyFS, with the delegated Microsoft Graph permissions Mail.Read, Calendars.Read and Contacts.Read; in the US Government cloud it must have, since AnyFS's own exists only in the global cloud.")]
+    public string ClientId { get; set; } = EntraSignIn.DefaultClientId;
 
     [Setting("Browser", Advanced = true, Order = 10, Kind = SettingKind.FilePath,
         Hint = "The Edge, Chrome or Chromium to open for the web session. Leave empty to find one automatically. AnyFS opens it with a profile of its own, never your everyday browser's.")]
@@ -106,12 +122,44 @@ public sealed class OutlookSettings
         }
     }
 
-    /// <summary>How the sign-in goes: the web session for a mailbox on Exchange Online; for a server a Windows account, as yourself unless a user name and password are chosen.</summary>
+    /// <summary>
+    /// How the sign-in goes: for a mailbox on Exchange Online the web session, or an app sign-in when one is chosen; for a
+    /// server a Windows account, as yourself unless a user name and password are chosen.
+    /// </summary>
     internal OutlookSignIn EffectiveSignIn => Kind switch
     {
-        OutlookKind.Server => string.Equals(SignInMethod?.Trim(), Windows, StringComparison.OrdinalIgnoreCase) ? OutlookSignIn.Windows : OutlookSignIn.WindowsCurrent,
+        OutlookKind.Server => Chose(Windows) ? OutlookSignIn.Windows : OutlookSignIn.WindowsCurrent,
+        _ when Chose(AppBrowser) => OutlookSignIn.AppBrowser,
+        _ when Chose(AppDeviceCode) => OutlookSignIn.AppDeviceCode,
         _ => OutlookSignIn.WebSession,
     };
+
+    /// <summary>An app sign-in and Microsoft Graph: a mailbox, with one of the app sign-ins chosen.</summary>
+    internal bool IsAppSignIn => EffectiveSignIn is OutlookSignIn.AppBrowser or OutlookSignIn.AppDeviceCode;
+
+    /// <summary>The Microsoft sign-in flavour for <see cref="EntraSignIn"/>: a device code when chosen, else the browser.</summary>
+    internal SignInMethod Method => EffectiveSignIn == OutlookSignIn.AppDeviceCode ? Microsoft365.SignInMethod.DeviceCode : Microsoft365.SignInMethod.Browser;
+
+    internal string EffectiveClientId => string.IsNullOrWhiteSpace(ClientId) ? EntraSignIn.DefaultClientId : ClientId.Trim();
+
+    /// <summary>The mailbox's domain: contoso.com for jane@contoso.com.</summary>
+    internal string? Domain => Address is { } address ? address[(address.LastIndexOf('@') + 1)..] : null;
+
+    /// <summary>The cloud as far as the settings say: the one chosen, else the tenant's or the address's initial domain's; null when the realm lookup must tell.</summary>
+    internal MicrosoftCloud? KnownCloud => MicrosoftCloud.FromName(Cloud) ?? MicrosoftCloud.FromTenant(Tenant) ?? MicrosoftCloud.FromTenant(Domain);
+
+    /// <summary>
+    /// The tenant an app sign-in goes to in <paramref name="cloud"/>: the one given, organizations by default, except
+    /// outside the global cloud, where organizations becomes the mailbox's domain: an organisation's own registration
+    /// there is usually for its own tenant only, which the organizations endpoint refuses (AADSTS50194).
+    /// </summary>
+    internal string TenantIn(MicrosoftCloud cloud)
+    {
+        var tenant = string.IsNullOrWhiteSpace(Tenant) ? "organizations" : Tenant.Trim();
+        return !cloud.IsGlobal && string.Equals(tenant, "organizations", StringComparison.OrdinalIgnoreCase) && Domain is { } domain ? domain : tenant;
+    }
+
+    private bool Chose(string choice) => string.Equals(SignInMethod?.Trim(), choice, StringComparison.OrdinalIgnoreCase);
 
     internal bool IsWindowsCurrent => EffectiveSignIn == OutlookSignIn.WindowsCurrent;
 
