@@ -110,8 +110,8 @@ public sealed class PstMessage
     /// <summary>Whether the message is a draft, never sent.</summary>
     public bool IsUnsent => (Flags & 0x8) != 0;
 
-    /// <summary>Whether the message has attachments (inline images count).</summary>
-    public bool HasAttachments => (Flags & 0x10) != 0 || Properties.GetBoolean(PstPropertyIds.HasAttachments) == true;
+    /// <summary>Whether the message has attachments (inline images count): PidTagMessageFlags says, a folder's table holding it; PidTagHasAttachments where the flags are not stored.</summary>
+    public bool HasAttachments => Properties.GetInt32(PstPropertyIds.MessageFlags) is { } flags ? (flags & 0x10) != 0 : Properties.GetBoolean(PstPropertyIds.HasAttachments) == true;
 
     /// <summary>The message's size in bytes as the store counts it.</summary>
     public long Size => Properties.GetInt64(PstPropertyIds.MessageSize) ?? 0;

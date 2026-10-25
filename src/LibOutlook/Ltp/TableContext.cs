@@ -8,6 +8,22 @@ internal readonly record struct TableColumn(ushort Id, ushort Type, int Offset, 
     public uint Tag => ((uint)Id << 16) | Type;
 }
 
+/// <summary>What a row holds for a property.</summary>
+internal enum CellKind
+{
+    /// <summary>The table has no such column.</summary>
+    NoColumn,
+
+    /// <summary>The column is the table's, the row's cell is not set: the item has no such property.</summary>
+    Unset,
+
+    /// <summary>The cell is set and its value read.</summary>
+    Value,
+
+    /// <summary>The cell is set but names a value the table does not hold: read as unset, as libpff reads it.</summary>
+    Missing,
+}
+
 /// <summary>
 /// A table context ([MS-PST] 2.3.4): rows of fixed layout (the TCINFO's columns), each with a cell-existence bitmap,
 /// kept in the node's heap when small or in a subnode's data blocks when not; a row index BTH maps row ids to rows.
@@ -127,40 +143,54 @@ internal sealed class TableContext
         return bitByte < block.Length && (block[bitByte] & (1 << (7 - column.Bit % 8))) != 0;
     }
 
-    /// <summary>A cell of a row, as bytes: inline for the fixed-size types, else from the heap or a subnode; null when the cell is not set.</summary>
-    internal byte[]? Cell(byte[] block, int rowOffset, ushort id)
+    /// <summary>A cell of a row, as bytes: inline for the fixed-size types, else from the heap or a subnode; null when the cell is not set or names a value the table does not hold.</summary>
+    internal byte[]? Cell(byte[] block, int rowOffset, ushort id) => ReadCell(block, rowOffset, id).Bytes;
+
+    /// <summary>
+    /// What a row holds for a property. A set cell that names a value the table does not hold (a reference past its heap's
+    /// allocations, a subnode it has not: met in a real OST's contents tables, hundreds of them) is Missing, as libpff takes
+    /// such a cell; it is noted in the file's <see cref="MissingValueLog"/>, and the item's own property stands in for it.
+    /// </summary>
+    internal (CellKind Kind, byte[]? Bytes) ReadCell(byte[] block, int rowOffset, ushort id)
     {
-        if (!HasCell(block, rowOffset, id))
+        if (!_byId.TryGetValue(id, out var column))
         {
-            return null;
+            return (CellKind.NoColumn, null);
         }
 
-        var column = _byId[id];
+        if (!HasCell(block, rowOffset, id))
+        {
+            return (CellKind.Unset, null);
+        }
+
         var at = rowOffset + column.Offset;
+        var rowId = BinaryPrimitives.ReadUInt32LittleEndian(block.AsSpan(rowOffset));
+        if (at + column.Size > block.Length)
+        {
+            throw new PstException($"{_node.Where}, the row of 0x{rowId:X}, {PropertyValues.Describe(id, column.Type)}: its cell lies outside the row");
+        }
+
+        var fixedSize = PropertyValues.FixedSize(column.Type);
+        if (fixedSize > 0 && fixedSize <= 8 && column.Size >= fixedSize)
+        {
+            return (CellKind.Value, block.AsSpan(at, column.Size).ToArray());
+        }
+
+        var hnid = BinaryPrimitives.ReadUInt32LittleEndian(block.AsSpan(at));
         try
         {
-            if (at + column.Size > block.Length)
-            {
-                throw new PstException("its cell lies outside the row");
-            }
-
-            var fixedSize = PropertyValues.FixedSize(column.Type);
-            if (fixedSize > 0 && fixedSize <= 8 && column.Size >= fixedSize)
-            {
-                return block.AsSpan(at, column.Size).ToArray();
-            }
-
-            var hnid = BinaryPrimitives.ReadUInt32LittleEndian(block.AsSpan(at));
-            return PropertyContext.ResolveHnid(_node, _heap, hnid);
+            return (CellKind.Value, PropertyContext.ResolveHnid(_node, _heap, hnid));
         }
         catch (PstException ex)
         {
-            var rowId = BinaryPrimitives.ReadUInt32LittleEndian(block.AsSpan(rowOffset));
-            throw new PstException($"{_node.Where}, the row of 0x{rowId:X}, {PropertyValues.Describe(id, column.Type)}: {ex.Message}", ex);
+            _node.Missing.Add($"{_node.Where}, the row of 0x{rowId:X}, {PropertyValues.Describe(id, column.Type)} in a cell of {column.Size} bytes: {ex.Message}");
+            return (CellKind.Missing, null);
         }
     }
 
     internal ushort TypeOf(ushort id) => _byId.TryGetValue(id, out var c) ? c.Type : (ushort)0;
+
+    internal bool HasColumn(ushort id) => _byId.ContainsKey(id);
 
     private List<(uint RowId, byte[] Block, int Offset)> LocateRows(BTreeOnHeap rowIndex)
     {
@@ -250,11 +280,17 @@ internal sealed class TableRow : IPropertySource
 
     public bool Contains(ushort id) => _table.HasCell(_block, _offset, id);
 
-    public RawProperty? Get(ushort id)
+    public RawProperty? Get(ushort id) => Read(id).Value;
+
+    /// <summary>What the row holds for the property: no column, an unset cell, a value, or one the table does not hold.</summary>
+    public (CellKind Kind, RawProperty? Value) Read(ushort id)
     {
-        var bytes = _table.Cell(_block, _offset, id);
-        return bytes is null ? null : new RawProperty(id, _table.TypeOf(id), bytes);
+        var (kind, bytes) = _table.ReadCell(_block, _offset, id);
+        return (kind, bytes is null ? null : new RawProperty(id, _table.TypeOf(id), bytes));
     }
+
+    /// <summary>Whether the table has the column and whether the row's cell is set, its value not read (Value for a set cell).</summary>
+    public CellKind State(ushort id) => !_table.HasColumn(id) ? CellKind.NoColumn : _table.HasCell(_block, _offset, id) ? CellKind.Value : CellKind.Unset;
 
     public IEnumerable<RawProperty> All()
     {

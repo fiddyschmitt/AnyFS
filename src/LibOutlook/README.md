@@ -15,7 +15,10 @@ dependencies, no MAPI, no Outlook: it reads the file itself, on any platform .NE
 - A file damaged in places reads as far as it reads: a fault names where it is (`message 0x200064, property 0x0037
   (Subject) of type 0x001F: HID 0x000000E0 names allocation 7 of 3 in heap block 0`), a folder's table still gives an
   item's cells when the item's own properties do not read, and `PstMessage.AsListed()` is a message as its folder
-  lists it, the message itself not read.
+  lists it, the message itself not read. A table's cell naming a value the table does not hold reads as unset, as
+  libpff reads it, the item's own property standing in (`PstFile.MissingValues` counts them, with examples).
+- Listing a folder reads its contents table alone where the table has what is asked: an unset cell is a property the
+  item has not, so a mailbox's mail lists without each message being read.
 
 ```csharp
 using LibOutlook;

@@ -14,10 +14,15 @@ internal static class Damage
     /// <summary>A claim of as many allocations as a property context's own BTH takes (a one-level tree's header and records).</summary>
     public const int OwnTree = 0;
 
+    /// <summary>A claim of as many allocations as a table context's own structures take (its TCINFO, its row index and its rows in the heap): the cells' values allocated after them are past the claim.</summary>
+    public const int OwnTable = -1;
+
     /// <summary>
     /// fixtures/damaged.pst from unicode.pst. The heap of the Inbox's Projects folder claims one allocation, its BTH's header:
     /// its property records do not read. The "Plain note" mail's claims only its own BTH's: its records read, the values
     /// allocated after them do not. The Contacts folder's contents table claims one, its TCINFO: its row index does not read.
+    /// The Projects folder's contents table claims only its own structures': its row reads, cells naming values allocated
+    /// after them name what the table does not hold, as hundreds of a real OST's contents tables' cells did.
     /// </summary>
     public static void Fixture(string unicodePst, string target)
     {
@@ -25,11 +30,13 @@ internal static class Damage
         using (var pst = PstFile.Open(unicodePst))
         {
             var inbox = pst.TopFolder.FindFolder("Inbox")!;
+            var projects = inbox.FindFolder("Projects")!.Nid;
             damage =
             [
-                (inbox.FindFolder("Projects")!.Nid, 1),
+                (projects, 1),
                 (inbox.Messages.Single(m => m.Subject.StartsWith("Plain note", StringComparison.Ordinal)).Nid, OwnTree),
                 (NodeId.WithType(pst.TopFolder.FindFolder("Contacts")!.Nid, NodeId.TypeContentsTable), 1),
+                (NodeId.WithType(projects, NodeId.TypeContentsTable), OwnTable),
             ];
         }
 
@@ -69,7 +76,12 @@ internal static class Damage
             var data = raw.AsSpan(0, cb).ToArray();
             Crypt.Decode(data, encoding, bid);
             var map = BinaryPrimitives.ReadUInt16LittleEndian(data);
-            var claim = claimed == OwnTree ? OwnTreeAllocations(data, map) : claimed;
+            var claim = claimed switch
+            {
+                OwnTree => OwnTreeAllocations(data, map),
+                OwnTable => OwnTableAllocations(data, map),
+                _ => claimed,
+            };
             if (BinaryPrimitives.ReadUInt16LittleEndian(data.AsSpan(map)) <= claim)
             {
                 throw new InvalidOperationException($"block {bid}'s heap holds no more than {claim} allocations: claiming {claim} damages nothing");
@@ -100,6 +112,25 @@ internal static class Damage
         }
 
         return Math.Max(Index(userRoot), Index(BinaryPrimitives.ReadUInt32LittleEndian(heap.AsSpan(header + 4))));
+    }
+
+    /// <summary>The highest allocation a TC heap's own structures take: its TCINFO (the user root), its row index's header and root, and its rows when they are in the heap.</summary>
+    private static int OwnTableAllocations(byte[] heap, int map)
+    {
+        static int Index(uint hid) => (int)((hid >> 5) & 0x7FF);
+        int Start(int index) => BinaryPrimitives.ReadUInt16LittleEndian(heap.AsSpan(map + 4 + (index - 1) * 2));
+        var userRoot = BinaryPrimitives.ReadUInt32LittleEndian(heap.AsSpan(4));
+        var info = Start(Index(userRoot));
+        var rowIndex = BinaryPrimitives.ReadUInt32LittleEndian(heap.AsSpan(info + 10));
+        var rows = BinaryPrimitives.ReadUInt32LittleEndian(heap.AsSpan(info + 14));
+        var header = Start(Index(rowIndex));
+        if (heap[header + 3] != 0)
+        {
+            throw new NotSupportedException("a row index of more than one level");
+        }
+
+        var claim = Math.Max(Index(userRoot), Math.Max(Index(rowIndex), Index(BinaryPrimitives.ReadUInt32LittleEndian(heap.AsSpan(header + 4)))));
+        return (rows & 0x1F) == 0 ? Math.Max(claim, Index(rows)) : claim;
     }
 
     /// <summary>CryptPermute with fEncrypt true: every byte through mpbbR ([MS-PST] 5.1), the inverse of the decoding.</summary>
@@ -135,7 +166,7 @@ public class DamagedFileTests
     private static PstFile Open() => PstFile.Open(Fixtures.Path("damaged.pst"));
 
     [TestMethod]
-    public void The_damaged_fixture_is_the_unicode_one_with_three_heaps_damaged()
+    public void The_damaged_fixture_is_the_unicode_one_with_its_heaps_damaged()
     {
         var made = Path.Combine(Path.GetTempPath(), $"liboutlook-damaged-{Guid.NewGuid():N}.pst");
         try
@@ -165,7 +196,7 @@ public class DamagedFileTests
         Assert.AreEqual(1, projects.Messages.Count(), "its contents table is a node of its own, and sound");
         var ex = Assert.ThrowsExactly<PstException>(() => projects.Properties.GetBoolean(AttributeHidden));
         StringAssert.StartsWith(ex.Message, $"folder 0x{projects.Nid:X}: HID 0x");
-        StringAssert.EndsWith(ex.Message, " of 1 in heap block 0");
+        StringAssert.EndsWith(ex.Message, " of 1 in heap block 0 (a heap of one block)");
         Assert.ThrowsExactly<PstException>(() => pst.GetFolder(projects.Nid)!.Name, "found by its id, it has only its own properties to name it");
     }
 
@@ -198,5 +229,41 @@ public class DamagedFileTests
         var ex = Assert.ThrowsExactly<PstException>(() => contacts.Messages.ToList());
         StringAssert.StartsWith(ex.Message, $"the contents table of folder 0x{contacts.Nid:X}: HID 0x");
         Assert.AreEqual(1, pst.TopFolder.FindFolder("Calendar")!.Messages.Count(), "the other folders' tables are sound");
+    }
+
+    [TestMethod]
+    public void A_cell_naming_a_value_its_table_does_not_hold_reads_as_unset_and_the_item_stands_in()
+    {
+        // the Projects folder's contents table holds its row, but not the values its cells name (as hundreds of a real OST's did)
+        using var pst = Open();
+        var projects = pst.TopFolder.FindFolder("Inbox")!.FindFolder("Projects")!;
+        Assert.AreEqual(0, pst.MissingValues, "nothing read yet");
+        var mail = projects.Messages.Single();
+        Assert.AreEqual("RE: Project kick-off", mail.Subject, "the mail's own subject stands in for its cell");
+        Assert.AreEqual("IPM.Note", mail.MessageClass);
+        Assert.IsTrue(pst.MissingValues >= 2, $"{pst.MissingValues} cells");
+        var example = pst.MissingValueExamples.First(e => e.Contains("(Subject)", StringComparison.Ordinal));
+        StringAssert.StartsWith(example, $"the contents table of folder 0x{projects.Nid:X}, the row of 0x{mail.Nid:X}, property 0x0037 (Subject) of type 0x001F in a cell of 4 bytes: HID 0x");
+        StringAssert.EndsWith(example, " in heap block 0 (a heap of one block)");
+
+        var listed = mail.AsListed()!;
+        Assert.AreEqual("", listed.Subject, "as the folder lists it: the cell reads as unset");
+        Assert.IsNotNull(listed.LastModificationTime, "the cells held in the row itself read");
+        Assert.AreEqual(projects.Messages.Single().Recipients.Count, mail.Recipients.Count, "the mail itself is sound");
+    }
+
+    [TestMethod]
+    public void A_table_cell_that_is_not_set_is_not_looked_for_in_the_item()
+    {
+        // a column of the table whose cell is unset is a property the item has not: the item is not read for it. The Projects
+        // folder's own properties do not read at all, so any look in them throws.
+        using var pst = Open();
+        var projects = pst.TopFolder.FindFolder("Inbox")!.FindFolder("Projects")!;
+        Assert.IsNull(projects.Properties.Get(0x0E30), "PidTagReplItemid: a column of the Inbox's subfolder table, unset in the row");
+        Assert.ThrowsExactly<PstException>(() => projects.Properties.Get(PstPropertyIds.CreationTime), "no column of the table: the folder's own properties are read for it");
+
+        var mail = pst.TopFolder.FindFolder("Inbox")!.Messages.Single(m => m.Subject.StartsWith("Plain note", StringComparison.Ordinal));
+        Assert.IsNull(mail.ClientSubmitTime, "a draft's: unset in the Inbox's row");
+        Assert.IsFalse(mail.HasAttachments, "the row's message flags say so");
     }
 }

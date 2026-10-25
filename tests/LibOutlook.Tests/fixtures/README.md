@@ -26,9 +26,11 @@ lab's Windows VM with Outlook signed in, and the files are copied here as they c
 4 KiB pages) is tested against a capture of the lab mailbox that stays outside the repository (`OstTests`, inconclusive
 without it: set `LIBOUTLOOK_TEST_OST` to point at one).
 
-`damaged.pst` is `unicode.pst` with three heaps damaged the way a real OST's was (a heap whose records name allocations
-its page map does not list: "HID 0x0000CD20 names allocation 1641 of 616 in heap block 0"), each block's CRC made
-again so that only the heap is wrong: the Inbox's Projects folder claims one allocation (its property records do not
-read), the "Plain note" mail claims only its own BTH's (its records read, its values do not), and the Contacts folder's
-contents table claims one (its row index does not read). `Damage.Fixture` in `DamagedFileTests.cs` makes it, and a test
-checks the file here is what it makes; to make it again, run that test with `LIBOUTLOOK_MAKE_FIXTURES` set to this folder.
+`damaged.pst` is `unicode.pst` with four heaps damaged the way a real OST's were (records naming allocations their
+heap's page map does not list: "HID 0x0000CD20 names allocation 1641 of 616 in heap block 0", by the hundred in its
+contents tables' cells), each block's CRC made again so that only the heap is wrong: the Inbox's Projects folder claims
+one allocation (its property records do not read), the "Plain note" mail claims only its own BTH's (its records read,
+its values do not), the Contacts folder's contents table claims one (its row index does not read), and the Projects
+folder's contents table claims only its own structures' (its row reads, the values its cells name do not).
+`Damage.Fixture` in `DamagedFileTests.cs` makes it, and a test checks the file here is what it makes; to make it again,
+run that test with `LIBOUTLOOK_MAKE_FIXTURES` set to this folder.

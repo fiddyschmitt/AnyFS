@@ -4,6 +4,35 @@ using LibOutlook.Ndb;
 namespace LibOutlook.Ltp;
 
 /// <summary>
+/// The table cells of a file met so far whose values their tables do not hold (a reference past its heap's allocations,
+/// a subnode the table has not): how many, the first few and the latest, described.
+/// </summary>
+internal sealed class MissingValueLog
+{
+    private const int Kept = 5;
+
+    private readonly System.Collections.Concurrent.ConcurrentQueue<string> _first = new();
+    private int _count;
+    private string? _latest;
+
+    public int Count => Volatile.Read(ref _count);
+
+    public IReadOnlyList<string> First => [.. _first];
+
+    public string? Latest => Volatile.Read(ref _latest);
+
+    public void Add(string what)
+    {
+        if (Interlocked.Increment(ref _count) <= Kept)
+        {
+            _first.Enqueue(what);
+        }
+
+        Volatile.Write(ref _latest, what);
+    }
+}
+
+/// <summary>
 /// A node and what the layers above need of it: its data blocks, its subnodes (read once, on first use), and the
 /// data of a subnode in one piece. A subnode's own tree is reached by making a context of its entry, with the node it
 /// belongs to as its parent.
@@ -13,16 +42,24 @@ internal sealed class NodeContext
     private readonly Lazy<Dictionary<uint, NodeEntry>> _subnodes;
     private readonly NodeContext? _parent;
 
-    public NodeContext(BlockStore blocks, NodeEntry node, NodeContext? parent = null)
+    /// <param name="blocks">The file's blocks.</param>
+    /// <param name="node">The node.</param>
+    /// <param name="parent">The node a subnode belongs to.</param>
+    /// <param name="missing">The file's log of values its tables do not hold (a parent's, else one of the node's own).</param>
+    public NodeContext(BlockStore blocks, NodeEntry node, NodeContext? parent = null, MissingValueLog? missing = null)
     {
         Blocks = blocks;
         Node = node;
         _parent = parent;
+        Missing = missing ?? parent?.Missing ?? new MissingValueLog();
         _subnodes = new Lazy<Dictionary<uint, NodeEntry>>(() => blocks.ReadSubnodes(node.BidSub));
     }
 
     /// <summary>What the node is, for messages: "message 0x200024", "the attachment table of message 0x200024".</summary>
     public string Where => _parent is null ? NodeId.Describe(Node.Nid) : $"{NodeId.Describe(Node.Nid)} of {_parent.Where}";
+
+    /// <summary>Where table cells whose values their tables do not hold are noted.</summary>
+    public MissingValueLog Missing { get; }
 
     public BlockStore Blocks { get; }
 
@@ -113,7 +150,7 @@ internal sealed class HeapNode
         var count = BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(map));
         if (index < 1 || index > count)
         {
-            throw new PstException($"HID 0x{hid:X8} names allocation {index} of {count} in heap block {blockIndex}");
+            throw new PstException($"HID 0x{hid:X8} names allocation {index} of {count} in heap block {blockIndex}{Elsewhere(index, blockIndex)}");
         }
 
         var table = map + 4;
@@ -130,5 +167,41 @@ internal sealed class HeapNode
         }
 
         return new ArraySegment<byte>(block, start, end - start);
+    }
+
+    /// <summary>
+    /// For an HID past its block's allocations, what the heap's other blocks hold of that number, to tell where such
+    /// references point: " (a heap of 12 blocks; allocation 675 is in blocks 3 (52 bytes), 7 (18 bytes))".
+    /// </summary>
+    private string Elsewhere(int index, int blockIndex)
+    {
+        if (_blocks.Count < 2)
+        {
+            return " (a heap of one block)";
+        }
+
+        var holders = new List<string>();
+        for (var b = 0; b < _blocks.Count && holders.Count < 6; b++)
+        {
+            var block = _blocks[b];
+            if (b == blockIndex || block.Length < 2)
+            {
+                continue;
+            }
+
+            int map = BinaryPrimitives.ReadUInt16LittleEndian(block);
+            if (map + 4 + (index + 1) * 2 > block.Length || index > BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(map)))
+            {
+                continue;
+            }
+
+            int start = BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(map + 4 + (index - 1) * 2));
+            int end = BinaryPrimitives.ReadUInt16LittleEndian(block.AsSpan(map + 4 + index * 2));
+            holders.Add($"{b} ({end - start} bytes)");
+        }
+
+        return holders.Count == 0
+            ? $" (a heap of {_blocks.Count} blocks, none with an allocation {index})"
+            : $" (a heap of {_blocks.Count} blocks; allocation {index} is in block{(holders.Count == 1 ? "" : "s")} {string.Join(", ", holders)})";
     }
 }

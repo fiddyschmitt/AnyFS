@@ -50,6 +50,7 @@ public sealed class PstFile : IDisposable
 {
     private readonly IDataSource _source;
     private readonly object _gate = new();
+    private readonly MissingValueLog _missing = new();
     private Header _header;
     private NodeDatabase _ndb;
     private BlockStore _blocks;
@@ -138,6 +139,16 @@ public sealed class PstFile : IDisposable
     /// <summary>The file's named properties.</summary>
     public PstNamedProperties NamedProperties => _named.Value;
 
+    /// <summary>
+    /// How many table cells read so far name a value their table does not hold (a reference past its heap's allocations,
+    /// a subnode the table has not), as hundreds of a real OST's contents tables' cells did. Such a cell reads as unset,
+    /// as libpff reads it, and the item's own property stands in for it wherever the item is at hand.
+    /// </summary>
+    public int MissingValues => _missing.Count;
+
+    /// <summary>The first few such cells, and the latest, described: "the contents table of folder 0x2162, the row of 0x1014184, property 0x0042 (SentRepresentingName) of type 0x001F in a cell of 4 bytes: HID ... names allocation 675 of 616 in heap block 0 (...)".</summary>
+    public IReadOnlyList<string> MissingValueExamples => _missing.Latest is { } latest && !_missing.First.Contains(latest) ? [.. _missing.First, latest] : _missing.First;
+
     /// <summary>A folder the message store points at, or null when it does not.</summary>
     public PstFolder? GetSpecialFolder(PstSpecialFolder which)
     {
@@ -216,7 +227,7 @@ public sealed class PstFile : IDisposable
     internal BlockEntry? FindBlock(ulong bid) => _ndb.FindBlock(bid);
 
     /// <summary>A node's context; a subnode's names the node it belongs to.</summary>
-    internal NodeContext Context(NodeEntry node, NodeContext? parent = null) => new(_blocks, node, parent);
+    internal NodeContext Context(NodeEntry node, NodeContext? parent = null) => new(_blocks, node, parent, _missing);
 
     [MemberNotNull(nameof(_store), nameof(_named), nameof(_root), nameof(_top))]
     private void Reset()

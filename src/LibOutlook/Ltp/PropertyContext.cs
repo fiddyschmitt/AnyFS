@@ -20,14 +20,38 @@ internal interface IPropertySource
     IEnumerable<RawProperty> All();
 }
 
-/// <summary>A table row's cells first (already in hand), the item's own property context for the rest (opened on first need).</summary>
+/// <summary>
+/// A table row's cells first (already in hand), the item's own property context for the rest (opened on first need). A
+/// column of the table whose cell is unset is a property the item has not (the table mirrors the item, so the item is not
+/// read for it); a property the table has no column for, or a cell naming a value the table does not hold, is the item's.
+/// </summary>
 internal sealed class RowBackedSource(TableRow? row, Lazy<PropertyContext> context) : IPropertySource
 {
     public IEnumerable<ushort> Ids => context.Value.Ids;
 
-    public bool Contains(ushort id) => (row?.Contains(id) ?? false) || context.Value.Contains(id);
+    public bool Contains(ushort id) => row?.State(id) switch
+    {
+        CellKind.Value => true,
+        CellKind.Unset => false,
+        _ => context.Value.Contains(id),
+    };
 
-    public RawProperty? Get(ushort id) => row?.Get(id) ?? context.Value.Get(id);
+    public RawProperty? Get(ushort id)
+    {
+        if (row is not null)
+        {
+            var (kind, value) = row.Read(id);
+            switch (kind)
+            {
+                case CellKind.Value:
+                    return value;
+                case CellKind.Unset:
+                    return null;
+            }
+        }
+
+        return context.Value.Get(id);
+    }
 
     public IEnumerable<RawProperty> All() => context.Value.All();
 }
