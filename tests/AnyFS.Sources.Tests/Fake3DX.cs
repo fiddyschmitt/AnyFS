@@ -144,6 +144,61 @@ internal sealed class Fake3DX : IDisposable
     /// <summary>Whether 3DPassport, given a SAML response without a relay state, shows its own page (signed in) rather than sending the client on to the service.</summary>
     public bool StaysWithoutRelayState { get; set; }
 
+    /// <summary>Whether a ticket's PUT with a CSRF token 3DSpace does not take is answered 200 with an error of 3DSpace's own and no ticket, rather than 403.</summary>
+    public bool WrongTokenAnsweredOk { get; set; }
+
+    /// <summary>How many of the next tickets' PUTs (with a right token) are answered 200 with an error and no ticket, as a 3DSpace that cannot give one answers.</summary>
+    public int TicketlessAnswers
+    {
+        get => Volatile.Read(ref _ticketlessAnswers);
+        set => Volatile.Write(ref _ticketlessAnswers, value);
+    }
+
+    private int _ticketlessAnswers;
+
+    /// <summary>How many of the next documents calls are answered 500 with 3DSpace's error of its own, as a server under strain answers.</summary>
+    public int DocumentErrors
+    {
+        get => Volatile.Read(ref _documentErrors);
+        set => Volatile.Write(ref _documentErrors, value);
+    }
+
+    private int _documentErrors;
+
+    /// <summary>Whether 3DSpace's and 3DSearch's sessions time out right after the next CSRF token is given: the request that carries it is sent to the sign-in.</summary>
+    public bool ExpireSessionsAfterNextCsrf { get; set; }
+
+    /// <summary>Tickets' PUTs refused for their CSRF token (missing, of another session, or one no longer taken).</summary>
+    public int TicketsRefused => _ticketsRefused;
+
+    private int _ticketsRefused;
+
+    /// <summary>The SecurityContext header of each ticket's PUT, in order (null for none).</summary>
+    public ConcurrentQueue<string?> TicketContexts { get; } = new();
+
+    /// <summary>One of a count of answers to give, if any are left.</summary>
+    private static bool TakeOne(ref int count)
+    {
+        for (var left = Volatile.Read(ref count); left > 0; left = Volatile.Read(ref count))
+        {
+            if (Interlocked.CompareExchange(ref count, left - 1, left) == left)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Every session's CSRF token is replaced by a new one, and the old ones are no longer taken, as tokens that lapsed with time.</summary>
+    public void RenewCsrfTokens()
+    {
+        foreach (var session in _sessions.Values)
+        {
+            session.Csrf = Guid.NewGuid().ToString("N");
+        }
+    }
+
     /// <summary>Every request, in order: its method, path (the badge port's prefixed with its port), user agent and whether it carried cookies.</summary>
     public ConcurrentQueue<(string Method, string Path, string? UserAgent, bool HadCookies)> Requests { get; } = new();
 
@@ -451,7 +506,7 @@ internal sealed class Fake3DX : IDisposable
     {
         public string Service { get; } = service;
 
-        public string Csrf { get; } = Guid.NewGuid().ToString("N");
+        public string Csrf { get; set; } = Guid.NewGuid().ToString("N");
     }
 
     /// <summary>The request's session for the service, or null when the response is already written: a ticket taken (and the client sent on without it), or the client sent to 3DPassport.</summary>
@@ -518,6 +573,12 @@ internal sealed class Fake3DX : IDisposable
         {
             case ("GET", "/3dspace/resources/v1/application/CSRF"):
                 await JsonAsync(response, 200, new JsonObject { ["success"] = true, ["csrf"] = new JsonObject { ["name"] = "ENO_CSRF_TOKEN", ["value"] = session.Csrf } });
+                if (ExpireSessionsAfterNextCsrf)
+                {
+                    ExpireSessionsAfterNextCsrf = false;
+                    _sessions.Clear();
+                }
+
                 return;
             case ("GET", "/3dspace/resources/AppsMngt/api/v1/services"):
                 await JsonAsync(response, 200, new JsonObject
@@ -547,6 +608,12 @@ internal sealed class Fake3DX : IDisposable
             case ("POST", "/3dspace/resources/v1/modeler/documents/ids"):
                 Interlocked.Increment(ref _documentPosts);
                 await ListingWaitAsync();
+                if (TakeOne(ref _documentErrors))
+                {
+                    await JsonAsync(response, 500, new JsonObject { ["success"] = false, ["statusCode"] = 500, ["error"] = "An unexpected error has occurred" });
+                    return;
+                }
+
                 var body = await new StreamReader(request.InputStream).ReadToEndAsync();
                 var ids = body.StartsWith("$ids=", StringComparison.Ordinal) ? Uri.UnescapeDataString(body[5..]).Split(',', StringSplitOptions.RemoveEmptyEntries) : [];
                 List<FakeDocument> found;
@@ -569,9 +636,19 @@ internal sealed class Fake3DX : IDisposable
                 await JsonAsync(response, 200, new JsonObject { ["results"] = new JsonArray(new JsonObject { ["busID"] = busId, ["attributes"] = new JsonArray(new JsonObject { ["name"] = "Owner", ["value"] = User }) }) });
                 return;
             case ("PUT", _) when path.EndsWith("/DownloadTicket", StringComparison.Ordinal):
+                TicketContexts.Enqueue(request.Headers["SecurityContext"]);
                 if (request.Headers["ENO_CSRF_TOKEN"] != session.Csrf)
                 {
-                    await JsonAsync(response, 403, new JsonObject { ["error"] = "CSRF token is missing or wrong" });
+                    Interlocked.Increment(ref _ticketsRefused);
+                    await JsonAsync(response, WrongTokenAnsweredOk ? 200 : 403, WrongTokenAnsweredOk
+                        ? new JsonObject { ["success"] = false, ["statusCode"] = 403, ["error"] = "Invalid CSRF token" }
+                        : new JsonObject { ["error"] = "CSRF token is missing or wrong" });
+                    return;
+                }
+
+                if (TakeOne(ref _ticketlessAnswers))
+                {
+                    await JsonAsync(response, 200, new JsonObject { ["success"] = false, ["statusCode"] = 500, ["error"] = "No file server for the file's store" });
                     return;
                 }
 

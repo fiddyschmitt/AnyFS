@@ -777,6 +777,68 @@ public class ThreeDXSourceTests
     }
 
     [TestMethod]
+    public async Task EachDownloadTicketIsAskedWithATokenJustGivenAsMount3DXAsksIt()
+    {
+        // a 3DSpace that answers a token it no longer takes with 200, an error of its own and no ticket: with a token kept
+        // from earlier, every open from then on failed with "3DX gave no download ticket"
+        using var fake = new Fake3DX { WrongTokenAnsweredOk = true };
+        var content = Bytes(300, 11);
+        fake.Add("DOC-T", "1", "Tokens", "Document", ("a.pdf", content), ("b.pdf", content), ("c.pdf", content));
+        using var context = new TestSourceContext("3dx");
+        await using var source = await StartAsync(ThreeDXSignInTests.Settings(fake), context);
+        CollectionAssert.AreEqual(content, await ReadAllAsync(source, "DOC-T Rev 1 (Tokens)/a.pdf"));
+
+        fake.RenewCsrfTokens();
+        CollectionAssert.AreEqual(content, await ReadAllAsync(source, "DOC-T Rev 1 (Tokens)/b.pdf"));
+
+        // the session lapses between the token and the ticket's PUT: the PUT made again after the renewal asks the new session for its token
+        fake.ExpireSessionsAfterNextCsrf = true;
+        CollectionAssert.AreEqual(content, await ReadAllAsync(source, "DOC-T Rev 1 (Tokens)/c.pdf"));
+        Assert.AreEqual(1, source.Session.GenerationOf(source.Session.Space), "renewed once, through 3DPassport");
+        Assert.AreEqual(0, fake.TicketsRefused, "every ticket was asked with a token of the session it went to");
+    }
+
+    [TestMethod]
+    public async Task AnAnswerWithoutATicketIsAskedOnceMoreAndWhat3DXAnsweredIsSaid()
+    {
+        using var fake = new Fake3DX { TicketlessAnswers = 1 };
+        var content = Bytes(300, 12);
+        fake.Add("DOC-N", "1", "No ticket", "Document", ("a.pdf", content), ("b.pdf", content));
+        var log = new LineLogger();
+        using var context = new TestSourceContext("3dx", log);
+        await using var source = await StartAsync(ThreeDXSignInTests.Settings(fake), context);
+
+        CollectionAssert.AreEqual(content, await ReadAllAsync(source, "DOC-N Rev 1 (No ticket)/a.pdf"), "the second ask got a ticket");
+        var said = log.Lines.Single(l => l.Contains("no download ticket for", StringComparison.Ordinal));
+        StringAssert.Contains(said, "HTTP 200, application/json");
+        StringAssert.Contains(said, "success false, statusCode 500, \"No file server for the file's store\"");
+        StringAssert.Contains(said, "fields success statusCode error");
+        CollectionAssert.AreEqual(new[] { null, "VPLMProjectLeader.Company Name.Common Space" }, fake.TicketContexts.ToArray(), "asked as Mount3DX asks, then with the security context");
+
+        // none when asked again either: the open fails saying what 3DX answered; the renewed session is asked its security context again
+        var persons = fake.PersonRequests;
+        fake.ExpireSessions();
+        fake.TicketlessAnswers = 2;
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => ReadAllAsync(source, "DOC-N Rev 1 (No ticket)/b.pdf"));
+        StringAssert.Contains(ex.Message, "3DX gave no download ticket for 'DOC-N Rev 1 (No ticket)/b.pdf', also when asked again");
+        StringAssert.Contains(ex.Message, "No file server for the file's store");
+        Assert.AreEqual(persons + 1, fake.PersonRequests, "a new session's security context");
+    }
+
+    [TestMethod]
+    public async Task ADocumentsCallAnswered500IsTriedAgainAndTheLogSaysWhat3DXSaid()
+    {
+        using var fake = new Fake3DX { DocumentErrors = 1 };
+        fake.Add("DOC-E", "1", "Error", "Document", ("e.txt", Bytes(10, 13)));
+        fake.Add("DOC-F", "1", "Fine", "Document", ("f.txt", Bytes(10, 14)));
+        var log = new LineLogger();
+        using var context = new TestSourceContext("3dx", log);
+        await using var source = await StartAsync(ThreeDXSignInTests.Settings(fake), context);
+        Assert.AreEqual(2, (await ListAsync(source, "")).Count);
+        Assert.AreEqual(1, log.Lines.Count(l => l.Contains("the request for 2 documents was answered 500: An unexpected error has occurred; trying again", StringComparison.Ordinal)), log.ToString());
+    }
+
+    [TestMethod]
     public async Task ARestartServesTheKeptListAndSessionAtOnce()
     {
         using var fake = new Fake3DX();

@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 
@@ -12,12 +13,12 @@ namespace AnyFS.Sources.ThreeDX;
 /// <summary>
 /// The 3DEXPERIENCE web services a 3DX source uses (spec 7.6), the ones Mount3DX uses: 3DSearch for every document's id
 /// (paged, a hundred at a time), 3DSpace's <c>modeler/documents</c> for the documents and their files, a download ticket
-/// (behind a CSRF token) for a file's content, which the file server (FCS) serves with ranges, and 3DSpace's attributes and
-/// the person's security context for a document's metadata. Requests go through the <see cref="ThreeDXSession"/>: one sent
-/// to the sign-in instead of answered has the session renewed and is sent again; a failure to connect, a 5xx or a 429 is
-/// tried again after a pause.
+/// (behind a CSRF token asked for it) for a file's content, which the file server (FCS) serves with ranges, and 3DSpace's
+/// attributes and the person's security context for a document's metadata. Requests go through the
+/// <see cref="ThreeDXSession"/>: one sent to the sign-in instead of answered has the session renewed and is made again; a
+/// failure to connect, a 5xx or a 429 is tried again after a pause.
 /// </summary>
-internal sealed class ThreeDXClient
+internal sealed partial class ThreeDXClient
 {
     public const int PageSize = 100;
 
@@ -30,9 +31,7 @@ internal sealed class ThreeDXClient
     private readonly ILogger _logger;
     private readonly Action<string>? _onTrouble;
     private readonly Action? _onSuccess;
-    private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly string _label = "anyfs-" + Guid.NewGuid().ToString("N")[..16];
-    private (string Token, int Generation)? _csrf;
     private SessionValue? _securityContext;
 
     public ThreeDXClient(ThreeDXSession session, DateOrder dates, ILogger logger, Action<string>? onTrouble = null, Action? onSuccess = null)
@@ -371,8 +370,8 @@ internal sealed class ThreeDXClient
 
     /// <summary>
     /// A file's content from <paramref name="offset"/>, its headers read: a download ticket for it (3DSpace hands one out for a
-    /// PUT that carries the session's CSRF token), then the file server's answer to a GET of the ticket, with a Range when the
-    /// offset is not 0. The answer may be the whole file (206 not given): the caller skips to the offset then.
+    /// PUT that carries a CSRF token it has just given), then the file server's answer to a GET of the ticket, with a Range
+    /// when the offset is not 0. The answer may be the whole file (206 not given): the caller skips to the offset then.
     /// </summary>
     public async Task<HttpResponseMessage> OpenFileAsync(string documentId, string fileId, long offset, string path, CancellationToken ct)
     {
@@ -418,66 +417,160 @@ internal sealed class ThreeDXClient
         }
     }
 
-    /// <summary>The download ticket's address (<c>DownloadTicket</c>'s <c>data[0].dataelements.ticketURL</c>); a refused PUT is tried once more with a new CSRF token.</summary>
+    /// <summary>
+    /// The download ticket's address (<c>DownloadTicket</c>'s <c>data[0].dataelements.ticketURL</c>), asked as Mount3DX asks
+    /// it: a PUT carrying a CSRF token 3DSpace has just given (<see cref="CsrfAsync"/>), so the token is the session's as it is
+    /// when the PUT goes, a session renewed on the way included. A PUT refused, or answered without a ticket, is logged with
+    /// what 3DX answered and asked once more, with a new token and the person's security context (as 3DX's own pages send it).
+    /// </summary>
     private async Task<Uri> TicketAsync(string documentId, string fileId, string path, CancellationToken ct)
     {
         var url = new Uri(Space, $"resources/v1/modeler/documents/{Uri.EscapeDataString(documentId)}/files/{Uri.EscapeDataString(fileId)}/DownloadTicket");
+        var what = $"a download ticket for '{path}'";
         for (var attempt = 1; ; attempt++)
         {
-            var csrf = await CsrfAsync(fresh: attempt > 1, ct).ConfigureAwait(false);
-            try
+            var context = attempt > 1 ? await SecurityContextAsync(ct).ConfigureAwait(false) : null;
+            using var response = await SendAsync(async tokenCt =>
             {
-                using var result = await SendJsonAsync(() =>
+                var csrf = await CsrfAsync(tokenCt).ConfigureAwait(false);
+                var request = new HttpRequestMessage(HttpMethod.Put, url);
+                request.Headers.TryAddWithoutValidation("ENO_CSRF_TOKEN", csrf);
+                if (context is not null)
                 {
-                    var request = new HttpRequestMessage(HttpMethod.Put, url);
-                    request.Headers.TryAddWithoutValidation("ENO_CSRF_TOKEN", csrf);
-                    return request;
-                }, $"a download ticket for '{path}'", ct).ConfigureAwait(false);
-                var elements = Data(result).FirstOrDefault() is { ValueKind: JsonValueKind.Object } first && first.TryGetProperty("dataelements", out var e) ? e : default;
-                var ticket = elements.ValueKind == JsonValueKind.Object ? Text(elements, "ticketURL") : null;
-                return ticket is not null && Uri.TryCreate(Space, ticket, out var address)
-                    ? address
-                    : throw new VfsException(VfsError.IoError, $"3DX gave no download ticket for '{path}'");
-            }
-            catch (VfsException ex) when (attempt == 1 && ex.Error is VfsError.AccessDenied or VfsError.InvalidPath)
+                    request.Headers.TryAddWithoutValidation("SecurityContext", context);
+                }
+
+                return request;
+            }, expectsJson: true, HttpCompletionOption.ResponseContentRead, what, ct).ConfigureAwait(false);
+            var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            string problem;
+            if (!response.IsSuccessStatusCode)
             {
-                _logger.LogDebug("3dx: the download ticket for '{Path}' was refused ({Error}); trying again with a new CSRF token", path, ex.Message);
+                var error = Error(response.StatusCode, body, what);
+                if (attempt > 1 || error.Error is not (VfsError.AccessDenied or VfsError.InvalidPath))
+                {
+                    throw error;
+                }
+
+                problem = error.Message;
             }
+            else if (TicketOf(body) is { } ticket)
+            {
+                return ticket;
+            }
+            else if (attempt > 1)
+            {
+                throw new VfsException(VfsError.IoError, $"3DX gave no download ticket for '{path}', also when asked again ({Gist(response, body)})");
+            }
+            else
+            {
+                problem = $"3DX answered without one ({Gist(response, body)})";
+            }
+
+            _logger.LogInformation("3dx: no download ticket for '{Path}': {Problem}; asking again with a new CSRF token and your security context", path, problem);
         }
     }
 
-    /// <summary>The session's CSRF token, asked once per 3DSpace session (a renewal makes a new session, and so a new token).</summary>
-    private async Task<string> CsrfAsync(bool fresh, CancellationToken ct)
+    /// <summary>The ticket's address in <c>DownloadTicket</c>'s answer, resolved against 3DSpace; null when it holds none.</summary>
+    private Uri? TicketOf(string body)
     {
-        var generation = _session.GenerationOf(Space);
-        if (!fresh && _csrf is { } held && held.Generation == generation)
-        {
-            return held.Token;
-        }
-
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            generation = _session.GenerationOf(Space);
-            if (!fresh && _csrf is { } again && again.Generation == generation)
-            {
-                return again.Token;
-            }
-
-            using var result = await GetJsonAsync(ThreeDXSession.SpaceProbe(Space), "a CSRF token", ct).ConfigureAwait(false);
-            var token = result.RootElement.TryGetProperty("csrf", out var csrf) ? Text(csrf, "value") : null;
-            if (token is null)
-            {
-                throw new VfsException(VfsError.IoError, $"{Space.Host} gave no CSRF token for downloads");
-            }
-
-            _csrf = (token, _session.GenerationOf(Space));
-            return token;
+            using var result = JsonDocument.Parse(body.Length == 0 ? "{}" : body);
+            var first = Data(result).FirstOrDefault();
+            var elements = first.ValueKind == JsonValueKind.Object && first.TryGetProperty("dataelements", out var e) ? e : default;
+            return elements.ValueKind == JsonValueKind.Object && Text(elements, "ticketURL") is { } ticket && Uri.TryCreate(Space, ticket, out var address) ? address : null;
         }
-        finally
+        catch (JsonException)
         {
-            _gate.Release();
+            return null;
         }
+    }
+
+    /// <summary>
+    /// What an answer that should have held a ticket held instead, for the log and the error: its status, type and length,
+    /// 3DX's own success, statusCode and message, and the names of what came (never their values, which may be a ticket's).
+    /// </summary>
+    private static string Gist(HttpResponseMessage response, string body)
+    {
+        var parts = new List<string> { $"HTTP {(int)response.StatusCode}", response.Content.Headers.ContentType?.MediaType ?? "no content type", body.Length == 0 ? "empty" : $"{body.Length} characters" };
+        if (body.Length > 0)
+        {
+            try
+            {
+                using var result = JsonDocument.Parse(body);
+                parts.AddRange(JsonGist(result.RootElement));
+            }
+            catch (JsonException)
+            {
+                parts.Add(Message(body) is { } text ? $"not JSON: \"{text}\"" : "not JSON");
+            }
+        }
+
+        return string.Join(", ", parts);
+
+        IEnumerable<string> JsonGist(JsonElement root)
+        {
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                yield return $"a JSON {root.ValueKind.ToString().ToLowerInvariant()}";
+                yield break;
+            }
+
+            foreach (var name in new[] { "success", "statusCode" })
+            {
+                if (root.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True or JsonValueKind.False or JsonValueKind.Number or JsonValueKind.String)
+                {
+                    yield return $"{name} {(value.ValueKind == JsonValueKind.String ? value.GetString() : value.GetRawText())}";
+                }
+            }
+
+            if (Message(body) is { } message)
+            {
+                yield return $"\"{message}\"";
+            }
+
+            if (root.TryGetProperty("data", out var data))
+            {
+                yield return DataGist(data);
+            }
+
+            yield return $"fields {Names(root)}";
+        }
+
+        static string DataGist(JsonElement data)
+        {
+            if (data.ValueKind != JsonValueKind.Array)
+            {
+                return $"data a {data.ValueKind.ToString().ToLowerInvariant()}";
+            }
+
+            var count = data.GetArrayLength();
+            if (count == 0 || data[0].ValueKind != JsonValueKind.Object)
+            {
+                return count == 0 ? "data empty" : $"data of {count}";
+            }
+
+            var first = data[0];
+            var gist = $"data of {count}, the first with {Names(first)}";
+            if (first.TryGetProperty("dataelements", out var elements) && elements.ValueKind == JsonValueKind.Object)
+            {
+                gist += $" (dataelements {Names(elements)}{(elements.TryGetProperty("ticketURL", out _) && Text(elements, "ticketURL") is null ? "; ticketURL empty" : "")})";
+            }
+
+            return gist;
+        }
+
+        static string Names(JsonElement element) => string.Join(" ", element.EnumerateObject().Select(p => p.Name).Take(12)) is { Length: > 0 } names ? names : "none";
+    }
+
+    /// <summary>A CSRF token from 3DSpace's session as it is now; asked for every download ticket, as Mount3DX asks it (one kept from earlier may no longer be taken).</summary>
+    private async Task<string> CsrfAsync(CancellationToken ct)
+    {
+        using var result = await GetJsonAsync(ThreeDXSession.SpaceProbe(Space), "a CSRF token", ct).ConfigureAwait(false);
+        var root = result.RootElement;
+        return (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("csrf", out var csrf) ? Text(csrf, "value") : null)
+            ?? throw new VfsException(VfsError.IoError, $"{Space.Host} gave no CSRF token for downloads");
     }
 
     // --- keeping the sessions alive -------------------------------------------------------------------------------------
@@ -536,16 +629,21 @@ internal sealed class ThreeDXClient
         }
     }
 
+    private Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, bool expectsJson, HttpCompletionOption completion, string what, CancellationToken ct)
+        => SendAsync(_ => Task.FromResult(make()), expectsJson, completion, what, ct);
+
     /// <summary>
-    /// Sends a request to 3DSpace or 3DSearch: a lapsed session is renewed once and the request sent again (a renewal is no
-    /// attempt); a connection that fails, a 5xx or a 429 is tried again after a pause, up to <see cref="MaxAttempts"/> times.
+    /// Sends a request to 3DSpace or 3DSearch: a lapsed session is renewed once and the request made and sent again (a
+    /// renewal is no attempt); a connection that fails, a 5xx or a 429 is tried again after a pause, up to
+    /// <see cref="MaxAttempts"/> times. The request is made afresh for each sending, so one that carries what a session gave
+    /// (a CSRF token) asks the session it goes to.
     /// </summary>
-    private async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, bool expectsJson, HttpCompletionOption completion, string what, CancellationToken ct)
+    private async Task<HttpResponseMessage> SendAsync(Func<CancellationToken, Task<HttpRequestMessage>> make, bool expectsJson, HttpCompletionOption completion, string what, CancellationToken ct)
     {
         var renewed = false;
         for (var attempt = 1; ; attempt++)
         {
-            var request = make();
+            var request = await make(ct).ConfigureAwait(false);
             var service = _session.ServiceOf(request.RequestUri!);
             var generation = _session.GenerationOf(service);
             HttpResponseMessage response;
@@ -582,7 +680,8 @@ internal sealed class ThreeDXClient
 
             if (((int)response.StatusCode >= 500 || response.StatusCode == HttpStatusCode.TooManyRequests) && attempt < MaxAttempts)
             {
-                _logger.LogWarning("3dx: the request for {What} was answered {Status}; trying again", what, (int)response.StatusCode);
+                var detail = Detail(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+                _logger.LogWarning("3dx: the request for {What} was answered {Status}{Detail}; trying again", what, (int)response.StatusCode, detail);
                 _onTrouble?.Invoke($"3DX answered {(int)response.StatusCode}");
                 response.Dispose();
                 await Task.Delay(Backoff(attempt), ct).ConfigureAwait(false);
@@ -614,13 +713,20 @@ internal sealed class ThreeDXClient
     }
 
     /// <summary>The message of a 3DX error body, briefly: ": message" or nothing.</summary>
-    private static string Detail(string body)
+    private static string Detail(string body) => Message(body) is { } message ? ": " + message : "";
+
+    /// <summary>
+    /// The message of a 3DX answer, at most 300 characters: a JSON body's error or message, a page's title, or the first line
+    /// of plain text; null when it has none.
+    /// </summary>
+    private static string? Message(string body)
     {
         if (string.IsNullOrWhiteSpace(body))
         {
-            return "";
+            return null;
         }
 
+        string? text = null;
         try
         {
             using var doc = JsonDocument.Parse(body);
@@ -628,17 +734,25 @@ internal sealed class ThreeDXClient
             {
                 if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty(name, out var value))
                 {
-                    var text = value.ValueKind == JsonValueKind.String ? value.GetString() : value.GetRawText();
-                    return string.IsNullOrWhiteSpace(text) ? "" : ": " + (text.Length > 300 ? text[..300] : text);
+                    text = value.ValueKind == JsonValueKind.String ? value.GetString() : value.GetRawText();
+                    break;
                 }
             }
         }
         catch (JsonException)
         {
+            // a page (an error page of the server's, or of a proxy before it): its title; other text: its first line
+            text = body.TrimStart().StartsWith('<')
+                ? HtmlTitle().Match(body) is { Success: true } title ? WebUtility.HtmlDecode(title.Groups[1].Value) : null
+                : body.TrimStart().Split('\n', 2)[0];
         }
 
-        return "";
+        text = text?.Trim();
+        return string.IsNullOrEmpty(text) ? null : text.Length > 300 ? text[..300] : text;
     }
+
+    [GeneratedRegex("<title>(.*?)</title>", RegexOptions.IgnoreCase | RegexOptions.Singleline)]
+    private static partial Regex HtmlTitle();
 
     /// <summary>A string property, or a number's text; null when absent or empty.</summary>
     private static string? Text(JsonElement element, string name)
