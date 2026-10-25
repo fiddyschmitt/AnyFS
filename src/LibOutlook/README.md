@@ -8,8 +8,9 @@ dependencies, no MAPI, no Outlook: it reads the file itself, on any platform .NE
 - Both obfuscations a PST may use ("compressible" and "high" encryption).
 - Folders, messages, recipients, attachments, embedded messages, the plain, HTML and RTF bodies (compressed RTF
   decoded), every MAPI property with its type, and named properties resolved through the file's name-to-id map.
-- Read-only, and able to read a file Outlook has open: a path is read through a memory-mapped view with full sharing,
-  which Outlook's byte-range lock on the header does not reach. A file that is being written is read with every page
+- Read-only, and able to read a file Outlook has open: a path is opened with full sharing and read with ordinary
+  positional reads, through the system's file cache; the range Outlook's byte-range lock bars (its header) is read
+  through a memory-mapped view, which the lock does not reach. A file that is being written is read with every page
   and block checked (checksums, signatures, back pointers) and re-read when caught mid-write.
 - Large attachments are streamed block by block, not loaded whole.
 - A file damaged in places reads as far as it reads: a fault names where it is (`message 0x200064, property 0x0037

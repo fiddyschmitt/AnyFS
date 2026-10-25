@@ -74,7 +74,7 @@ public sealed class PstFile : IDisposable
     public static PstFile Open(string path, PstOpenOptions? options = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(path);
-        var source = new MappedFileData(path);
+        var source = new FileData(path);
         try
         {
             return new PstFile(source, options ?? new PstOpenOptions());
