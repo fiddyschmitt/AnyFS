@@ -70,6 +70,18 @@ public class OutlookPluginTests
     }
 
     [TestMethod]
+    public void TheIconIsOutlooksLogoAsA64PixelPng()
+    {
+        using var icon = _plugin.OpenIcon();
+        Assert.IsNotNull(icon, "embedded in the plugin");
+        var header = new byte[24];
+        icon.ReadExactly(header);
+        CollectionAssert.AreEqual(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }, header[..8], "a PNG: the window draws no SVG yet");
+        Assert.AreEqual(64, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(16)), "width");
+        Assert.AreEqual(64, System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(20)), "height");
+    }
+
+    [TestMethod]
     public void TheFileNamesTheSource()
     {
         var documents = OperatingSystem.IsWindows() ? @"C:\Users\me\Documents\Outlook Files\" : "/home/me/Documents/Outlook Files/";

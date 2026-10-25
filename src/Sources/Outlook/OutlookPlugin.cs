@@ -32,7 +32,8 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
 
     public string TypeFolder => "outlook";
 
-    public Stream? OpenIcon() => null;
+    /// <summary>Outlook's logo, a PNG (Assets/outlook.png).</summary>
+    public Stream? OpenIcon() => typeof(OutlookPlugin).Assembly.GetManifestResourceStream("outlook.png");
 
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public Type SettingsType => typeof(OutlookSettings);

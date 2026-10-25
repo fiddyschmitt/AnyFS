@@ -24,6 +24,11 @@
     <Using Include="AnyFS.Sources.Microsoft365" />
   </ItemGroup>
   <ItemGroup>
+    <!-- the type's icon (OpenIcon): Outlook's logo from the user's microsoft-outlook.png (25-Oct-2026, 541 x 512 with
+         real transparency), centred on a square transparent canvas and scaled to 64 px -->
+    <EmbeddedResource Include="Assets\outlook.png" LogicalName="outlook.png" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
     <InternalsVisibleTo Include="SharePointSignIn" />
   </ItemGroup>
