@@ -33,7 +33,7 @@ internal sealed class ThreeDXClient
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly string _label = "anyfs-" + Guid.NewGuid().ToString("N")[..16];
     private (string Token, int Generation)? _csrf;
-    private string? _securityContext;
+    private SessionValue? _securityContext;
 
     public ThreeDXClient(ThreeDXSession session, DateOrder dates, ILogger logger, Action<string>? onTrouble = null, Action? onSuccess = null)
     {
@@ -338,19 +338,23 @@ internal sealed class ThreeDXClient
 
     /// <summary>
     /// The person's security context ("role.organization.collaborative space", from their preferred credentials), which
-    /// 3DSpace's collaboration services want with each call; asked once.
+    /// 3DSpace's collaboration services want with each call; asked once per 3DSpace session, as Mount3DX asks it once per
+    /// sign-in (a new sign-in may carry other preferred credentials).
     /// </summary>
     public async Task<string> SecurityContextAsync(CancellationToken ct)
     {
-        if (_securityContext is { } known)
+        if (_securityContext is { } known && known.Generation == _session.GenerationOf(Space))
         {
-            return known;
+            return known.Value;
         }
 
         var person = await PersonAsync(ct).ConfigureAwait(false);
-        _securityContext = person.SecurityContext;
+        _securityContext = new SessionValue(person.SecurityContext, _session.GenerationOf(Space));
         return person.SecurityContext;
     }
+
+    /// <summary>What was asked of a 3DSpace session, and which one (its <see cref="ThreeDXSession.GenerationOf"/>).</summary>
+    private sealed record SessionValue(string Value, int Generation);
 
     /// <summary>Who 3DX says is signed in: their name (where 3DX gives it) and security context.</summary>
     public async Task<(string? Name, string SecurityContext)> PersonAsync(CancellationToken ct)

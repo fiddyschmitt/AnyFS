@@ -545,6 +545,29 @@ public class ThreeDXSignInTests
     }
 
     [TestMethod]
+    public async Task ABadgeSignInThatRenewsOneServiceMakesEverySessionNew()
+    {
+        using var fake = new Fake3DX(Fake3DX.Passport.Saml, Fake3DX.Idp.Badge);
+        fake.Add("DOC-NEW", "A", "New", "Document");
+        var settings = Settings(fake, ThreeDXSettings.WebSession);
+        using var session = new ThreeDXSession(settings, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, secrets: null, new SessionOptions(Browser: false, MinRenewalInterval: TimeSpan.Zero));
+        await session.SignInAsync(interactive: true, _ => { }, CancellationToken.None);
+        var client = new ThreeDXClient(session, DateOrder.DayFirst, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+        await client.SecurityContextAsync(CancellationToken.None);
+        await client.SearchAsync(CancellationToken.None);
+        var space = session.GenerationOf(session.Space);
+        var persons = fake.PersonRequests;
+
+        // overnight every session and 3DPassport's sign-in went; 3DSearch is asked first, and only the badge renews it
+        fake.ExpireAll();
+        Assert.AreEqual(1, (await client.CountAsync(settings.Query, settings.EffectiveTenant, CancellationToken.None)).Count);
+        Assert.AreEqual(2, fake.BadgeAttempts, "the badge for 3DSearch's renewal");
+        Assert.IsTrue(session.GenerationOf(session.Space) > space, "3DSpace's session came new with the badge's cookies too");
+        await client.SecurityContextAsync(CancellationToken.None);
+        Assert.AreEqual(persons + 1, fake.PersonRequests, "the new session is asked the security context again");
+    }
+
+    [TestMethod]
     public async Task AWindowsAccountFillsInTheIdentityProvidersPasswordPage()
     {
         using var fake = new Fake3DX(Fake3DX.Passport.Saml, Fake3DX.Idp.Password);

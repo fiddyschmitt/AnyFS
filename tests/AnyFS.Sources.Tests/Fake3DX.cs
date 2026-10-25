@@ -147,6 +147,9 @@ internal sealed class Fake3DX : IDisposable
     /// <summary>Every request, in order: its method, path (the badge port's prefixed with its port), user agent and whether it carried cookies.</summary>
     public ConcurrentQueue<(string Method, string Path, string? UserAgent, bool HadCookies)> Requests { get; } = new();
 
+    /// <summary>How many times the person signed in was asked for (their security context with it).</summary>
+    public int PersonRequests => Requests.Count(r => r.Path == "/3dspace/resources/modeler/pno/person");
+
     /// <summary>How many badge sign-ins were asked for: each one a PIN prompt on the person's screen.</summary>
     public int BadgeAttempts => _badgeAttempts;
 

@@ -271,6 +271,7 @@ internal sealed class ThreeDXSession : IDisposable
         if (result.SignedIn)
         {
             Replace(Cookies, jar);
+            NewSessions();
             if (!await AnswersAsync(Space, ct).ConfigureAwait(false) && await FlowAsync(Space, ct).ConfigureAwait(false) is { SignedIn: false } handOver)
             {
                 result = result with { SignedIn = false, Problem = $"the single sign-on went through, but 3DSpace does not take the session it made ({handOver.Problem})" };
@@ -375,6 +376,18 @@ internal sealed class ThreeDXSession : IDisposable
     public int GenerationOf(Uri service) => _generations.GetValueOrDefault(service.AbsoluteUri);
 
     /// <summary>
+    /// The cookies came new as a whole (a single sign-on's, a browser's), so every service's session is new, not only the one
+    /// being renewed: what was asked of the sessions before (the security context) is asked again.
+    /// </summary>
+    private void NewSessions()
+    {
+        foreach (var service in new[] { Space, Search }.OfType<Uri>())
+        {
+            _generations.AddOrUpdate(service.AbsoluteUri, 1, (_, n) => n + 1);
+        }
+    }
+
+    /// <summary>
     /// Whether 3DX answered a request to <paramref name="service"/> by sending it to the sign-in: a 401, a redirect away
     /// from the service (to 3DPassport or the identity provider) or to a login page, or a web page where data was asked
     /// for (a sign-in page served in place).
@@ -437,6 +450,7 @@ internal sealed class ThreeDXSession : IDisposable
             {
                 _logger.LogInformation("3dx: {Path} could not be signed in to again without a browser ({Problem}); renewing the web session headless", service.AbsolutePath, result.Problem);
                 Add(Cookies, await Browser().SignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false));
+                NewSessions();
                 result = await FlowAsync(service, ct).ConfigureAwait(false);
             }
 
