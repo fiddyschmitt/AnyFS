@@ -113,9 +113,9 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
                     yield return new ValidationMessage($"Sign in with {OutlookSettings.WebSession}.", nameof(OutlookSettings.SignInMethod));
                 }
 
-                if (OwaOrigins.FromChoice(s.Cloud) is null && !string.Equals(s.Cloud?.Trim(), OutlookSettings.CloudAutomatic, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(s.Cloud))
+                if (!MicrosoftCloud.IsChoice(s.Cloud))
                 {
-                    yield return new ValidationMessage($"Cloud is one of {OutlookSettings.CloudAutomatic}, {OutlookSettings.CloudGlobal}, {OutlookSettings.CloudUsGovernment}.", nameof(OutlookSettings.Cloud));
+                    yield return new ValidationMessage($"Cloud is one of {MicrosoftCloud.AutomaticName}, {MicrosoftCloud.GlobalName}, {MicrosoftCloud.UsGovernmentName}.", nameof(OutlookSettings.Cloud));
                 }
 
                 if (s.Browser is { } browser && !File.Exists(browser))

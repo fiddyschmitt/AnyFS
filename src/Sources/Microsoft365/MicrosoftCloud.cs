@@ -1,3 +1,4 @@
+using System.Text.Json;
 using AnyFS.Sdk;
 using Microsoft.Identity.Client;
 
@@ -5,7 +6,7 @@ namespace AnyFS.Sources.Microsoft365;
 
 /// <summary>
 /// The Microsoft cloud a Microsoft 365 tenant lives in (spec 7.3): where its accounts sign in, where its Microsoft
-/// Graph answers, and which domains its SharePoint sites and tenants are under. The clouds do not mix: an account
+/// Graph and its Outlook on the web answer, and which domains its SharePoint sites and tenants are under. The clouds do not mix: an account
 /// signs in only at its own cloud's endpoint, an app registration exists only in the cloud it was made in (so
 /// AnyFS's own registration serves the global cloud alone), and a token is good only for its cloud's Graph. GCC
 /// ("moderate") tenants are in the global cloud; GCC High is the US Government cloud, Microsoft's "L4". DoD and the
@@ -20,21 +21,22 @@ public sealed class MicrosoftCloud
 
     public const string UsGovernmentName = "US Government (GCC High)";
 
-    public static readonly MicrosoftCloud Global = new(GlobalName, AzureCloudInstance.AzurePublic, "login.microsoftonline.com", "graph.microsoft.com", "sharepoint.com", "onmicrosoft.com");
+    public static readonly MicrosoftCloud Global = new(GlobalName, AzureCloudInstance.AzurePublic, "login.microsoftonline.com", "graph.microsoft.com", "outlook.office.com", "sharepoint.com", "onmicrosoft.com");
 
-    public static readonly MicrosoftCloud UsGovernment = new(UsGovernmentName, AzureCloudInstance.AzureUsGovernment, "login.microsoftonline.us", "graph.microsoft.us", "sharepoint.us", "onmicrosoft.us");
+    public static readonly MicrosoftCloud UsGovernment = new(UsGovernmentName, AzureCloudInstance.AzureUsGovernment, "login.microsoftonline.us", "graph.microsoft.us", "outlook.office365.us", "sharepoint.us", "onmicrosoft.us");
 
     private static readonly MicrosoftCloud[] All = [Global, UsGovernment];
 
     /// <summary>The identity platform's own scopes, which every cloud takes as they are.</summary>
     private static readonly HashSet<string> PlatformScopes = new(StringComparer.OrdinalIgnoreCase) { "openid", "profile", "offline_access", "email" };
 
-    private MicrosoftCloud(string name, AzureCloudInstance instance, string loginHost, string graphHost, string sharePointDomain, string tenantDomain)
+    private MicrosoftCloud(string name, AzureCloudInstance instance, string loginHost, string graphHost, string outlookHost, string sharePointDomain, string tenantDomain)
     {
         Name = name;
         Instance = instance;
         LoginHost = loginHost;
         GraphHost = graphHost;
+        OutlookHost = outlookHost;
         SharePointDomain = sharePointDomain;
         TenantDomain = tenantDomain;
     }
@@ -47,6 +49,9 @@ public sealed class MicrosoftCloud
 
     /// <summary>Microsoft Graph's host, graph.microsoft.us for the US Government cloud.</summary>
     public string GraphHost { get; }
+
+    /// <summary>Outlook on the web's host, outlook.office365.us for the US Government cloud (the web session's mailbox store).</summary>
+    public string OutlookHost { get; }
 
     /// <summary>The domain the cloud's SharePoint sites are under: contoso.sharepoint.us.</summary>
     public string SharePointDomain { get; }
@@ -61,6 +66,9 @@ public sealed class MicrosoftCloud
 
     /// <summary>Microsoft Graph's v1.0 root in this cloud, with the trailing slash.</summary>
     public string GraphBaseUrl => $"https://{GraphHost}/v1.0/";
+
+    /// <summary>Outlook on the web's origin in this cloud: https://outlook.office.com.</summary>
+    public Uri OutlookOrigin => new($"https://{OutlookHost}");
 
     internal AzureCloudInstance Instance { get; }
 
@@ -116,6 +124,39 @@ public sealed class MicrosoftCloud
     /// <summary>Whether a settings value is one of the choices offered (empty counts as Automatic).</summary>
     public static bool IsChoice(string? name)
         => string.IsNullOrWhiteSpace(name) || string.Equals(name.Trim(), AutomaticName, StringComparison.OrdinalIgnoreCase) || FromName(name) is not null;
+
+    /// <summary>
+    /// The cloud an account is in, by its address: its tenant's initial domain says so outright (jane@contoso.onmicrosoft.us),
+    /// else Microsoft's public realm lookup (GetUserRealm, no sign-in needed; an account whose cloud instance is
+    /// microsoftonline.us is in the US Government cloud); the global cloud when the lookup says nothing or cannot be made.
+    /// </summary>
+    /// <param name="handler">The handler the lookup goes through: a test's; null for the network.</param>
+    public static async Task<MicrosoftCloud> FindAsync(string address, HttpMessageHandler? handler, CancellationToken ct)
+    {
+        if (FromTenant(address[(address.LastIndexOf('@') + 1)..]) is { } known)
+        {
+            return known;
+        }
+
+        try
+        {
+            using var http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: true);
+            http.Timeout = TimeSpan.FromSeconds(15);
+            using var response = await http.GetAsync($"https://{Global.LoginHost}/GetUserRealm.srf?login={Uri.EscapeDataString(address)}&json=1", ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return Global;
+            }
+
+            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+            var instance = json.RootElement.ValueKind == JsonValueKind.Object && json.RootElement.TryGetProperty("CloudInstanceName", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() : null;
+            return instance is not null && instance.EndsWith("microsoftonline.us", StringComparison.OrdinalIgnoreCase) ? UsGovernment : Global;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException || ex is TaskCanceledException && !ct.IsCancellationRequested)
+        {
+            return Global;
+        }
+    }
 
     /// <summary>The cloud to sign in to: the one chosen, else the one the site's address or the tenant's domain is in, else the global cloud.</summary>
     public static MicrosoftCloud Resolve(string? choice, string? siteHost, string? tenant)

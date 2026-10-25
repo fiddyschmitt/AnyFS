@@ -14,11 +14,14 @@
   <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
     <ProjectReference Include="..\..\LibOutlook\LibOutlook.csproj" />
-    <!-- MemoryFile -->
+    <!-- the web session, Windows account credentials, MemoryFile -->
     <ProjectReference Include="..\Common\AnyFS.Sources.Common.csproj" />
+    <!-- the Microsoft clouds, and for Exchange Online's app sign-in MSAL and Microsoft Graph's calls, as SharePoint's -->
+    <ProjectReference Include="..\Microsoft365\AnyFS.Sources.Microsoft365.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="AnyFS.Sources.Common" />
+    <Using Include="AnyFS.Sources.Microsoft365" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="AnyFS.Sources.Tests" />

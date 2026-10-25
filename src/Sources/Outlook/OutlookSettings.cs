@@ -30,10 +30,6 @@ public sealed class OutlookSettings
     public const string WindowsCurrent = WindowsAccount.AsYourself;
     public const string Windows = WindowsAccount.WithPassword;
 
-    public const string CloudAutomatic = "Automatic";
-    public const string CloudGlobal = "Global";
-    public const string CloudUsGovernment = "US Government (GCC High)";
-
     [Setting("Mailbox, server or file", Required = true, Primary = true, Order = 0, Placeholder = @"jane@contoso.com, https://mail.contoso.com, or C:\Users\me\Documents\Outlook Files\archive.pst",
         Hint = "A mailbox's address (Exchange Online, signed in through Outlook on the web in a browser window of AnyFS's own); an Exchange server's address (its Outlook on the web or EWS address, signed in with a Windows account: your own mailbox there); or an Outlook data file, a .pst (an archive, an exported mailbox) or a .ost (Outlook's offline copy of a mailbox, read while Outlook has it open).")]
     public string Path { get; set; } = "";
@@ -42,9 +38,9 @@ public sealed class OutlookSettings
         Hint = "A mailbox on Exchange Online: the web session. AnyFS opens Outlook on the web in a browser profile of its own, you sign in there once, and AnyFS reads the mailbox the way that page does, with no app registration and nothing for an administrator to approve; a window opens again only when the sign-in lapses. An Exchange server: a Windows account, as you are signed in to Windows (nothing to type) or with a user name and password.")]
     public string SignInMethod { get; set; } = WebSession;
 
-    [Setting("Cloud", Order = 2, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [CloudAutomatic, CloudGlobal, CloudUsGovernment],
+    [Setting("Cloud", Order = 2, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [MicrosoftCloud.AutomaticName, MicrosoftCloud.GlobalName, MicrosoftCloud.UsGovernmentName],
         Hint = "Which Microsoft cloud the mailbox is in: looked up from the address (Microsoft's public realm lookup) unless said here. US Government (GCC High) mailboxes are at outlook.office365.us.")]
-    public string Cloud { get; set; } = CloudAutomatic;
+    public string Cloud { get; set; } = MicrosoftCloud.AutomaticName;
 
     [Setting("Username", Order = 3, Group = "Sign-in", Placeholder = @"CONTOSO\name, or name@contoso.com",
         Hint = "The Windows account whose mailbox to read, for an Exchange server.")]

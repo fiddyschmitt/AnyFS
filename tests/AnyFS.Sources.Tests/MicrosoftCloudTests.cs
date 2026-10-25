@@ -158,8 +158,34 @@ public class MicrosoftCloudTests
         Assert.IsNull(EntraSignIn.AadstsCode("AADSTS: nothing after it"));
     }
 
+    [TestMethod]
+    public async Task TheRealmLookupSaysWhichCloudAnAccountIsIn()
+    {
+        // what login.microsoftonline.com's GetUserRealm answers for an account in each cloud
+        var lookups = new List<string>();
+        HttpMessageHandler Realm(int status, string body) => new AnsweringHandler(request =>
+        {
+            lookups.Add(request.RequestUri!.AbsoluteUri);
+            return new HttpResponseMessage((HttpStatusCode)status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        });
+
+        Assert.AreSame(MicrosoftCloud.UsGovernment, await MicrosoftCloud.FindAsync("jane@acme.gov", Realm(200, """{"NameSpaceType":"Managed","CloudInstanceName":"microsoftonline.us"}"""), CancellationToken.None));
+        StringAssert.StartsWith(lookups.Single(), "https://login.microsoftonline.com/GetUserRealm.srf?login=jane%40acme.gov");
+        Assert.AreSame(MicrosoftCloud.Global, await MicrosoftCloud.FindAsync("jane@contoso.com", Realm(200, """{"NameSpaceType":"Managed","CloudInstanceName":"microsoftonline.com"}"""), CancellationToken.None));
+        Assert.AreSame(MicrosoftCloud.Global, await MicrosoftCloud.FindAsync("jane@contoso.com", Realm(500, "oops"), CancellationToken.None), "a lookup that fails is the global cloud");
+        Assert.AreSame(MicrosoftCloud.Global, await MicrosoftCloud.FindAsync("jane@contoso.com", Realm(200, "<html>a captive portal</html>"), CancellationToken.None));
+        Assert.AreSame(MicrosoftCloud.Global, await MicrosoftCloud.FindAsync("jane@contoso.onmicrosoft.com", Realm(200, "{}"), CancellationToken.None));
+        Assert.AreEqual(4, lookups.Count, "an initial domain needs no lookup");
+    }
+
     private static SignInOptions Options(string clientId, string tenant, MicrosoftCloud? cloud)
         => new(SharePointPlugin.Service, clientId, tenant, null, SignInMethod.DeviceCode, SharePointPlugin.SiteScopes, _ => { }, null, () => null, _ => { }, Cloud: cloud);
+
+    /// <summary>Answers each request as it is told to.</summary>
+    private sealed class AnsweringHandler(Func<HttpRequestMessage, HttpResponseMessage> answer) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => Task.FromResult(answer(request));
+    }
 
     /// <summary>Answers every request with an empty JSON object and keeps the requests.</summary>
     private sealed class RecordingHandler : HttpMessageHandler

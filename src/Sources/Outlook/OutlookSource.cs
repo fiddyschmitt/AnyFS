@@ -159,7 +159,7 @@ public sealed class OutlookSource : SourceBase
 
         var browser = OutlookPlugin.BrowserFor(s) ?? throw new SourceFailedException("The web session needs Microsoft Edge, Google Chrome or Chromium installed, or the path of one under Browser.", permanent: true);
         progress($"Finding {address}'s cloud");
-        var origin = OwaOrigins.FromChoice(s.Cloud) ?? await OwaOrigins.DetectAsync(address, null, ct).ConfigureAwait(false);
+        var origin = (MicrosoftCloud.FromName(s.Cloud) ?? await MicrosoftCloud.FindAsync(address, null, ct).ConfigureAwait(false)).OutlookOrigin;
         var session = new OwaTokenSession(origin, browser, OutlookPlugin.ProfileDir(address), logger);
         progress($"Reading the sign-in to {origin.Host} from {session.BrowserName}");
         var first = await session.TokenAsync(interactive, progress, ct).ConfigureAwait(false);

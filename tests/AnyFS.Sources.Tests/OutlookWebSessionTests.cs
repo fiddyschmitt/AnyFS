@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
+using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.Outlook;
 using AnyFS.Sources.Outlook.Ews;
 
@@ -276,10 +277,10 @@ public class OutlookWebSessionTests
     [TestMethod]
     public void TheCloudComesFromTheChoiceOrTheAddress()
     {
-        Assert.AreEqual(OwaOrigins.Global, OwaOrigins.FromChoice(OutlookSettings.CloudGlobal));
-        Assert.AreEqual(OwaOrigins.UsGovernment, OwaOrigins.FromChoice(OutlookSettings.CloudUsGovernment));
-        Assert.IsNull(OwaOrigins.FromChoice(OutlookSettings.CloudAutomatic));
-        Assert.AreEqual(OwaOrigins.UsGovernment, OwaOrigins.DetectAsync("jane@contoso.onmicrosoft.us", null, CancellationToken.None).Result, "a .onmicrosoft.us address needs no lookup");
+        Assert.AreEqual(new Uri("https://outlook.office.com"), MicrosoftCloud.FromName(MicrosoftCloud.GlobalName)!.OutlookOrigin);
+        Assert.AreEqual(new Uri("https://outlook.office365.us"), MicrosoftCloud.FromName(MicrosoftCloud.UsGovernmentName)!.OutlookOrigin);
+        Assert.IsNull(MicrosoftCloud.FromName(MicrosoftCloud.AutomaticName));
+        Assert.AreSame(MicrosoftCloud.UsGovernment, MicrosoftCloud.FindAsync("jane@contoso.onmicrosoft.us", null, CancellationToken.None).Result, "a .onmicrosoft.us address needs no lookup");
     }
 
     /// <summary>The sandbox mailbox through a real browser profile: set ANYFS_TEST_OWA_MAILBOX (the address) and ANYFS_OUTLOOK_PROFILES (where a signed-in profile for it is).</summary>
