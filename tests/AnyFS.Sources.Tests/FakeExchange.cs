@@ -20,6 +20,9 @@ internal sealed class FakeExchange
 {
     public const string Account = "jane@fake.test";
 
+    /// <summary>What Exchange adds to an attachment's size, its properties' share (Spike 12: 247 bytes for a 70-byte image), so the fake's sizes are as far out as the real ones.</summary>
+    public const int StoreOverhead = 177;
+
     private readonly Dictionary<string, Folder> _folders = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Item> _items = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (Item Owner, Attachment Attachment)> _attachments = new(StringComparer.Ordinal);
@@ -526,7 +529,7 @@ internal sealed class FakeExchange
                 ["AttachmentId"] = new JsonObject { ["Id"] = a.Id },
                 ["Name"] = a.Name,
                 ["ContentType"] = a.ContentType,
-                ["Size"] = a.Content?.Length ?? a.Embedded?.Size ?? 0,
+                ["Size"] = a.Content is { } content ? content.Length + StoreOverhead : a.Embedded?.Size ?? 0,
                 ["IsInline"] = a.IsInline,
                 ["ContentId"] = a.ContentId,
             }).ToArray());
@@ -787,7 +790,7 @@ internal sealed class FakeExchange
                 new System.Xml.Linq.XElement(T + "Name", a.Name),
                 new System.Xml.Linq.XElement(T + "ContentType", a.ContentType),
                 a.ContentId is null ? null : new System.Xml.Linq.XElement(T + "ContentId", a.ContentId),
-                new System.Xml.Linq.XElement(T + "Size", a.Content?.Length ?? a.Embedded?.Size ?? 0),
+                new System.Xml.Linq.XElement(T + "Size", a.Content is { } content ? content.Length + StoreOverhead : a.Embedded?.Size ?? 0),
                 new System.Xml.Linq.XElement(T + "IsInline", a.IsInline ? "true" : "false")))));
         }
 

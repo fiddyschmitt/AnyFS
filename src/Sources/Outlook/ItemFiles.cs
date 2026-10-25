@@ -1,4 +1,5 @@
 using AnyFS.Sdk;
+using AnyFS.Sources.Outlook.Ews;
 using AnyFS.Sources.Outlook.Files;
 using AnyFS.Sources.Outlook.Mail;
 
@@ -25,7 +26,9 @@ internal sealed class ItemFile(string name, long length, byte[]? bytes, MailAtta
 /// What an item's folder holds (spec 7.7): for a message "name.md" and "name.eml", for an appointment event.md and
 /// event.ics, for a task or note "name.md"; and, when the item has attachments, an "attachments" folder with every one
 /// of them (inline images too), an attached message as a nested .eml. Made once per open item and kept a while. The
-/// .eml is the message as its server holds it where the store has that; else it is made from the properties.
+/// .eml is the message as its server holds it where the store has that; else it is made from the properties. An
+/// attachment whose size the store only estimates (a mailbox's server's) is read whole then, so that its file's length,
+/// and the size the Markdown gives, are its content's.
 /// </summary>
 internal sealed class ItemFiles
 {
@@ -61,8 +64,9 @@ internal sealed class ItemFiles
     /// <param name="folderName">The item's folder name: the stem of its .md and .eml.</param>
     public static async Task<ItemFiles> BuildAsync(MailItem item, string folderName, CancellationToken ct)
     {
-        // the attachments' names, fixed first so the Markdown's links, the .eml's parts and the attachments folder agree
-        var named = AttachmentNames.For(item.Attachments);
+        // the attachments' names, fixed first so the Markdown's links, the .eml's parts and the attachments folder agree;
+        // a contact's (its photo) are the vCard's business alone
+        var named = AttachmentNames.For(item.Kind == MailItemKind.Contact ? item.Attachments : await SettleAsync(item.Attachments, ct).ConfigureAwait(false));
         var files = new List<ItemFile>();
         switch (item.Kind)
         {
@@ -103,6 +107,45 @@ internal sealed class ItemFiles
     }
 
     private static ItemFile Made(string name, byte[] bytes, string what) => new(name, bytes.Length, bytes, null, what);
+
+    /// <summary>
+    /// The attachments with their sizes right: one the store gives an estimate for is read now and served from memory;
+    /// one that is gone by then is left out. Any other trouble fails the item, to be tried again when it is next opened.
+    /// </summary>
+    private static async Task<IReadOnlyList<MailAttachment>> SettleAsync(IReadOnlyList<MailAttachment> attachments, CancellationToken ct)
+    {
+        if (attachments.All(a => a.ExactSize || a.IsMessage))
+        {
+            return attachments;
+        }
+
+        var settled = new List<MailAttachment>(attachments.Count);
+        foreach (var attachment in attachments)
+        {
+            if (attachment.ExactSize || attachment.IsMessage)
+            {
+                settled.Add(attachment);
+                continue;
+            }
+
+            byte[] content;
+            try
+            {
+                await using var stream = await attachment.OpenAsync(ct).ConfigureAwait(false);
+                using var copy = new MemoryStream();
+                await stream.CopyToAsync(copy, ct).ConfigureAwait(false);
+                content = copy.ToArray();
+            }
+            catch (EwsException ex) when (ex.IsNotFound)
+            {
+                continue;
+            }
+
+            settled.Add(attachment with { Size = content.Length, OpenAsync = _ => Task.FromResult<Stream>(new MemoryStream(content, writable: false)), ExactSize = true });
+        }
+
+        return settled;
+    }
 }
 
 /// <summary>The names a message's attachments show under: safe for a path, told apart from each other, a nameless one numbered.</summary>

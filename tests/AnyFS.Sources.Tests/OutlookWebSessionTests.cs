@@ -112,12 +112,13 @@ public class OutlookWebSessionTests
             var markdown = await OutlookFixtures.TextAsync(source, $"{figures}/{name}.md");
             StringAssert.Contains(markdown, "**From:** Adele Vance <adelev@fake.test>");
             StringAssert.Contains(markdown, "**To:** Jane <jane@fake.test>");
-            StringAssert.Contains(markdown, "[figures.csv](attachments/figures.csv) (27 bytes)");
+            StringAssert.Contains(markdown, "[figures.csv](attachments/figures.csv) (27 bytes)", "the content's size, not the server's, which counts the attachment's properties too");
             StringAssert.Contains(markdown, "\n---\n\nFigures attached.");
 
+            Assert.AreEqual(27, (await OutlookFixtures.ListAsync(source, $"{figures}/attachments")).Single().Length);
             var csv = await OutlookFixtures.ReadAsync(source, $"{figures}/attachments/figures.csv");
             Assert.AreEqual("quarter,amount\nQ3,42\nQ4,58\n", Encoding.ASCII.GetString(csv));
-            Assert.AreEqual(1, fake.Actions.Count(a => a == "GetAttachment"), "the attachment is fetched when read, not when listed");
+            Assert.AreEqual(1, fake.Actions.Count(a => a == "GetAttachment"), "the attachment is fetched once, when its message's folder is opened");
             Assert.IsNull(await source.StatAsync("Inbox/2026/03/nothing here", CancellationToken.None));
         }
     }
@@ -211,12 +212,6 @@ public class OutlookWebSessionTests
         using (context)
         {
             fake.RotateToken();
-            var folder = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
-            var eml = await OutlookFixtures.TextAsync(source, $"{folder}/{VfsPath.Name(folder)}.eml");
-            StringAssert.Contains(eml, "Subject: Quarterly figures");
-            Assert.AreEqual(1, fake.Refusals, "the old token was refused once; the stand-in handed over the new one");
-            Assert.AreEqual(ComponentHealth.Ready, context.LastHealth ?? ComponentHealth.Ready);
-
             var held = 0;
             fake.Intercept = (request, action) =>
             {
@@ -229,6 +224,13 @@ public class OutlookWebSessionTests
 
                 return null;
             };
+            var folder = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
+            var eml = await OutlookFixtures.TextAsync(source, $"{folder}/{VfsPath.Name(folder)}.eml");
+            StringAssert.Contains(eml, "Subject: Quarterly figures");
+            Assert.AreEqual(1, fake.Refusals, "the old token was refused once; the stand-in handed over the new one");
+            Assert.AreEqual(ComponentHealth.Ready, context.LastHealth ?? ComponentHealth.Ready);
+
+            // the attachment was read when its message's folder was opened, held once on the way
             var csv = await OutlookFixtures.ReadAsync(source, $"{folder}/attachments/figures.csv");
             Assert.AreEqual(27, csv.Length);
             Assert.AreEqual(2, held, "the request was held once and then sent again");

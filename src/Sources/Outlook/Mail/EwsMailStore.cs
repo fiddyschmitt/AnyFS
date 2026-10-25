@@ -262,7 +262,8 @@ internal sealed class EwsMailStore : IMailStore
             a.Size,
             a.IsItem ? _ => Task.FromResult(Stream.Null) : ct => OpenAttachmentAsync(a.Id, ct),
             a.IsItem ? ct => OpenEmbeddedAsync(id, a.Id, ct) : null,
-            a.IsContactPhoto)).ToList();
+            a.IsContactPhoto,
+            ExactSize: false)).ToList();
         var recipients = new List<MailRecipient>();
         recipients.AddRange(item.ToRecipients.Select(m => new MailRecipient(MailRecipientKind.To, Address(m))));
         recipients.AddRange(item.CcRecipients.Select(m => new MailRecipient(MailRecipientKind.Cc, Address(m))));

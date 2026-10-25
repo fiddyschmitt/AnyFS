@@ -56,7 +56,11 @@ internal sealed record MailRecipient(MailRecipientKind Kind, MailAddress Address
 /// <param name="Name">The file name as the message gives it (not yet made safe for a path, nor told apart from another of the name).</param>
 /// <param name="OpenAsync">The content, as a seekable stream; empty for an embedded message.</param>
 /// <param name="Embedded">The attached message, for an attachment that is one; null otherwise.</param>
-internal sealed record MailAttachment(string Name, string ContentType, string? ContentId, bool IsInline, long Size, Func<CancellationToken, Task<Stream>> OpenAsync, Func<CancellationToken, Task<MailItem?>>? Embedded, bool IsContactPhoto = false)
+/// <param name="ExactSize">
+/// Whether <paramref name="Size"/> is the content's length, as a PST's is. A mailbox's server counts an attachment with
+/// its properties (Graph said 247 bytes for a 70-byte image, Spike 12), so such an attachment is read for its length.
+/// </param>
+internal sealed record MailAttachment(string Name, string ContentType, string? ContentId, bool IsInline, long Size, Func<CancellationToken, Task<Stream>> OpenAsync, Func<CancellationToken, Task<MailItem?>>? Embedded, bool IsContactPhoto = false, bool ExactSize = true)
 {
     public bool IsMessage => Embedded is not null;
 }

@@ -152,7 +152,8 @@ public class OutlookExchangeServerTests
             fake.Intercept = (_, action) => action == "GetAttachment"
                 ? new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("""<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><s:Fault><faultcode>a:ErrorSchemaValidation</faultcode><faultstring>The request failed schema validation.</faultstring></s:Fault></s:Body></s:Envelope>""", Encoding.UTF8, "text/xml") }
                 : null;
-            var failed = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, $"{figures}/attachments/figures.csv"));
+            var photo = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Photo from the site visit");
+            var failed = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, $"{photo}/attachments/dot.png"));
             StringAssert.Contains(failed.Message, "schema validation");
         }
     }
