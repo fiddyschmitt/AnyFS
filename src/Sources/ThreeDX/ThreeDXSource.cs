@@ -91,7 +91,7 @@ public sealed class ThreeDXSource : SourceBase, ICountable
             throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
         }
 
-        _client = new ThreeDXClient(_session, Dates, Logger, MarkDegraded, MarkHealthy);
+        _client = new ThreeDXClient(_session, Dates, Logger, MarkDegraded, MarkHealthy, _options?.RetryPause);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
         DateTimeOffset? due;
@@ -139,7 +139,8 @@ public sealed class ThreeDXSource : SourceBase, ICountable
 
     /// <summary>
     /// Lists every document afresh and serves the new tree, saving it for the next start; one listing at a time. With
-    /// <paramref name="report"/> (the start), its progress shows on the source's tile.
+    /// <paramref name="report"/> (the start), its progress shows on the source's tile. A document 3DX fails to describe now
+    /// keeps its entry from the list before, as Mount3DX's tree keeps every entry when its listing fails.
     /// </summary>
     internal async Task RefreshAsync(bool report, CancellationToken ct)
     {
@@ -151,7 +152,17 @@ public sealed class ThreeDXSource : SourceBase, ICountable
             Action<int, int, int>? progress = report
                 ? (done, pages, documents) => Context.ReportProgress($"Listing the documents: page {done:N0} of {pages:N0}, {documents:N0} documents", pages == 0 ? null : (double)done / pages)
                 : null;
-            var documents = await DocumentLister.ListAsync(Client, _settings.Query, _settings.EffectiveTenant, Math.Clamp(_settings.QueryThreads, 1, 32), progress, Logger, ct).ConfigureAwait(false);
+            var listing = await DocumentLister.ListAsync(Client, _settings.Query, _settings.EffectiveTenant, Math.Clamp(_settings.QueryThreads, 1, 32), progress, Logger, ct,
+                _options?.RetryPause is { } pause ? attempt => pause * attempt : null).ConfigureAwait(false);
+            var documents = listing.Documents;
+            if (listing.Undescribed.Count > 0)
+            {
+                var undescribed = listing.Undescribed.ToHashSet(StringComparer.Ordinal);
+                var kept = _tree.Documents.Where(d => undescribed.Contains(d.Id)).ToList();
+                documents = [.. documents, .. kept];
+                Logger.LogWarning("3dx: 3DX failed to describe {Count} documents its search finds; {Kept} of them keep their entries from the last list, the rest are left out until 3DX describes them", undescribed.Count, kept.Count);
+            }
+
             var tree = DocumentTree.Build(documents, Links, taken);
             Swap(tree);
             Save(tree);

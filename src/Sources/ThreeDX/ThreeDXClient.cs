@@ -32,15 +32,18 @@ internal sealed partial class ThreeDXClient
     private readonly Action<string>? _onTrouble;
     private readonly Action? _onSuccess;
     private readonly string _label = "anyfs-" + Guid.NewGuid().ToString("N")[..16];
+    private readonly TimeSpan _retryPause;
     private SessionValue? _securityContext;
 
-    public ThreeDXClient(ThreeDXSession session, DateOrder dates, ILogger logger, Action<string>? onTrouble = null, Action? onSuccess = null)
+    /// <param name="retryPause">The pause before a request is tried again, times the attempt (2 s; a test's shorter).</param>
+    public ThreeDXClient(ThreeDXSession session, DateOrder dates, ILogger logger, Action<string>? onTrouble = null, Action? onSuccess = null, TimeSpan? retryPause = null)
     {
         _session = session;
         _dates = dates;
         _logger = logger;
         _onTrouble = onTrouble;
         _onSuccess = onSuccess;
+        _retryPause = retryPause ?? TimeSpan.FromSeconds(2);
     }
 
     public Uri Space => _session.Space;
@@ -194,6 +197,9 @@ internal sealed partial class ThreeDXClient
 
     // --- documents --------------------------------------------------------------------------------------------------------
 
+    /// <summary>The most requests the halves of one batch may take while a listing looks for the documents 3DX fails to describe.</summary>
+    internal const int HalvesBudget = 64;
+
     /// <summary>The documents with these ids and their files; one 3DX cannot describe (no title, or a field missing) is left out and logged.</summary>
     public async Task<IReadOnlyList<DxDocument>> DocumentsAsync(IReadOnlyList<string> ids, CancellationToken ct)
     {
@@ -204,6 +210,81 @@ internal sealed partial class ThreeDXClient
 
         using var result = await DocumentsJsonAsync(ids, ct).ConfigureAwait(false);
         var documents = new List<DxDocument>();
+        AddDocuments(result, documents);
+        return documents;
+    }
+
+    /// <summary>
+    /// For a listing: the documents with these ids, as <see cref="DocumentsAsync"/>, and the ids of those 3DX fails to
+    /// describe. A batch 3DX keeps answering with a 5xx is asked for again in halves, each half once, down to single
+    /// documents, so that a document whose description fails in 3DX is passed over rather than failing the whole listing (as
+    /// Mount3DX's fails). When 3DX describes none of the batch, or the halves would take more than
+    /// <see cref="HalvesBudget"/> requests, it is the call that fails, not a document: the batch fails as before.
+    /// </summary>
+    public async Task<(IReadOnlyList<DxDocument> Documents, IReadOnlyList<string> Undescribed)> ListDocumentsAsync(IReadOnlyList<string> ids, CancellationToken ct)
+    {
+        var documents = new List<DxDocument>();
+        var undescribed = new List<string>();
+        if (ids.Count > 0)
+        {
+            var budget = HalvesBudget;
+            await DescribeAsync(ids, MaxAttempts, documents, undescribed, () => budget-- > 0, ct).ConfigureAwait(false);
+            foreach (var id in undescribed)
+            {
+                _logger.LogWarning("3dx: 3DX fails to describe document {Id}: every request holding it is answered with a server error", id);
+            }
+        }
+
+        return (documents, undescribed);
+    }
+
+    /// <summary>One batch, or a half of one, of <see cref="ListDocumentsAsync"/>; whether 3DX described any of it.</summary>
+    private async Task<bool> DescribeAsync(IReadOnlyList<string> ids, int tries, List<DxDocument> documents, List<string> undescribed, Func<bool> spend, CancellationToken ct)
+    {
+        var what = DocumentsWhat(ids);
+        using var response = await SendAsync(() => DocumentsRequest(ids), expectsJson: true, HttpCompletionOption.ResponseContentRead, what, ct, tries).ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+        if ((int)response.StatusCode < 500)
+        {
+            if (!response.IsSuccessStatusCode)
+            {
+                throw Error(response.StatusCode, body, what);
+            }
+
+            using var result = Json(body, what);
+            AddDocuments(result, documents);
+            return true;
+        }
+
+        if (ids.Count == 1)
+        {
+            undescribed.Add(ids[0]);
+            return false;
+        }
+
+        if (tries == MaxAttempts)
+        {
+            _logger.LogInformation("3dx: 3DX keeps failing the request for {What}; asking for them in halves, to find any document it fails to describe", what);
+        }
+
+        var half = ids.Count / 2;
+        var described = false;
+        foreach (var part in new[] { ids.Take(half).ToList(), ids.Skip(half).ToList() })
+        {
+            if (!spend())
+            {
+                throw Error(response.StatusCode, body, what);
+            }
+
+            described |= await DescribeAsync(part, 1, documents, undescribed, spend, ct).ConfigureAwait(false);
+        }
+
+        // none of the batch at all: 3DX fails the call itself
+        return described || tries < MaxAttempts ? described : throw Error(response.StatusCode, body, what);
+    }
+
+    private void AddDocuments(JsonDocument result, List<DxDocument> documents)
+    {
         foreach (var data in Data(result))
         {
             if (Document(data) is { } document)
@@ -211,14 +292,17 @@ internal sealed partial class ThreeDXClient
                 documents.Add(document);
             }
         }
-
-        return documents;
     }
 
     private Task<JsonDocument> DocumentsJsonAsync(IReadOnlyList<string> ids, CancellationToken ct)
-        => PostJsonAsync(new Uri(Space, "resources/v1/modeler/documents/ids"),
-            () => new StringContent("$ids=" + string.Join(",", ids.Select(Uri.EscapeDataString)), Encoding.UTF8, "application/x-www-form-urlencoded"),
-            ids.Count == 1 ? $"document {ids[0]}" : $"{ids.Count} documents", ct);
+        => SendJsonAsync(() => DocumentsRequest(ids), DocumentsWhat(ids), ct);
+
+    private HttpRequestMessage DocumentsRequest(IReadOnlyList<string> ids) => new(HttpMethod.Post, new Uri(Space, "resources/v1/modeler/documents/ids"))
+    {
+        Content = new StringContent("$ids=" + string.Join(",", ids.Select(Uri.EscapeDataString)), Encoding.UTF8, "application/x-www-form-urlencoded"),
+    };
+
+    private static string DocumentsWhat(IReadOnlyList<string> ids) => ids.Count == 1 ? $"document {ids[0]}" : $"{ids.Count} documents";
 
     private static IEnumerable<JsonElement> Data(JsonDocument result)
         => result.RootElement.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array ? data.EnumerateArray() : [];
@@ -662,6 +746,11 @@ internal sealed partial class ThreeDXClient
             throw Error(response.StatusCode, body, what);
         }
 
+        return Json(body, what);
+    }
+
+    private static JsonDocument Json(string body, string what)
+    {
         try
         {
             return JsonDocument.Parse(body.Length == 0 ? "{}" : body);
@@ -672,16 +761,16 @@ internal sealed partial class ThreeDXClient
         }
     }
 
-    private Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, bool expectsJson, HttpCompletionOption completion, string what, CancellationToken ct)
-        => SendAsync(_ => Task.FromResult(make()), expectsJson, completion, what, ct);
+    private Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, bool expectsJson, HttpCompletionOption completion, string what, CancellationToken ct, int tries = MaxAttempts)
+        => SendAsync(_ => Task.FromResult(make()), expectsJson, completion, what, ct, tries);
 
     /// <summary>
     /// Sends a request to 3DSpace or 3DSearch: a lapsed session is renewed once and the request made and sent again (a
     /// renewal is no attempt); a connection that fails, a 5xx or a 429 is tried again after a pause, up to
-    /// <see cref="MaxAttempts"/> times. The request is made afresh for each sending, so one that carries what a session gave
-    /// (a CSRF token) asks the session it goes to.
+    /// <paramref name="tries"/> times (the last answer is returned). The request is made afresh for each sending, so one
+    /// that carries what a session gave (a CSRF token) asks the session it goes to.
     /// </summary>
-    private async Task<HttpResponseMessage> SendAsync(Func<CancellationToken, Task<HttpRequestMessage>> make, bool expectsJson, HttpCompletionOption completion, string what, CancellationToken ct)
+    private async Task<HttpResponseMessage> SendAsync(Func<CancellationToken, Task<HttpRequestMessage>> make, bool expectsJson, HttpCompletionOption completion, string what, CancellationToken ct, int tries = MaxAttempts)
     {
         var renewed = false;
         for (var attempt = 1; ; attempt++)
@@ -697,7 +786,7 @@ internal sealed partial class ThreeDXClient
             catch (Exception ex) when (ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested)
             {
                 _onTrouble?.Invoke(ex.Message);
-                if (attempt < MaxAttempts)
+                if (attempt < tries)
                 {
                     _logger.LogWarning("3dx: the request for {What} failed ({Error}); trying again", what, ex.Message);
                     await Task.Delay(Backoff(attempt), ct).ConfigureAwait(false);
@@ -721,7 +810,7 @@ internal sealed partial class ThreeDXClient
                 continue;
             }
 
-            if (((int)response.StatusCode >= 500 || response.StatusCode == HttpStatusCode.TooManyRequests) && attempt < MaxAttempts)
+            if (((int)response.StatusCode >= 500 || response.StatusCode == HttpStatusCode.TooManyRequests) && attempt < tries)
             {
                 var answer = Gist(response, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
                 _logger.LogWarning("3dx: the request for {What} was answered {Answer}; trying again", what, answer);
@@ -740,7 +829,7 @@ internal sealed partial class ThreeDXClient
         }
     }
 
-    private static TimeSpan Backoff(int attempt) => TimeSpan.FromSeconds(2 * attempt);
+    private TimeSpan Backoff(int attempt) => _retryPause * attempt;
 
     private static VfsException Error(HttpStatusCode status, string body, string what)
     {

@@ -176,6 +176,9 @@ internal sealed class Fake3DX : IDisposable
     /// <summary>The SecurityContext header of each ticket's PUT, in order (null for none).</summary>
     public ConcurrentQueue<string?> TicketContexts { get; } = new();
 
+    /// <summary>Documents whose description fails in 3DSpace (by id): a documents call holding any of them is answered 500.</summary>
+    public ConcurrentDictionary<string, bool> BrokenDocuments { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>One of a count of answers to give, if any are left.</summary>
     private static bool TakeOne(ref int count)
     {
@@ -616,6 +619,12 @@ internal sealed class Fake3DX : IDisposable
 
                 var body = await new StreamReader(request.InputStream).ReadToEndAsync();
                 var ids = body.StartsWith("$ids=", StringComparison.Ordinal) ? Uri.UnescapeDataString(body[5..]).Split(',', StringSplitOptions.RemoveEmptyEntries) : [];
+                if (ids.Any(BrokenDocuments.ContainsKey))
+                {
+                    await JsonAsync(response, 500, new JsonObject { ["success"] = false, ["statusCode"] = 500, ["error"] = "An unexpected error has occurred" });
+                    return;
+                }
+
                 List<FakeDocument> found;
                 lock (Documents)
                 {

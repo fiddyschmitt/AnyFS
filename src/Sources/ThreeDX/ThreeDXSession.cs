@@ -9,8 +9,8 @@ using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.ThreeDX;
 
-/// <summary>What a test (or the Test button) changes about a 3DX session: what sends its requests, whether it may open a browser and with which profile, how soon a service's session may be renewed again, whether a session kept from before is used.</summary>
-internal sealed record SessionOptions(HttpMessageHandler? Handler = null, bool Browser = true, TimeSpan? MinRenewalInterval = null, string? Profile = null, bool UseKept = true);
+/// <summary>What a test (or the Test button) changes about a 3DX session: what sends its requests, whether it may open a browser and with which profile, how soon a service's session may be renewed again, whether a session kept from before is used, and the pause before a request is tried again (times the attempt).</summary>
+internal sealed record SessionOptions(HttpMessageHandler? Handler = null, bool Browser = true, TimeSpan? MinRenewalInterval = null, string? Profile = null, bool UseKept = true, TimeSpan? RetryPause = null);
 
 /// <summary>
 /// A 3DX source's sign-in and the cookies that carry it (spec 7.6.2). 3DSpace and 3DSearch each keep a session of their own

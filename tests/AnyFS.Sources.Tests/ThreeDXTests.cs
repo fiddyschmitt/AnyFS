@@ -609,7 +609,7 @@ public class ThreeDXSourceTests
 
     private static async Task<ThreeDXSource> StartAsync(ThreeDXSettings settings, TestSourceContext context)
     {
-        var source = new ThreeDXSource(settings, new SessionOptions(Browser: false, MinRenewalInterval: TimeSpan.Zero));
+        var source = new ThreeDXSource(settings, new SessionOptions(Browser: false, MinRenewalInterval: TimeSpan.Zero, RetryPause: TimeSpan.Zero));
         await source.InitialiseAsync(context, CancellationToken.None);
         return source;
     }
@@ -870,6 +870,59 @@ public class ThreeDXSourceTests
         var said = log.Lines.Single(l => l.Contains("the request for 2 documents was answered", StringComparison.Ordinal));
         StringAssert.Contains(said, "answered HTTP 500, application/json, ");
         StringAssert.Contains(said, "success false, statusCode 500, \"An unexpected error has occurred\", fields success statusCode error; trying again");
+    }
+
+    [TestMethod]
+    public async Task ADocument3DXFailsToDescribeIsPassedOverAndTheRestIsListedAfresh()
+    {
+        using var fake = new Fake3DX();
+        for (var i = 0; i < 150; i++)
+        {
+            fake.Add($"DOC-{i:000}", "1", $"Doc {i}", "Document", ("f.txt", Bytes(16, i)));
+        }
+
+        var log = new LineLogger();
+        using var context = new TestSourceContext("3dx", log);
+        await using var source = await StartAsync(ThreeDXSignInTests.Settings(fake), context);
+        Assert.AreEqual(150, (await ListAsync(source, "")).Count);
+
+        // 3DX now fails any documents call holding DOC-017 (listed before) or DOC-NEW (not); DOC-003 has a new title
+        var broken = fake.Documents[17];
+        var added = fake.Add("DOC-NEW", "1", "New", "Document", ("n.txt", Bytes(16, 999)));
+        fake.BrokenDocuments[broken.Id] = true;
+        fake.BrokenDocuments[added.Id] = true;
+        lock (fake.Documents)
+        {
+            fake.Documents[3] = fake.Documents[3] with { Title = "Doc 3 renamed" };
+        }
+
+        var posts = fake.DocumentPosts;
+        await source.RefreshAsync(report: false, CancellationToken.None);
+        var names = (await ListAsync(source, "")).Select(e => e.Name).ToList();
+        CollectionAssert.Contains(names, "DOC-003 Rev 1 (Doc 3 renamed)", "the rest listed afresh");
+        CollectionAssert.Contains(names, "DOC-017 Rev 1 (Doc 17)", "kept from the last list");
+        Assert.IsFalse(names.Any(n => n.StartsWith("DOC-NEW", StringComparison.Ordinal)), "new, and 3DX describes it not: left out");
+        Assert.AreEqual(150, names.Count);
+        Assert.IsTrue(log.Lines.Any(l => l.Contains($"3DX fails to describe document {broken.Id}", StringComparison.Ordinal)), log.ToString());
+        Assert.IsTrue(log.Lines.Any(l => l.Contains("failed to describe 2 documents its search finds; 1 of them keep their entries from the last list", StringComparison.Ordinal)), log.ToString());
+        Assert.IsTrue(fake.DocumentPosts - posts <= 2 * (ThreeDXClient.HalvesBudget + 4), $"{fake.DocumentPosts - posts} documents calls");
+    }
+
+    [TestMethod]
+    public async Task WhenTheDocumentsCallFailsForEveryDocumentTheListingFailsAndTheLastListStays()
+    {
+        using var fake = new Fake3DX();
+        var docs = Enumerable.Range(0, 5).Select(i => fake.Add($"ALL-{i}", "1", $"All {i}", "Document", ("a.txt", Bytes(8, i)))).ToList();
+        using var context = new TestSourceContext("3dx");
+        await using var source = await StartAsync(ThreeDXSignInTests.Settings(fake), context);
+        foreach (var doc in docs)
+        {
+            fake.BrokenDocuments[doc.Id] = true;
+        }
+
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.RefreshAsync(report: false, CancellationToken.None));
+        StringAssert.Contains(ex.Message, "answered the request for 5 documents with 500");
+        Assert.AreEqual(5, (await ListAsync(source, "")).Count, "the last list is still served");
     }
 
     [TestMethod]

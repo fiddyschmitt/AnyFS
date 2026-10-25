@@ -3,24 +3,28 @@ using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.ThreeDX;
 
+/// <summary>What a listing found: the documents, in the search's order, and the ids of those 3DX failed to describe.</summary>
+internal sealed record Listing(IReadOnlyList<DxDocument> Documents, IReadOnlyList<string> Undescribed);
+
 /// <summary>
 /// Lists every document the source's search finds (spec 7.6), as Mount3DX does: 3DSearch for how many there are, then each
-/// page of a hundred ids and their documents (<see cref="ThreeDXClient.DocumentsAsync"/>), several pages at once. A page
-/// that fails is tried again a few times after a pause, longer each time, before the listing fails as a whole; the
-/// documents come back in the search's order.
+/// page of a hundred ids and their documents (<see cref="ThreeDXClient.ListDocumentsAsync"/>), several pages at once. A page
+/// that fails is tried again a few times after a pause, longer each time, before the listing fails as a whole; a document
+/// 3DX fails to describe is passed over and named. The documents come back in the search's order.
 /// </summary>
 internal static class DocumentLister
 {
     public const int PageAttempts = 5;
 
     /// <param name="progress">Pages done, pages in all, documents so far.</param>
-    public static async Task<IReadOnlyList<DxDocument>> ListAsync(ThreeDXClient client, string query, string tenant, int threads, Action<int, int, int>? progress, ILogger logger, CancellationToken ct, Func<int, TimeSpan>? pause = null)
+    public static async Task<Listing> ListAsync(ThreeDXClient client, string query, string tenant, int threads, Action<int, int, int>? progress, ILogger logger, CancellationToken ct, Func<int, TimeSpan>? pause = null)
     {
         pause ??= attempt => TimeSpan.FromSeconds(2 * attempt);
         var (count, searchId) = await client.CountAsync(query, tenant, ct).ConfigureAwait(false);
         var pages = (count + ThreeDXClient.PageSize - 1) / ThreeDXClient.PageSize;
         logger.LogInformation("3dx: the search finds {Count} documents: {Pages} pages to list, {Threads} at a time", count, pages, threads);
         var results = new IReadOnlyList<DxDocument>[pages];
+        var undescribed = new IReadOnlyList<string>[pages];
         var done = 0;
         var documents = 0;
         progress?.Invoke(0, pages, 0);
@@ -31,7 +35,7 @@ internal static class DocumentLister
                 try
                 {
                     var ids = await client.PageAsync(page, ThreeDXClient.PageSize, searchId, query, tenant, pageCt).ConfigureAwait(false);
-                    results[page] = await client.DocumentsAsync(ids, pageCt).ConfigureAwait(false);
+                    (results[page], undescribed[page]) = await client.ListDocumentsAsync(ids, pageCt).ConfigureAwait(false);
                     if (attempt > 1)
                     {
                         logger.LogInformation("3dx: page {Page} listed at attempt {Attempt}", page, attempt);
@@ -49,7 +53,7 @@ internal static class DocumentLister
             progress?.Invoke(Interlocked.Increment(ref done), pages, Interlocked.Add(ref documents, results[page].Count));
         }).ConfigureAwait(false);
 
-        return results.SelectMany(r => r).ToList();
+        return new Listing(results.SelectMany(r => r).ToList(), undescribed.SelectMany(u => u).ToList());
     }
 
     /// <summary>Whether trying again can help: not when 3DX refuses the account, nor when the sign-in needs a person.</summary>
