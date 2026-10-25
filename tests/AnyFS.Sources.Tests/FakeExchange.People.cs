@@ -40,41 +40,59 @@ internal sealed partial class FakeExchange
         }
     }
 
-    /// <summary>A person as FindPeople's default shape gives one; the many-valued fields as attributed values.</summary>
+    /// <summary>
+    /// A person as the lab's Exchange Server SE gave one (26-Oct-2026): the default shape's fields, and those asked for
+    /// beside it (title, departments, office, business and mobile telephones, business address, IM), the many-valued ones as
+    /// attributed values. <see cref="FindPeople"/> leaves out what was not asked for.
+    /// </summary>
     public static JsonObject Person(string name, string email, string? given = null, string? surname = null, string? title = null, string? department = null, string? company = null,
-        string? office = null, string? phone = null, string? mobile = null, string? city = null)
+        string? office = null, string? phone = null, string? mobile = null, string? city = null, string? street = null)
     {
+        static JsonArray Attributed(JsonNode value) => new(new JsonObject { ["Value"] = value, ["Attributions"] = new JsonArray("0") });
         var mailbox = new JsonObject { ["__type"] = "EmailAddress:#Exchange", ["Name"] = name, ["EmailAddress"] = email, ["RoutingType"] = "SMTP", ["MailboxType"] = "Mailbox" };
         var person = new JsonObject
         {
             ["__type"] = "Persona:#Exchange",
             ["PersonaId"] = new JsonObject { ["__type"] = "ItemId:#Exchange", ["Id"] = "AAUQ" + Convert.ToBase64String(Encoding.UTF8.GetBytes(email)) },
+            ["PersonaType"] = "Person",
+            ["CreationTime"] = "0001-01-02T00:00:00Z",
             ["DisplayName"] = name,
             ["DisplayNameFirstLast"] = name,
+            ["DisplayNameLastFirst"] = name,
+            ["FileAs"] = "",
             ["GivenName"] = given,
             ["Surname"] = surname,
             ["CompanyName"] = company,
-            ["Department"] = department,
-            ["Title"] = title,
             ["EmailAddress"] = mailbox,
             ["EmailAddresses"] = new JsonArray(mailbox.DeepClone(), new JsonObject { ["Name"] = name, ["EmailAddress"] = "/o=ExchangeLabs/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=" + name.Replace(" ", "", StringComparison.Ordinal), ["RoutingType"] = "EX" }),
-            ["ImAddress"] = "sip:" + email.ToLowerInvariant(),
             ["WorkCity"] = city,
             ["RelevanceScore"] = 2147483647,
+            ["Title"] = title,
+            ["ImAddress"] = "sip:" + email.ToLowerInvariant(),
         };
+        if (department is not null)
+        {
+            person["Departments"] = Attributed(department);
+        }
+
         if (office is not null)
         {
-            person["OfficeLocations"] = new JsonArray(new JsonObject { ["__type"] = "AttributedString:#Exchange", ["Value"] = office, ["Attributions"] = new JsonArray("0") });
+            person["OfficeLocations"] = Attributed(office);
         }
 
         if (phone is not null)
         {
-            person["PhoneNumber"] = new JsonObject { ["Number"] = phone, ["Type"] = "Business" };
+            person["BusinessPhoneNumbers"] = Attributed(new JsonObject { ["Number"] = phone, ["Type"] = "Business" });
         }
 
         if (mobile is not null)
         {
-            person["MobilePhones"] = new JsonArray(new JsonObject { ["Value"] = new JsonObject { ["Number"] = mobile, ["Type"] = "Mobile" }, ["Attributions"] = new JsonArray("0") });
+            person["MobilePhones"] = Attributed(new JsonObject { ["Number"] = mobile, ["Type"] = "Mobile" });
+        }
+
+        if (street is not null)
+        {
+            person["BusinessAddresses"] = Attributed(new JsonObject { ["Street"] = street, ["City"] = city, ["Type"] = "Business", ["LocationUri"] = email, ["LocationSource"] = "Contact" });
         }
 
         return person;
@@ -114,10 +132,15 @@ internal sealed partial class FakeExchange
 
         var id = body["ParentFolderId"]?["BaseFolderId"]?["Id"]?.GetValue<string>();
         var list = _addressLists.FirstOrDefault(l => l.Id == id);
+        var asked = body["PersonaShape"]?["AdditionalProperties"]?.AsArray().Select(p => p?["FieldURI"]?.GetValue<string>() ?? "").ToList() ?? [];
         JsonObject answer;
         if (list is null)
         {
             answer = new JsonObject { ["__type"] = "FindPeopleResponseMessage:#Exchange", ["ResponseClass"] = "Error", ["ResponseCode"] = "ErrorInvalidIdMalformed", ["MessageText"] = "Id is malformed." };
+        }
+        else if (asked.Count > 0 && (RefuseFullerPersonaShape || asked.Any(f => !AskedFields.ContainsKey(f))))
+        {
+            answer = new JsonObject { ["__type"] = "FindPeopleResponseMessage:#Exchange", ["ResponseClass"] = "Error", ["ResponseCode"] = "ErrorInvalidArgument", ["MessageText"] = "Invalid shape specification." };
         }
         else
         {
@@ -130,7 +153,7 @@ internal sealed partial class FakeExchange
                 ColdPeopleAnswers--;
             }
 
-            var people = cold ? [] : list.People.Skip(offset).Take(most).Select(p => p.DeepClone()).ToArray();
+            var people = cold ? [] : list.People.Skip(offset).Take(most).Select(p => Shown(p, asked)).ToArray();
             answer = new JsonObject
             {
                 ["__type"] = "FindPeopleResponseMessage:#Exchange",
@@ -149,6 +172,36 @@ internal sealed partial class FakeExchange
             ["Body"] = answer,
         };
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(envelope.ToJsonString(), Encoding.UTF8, "application/json") };
+    }
+
+    /// <summary>Whether FindPeople refuses any field asked for beside its default shape, as a server stricter than the lab's might.</summary>
+    public bool RefuseFullerPersonaShape { get; set; }
+
+    /// <summary>The fields a FindPeople may ask for beside the default shape (those the lab's server took), and the persona's property each is.</summary>
+    private static readonly Dictionary<string, string> AskedFields = new(StringComparer.Ordinal)
+    {
+        ["persona:Title"] = "Title",
+        ["persona:Departments"] = "Departments",
+        ["persona:OfficeLocations"] = "OfficeLocations",
+        ["persona:BusinessPhoneNumbers"] = "BusinessPhoneNumbers",
+        ["persona:MobilePhones"] = "MobilePhones",
+        ["persona:BusinessAddresses"] = "BusinessAddresses",
+        ["persona:ImAddress"] = "ImAddress",
+    };
+
+    /// <summary>A person as an answer gives it: the default shape's fields and those asked for.</summary>
+    private static JsonNode Shown(JsonObject person, List<string> asked)
+    {
+        var shown = person.DeepClone().AsObject();
+        foreach (var (field, property) in AskedFields)
+        {
+            if (!asked.Contains(field))
+            {
+                shown.Remove(property);
+            }
+        }
+
+        return shown;
     }
 
     /// <summary>An address list of the fake's directory: its people, as FindPeople gives them.</summary>

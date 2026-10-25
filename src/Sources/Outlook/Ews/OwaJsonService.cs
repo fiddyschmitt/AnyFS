@@ -32,11 +32,25 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
         "calendar:IsRecurring", "calendar:UID", "calendar:LegacyFreeBusyStatus", "item:ItemClass", "item:LastModifiedTime", "item:DateTimeCreated", "item:HasAttachments", "item:Size",
     ];
 
+    /// <summary>
+    /// The persona fields FindPeople is asked for beside its default shape, which gives the names, the addresses, the
+    /// company and the city but no title, department, office or telephone: those the lab's Exchange Server SE took, one by
+    /// one, on 26-Oct-2026 (it refused persona:Department, PhoneNumber, HomePhones, Titles and CompanyNames as an
+    /// invalid shape, and the same server code answers Outlook on the web).
+    /// </summary>
+    private static readonly string[] PersonaProperties =
+    [
+        "persona:Title", "persona:Departments", "persona:OfficeLocations", "persona:BusinessPhoneNumbers", "persona:MobilePhones", "persona:BusinessAddresses", "persona:ImAddress",
+    ];
+
     private readonly Uri _origin;
     private readonly Func<bool, CancellationToken, Task<string>> _token;
     private readonly HttpClient _http;
     private readonly MailboxPace _pace;
     private readonly ILogger _logger;
+
+    /// <summary>Whether the server refused <see cref="PersonaProperties"/>: its default persona shape alone is asked for since.</summary>
+    private volatile bool _defaultPersonaShape;
 
     /// <param name="origin">Outlook on the web's origin for the cloud (https://outlook.office.com).</param>
     /// <param name="token">The bearer; true asks for a fresh one after a 401.</param>
@@ -252,19 +266,43 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
 
     public async Task<DirectoryPage> AddressListPageAsync(string listId, int offset, int count, CancellationToken ct)
     {
+        JsonElement answer;
+        try
+        {
+            answer = await FindPeopleAsync(listId, offset, count, fuller: !_defaultPersonaShape, ct).ConfigureAwait(false);
+        }
+        catch (EwsException ex) when (!_defaultPersonaShape && ex.Code == "ErrorInvalidArgument")
+        {
+            // "Invalid shape specification": a server that takes fewer fields than the lab's; its default shape from now on
+            _logger.LogInformation("outlook: {Host} refused the persona fields asked for beside the default ones ({Error}); asking for the default ones alone", _origin.Host, ex.Message);
+            _defaultPersonaShape = true;
+            answer = await FindPeopleAsync(listId, offset, count, fuller: false, ct).ConfigureAwait(false);
+        }
+
+        var body = answer.ValueKind == JsonValueKind.Object && answer.TryGetProperty("Body", out var b) && b.ValueKind == JsonValueKind.Object ? b : answer;
+        var entries = Values(body, "ResultSet").Select(PersonaOf).OfType<DirectoryEntry>().ToList();
+        return new DirectoryPage(entries, Int(body, "TotalNumberOfPeopleInView"));
+    }
+
+    /// <summary>One FindPeople over an address list: its default shape, and with <paramref name="fuller"/> <see cref="PersonaProperties"/> beside it.</summary>
+    private Task<JsonElement> FindPeopleAsync(string listId, int offset, int count, bool fuller, CancellationToken ct)
+    {
+        var shape = new JsonObject { ["__type"] = "PersonaResponseShape:#Exchange", ["BaseShape"] = "Default" };
+        if (fuller)
+        {
+            shape["AdditionalProperties"] = Properties(PersonaProperties);
+        }
+
         var request = new JsonObject
         {
             ["__type"] = "FindPeopleRequest:#Exchange",
             ["IndexedPageItemView"] = IndexedPage(offset, count),
             ["QueryString"] = null,
             ["ParentFolderId"] = new JsonObject { ["__type"] = "TargetFolderId:#Exchange", ["BaseFolderId"] = new JsonObject { ["__type"] = "AddressListId:#Exchange", ["Id"] = listId } },
-            ["PersonaShape"] = new JsonObject { ["__type"] = "PersonaResponseShape:#Exchange", ["BaseShape"] = "Default" },
+            ["PersonaShape"] = shape,
             ["ShouldResolveOneOffEmailAddress"] = false,
         };
-        var answer = await SendAsync("FindPeople", Envelope("FindPeople", request), "People", whole: true, ct).ConfigureAwait(false);
-        var body = answer.ValueKind == JsonValueKind.Object && answer.TryGetProperty("Body", out var b) && b.ValueKind == JsonValueKind.Object ? b : answer;
-        var entries = Values(body, "ResultSet").Select(PersonaOf).OfType<DirectoryEntry>().ToList();
-        return new DirectoryPage(entries, Int(body, "TotalNumberOfPeopleInView"));
+        return SendAsync("FindPeople", Envelope("FindPeople", request), "People", whole: true, ct);
     }
 
     /// <summary>

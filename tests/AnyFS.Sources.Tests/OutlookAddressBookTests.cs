@@ -193,6 +193,25 @@ public class OutlookAddressBookTests
     }
 
     [TestMethod]
+    public async Task AServerThatTakesOnlyTheDefaultShapeStillGivesCards()
+    {
+        var fake = WithDirectory();
+        fake.RefuseFullerPersonaShape = true;
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            var card = await OutlookFixtures.TextAsync(source, Gal + "/Adele Vance.vcf");
+            StringAssert.Contains(card, "ORG:Contoso\r\n", "the default shape's company");
+            StringAssert.Contains(card, "EMAIL;TYPE=INTERNET,PREF:AdeleV@fake.test\r\n");
+            Assert.IsFalse(card.Contains("TITLE:", StringComparison.Ordinal), "no title without the fields asked for beside the default ones");
+            Assert.AreEqual(2, fake.Actions.Count(a => a == "FindPeople"), "refused once, then the default shape");
+            await OutlookFixtures.ListAsync(source, "Address Books/All Rooms");
+            Assert.AreEqual(3, fake.Actions.Count(a => a == "FindPeople"), "the default shape alone from then on");
+        }
+    }
+
+    [TestMethod]
     public void APersonasManyValuedFieldsAreReadAsWellAsItsSingleOnes()
     {
         using var many = JsonDocument.Parse("""
