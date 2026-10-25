@@ -101,7 +101,7 @@ public sealed class ThreeDXSource : SourceBase, ICountable
             Swap(DocumentTree.Build(saved.Documents, Links, saved.Taken));
             var age = DateTimeOffset.UtcNow - saved.Taken;
             due = RefreshEvery > TimeSpan.Zero ? saved.Taken + RefreshEvery : DateTimeOffset.UtcNow;
-            Logger.LogInformation("3dx: serving the {Count} documents ({Files} files) listed {Minutes:F0} minutes ago; listing them afresh {When}",
+            Logger.LogInformation("3dx: serving the {Count:N0} documents ({Files:N0} files) listed {Minutes:F0} minutes ago; listing them afresh {When}",
                 _tree.Folders.Count, _tree.FileCount, age.TotalMinutes, due <= DateTimeOffset.UtcNow ? "now, in the background" : $"at {due.Value.ToLocalTime():HH:mm}");
         }
         else
@@ -129,7 +129,7 @@ public sealed class ThreeDXSource : SourceBase, ICountable
             _keepingAlive = Task.Run(() => KeepAliveLoopAsync(TimeSpan.FromMinutes(_settings.KeepAliveMinutes), stopping), CancellationToken.None);
         }
 
-        Logger.LogInformation("3dx: serving {Space} ({How}): {Count} documents, {Files} files", space, _session.How, _tree.Folders.Count, _tree.FileCount);
+        Logger.LogInformation("3dx: serving {Space} ({How}): {Count:N0} documents, {Files:N0} files", space, _session.How, _tree.Folders.Count, _tree.FileCount);
     }
 
     // --- the document list ------------------------------------------------------------------------------------------
@@ -160,13 +160,13 @@ public sealed class ThreeDXSource : SourceBase, ICountable
                 var undescribed = listing.Undescribed.ToHashSet(StringComparer.Ordinal);
                 var kept = _tree.Documents.Where(d => undescribed.Contains(d.Id)).ToList();
                 documents = [.. documents, .. kept];
-                Logger.LogWarning("3dx: 3DX failed to describe {Count} documents its search finds; {Kept} of them keep their entries from the last list, the rest are left out until 3DX describes them", undescribed.Count, kept.Count);
+                Logger.LogWarning("3dx: 3DX failed to describe {Count:N0} documents its search finds; {Kept:N0} of them keep their entries from the last list, the rest are left out until 3DX describes them", undescribed.Count, kept.Count);
             }
 
             var tree = DocumentTree.Build(documents, Links, taken);
             Swap(tree);
             Save(tree);
-            Logger.LogInformation("3dx: listed {Count} documents ({Files} files) in {Seconds:F0} s", tree.Folders.Count, tree.FileCount, Stopwatch.GetElapsedTime(started).TotalSeconds);
+            Logger.LogInformation("3dx: listed {Count:N0} documents ({Files:N0} files) in {Seconds:F0} s", tree.Folders.Count, tree.FileCount, Stopwatch.GetElapsedTime(started).TotalSeconds);
         }
         finally
         {

@@ -22,7 +22,7 @@ internal static class DocumentLister
         pause ??= attempt => TimeSpan.FromSeconds(2 * attempt);
         var (count, searchId) = await client.CountAsync(query, tenant, ct).ConfigureAwait(false);
         var pages = (count + ThreeDXClient.PageSize - 1) / ThreeDXClient.PageSize;
-        logger.LogInformation("3dx: the search finds {Count} documents: {Pages} pages to list, {Threads} at a time", count, pages, threads);
+        logger.LogInformation("3dx: the search finds {Count:N0} documents: {Pages:N0} pages to list, {Threads} at a time", count, pages, threads);
         var results = new IReadOnlyList<DxDocument>[pages];
         var undescribed = new IReadOnlyList<string>[pages];
         var done = 0;

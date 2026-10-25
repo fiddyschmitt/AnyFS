@@ -266,7 +266,7 @@ public abstract class SharePointSource : SourceBase, ICountable
             {
                 await WalkAsync(counters, ct).ConfigureAwait(false);
                 Counters.Set(counters.FilesKnown, counters.DirectoriesKnown, EnumerationState.Complete);
-                Logger.LogInformation("sharepoint: walked every folder in {Seconds:F0} s: {Files} files in {Folders} folders", Stopwatch.GetElapsedTime(started).TotalSeconds, counters.FilesKnown, counters.DirectoriesKnown);
+                Logger.LogInformation("sharepoint: walked every folder in {Seconds:F0} s: {Files:N0} files in {Folders:N0} folders", Stopwatch.GetElapsedTime(started).TotalSeconds, counters.FilesKnown, counters.DirectoriesKnown);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
