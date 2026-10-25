@@ -152,6 +152,7 @@ src/AnyFS.Sdk            interfaces, DTOs, SourceBase, caching helpers (the NuGe
 src/AnyFS.Sdk.Testing    contract tests and fakes for plugin authors (and our own tests)
 src/AnyFS.Core           model, plugin host, router, read-only layers, status, settings, secrets, stats, logging
 src/AnyFS.App            anyfs: the window (Gui/) and the command line (Cli/)
+src/LibOutlook           a self-contained reader of Outlook's PST and OST files (no AnyFS reference; its own package)
 src/Sources/Mirror       the Mirror source
 src/Sources/Sshfs        the SSHFS source over SSH.NET
 src/Sources/Common       what more than one source needs: the web session's sign-in in a browser of AnyFS's own over
@@ -162,13 +163,16 @@ src/Sources/SharePoint   the SharePoint source: Graph after an MSAL sign-in, RES
                          session read from a browser
 src/Sources/ThreeDX      the 3DX source: a 3DEXPERIENCE platform's documents through 3DSearch and 3DSpace, read-only,
                          signed in through 3DPassport (single sign-on, a browser, or a Windows account)
+src/Sources/Outlook      the Outlook source: a mailbox as folders, from a PST or OST file (LibOutlook), Exchange Online
+                         through Outlook on the web's session, or an Exchange server over EWS with a Windows account
 src/Mounts/WinFsp        the WinFsp mount (Windows)
 src/Mounts/Smb           the SMB mount: the VFS endpoint and the portable-smb-server process
 src/Mounts/Fuse          the FUSE mount (Linux)
 src/Mounts/WebDav        the WebDAV server and mount
 src/Mounts/Ftp           the FTP mount: AnyFS's own FTP server
 src/Mounts/Http          the HTTP mount
-tests/                   unit tests per assembly, GUI tests (headless Avalonia), AnyFS.E2E, fixtures/MakeTree, fixtures/SamplePlugin
+tests/                   unit tests per assembly, GUI tests (headless Avalonia), AnyFS.E2E, fixtures/MakeTree, fixtures/SamplePlugin,
+                         fixtures/SharePointSignIn (the live SharePoint tests' sign-in)
 scripts/                 publish.ps1, smoke.ps1, pack.ps1, fetch-go-servers.ps1 (+ go-servers.json), fetch-winfsp.ps1 (+ winfsp.json)
 provisioning/            the test lab: settings.yml, Vagrantfile, ansible/, windows/, macos/, mac.ps1, check.ps1, publish.ps1
 tools/go-servers/        the fetched Go server binaries per RID (not in git)
