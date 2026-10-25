@@ -50,10 +50,10 @@ public sealed class PstProperties : IEnumerable<PstProperty>
     {
         _file = file;
         _source = source;
-        _codePage = new Lazy<int>(() => RawInt32(PstPropertyIds.MessageCodepage) ?? file.AnsiCodePage);
+        _codePage = new Lazy<int>(ReadCodePage);
     }
 
-    /// <summary>The code page the item's 8-bit strings are decoded with.</summary>
+    /// <summary>The code page the item's 8-bit strings are decoded with: its own, else the file's (also when its own properties do not read).</summary>
     public int CodePage => _codePage.Value;
 
     /// <summary>The ids of the properties the item has.</summary>
@@ -131,10 +131,40 @@ public sealed class PstProperties : IEnumerable<PstProperty>
         return raw is null ? null : PropertyValues.Decode(raw.Value.Type, raw.Value.Bytes, 1252) as int?;
     }
 
+    private int ReadCodePage()
+    {
+        try
+        {
+            return RawInt32(PstPropertyIds.MessageCodepage) ?? _file.AnsiCodePage;
+        }
+        catch (PstException)
+        {
+            // the item's own properties do not read: the 8-bit strings that do (a table's cells of it) are read in the file's
+            return _file.AnsiCodePage;
+        }
+    }
+
+    /// <summary>
+    /// The value decoded by its type. Only 8-bit strings need the item's code page (so a table's cells decode without the
+    /// item's own properties); a named property's name is left out when the file's named-property map does not read.
+    /// </summary>
     private PstProperty Decode(RawProperty raw)
     {
-        var value = PropertyValues.Decode(raw.Type, raw.Bytes, CodePage);
-        var named = raw.Id >= 0x8000 ? _file.NamedProperties.Get(raw.Id) : null;
+        var string8 = (raw.Type & 0x0FFF) == (ushort)PstPropertyType.String8;
+        var value = PropertyValues.Decode(raw.Type, raw.Bytes, string8 ? CodePage : _file.AnsiCodePage);
+        PstNamedProperty? named = null;
+        if (raw.Id >= 0x8000)
+        {
+            try
+            {
+                named = _file.NamedProperties.Get(raw.Id);
+            }
+            catch (PstException)
+            {
+                // the map is damaged: the value stands without its name
+            }
+        }
+
         var name = named?.Name ?? PstPropertyIds.NameOf(raw.Id);
         return new PstProperty(raw.Id, (PstPropertyType)raw.Type, value, name, named);
     }

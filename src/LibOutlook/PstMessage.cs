@@ -13,19 +13,29 @@ public sealed class PstMessage
     private readonly Lazy<PropertyContext> _context;
     private readonly Lazy<IReadOnlyList<PstRecipient>> _recipients;
     private readonly Lazy<IReadOnlyList<PstAttachment>> _attachments;
+    private readonly TableRow? _summary;
 
-    internal PstMessage(PstFile file, NodeContext node, TableRow? summary)
+    // listedOnly: properties from the summary row's cells alone, the message's own node never read
+    internal PstMessage(PstFile file, NodeContext node, TableRow? summary, bool listedOnly = false)
     {
         _file = file;
         _node = node;
+        _summary = summary;
         _context = new Lazy<PropertyContext>(() => new PropertyContext(_node));
-        Properties = new PstProperties(file, new RowBackedSource(summary, _context));
+        Properties = new PstProperties(file, listedOnly && summary is not null ? summary : new RowBackedSource(summary, _context));
         _recipients = new Lazy<IReadOnlyList<PstRecipient>>(ReadRecipients);
         _attachments = new Lazy<IReadOnlyList<PstAttachment>>(ReadAttachments);
     }
 
     /// <summary>The message's node id, stable for the file's life (an embedded message's is its subnode's).</summary>
     public uint Nid => _node.Node.Nid;
+
+    /// <summary>
+    /// The message as its folder's contents table lists it: the same members, with properties from the table's cells
+    /// alone, the message itself not read (for a message whose own properties cannot be read: what the folder lists of
+    /// it, as Outlook's list shows it). Null for a message not listed from a folder (an embedded one, or one found by id).
+    /// </summary>
+    public PstMessage? AsListed() => _summary is null ? null : new PstMessage(_file, _node, _summary, listedOnly: true);
 
     /// <summary>All of the message's properties.</summary>
     public PstProperties Properties { get; }
@@ -162,14 +172,14 @@ public sealed class PstMessage
     private IReadOnlyList<PstRecipient> ReadRecipients()
     {
         var sub = _node.Subnode(NodeId.RecipientTable);
-        var table = sub is null ? null : TableContext.TryOpen(_file.Context(sub.Value));
+        var table = sub is null ? null : TableContext.TryOpen(_file.Context(sub.Value, _node));
         return table is null ? [] : table.Rows().Select(row => new PstRecipient(_file, row)).ToList();
     }
 
     private IReadOnlyList<PstAttachment> ReadAttachments()
     {
         var sub = _node.Subnode(NodeId.AttachmentTable);
-        var table = sub is null ? null : TableContext.TryOpen(_file.Context(sub.Value));
+        var table = sub is null ? null : TableContext.TryOpen(_file.Context(sub.Value, _node));
         if (table is null)
         {
             return [];
@@ -180,7 +190,7 @@ public sealed class PstMessage
         {
             if (_node.Subnode(row.RowId) is { } attachment && NodeId.TypeOf(attachment.Nid) == NodeId.TypeAttachment)
             {
-                list.Add(new PstAttachment(_file, _file.Context(attachment), row));
+                list.Add(new PstAttachment(_file, _file.Context(attachment, _node), row));
             }
         }
 

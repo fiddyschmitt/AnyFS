@@ -46,26 +46,34 @@ internal sealed class PropertyContext : IPropertySource
     private readonly HeapNode _heap;
     private readonly Dictionary<ushort, (ushort Type, uint Hnid)> _records = [];
 
+    /// <summary>Reads the node's property records; a fault says which node it is in.</summary>
     public PropertyContext(NodeContext node)
     {
         _node = node;
-        _heap = node.Heap();
-        if (_heap.ClientSignature != ClientSignature)
+        try
         {
-            throw new PstException($"node {node.Node.Nid:X} holds a heap of kind 0x{_heap.ClientSignature:X2}, not a property context");
-        }
+            _heap = node.Heap();
+            if (_heap.ClientSignature != ClientSignature)
+            {
+                throw new PstException($"it holds a heap of kind 0x{_heap.ClientSignature:X2}, not a property context");
+            }
 
-        var bth = new BTreeOnHeap(_heap, _heap.UserRoot);
-        if (bth.KeySize != 2 || bth.DataSize != 6)
-        {
-            throw new PstException($"node {node.Node.Nid:X}: a property context's BTH has {bth.KeySize}-byte keys and {bth.DataSize}-byte records");
-        }
+            var bth = new BTreeOnHeap(_heap, _heap.UserRoot);
+            if (bth.KeySize != 2 || bth.DataSize != 6)
+            {
+                throw new PstException($"its property context's BTH has {bth.KeySize}-byte keys and {bth.DataSize}-byte records");
+            }
 
-        foreach (var record in bth.Records())
+            foreach (var record in bth.Records())
+            {
+                var type = BinaryPrimitives.ReadUInt16LittleEndian(record.Data.AsSpan(0));
+                var hnid = BinaryPrimitives.ReadUInt32LittleEndian(record.Data.AsSpan(2));
+                _records[(ushort)record.Key] = (type, hnid);
+            }
+        }
+        catch (PstException ex)
         {
-            var type = BinaryPrimitives.ReadUInt16LittleEndian(record.Data.AsSpan(0));
-            var hnid = BinaryPrimitives.ReadUInt32LittleEndian(record.Data.AsSpan(2));
-            _records[(ushort)record.Key] = (type, hnid);
+            throw new PstException($"{node.Where}: {ex.Message}", ex);
         }
     }
 
@@ -83,7 +91,7 @@ internal sealed class PropertyContext : IPropertySource
             return null;
         }
 
-        return new RawProperty(id, r.Type, Resolve(r.Type, r.Hnid));
+        return new RawProperty(id, r.Type, Resolve(id, r.Type, r.Hnid));
     }
 
     /// <summary>Every property, bytes and all.</summary>
@@ -91,7 +99,7 @@ internal sealed class PropertyContext : IPropertySource
     {
         foreach (var (id, r) in _records)
         {
-            yield return new RawProperty(id, r.Type, Resolve(r.Type, r.Hnid));
+            yield return new RawProperty(id, r.Type, Resolve(id, r.Type, r.Hnid));
         }
     }
 
@@ -110,9 +118,19 @@ internal sealed class PropertyContext : IPropertySource
     }
 
     /// <summary>What an HNID of this node names: nothing, an allocation of its heap, or the whole data of a subnode.</summary>
-    public byte[] Bytes(uint hnid) => ResolveHnid(_node, _heap, hnid);
+    public byte[] Bytes(uint hnid)
+    {
+        try
+        {
+            return ResolveHnid(_node, _heap, hnid);
+        }
+        catch (PstException ex)
+        {
+            throw new PstException($"{_node.Where}: {ex.Message}", ex);
+        }
+    }
 
-    private byte[] Resolve(ushort type, uint hnid)
+    private byte[] Resolve(ushort id, ushort type, uint hnid)
     {
         if (PropertyValues.IsInline(type))
         {
@@ -121,7 +139,14 @@ internal sealed class PropertyContext : IPropertySource
             return inline;
         }
 
-        return ResolveHnid(_node, _heap, hnid);
+        try
+        {
+            return ResolveHnid(_node, _heap, hnid);
+        }
+        catch (PstException ex)
+        {
+            throw new PstException($"{_node.Where}, {PropertyValues.Describe(id, type)}: {ex.Message}", ex);
+        }
     }
 
     /// <summary>What an HNID names: nothing, an allocation of the heap, or the whole data of a subnode.</summary>

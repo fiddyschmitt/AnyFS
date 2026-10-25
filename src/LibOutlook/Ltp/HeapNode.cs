@@ -5,18 +5,24 @@ namespace LibOutlook.Ltp;
 
 /// <summary>
 /// A node and what the layers above need of it: its data blocks, its subnodes (read once, on first use), and the
-/// data of a subnode in one piece. A subnode's own tree is reached by making a context of its entry.
+/// data of a subnode in one piece. A subnode's own tree is reached by making a context of its entry, with the node it
+/// belongs to as its parent.
 /// </summary>
 internal sealed class NodeContext
 {
     private readonly Lazy<Dictionary<uint, NodeEntry>> _subnodes;
+    private readonly NodeContext? _parent;
 
-    public NodeContext(BlockStore blocks, NodeEntry node)
+    public NodeContext(BlockStore blocks, NodeEntry node, NodeContext? parent = null)
     {
         Blocks = blocks;
         Node = node;
+        _parent = parent;
         _subnodes = new Lazy<Dictionary<uint, NodeEntry>>(() => blocks.ReadSubnodes(node.BidSub));
     }
+
+    /// <summary>What the node is, for messages: "message 0x200024", "the attachment table of message 0x200024".</summary>
+    public string Where => _parent is null ? NodeId.Describe(Node.Nid) : $"{NodeId.Describe(Node.Nid)} of {_parent.Where}";
 
     public BlockStore Blocks { get; }
 

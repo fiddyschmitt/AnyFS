@@ -213,7 +213,10 @@ public sealed class PstFile : IDisposable
 
     internal NodeEntry? FindNode(uint nid) => _ndb.FindNode(nid);
 
-    internal NodeContext Context(NodeEntry node) => new(_blocks, node);
+    internal BlockEntry? FindBlock(ulong bid) => _ndb.FindBlock(bid);
+
+    /// <summary>A node's context; a subnode's names the node it belongs to.</summary>
+    internal NodeContext Context(NodeEntry node, NodeContext? parent = null) => new(_blocks, node, parent);
 
     [MemberNotNull(nameof(_store), nameof(_named), nameof(_root), nameof(_top))]
     private void Reset()

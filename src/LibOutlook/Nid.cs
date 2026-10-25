@@ -27,6 +27,28 @@ internal static class NodeId
 
     public static uint TypeOf(uint nid) => nid & 0x1F;
 
+    /// <summary>What a node is, for messages: "message 0x200024", "the contents table of folder 0x8022", "the attachment table".</summary>
+    public static string Describe(uint nid) => nid switch
+    {
+        MessageStore => "the message store",
+        NameToIdMap => "the named-property map",
+        RecipientTable => "the recipient table",
+        AttachmentTable => "the attachment table",
+        _ => TypeOf(nid) switch
+        {
+            TypeNormalFolder => $"folder 0x{nid:X}",
+            TypeSearchFolder => $"search folder 0x{nid:X}",
+            TypeNormalMessage => $"message 0x{nid:X}",
+            TypeAssocMessage => $"hidden item 0x{nid:X}",
+            TypeAttachment => $"attachment 0x{nid:X}",
+            TypeHierarchyTable => $"the subfolder table of folder 0x{WithType(nid, TypeNormalFolder):X}",
+            TypeContentsTable => $"the contents table of folder 0x{WithType(nid, TypeNormalFolder):X}",
+            TypeAssocContentsTable => $"the hidden-items table of folder 0x{WithType(nid, TypeNormalFolder):X}",
+            TypeSearchContentsTable => $"the contents table of search folder 0x{WithType(nid, TypeSearchFolder):X}",
+            _ => $"node 0x{nid:X}",
+        },
+    };
+
     /// <summary>The same node index with another type: a folder's tables share its index ([MS-PST] 2.4.4).</summary>
     public static uint WithType(uint nid, uint type) => (nid & ~0x1Fu) | type;
 

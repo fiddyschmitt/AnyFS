@@ -174,7 +174,7 @@ public sealed class PstAttachment
             return null;
         }
 
-        return new PstMessage(_file, _file.Context(message), null);
+        return new PstMessage(_file, _file.Context(message, _node), null);
     }
 
     /// <summary>The subnode a PtypObject value names: its HNID leads to 8 bytes, the subnode's NID then the object's size.</summary>

@@ -11,6 +11,10 @@ internal static class PropertyValues
         Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
     }
 
+    /// <summary>A property for messages: "property 0x0037 (Subject) of type 0x001F".</summary>
+    public static string Describe(ushort id, ushort type)
+        => $"property 0x{id:X4}{(PstPropertyIds.NameOf(id) is { } name ? $" ({name})" : "")} of type 0x{type:X4}";
+
     /// <summary>Whether values of the type are small enough to live in a PC record's own 4 bytes.</summary>
     public static bool IsInline(ushort type) => type is (ushort)PstPropertyType.Integer16 or (ushort)PstPropertyType.Integer32
         or (ushort)PstPropertyType.Floating32 or (ushort)PstPropertyType.Boolean or (ushort)PstPropertyType.ErrorCode;

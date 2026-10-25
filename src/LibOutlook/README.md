@@ -12,6 +12,10 @@ dependencies, no MAPI, no Outlook: it reads the file itself, on any platform .NE
   which Outlook's byte-range lock on the header does not reach. A file that is being written is read with every page
   and block checked (checksums, signatures, back pointers) and re-read when caught mid-write.
 - Large attachments are streamed block by block, not loaded whole.
+- A file damaged in places reads as far as it reads: a fault names where it is (`message 0x200064, property 0x0037
+  (Subject) of type 0x001F: HID 0x000000E0 names allocation 7 of 3 in heap block 0`), a folder's table still gives an
+  item's cells when the item's own properties do not read, and `PstMessage.AsListed()` is a message as its folder
+  lists it, the message itself not read.
 
 ```csharp
 using LibOutlook;
