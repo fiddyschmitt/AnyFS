@@ -18,6 +18,7 @@
     <ProjectReference Include="..\..\src\Sources\Mirror\AnyFS.Sources.Mirror.csproj" />
     <ProjectReference Include="..\..\src\Sources\Sshfs\AnyFS.Sources.Sshfs.csproj" />
     <ProjectReference Include="..\..\src\Sources\Common\AnyFS.Sources.Common.csproj" />
+    <ProjectReference Include="..\..\src\Sources\Microsoft365\AnyFS.Sources.Microsoft365.csproj" />
     <ProjectReference Include="..\..\src\Sources\SharePoint\AnyFS.Sources.SharePoint.csproj" />
     <ProjectReference Include="..\..\src\Sources\ThreeDX\AnyFS.Sources.ThreeDX.csproj" />
     <ProjectReference Include="..\..\src\Sources\Outlook\AnyFS.Sources.Outlook.csproj" />

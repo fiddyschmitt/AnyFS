@@ -4,6 +4,7 @@ using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using AnyFS.Sources.Common;
+using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.SharePoint;
 
 namespace AnyFS.Sources.Tests;

@@ -2,6 +2,7 @@ using System.Net;
 using System.Reflection;
 using System.Text;
 using AnyFS.Sdk;
+using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.SharePoint;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Identity.Client;
@@ -93,7 +94,7 @@ public class MicrosoftCloudTests
     public void RelativeAddressesGoToTheCloudsGraph()
     {
         var handler = new RecordingHandler();
-        using var graph = new GraphClient((_, _) => Task.FromResult("token"), NullLogger.Instance, handler: handler, cloud: MicrosoftCloud.UsGovernment);
+        using var graph = new GraphClient((_, _) => Task.FromResult("token"), NullLogger.Instance, SharePointPlugin.Service, handler: handler, cloud: MicrosoftCloud.UsGovernment);
         using var site = graph.GetJsonAsync("sites/acme.sharepoint.us:/sites/Bar", "Bar", CancellationToken.None).GetAwaiter().GetResult();
         Assert.AreEqual("https://graph.microsoft.us/v1.0/sites/acme.sharepoint.us:/sites/Bar", handler.Requests.Single().RequestUri!.AbsoluteUri);
         Assert.AreEqual("token", handler.Requests.Single().Headers.Authorization?.Parameter);
@@ -101,7 +102,7 @@ public class MicrosoftCloudTests
         using var next = graph.GetJsonAsync("https://graph.microsoft.us/v1.0/drives/b!x/items?$skiptoken=1", "x", CancellationToken.None).GetAwaiter().GetResult();
         Assert.AreEqual("https://graph.microsoft.us/v1.0/drives/b!x/items?$skiptoken=1", handler.Requests[1].RequestUri!.AbsoluteUri, "a nextLink is followed as it is");
 
-        using var global = new GraphClient((_, _) => Task.FromResult("token"), NullLogger.Instance, handler: new RecordingHandler());
+        using var global = new GraphClient((_, _) => Task.FromResult("token"), NullLogger.Instance, SharePointPlugin.Service, handler: new RecordingHandler());
         Assert.AreEqual("https://graph.microsoft.com/v1.0/", global.BaseUrl);
     }
 
@@ -113,8 +114,8 @@ public class MicrosoftCloudTests
             new[] { "https://graph.microsoft.us/User.Read", "https://graph.microsoft.us/Files.ReadWrite.All", "https://graph.microsoft.us/Sites.ReadWrite.All" },
             signIn.Scopes.ToArray());
 
-        var global = new EntraSignIn(Options(SharePointPlugin.DefaultClientId, "organizations", null), NullLogger.Instance);
-        CollectionAssert.AreEqual(EntraSignIn.SiteScopes, global.Scopes.ToArray());
+        var global = new EntraSignIn(Options(EntraSignIn.DefaultClientId, "organizations", null), NullLogger.Instance);
+        CollectionAssert.AreEqual(SharePointPlugin.SiteScopes, global.Scopes.ToArray());
     }
 
     [TestMethod]
@@ -126,7 +127,7 @@ public class MicrosoftCloudTests
 
         // what the US Government endpoint answers AnyFS's own client ID with (checked by hand, 18-Oct-2026)
         var unknownApp = Refusal("AADSTS50059: No tenant-identifying information found in either the request or implied by any provided credentials. Trace ID: x");
-        var message = EntraSignIn.Describe(unknownApp, gov, SharePointPlugin.DefaultClientId, "organizations");
+        var message = EntraSignIn.Describe(unknownApp, gov, EntraSignIn.DefaultClientId, "organizations");
         StringAssert.Contains(message, "global cloud");
         StringAssert.Contains(message, "client ID");
         Assert.IsTrue(EntraSignIn.IsPermanent(unknownApp), "retrying cannot help, and would open the browser again");
@@ -139,7 +140,7 @@ public class MicrosoftCloudTests
         StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS90002: Tenant 'acme.onmicrosoft.us' not found."), gov, own, "acme.onmicrosoft.us"), "tenant acme.onmicrosoft.us was not found in the US Government (GCC High) cloud");
         StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS7000218: The request body must contain the following parameter: 'client_assertion' or 'client_secret'."), gov, own, "acme.onmicrosoft.us"), "Allow public client flows");
         StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS65001: The user or administrator has not consented to use the application."), gov, own, "acme.onmicrosoft.us"), "administrator must consent");
-        StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS530035: Access has been blocked by security defaults."), MicrosoftCloud.Global, SharePointPlugin.DefaultClientId, "organizations"), "Conditional Access");
+        StringAssert.Contains(EntraSignIn.Describe(Refusal("AADSTS530035: Access has been blocked by security defaults."), MicrosoftCloud.Global, EntraSignIn.DefaultClientId, "organizations"), "Conditional Access");
 
         var other = Refusal("AADSTS12345: Something new.\nmore detail");
         Assert.AreEqual("the sign-in failed: AADSTS12345: Something new.", EntraSignIn.Describe(other, gov, own, "organizations"));
@@ -158,7 +159,7 @@ public class MicrosoftCloudTests
     }
 
     private static SignInOptions Options(string clientId, string tenant, MicrosoftCloud? cloud)
-        => new(clientId, tenant, null, SignInMethod.DeviceCode, EntraSignIn.SiteScopes, _ => { }, null, () => null, _ => { }, Cloud: cloud);
+        => new(SharePointPlugin.Service, clientId, tenant, null, SignInMethod.DeviceCode, SharePointPlugin.SiteScopes, _ => { }, null, () => null, _ => { }, Cloud: cloud);
 
     /// <summary>Answers every request with an empty JSON object and keeps the requests.</summary>
     private sealed class RecordingHandler : HttpMessageHandler

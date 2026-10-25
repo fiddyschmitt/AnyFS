@@ -19,6 +19,7 @@
 using System.Security.Cryptography;
 using AnyFS.Sdk;
 using AnyFS.Sources.Common;
+using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.SharePoint;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -26,12 +27,12 @@ string? account = null;
 var tenant = "organizations";
 var deviceCode = false;
 var forceLogin = false;
-IReadOnlyList<string> scopes = [.. EntraSignIn.SiteScopes.Concat(EntraSignIn.ContainerScopes).Distinct()];
+IReadOnlyList<string> scopes = [.. SharePointPlugin.SiteScopes.Concat(SharePointPlugin.ContainerScopes).Distinct()];
 var printUrl = false;
 var output = SignInCacheFile.DefaultPath;
 var gets = new List<string>();
 var cloud = MicrosoftCloud.Global;
-var clientId = SharePointPlugin.DefaultClientId;
+var clientId = EntraSignIn.DefaultClientId;
 for (var i = 0; i < args.Length; i++)
 {
     switch (args[i])
@@ -41,8 +42,8 @@ for (var i = 0; i < args.Length; i++)
         case "--scopes":
             scopes = args[++i] switch
             {
-                "site" => EntraSignIn.SiteScopes,
-                "containers" => EntraSignIn.ContainerScopes,
+                "site" => SharePointPlugin.SiteScopes,
+                "containers" => SharePointPlugin.ContainerScopes,
                 "all" => scopes,
                 var other => throw new ArgumentException($"--scopes {other}: site, containers or all"),
             };
@@ -68,7 +69,7 @@ for (var i = 0; i < args.Length; i++)
 }
 
 var signIn = new EntraSignIn(new SignInOptions(
-    clientId, tenant, account, deviceCode ? SignInMethod.DeviceCode : SignInMethod.Browser, scopes,
+    SharePointPlugin.Service, clientId, tenant, account, deviceCode ? SignInMethod.DeviceCode : SignInMethod.Browser, scopes,
     Progress: Console.WriteLine,
     Prompt: (title, message) => { Console.WriteLine($"{title}: {message}"); return Task.CompletedTask; },
     LoadCache: () => SignInCacheFile.Read(output),
@@ -95,7 +96,7 @@ if (account is not null && !string.Equals(signIn.Username, account, StringCompar
 Console.WriteLine($"signed in as {signIn.Username}; the sign-in is kept in {output}");
 if (gets.Count > 0)
 {
-    using var graph = new GraphClient((ct, refresh) => signIn.GetAccessTokenAsync(ct, refresh), NullLogger.Instance, cloud: cloud);
+    using var graph = new GraphClient((ct, refresh) => signIn.GetAccessTokenAsync(ct, refresh), NullLogger.Instance, SharePointPlugin.Service, cloud: cloud);
     foreach (var path in gets)
     {
         Console.WriteLine($"--- GET {path}");

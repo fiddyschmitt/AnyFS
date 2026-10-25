@@ -156,6 +156,8 @@ src/Sources/Mirror       the Mirror source
 src/Sources/Sshfs        the SSHFS source over SSH.NET
 src/Sources/Common       what more than one source needs: the web session's sign-in in a browser of AnyFS's own over
                          DevTools (Selenium WebDriver where that is closed), Windows account credentials, small helpers
+src/Sources/Microsoft365 what the Microsoft 365 sources share: the Microsoft clouds, the app sign-in (MSAL, as AnyFS's
+                         registration or the organisation's own) and Microsoft Graph's calls at a tenant's pace
 src/Sources/SharePoint   the SharePoint source: Graph after an MSAL sign-in, REST with a Windows account or a web
                          session read from a browser
 src/Sources/ThreeDX      the 3DX source: a 3DEXPERIENCE platform's documents through 3DSearch and 3DSpace, read-only,

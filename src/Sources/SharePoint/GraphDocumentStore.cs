@@ -227,7 +227,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
             using var doc = await graph.GetJsonAsync(url, description, ct).ConfigureAwait(false);
             foreach (var element in doc.RootElement.GetProperty("value").EnumerateArray())
             {
-                var drive = GraphClient.ParseDrive(element);
+                var drive = GraphDrives.ParseDrive(element);
                 if (drive.Name.Length > 0)
                 {
                     libraries.Add(new LibraryInfo(drive.Id, drive.Name, drive.QuotaTotal, drive.QuotaRemaining, web));
@@ -356,7 +356,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
             {
                 if (!library.Pages || element.TryGetProperty("folder", out _))
                 {
-                    yield return GraphClient.ParseItem(element);
+                    yield return GraphDrives.ParseItem(element);
                 }
                 else if (SharePointPages.IsPage(element.GetProperty("name").GetString() ?? ""))
                 {
@@ -371,7 +371,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
     /// <summary>A page as its Markdown file; the Markdown kept for the read that follows.</summary>
     private (VfsEntry Entry, ItemRef Item) ParsePage(JsonElement element)
     {
-        var (entry, item) = GraphClient.ParseItem(element);
+        var (entry, item) = GraphDrives.ParseItem(element);
         var fields = element.TryGetProperty("listItem", out var listItem) && listItem.TryGetProperty("fields", out var f) ? f : default;
         var pageUrl = element.TryGetProperty("webUrl", out var w) && Uri.TryCreate(w.GetString(), UriKind.Absolute, out var u) ? u : null;
         var markdown = SharePointPages.Markdown(fields, pageUrl);
@@ -394,7 +394,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
         // no $select: the download URL is an annotation that only comes with the whole item
         using var doc = await _graph.TryGetJsonAsync(SharePointPaths.ItemAddress(library.Key, itemPath), Display(library, itemPath), ct).ConfigureAwait(false);
-        var item = doc is null ? null : GraphClient.ParseItem(doc.RootElement).Item;
+        var item = doc is null ? null : GraphDrives.ParseItem(doc.RootElement).Item;
         return library.Pages && item is { IsFolder: false } ? null : item;
     }
 
@@ -432,7 +432,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
         var address = SharePointPaths.ItemAddress(library.Key, itemPath);
         var path = Display(library, itemPath);
         JsonDocument result;
-        if (length <= GraphClient.SimpleUploadLimit)
+        if (length <= GraphDrives.SimpleUploadLimit)
         {
             result = await _graph.PutContentAsync(address, () => OpenLocal(localPath), length, path, ct).ConfigureAwait(false);
         }
@@ -444,7 +444,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
         using (result)
         {
-            return GraphClient.ParseItem(result.RootElement).Item;
+            return GraphDrives.ParseItem(result.RootElement).Item;
         }
     }
 
@@ -455,7 +455,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
         try
         {
             using var created = await _graph.SendJsonAsync(HttpMethod.Post, $"{SharePointPaths.ItemAddress(library.Key, parent)}/children", json, Display(library, itemPath), ct).ConfigureAwait(false);
-            return GraphClient.ParseItem(created.RootElement).Item;
+            return GraphDrives.ParseItem(created.RootElement).Item;
         }
         catch (VfsException ex) when (ex.Error == VfsError.NotFound)
         {
@@ -483,7 +483,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
         var json = "{\"name\":" + Json.Quote(toName) + ",\"parentReference\":{\"id\":" + Json.Quote(parentId) + "}}";
         using var moved = await _graph.SendJsonAsync(HttpMethod.Patch, SharePointPaths.ItemAddress(library.Key, fromPath), json, Display(library, fromPath), ct).ConfigureAwait(false);
-        return GraphClient.ParseItem(moved.RootElement).Item;
+        return GraphDrives.ParseItem(moved.RootElement).Item;
     }
 
     public async Task SetTimesAsync(LibraryInfo library, string itemPath, DateTimeOffset? created, DateTimeOffset? modified, CancellationToken ct)

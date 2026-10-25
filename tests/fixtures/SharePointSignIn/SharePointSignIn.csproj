@@ -13,6 +13,7 @@
     <PackageReference Include="System.Security.Cryptography.ProtectedData" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="..\..\..\src\Sources\Microsoft365\AnyFS.Sources.Microsoft365.csproj" />
     <ProjectReference Include="..\..\..\src\Sources\SharePoint\AnyFS.Sources.SharePoint.csproj" />
   </ItemGroup>
 </Project>

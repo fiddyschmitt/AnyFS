@@ -2,6 +2,7 @@ using System.Text.Json;
 using AnyFS.Fixtures;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
+using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.SharePoint;
 
 namespace AnyFS.Sources.Tests;
@@ -18,7 +19,7 @@ public class SharePointEmbeddedPluginTests
         var settings = (SharePointSettings)plugin.CreateDefaultSettings();
         Assert.AreEqual("sharepoint", plugin.TypeId);
         Assert.AreEqual("sharepoint", plugin.TypeFolder);
-        Assert.AreEqual(SharePointPlugin.DefaultClientId, settings.ClientId);
+        Assert.AreEqual(EntraSignIn.DefaultClientId, settings.ClientId);
         CollectionAssert.AreEqual(new[] { nameof(SharePointSettings.SiteUrl) }, plugin.Validate(settings).Select(m => m.Property).ToArray());
 
         settings.SiteUrl = $" {ContainerType} ";
@@ -57,7 +58,7 @@ public class SharePointEmbeddedPluginTests
         var settings = new SharePointSettings { SiteUrl = ContainerType, SignInMethod = "device CODE", Tenant = " ", ClientId = "" };
         Assert.AreEqual(SignInMethod.DeviceCode, settings.Method, "the earlier \"Device code\" value still works");
         Assert.AreEqual("organizations", settings.EffectiveTenant);
-        Assert.AreEqual(SharePointPlugin.DefaultClientId, settings.EffectiveClientId);
+        Assert.AreEqual(EntraSignIn.DefaultClientId, settings.EffectiveClientId);
         Assert.IsNull(settings.PinnedLibrary);
         Assert.IsNull(settings.LoginHint);
     }

@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Threading.RateLimiting;
 
-namespace AnyFS.Sources.SharePoint;
+namespace AnyFS.Sources.Microsoft365;
 
 /// <summary>
 /// How fast AnyFS sends requests to one SharePoint Online tenant (by its host, or by the account where there is none),
@@ -14,7 +14,7 @@ namespace AnyFS.Sources.SharePoint;
 /// threads. Requests wait their turn, oldest first, rather than fail. SharePoint Server has no such limit and goes
 /// unpaced.
 /// </summary>
-internal sealed class RequestPace
+public sealed class RequestPace
 {
     public const int PerSecond = 10;
 

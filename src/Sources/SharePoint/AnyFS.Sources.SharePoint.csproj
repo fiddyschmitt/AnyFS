@@ -4,24 +4,22 @@
     <RootNamespace>AnyFS.Sources.SharePoint</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
-    <!-- MSAL (MIT): the Microsoft identity platform sign-in for SharePoint Online and Embedded; trim-clean (spike 9).
-         Microsoft Graph and SharePoint's REST API are spoken with HttpClient and System.Text.Json directly: the
-         handful of calls a file system needs is not worth the Graph SDK's size under the trimmed single-file publish. -->
-    <PackageReference Include="Microsoft.Identity.Client" />
     <!-- ReverseMarkdown (MIT) over AngleSharp (MIT): a site's pages show as Markdown (SharePointPages). MarkItDown's
          .NET ports carry cloud SDKs and image libraries for other formats; HTML is all a page is. -->
     <PackageReference Include="ReverseMarkdown" />
     <PackageReference Include="AngleSharp" />
-    <!-- System.Threading.RateLimiting (MIT, the .NET runtime's own): the pace of requests to SharePoint Online (RequestPace) -->
-    <PackageReference Include="System.Threading.RateLimiting" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
     <!-- the web session (with its Selenium WebDriver fallback), Windows account credentials, ResponseStream, MemoryFile -->
     <ProjectReference Include="..\Common\AnyFS.Sources.Common.csproj" />
+    <!-- the Microsoft clouds, the app sign-in (MSAL) and Microsoft Graph's calls, which Outlook shares; SharePoint's REST
+         API is spoken with HttpClient and System.Text.Json directly, as Graph is -->
+    <ProjectReference Include="..\Microsoft365\AnyFS.Sources.Microsoft365.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Using Include="AnyFS.Sources.Common" />
+    <Using Include="AnyFS.Sources.Microsoft365" />
   </ItemGroup>
   <ItemGroup>
     <!-- the type's icon (OpenIcon): sharepoint.svg (the user's, 23-Oct-2026) rendered at 64 px, since the window draws

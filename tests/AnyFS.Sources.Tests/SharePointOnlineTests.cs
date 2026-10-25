@@ -4,6 +4,7 @@ using System.Text.Json;
 using AnyFS.Fixtures;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
+using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.SharePoint;
 
 namespace AnyFS.Sources.Tests;
@@ -146,19 +147,24 @@ public class GraphClientTests
     public void MapsGraphErrorsToVfsErrors()
     {
         static string Body(string code) => "{\"error\":{\"code\":\"" + code + "\",\"message\":\"m\"}}";
-        Assert.AreEqual(VfsError.NotFound, GraphClient.MapError(HttpStatusCode.NotFound, Body("itemNotFound"), "p").Error);
-        Assert.AreEqual(VfsError.AlreadyExists, GraphClient.MapError(HttpStatusCode.Conflict, Body("nameAlreadyExists"), "p").Error);
-        Assert.AreEqual(VfsError.AccessDenied, GraphClient.MapError(HttpStatusCode.Forbidden, Body("accessDenied"), "p").Error);
-        Assert.AreEqual(VfsError.AccessDenied, GraphClient.MapError(HttpStatusCode.Locked, Body("resourceLocked"), "p").Error);
-        Assert.AreEqual(VfsError.InvalidPath, GraphClient.MapError(HttpStatusCode.BadRequest, Body("invalidRequest"), "p").Error);
-        Assert.AreEqual(VfsError.Unavailable, GraphClient.MapError(HttpStatusCode.TooManyRequests, Body("activityLimitReached"), "p").Error);
-        Assert.AreEqual(VfsError.Unavailable, GraphClient.MapError(HttpStatusCode.InternalServerError, Body("generalException"), "p").Error);
-        Assert.AreEqual(VfsError.Unavailable, GraphClient.MapError(HttpStatusCode.Unauthorized, "", "p").Error);
-        Assert.AreEqual(VfsError.IoError, GraphClient.MapError(HttpStatusCode.InsufficientStorage, Body("quotaLimitReached"), "p").Error);
-        Assert.AreEqual(VfsError.NotSupported, GraphClient.MapError(HttpStatusCode.BadRequest, Body("notSupported"), "p").Error);
-        Assert.AreEqual(VfsError.IoError, GraphClient.MapError(HttpStatusCode.Gone, "not json", "p").Error);
+        Assert.AreEqual(VfsError.NotFound, GraphClient.MapError(HttpStatusCode.NotFound, Body("itemNotFound"), "p", SharePointPlugin.Service).Error);
+        Assert.AreEqual(VfsError.AlreadyExists, GraphClient.MapError(HttpStatusCode.Conflict, Body("nameAlreadyExists"), "p", SharePointPlugin.Service).Error);
+        Assert.AreEqual(VfsError.AccessDenied, GraphClient.MapError(HttpStatusCode.Forbidden, Body("accessDenied"), "p", SharePointPlugin.Service).Error);
+        Assert.AreEqual(VfsError.AccessDenied, GraphClient.MapError(HttpStatusCode.Locked, Body("resourceLocked"), "p", SharePointPlugin.Service).Error);
+        Assert.AreEqual(VfsError.InvalidPath, GraphClient.MapError(HttpStatusCode.BadRequest, Body("invalidRequest"), "p", SharePointPlugin.Service).Error);
+        Assert.AreEqual(VfsError.Unavailable, GraphClient.MapError(HttpStatusCode.TooManyRequests, Body("activityLimitReached"), "p", SharePointPlugin.Service).Error);
+        Assert.AreEqual(VfsError.Unavailable, GraphClient.MapError(HttpStatusCode.InternalServerError, Body("generalException"), "p", SharePointPlugin.Service).Error);
+        Assert.AreEqual(VfsError.Unavailable, GraphClient.MapError(HttpStatusCode.Unauthorized, "", "p", SharePointPlugin.Service).Error);
+        Assert.AreEqual(VfsError.IoError, GraphClient.MapError(HttpStatusCode.InsufficientStorage, Body("quotaLimitReached"), "p", SharePointPlugin.Service).Error);
+        Assert.AreEqual(VfsError.NotSupported, GraphClient.MapError(HttpStatusCode.BadRequest, Body("notSupported"), "p", SharePointPlugin.Service).Error);
+        Assert.AreEqual(VfsError.IoError, GraphClient.MapError(HttpStatusCode.Gone, "not json", "p", SharePointPlugin.Service).Error);
         Assert.AreEqual("itemNotFound", GraphClient.ErrorCode(Body("itemNotFound")));
         Assert.AreEqual("", GraphClient.ErrorCode("<html>"));
+
+        // the messages name the service the client works for
+        StringAssert.Contains(GraphClient.MapError(HttpStatusCode.TooManyRequests, "", "p", SharePointPlugin.Service).Message, "SharePoint is throttling this app");
+        StringAssert.Contains(GraphClient.MapError(HttpStatusCode.InsufficientStorage, Body("quotaLimitReached"), "p", SharePointPlugin.Service).Message, "the site is out of storage");
+        StringAssert.Contains(GraphClient.MapError(HttpStatusCode.ServiceUnavailable, "", "p", new Microsoft365Service("Exchange Online", "outlook", "the mailbox")).Message, "Exchange Online answered 503");
     }
 
     [TestMethod]
@@ -170,7 +176,7 @@ public class GraphClientTests
              "createdDateTime":"2026-01-02T03:04:05Z","lastModifiedDateTime":"2026-02-03T04:05:06Z",
              "fileSystemInfo":{"createdDateTime":"2025-12-31T00:00:00Z","lastModifiedDateTime":"2026-02-01T00:00:00Z"}}
             """);
-        var (entry, item) = GraphClient.ParseItem(file.RootElement);
+        var (entry, item) = GraphDrives.ParseItem(file.RootElement);
         Assert.AreEqual("report.docx", entry.Name);
         Assert.IsFalse(entry.IsDirectory);
         Assert.AreEqual(1234, entry.Length);
@@ -181,14 +187,14 @@ public class GraphClientTests
         Assert.AreEqual("https://x.sharepoint.com/dl?tempauth=1", item.DownloadUrl);
 
         using var folder = JsonDocument.Parse("""{"id":"01DEF","name":"Design","size":99,"folder":{"childCount":3},"lastModifiedDateTime":"2026-02-03T04:05:06Z"}""");
-        var (dirEntry, dirItem) = GraphClient.ParseItem(folder.RootElement);
+        var (dirEntry, dirItem) = GraphDrives.ParseItem(folder.RootElement);
         Assert.IsTrue(dirEntry.IsDirectory);
         Assert.AreEqual(0, dirEntry.Length, "folders report no size");
         Assert.IsTrue(dirItem.IsFolder);
         Assert.IsNull(dirEntry.Created);
 
         using var drive = JsonDocument.Parse("""{"id":"b!x","name":"Documents","driveType":"documentLibrary","quota":{"total":27487790694400,"remaining":27487700000000,"used":90694400}}""");
-        var info = GraphClient.ParseDrive(drive.RootElement);
+        var info = GraphDrives.ParseDrive(drive.RootElement);
         Assert.AreEqual("Documents", info.Name);
         Assert.AreEqual(27487790694400, info.QuotaTotal);
         Assert.AreEqual(27487700000000, info.QuotaRemaining);
@@ -209,7 +215,7 @@ public class SharePointOnlinePluginTests
 
         settings.SiteUrl = "https://contoso.sharepoint.com/sites/Team";
         Assert.AreEqual(0, plugin.Validate(settings).Count());
-        Assert.AreEqual(SharePointPlugin.DefaultClientId, settings.EffectiveClientId);
+        Assert.AreEqual(EntraSignIn.DefaultClientId, settings.EffectiveClientId);
         Assert.AreEqual("organizations", settings.EffectiveTenant);
         Assert.AreEqual(SignInMethod.Browser, settings.Method);
     }
@@ -548,7 +554,7 @@ public class SharePointOnlineLiveTests
     /// <summary>Files at the edges of Graph's one-request upload and of an upload session's pieces (the last a single byte).</summary>
     [TestMethod]
     public Task FilesAtTheUploadLimitsRoundTrip() => Target.UploadsRoundTripAsync(
-        GraphClient.SimpleUploadLimit, GraphClient.SimpleUploadLimit + 1, GraphClient.UploadChunkSize, GraphClient.UploadChunkSize + 1);
+        GraphDrives.SimpleUploadLimit, GraphDrives.SimpleUploadLimit + 1, GraphDrives.UploadChunkSize, GraphDrives.UploadChunkSize + 1);
 
     [TestMethod]
     public async Task CaseInsensitiveLookupsAndLargeUpload()

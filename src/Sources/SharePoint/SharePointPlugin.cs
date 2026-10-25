@@ -78,7 +78,7 @@ public sealed class SharePointSettings
 
     [Setting("Client ID", Advanced = true, Order = 11, Group = "Sign-in",
         Hint = "The app registration AnyFS signs in as. Leave the default unless your organisation registered its own for AnyFS; in the US Government cloud it must have, since AnyFS's own exists only in the global cloud. For SharePoint Embedded, an app registered on the container type.")]
-    public string ClientId { get; set; } = SharePointPlugin.DefaultClientId;
+    public string ClientId { get; set; } = EntraSignIn.DefaultClientId;
 
     [Setting("Browser", Advanced = true, Order = 12, Kind = SettingKind.FilePath,
         Hint = "The Edge, Chrome or Chromium to open for the web session's sign-in. Leave empty to find one automatically. AnyFS opens it with a profile of its own, never your everyday browser's.")]
@@ -151,7 +151,7 @@ public sealed class SharePointSettings
     };
 
     /// <summary>The Microsoft sign-in flavour for <see cref="EntraSignIn"/>: a device code when chosen, else the browser.</summary>
-    internal SignInMethod Method => EffectiveSignIn == SharePointSignIn.AppDeviceCode ? SharePoint.SignInMethod.DeviceCode : SharePoint.SignInMethod.Browser;
+    internal SignInMethod Method => EffectiveSignIn == SharePointSignIn.AppDeviceCode ? Microsoft365.SignInMethod.DeviceCode : Microsoft365.SignInMethod.Browser;
 
     internal string? PinnedLibrary => string.IsNullOrWhiteSpace(Library) ? null : Library.Trim();
 
@@ -165,7 +165,7 @@ public sealed class SharePointSettings
 
     internal string? Browser => string.IsNullOrWhiteSpace(BrowserPath) ? null : BrowserPath.Trim();
 
-    internal string EffectiveClientId => string.IsNullOrWhiteSpace(ClientId) ? SharePointPlugin.DefaultClientId : ClientId.Trim();
+    internal string EffectiveClientId => string.IsNullOrWhiteSpace(ClientId) ? EntraSignIn.DefaultClientId : ClientId.Trim();
 
     /// <summary>The cloud to sign in to: the one chosen, else the site's (a .sharepoint.us site is US Government), else the tenant's.</summary>
     internal MicrosoftCloud EffectiveCloud => MicrosoftCloud.Resolve(Cloud, Kind == SharePointKind.Online ? SiteHost : null, Tenant);
@@ -204,7 +204,7 @@ public sealed class SharePointSettings
     /// <summary>The credentials for the Windows sign-in: DOMAIN\name is split, name@domain is passed as a user principal name, none means the account AnyFS runs as.</summary>
     internal ICredentials Credentials() => Common.WindowsAccount.Credentials(IsWindowsCurrent, Username, Password);
 
-    private bool IsShippedClientId => string.Equals(EffectiveClientId, SharePointPlugin.DefaultClientId, StringComparison.OrdinalIgnoreCase);
+    private bool IsShippedClientId => string.Equals(EffectiveClientId, EntraSignIn.DefaultClientId, StringComparison.OrdinalIgnoreCase);
 
     private string? SiteHost => SiteAddress.TryParse(FirstSite, out var site, out _) ? site.Host : null;
 
@@ -230,13 +230,19 @@ public sealed class SharePointSettings
 /// </summary>
 public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, ISettingVisibility
 {
-    /// <summary>The AnyFS app registration (provisioning/sharepoint/README.md): a multi-tenant public client with delegated Graph scopes, in the global cloud only.</summary>
-    public const string DefaultClientId = "824dc5b9-f3c4-42b7-871d-6f0de8bc0a4a";
+    /// <summary>The service SharePoint's sign-ins and Graph calls are for, as their messages and log lines name it.</summary>
+    internal static readonly Microsoft365Service Service = new("SharePoint", "sharepoint", "the site");
 
-    /// <summary>The delegated Graph permissions an organisation's own registration needs for a site (<see cref="EntraSignIn.SiteScopes"/>), as messages list them.</summary>
+    /// <summary>The delegated Microsoft Graph scopes for a SharePoint Online site; AnyFS's app registration lists the same (provisioning/sharepoint/register-app.ps1).</summary>
+    internal static readonly string[] SiteScopes = ["User.Read", "Files.ReadWrite.All", "Sites.ReadWrite.All"];
+
+    /// <summary>The delegated Microsoft Graph scopes for SharePoint Embedded containers (spec 7.5): the one scope Embedded uses, which the container type's registration then narrows per app.</summary>
+    internal static readonly string[] ContainerScopes = ["User.Read", "FileStorageContainer.Selected"];
+
+    /// <summary>The delegated Graph permissions an organisation's own registration needs for a site (<see cref="SiteScopes"/>), as messages list them.</summary>
     internal const string SitePermissions = "User.Read, Files.ReadWrite.All and Sites.ReadWrite.All";
 
-    /// <summary>The same for SharePoint Embedded (<see cref="EntraSignIn.ContainerScopes"/>).</summary>
+    /// <summary>The same for SharePoint Embedded (<see cref="ContainerScopes"/>).</summary>
     internal const string ContainerPermissions = "User.Read and FileStorageContainer.Selected";
 
     /// <summary>What an organisation's own registration for SharePoint Embedded needs besides its permissions.</summary>
@@ -481,17 +487,6 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
                 yield return new ValidationMessage("The account is a sign-in name like name@contoso.com.", nameof(SharePointSettings.Account));
             }
 
-            var tenant = string.IsNullOrWhiteSpace(s.Tenant) ? "organizations" : s.Tenant.Trim();
-            if (tenant.Any(char.IsWhiteSpace) || tenant.Contains('/'))
-            {
-                yield return new ValidationMessage("The tenant is organizations, a domain like contoso.onmicrosoft.com, or a tenant id.", nameof(SharePointSettings.Tenant));
-            }
-
-            if (!Guid.TryParse(s.EffectiveClientId, out _))
-            {
-                yield return new ValidationMessage("The client ID is the app registration's Application (client) ID, a GUID.", nameof(SharePointSettings.ClientId));
-            }
-
             var siteHost = kind == SharePointKind.Online && SiteAddress.TryParse(s.FirstSite, out var site, out _) ? site.Host : null;
             var embedded = kind == SharePointKind.Embedded;
             foreach (var message in CloudSettings.Check(s.Cloud, s.EffectiveCloud, s.Tenant, s.EffectiveClientId, siteHost,
@@ -574,10 +569,10 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
             return new TestResult(false, CloudSettings.OwnRegistrationNeeded(cloud, SitePermissions));
         }
 
-        var app = await TestSignInAsync(s, EntraSignIn.SiteScopes, cloud, progress, standIn, ct).ConfigureAwait(false);
+        var app = await TestSignInAsync(s, SiteScopes, cloud, progress, standIn, ct).ConfigureAwait(false);
 
         // the store is not disposed: it would dispose the client, which the using here does
-        using var graph = new GraphClient(app.Token, NullLogger.Instance, handler: standIn?.Handler(), cloud: cloud);
+        using var graph = new GraphClient(app.Token, NullLogger.Instance, Service, handler: standIn?.Handler(), cloud: cloud);
         if (s.IsMultiSite)
         {
             progress.Report($"Signed in as {app.Username}; looking up {s.Sites.Count} sites");
@@ -683,8 +678,8 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
             return new TestResult(false, CloudSettings.OwnRegistrationNeeded(cloud, ContainerPermissions, ContainerRegistrationExtra));
         }
 
-        var app = await TestSignInAsync(s, EntraSignIn.ContainerScopes, cloud, progress, standIn, ct).ConfigureAwait(false);
-        using var graph = new GraphClient(app.Token, NullLogger.Instance, handler: standIn?.Handler(), cloud: cloud);
+        var app = await TestSignInAsync(s, ContainerScopes, cloud, progress, standIn, ct).ConfigureAwait(false);
+        using var graph = new GraphClient(app.Token, NullLogger.Instance, Service, handler: standIn?.Handler(), cloud: cloud);
         try
         {
             if (s.PinnedContainerId is { } id)
@@ -833,7 +828,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
     /// <summary>The Microsoft sign-in for an app sign-in, as the settings describe it.</summary>
     internal static EntraSignIn MicrosoftSignIn(SharePointSettings s, IReadOnlyList<string> scopes, Action<string> progress, Func<string, string, Task>? prompt, Func<byte[]?> loadCache, Action<byte[]> saveCache, Microsoft.Extensions.Logging.ILogger? logger = null)
-        => new(new SignInOptions(s.EffectiveClientId, s.EffectiveTenant, s.LoginHint, s.Method, scopes, progress, prompt, loadCache, saveCache, Cloud: s.EffectiveCloud), logger ?? NullLogger.Instance);
+        => new(new SignInOptions(Service, s.EffectiveClientId, s.EffectiveTenant, s.LoginHint, s.Method, scopes, progress, prompt, loadCache, saveCache, Cloud: s.EffectiveCloud), logger ?? NullLogger.Instance);
 }
 
 /// <summary>A SharePoint source of whichever kind its address is, signed in as its settings say (<see cref="SharePointPlugin"/>).</summary>
@@ -962,9 +957,9 @@ public sealed class SharePointSiteSource : SharePointSource
         SiteAddress.TryParse(_settings.FirstSite, out var site, out _);
         var cloud = _settings.EffectiveCloud;
         RefuseWithoutOwnRegistration(cloud, SharePointPlugin.SitePermissions);
-        var signIn = await SignInAppAsync(EntraSignIn.SiteScopes, cloud, ct).ConfigureAwait(false);
+        var signIn = await SignInAppAsync(SharePointPlugin.SiteScopes, cloud, ct).ConfigureAwait(false);
 
-        var graph = new GraphClient(signIn.Token, Logger, MarkDegraded, MarkHealthy, _standIn?.Handler(), cloud, RequestPace.ForHost(site.Host));
+        var graph = new GraphClient(signIn.Token, Logger, SharePointPlugin.Service, MarkDegraded, MarkHealthy, _standIn?.Handler(), cloud, RequestPace.ForHost(site.Host));
         if (_settings.IsMultiSite)
         {
             // the source opens the sites itself, and leaves out those that do not open
@@ -1009,10 +1004,10 @@ public sealed class SharePointSiteSource : SharePointSource
         _settings.TryGetContainerType(out var containerType);
         var cloud = _settings.EffectiveCloud;
         RefuseWithoutOwnRegistration(cloud, SharePointPlugin.ContainerPermissions, SharePointPlugin.ContainerRegistrationExtra);
-        var signIn = await SignInAppAsync(EntraSignIn.ContainerScopes, cloud, ct).ConfigureAwait(false);
+        var signIn = await SignInAppAsync(SharePointPlugin.ContainerScopes, cloud, ct).ConfigureAwait(false);
 
         // containers have no site host to go by: their pace is the account's
-        var graph = new GraphClient(signIn.Token, Logger, MarkDegraded, MarkHealthy, _standIn?.Handler(), cloud, RequestPace.For(signIn.Username ?? containerType.ToString()));
+        var graph = new GraphClient(signIn.Token, Logger, SharePointPlugin.Service, MarkDegraded, MarkHealthy, _standIn?.Handler(), cloud, RequestPace.For(signIn.Username ?? containerType.ToString()));
         Progress($"Listing the containers of type {containerType}");
         try
         {

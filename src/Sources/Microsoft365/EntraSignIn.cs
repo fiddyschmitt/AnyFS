@@ -7,7 +7,7 @@ using Microsoft.Identity.Client;
 using LogLevel = Microsoft.Extensions.Logging.LogLevel;
 using MsalLogLevel = Microsoft.Identity.Client.LogLevel;
 
-namespace AnyFS.Sources.SharePoint;
+namespace AnyFS.Sources.Microsoft365;
 
 /// <summary>How the user signs in when there is no token to reuse.</summary>
 public enum SignInMethod
@@ -18,8 +18,9 @@ public enum SignInMethod
     DeviceCode,
 }
 
-/// <summary>What a sign-in needs from its caller: the app and tenant, how to talk to the user, and where the token cache lives.</summary>
-/// <param name="Scopes">The delegated Microsoft Graph scopes to ask for: <see cref="EntraSignIn.SiteScopes"/> or <see cref="EntraSignIn.ContainerScopes"/>.</param>
+/// <summary>What a sign-in needs from its caller: who it is for, the app and tenant, how to talk to the user, and where the token cache lives.</summary>
+/// <param name="Service">The service signed in to, as the device-code prompt and the log lines name it.</param>
+/// <param name="Scopes">The delegated Microsoft Graph scopes to ask for: SharePoint's for a site or for Embedded's containers, Outlook's for a mailbox.</param>
 /// <param name="Progress">One-line status while signing in ("Waiting for the sign-in in your browser").</param>
 /// <param name="Prompt">Puts a message in front of the user without waiting for an answer (the device code), or null when nobody can be asked.</param>
 /// <param name="LoadCache">The serialised MSAL cache from the last run, or null.</param>
@@ -27,7 +28,8 @@ public enum SignInMethod
 /// <param name="OpenBrowser">Shows the sign-in page: false when it could not (the device code is used instead). Null: the system browser.</param>
 /// <param name="ForceLogin">The browser sign-in asks for credentials rather than offering the browser's signed-in accounts (for signing in as exactly the named account).</param>
 /// <param name="Cloud">The Microsoft cloud to sign in to and whose Graph the scopes are for; null: the global cloud.</param>
-internal sealed record SignInOptions(
+public sealed record SignInOptions(
+    Microsoft365Service Service,
     string ClientId,
     string Tenant,
     string? LoginHint,
@@ -42,19 +44,16 @@ internal sealed record SignInOptions(
     MicrosoftCloud? Cloud = null);
 
 /// <summary>
-/// The Microsoft identity platform sign-in behind the SharePoint source's app sign-in (Online and Embedded), on MSAL. Silent
-/// first (the cache from the last run, refresh tokens included); otherwise the system browser or a device
-/// code, as the settings say. The cache is handed back to the caller serialised, so the source keeps it in its
-/// secret store; a process-wide copy also bridges the settings dialog's Test button and the source it then
-/// starts, so the user signs in once.
+/// The Microsoft identity platform sign-in behind the Microsoft 365 sources' app sign-ins (SharePoint Online and
+/// Embedded, Exchange Online), on MSAL. Silent first (the cache from the last run, refresh tokens included); otherwise
+/// the system browser or a device code, as the settings say. The cache is handed back to the caller serialised, so the
+/// source keeps it in its secret store; a process-wide copy also bridges the settings dialog's Test button and the
+/// source it then starts, so the user signs in once.
 /// </summary>
-internal sealed class EntraSignIn
+public sealed class EntraSignIn
 {
-    /// <summary>The delegated Microsoft Graph scopes for a SharePoint Online site; the app registration lists the same (provisioning/sharepoint/register-app.ps1).</summary>
-    public static readonly string[] SiteScopes = ["User.Read", "Files.ReadWrite.All", "Sites.ReadWrite.All"];
-
-    /// <summary>The delegated Microsoft Graph scopes for SharePoint Embedded containers (spec 7.5): the one scope Embedded uses, which the container type's registration then narrows per app.</summary>
-    public static readonly string[] ContainerScopes = ["User.Read", "FileStorageContainer.Selected"];
+    /// <summary>The AnyFS app registration (provisioning/sharepoint/README.md): a multi-tenant public client with delegated Graph scopes, in the global cloud only.</summary>
+    public const string DefaultClientId = "824dc5b9-f3c4-42b7-871d-6f0de8bc0a4a";
 
     private static readonly TimeSpan InteractiveTimeout = TimeSpan.FromMinutes(10);
     private static readonly ConcurrentDictionary<string, byte[]> RecentCaches = new(StringComparer.Ordinal);
@@ -97,6 +96,8 @@ internal sealed class EntraSignIn
     /// <summary>The signed-in account's name, once <see cref="SignInAsync"/> has succeeded.</summary>
     public string? Username => _account?.Username;
 
+    private string Prefix => _options.Service.LogPrefix;
+
     /// <summary>The scopes asked for, qualified for the cloud (for tests).</summary>
     internal IReadOnlyList<string> Scopes => _scopes;
 
@@ -125,19 +126,19 @@ internal sealed class EntraSignIn
                 {
                     var silent = await Silent(preferred, forceRefresh: false).ExecuteAsync(ct).ConfigureAwait(false);
                     _account = silent.Account;
-                    _logger.LogDebug("sharepoint: signed in silently as {Account} (token from {Source})", silent.Account.Username, silent.AuthenticationResultMetadata.TokenSource);
+                    _logger.LogDebug("{Prefix}: signed in silently as {Account} (token from {Source})", Prefix, silent.Account.Username, silent.AuthenticationResultMetadata.TokenSource);
                     return;
                 }
                 catch (MsalThrottledUiRequiredException ex) when (attempt <= 4)
                 {
                     // MSAL replays a recent refusal for a while rather than ask the server again; that is not a
                     // reason to make the user sign in, so wait it out before deciding
-                    _logger.LogInformation("sharepoint: the sign-in for {Account} is throttled ({Code}); waiting 30 s before trying again", preferred.Username, ex.ErrorCode);
+                    _logger.LogInformation("{Prefix}: the sign-in for {Account} is throttled ({Code}); waiting 30 s before trying again", Prefix, preferred.Username, ex.ErrorCode);
                     await Task.Delay(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
                 }
                 catch (MsalUiRequiredException ex)
                 {
-                    _logger.LogInformation("sharepoint: the saved sign-in for {Account} needs renewing ({Code}: {Message})", preferred.Username, ex.ErrorCode, ex.Message.Split('\n')[0].Trim());
+                    _logger.LogInformation("{Prefix}: the saved sign-in for {Account} needs renewing ({Code}: {Message})", Prefix, preferred.Username, ex.ErrorCode, ex.Message.Split('\n')[0].Trim());
                     break;
                 }
             }
@@ -156,7 +157,7 @@ internal sealed class EntraSignIn
             }
             catch (NoBrowserException)
             {
-                _logger.LogInformation("sharepoint: no browser could be opened; asking for a device-code sign-in instead");
+                _logger.LogInformation("{Prefix}: no browser could be opened; asking for a device-code sign-in instead", Prefix);
                 result = await DeviceCodeAsync(ct).ConfigureAwait(false);
             }
         }
@@ -259,12 +260,12 @@ internal sealed class EntraSignIn
             return await _app.AcquireTokenWithDeviceCode(_scopes, code =>
             {
                 _options.Progress(code.Message);
-                _logger.LogInformation("sharepoint: {Message}", code.Message);
+                _logger.LogInformation("{Prefix}: {Message}", Prefix, code.Message);
                 if (_options.Prompt is { } prompt)
                 {
                     // shown, not awaited: MSAL is polling for the sign-in meanwhile
-                    _ = prompt("Sign in to SharePoint", code.Message).ContinueWith(
-                        t => _logger.LogDebug(t.Exception, "sharepoint: the device-code prompt could not be shown"),
+                    _ = prompt($"Sign in to {_options.Service.Name}", code.Message).ContinueWith(
+                        t => _logger.LogDebug(t.Exception, "{Prefix}: the device-code prompt could not be shown", Prefix),
                         TaskContinuationOptions.OnlyOnFaulted);
                 }
 
@@ -299,7 +300,7 @@ internal sealed class EntraSignIn
             case 53000 or 53003 or 530035:
                 return "your organisation's Conditional Access policy blocked this sign-in (the device-code flow is often blocked: choose the browser sign-in in the settings)";
             case 50059 or 700016:
-                return !cloud.HasShippedRegistration && string.Equals(clientId, SharePointPlugin.DefaultClientId, StringComparison.OrdinalIgnoreCase)
+                return !cloud.HasShippedRegistration && string.Equals(clientId, DefaultClientId, StringComparison.OrdinalIgnoreCase)
                     ? $"AnyFS's own app registration exists only in Microsoft's global cloud, not the {cloud.Name} cloud: put your organisation's own registration's client ID in the settings"
                     : $"the app registration {clientId} does not exist in the {cloud.Name} cloud{(organizations ? "" : $" for tenant {tenant}")}: check the Client ID, Tenant and Cloud settings";
             case 50194:
@@ -409,9 +410,12 @@ internal sealed class EntraSignIn
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
-            _logger.LogWarning(ex, "sharepoint: the sign-in could not be saved; it will be asked for again next time");
+            _logger.LogWarning(ex, "{Prefix}: the sign-in could not be saved; it will be asked for again next time", Prefix);
         }
     }
 
     private sealed class NoBrowserException : Exception;
 }
+
+/// <summary>An app sign-in, done: who it is, and its bearer tokens (true after a 401: a fresh one), from MSAL or a test's stand-in.</summary>
+public sealed record AppSignIn(string? Username, Func<CancellationToken, bool, Task<string>> Token);

@@ -31,6 +31,9 @@
   <Folder Name="/src/Sources/Common/">
     <Project Path="src/Sources/Common/AnyFS.Sources.Common.csproj" />
   </Folder>
+  <Folder Name="/src/Sources/Microsoft365/">
+    <Project Path="src/Sources/Microsoft365/AnyFS.Sources.Microsoft365.csproj" />
+  </Folder>
   <Folder Name="/src/Sources/Mirror/">
     <Project Path="src/Sources/Mirror/AnyFS.Sources.Mirror.csproj" />
   </Folder>

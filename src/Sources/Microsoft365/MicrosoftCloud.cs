@@ -1,7 +1,7 @@
 using AnyFS.Sdk;
 using Microsoft.Identity.Client;
 
-namespace AnyFS.Sources.SharePoint;
+namespace AnyFS.Sources.Microsoft365;
 
 /// <summary>
 /// The Microsoft cloud a Microsoft 365 tenant lives in (spec 7.3): where its accounts sign in, where its Microsoft
@@ -127,48 +127,69 @@ public sealed class MicrosoftCloud
 }
 
 /// <summary>
-/// The checks an app sign-in's settings get about the cloud, the tenant and the client ID, for an Online site or
-/// Embedded's containers (the messages point at <see cref="SharePointSettings"/>' properties).
+/// The checks an app sign-in's settings get: the tenant and the client ID as written, then the cloud, the tenant and the
+/// client ID together, for a SharePoint Online site, SharePoint Embedded's containers or an Exchange Online mailbox. The
+/// messages point at the settings' properties by the names every Microsoft 365 source gives them
+/// (<see cref="CloudProperty"/>, <see cref="TenantProperty"/>, <see cref="ClientIdProperty"/>).
 /// </summary>
-internal static class CloudSettings
+public static class CloudSettings
 {
+    public const string CloudProperty = "Cloud";
+
+    public const string TenantProperty = "Tenant";
+
+    public const string ClientIdProperty = "ClientId";
+
     /// <param name="choice">The Cloud setting as stored.</param>
     /// <param name="cloud">The cloud the source will sign in to.</param>
-    /// <param name="siteHost">The site's host, for an Online site; null for Embedded.</param>
-    /// <param name="permissions">The delegated Graph permissions an organisation's own registration needs, as the message lists them.</param>
-    /// <param name="tenantRequired">Whether a cloud other than the global one needs the tenant named (Embedded, which has no site to take it from).</param>
+    /// <param name="tenant">The Tenant setting as stored.</param>
+    /// <param name="clientId">The client ID the sign-in goes as: the setting, or AnyFS's own when it is empty.</param>
+    /// <param name="siteHost">The site's host, for a SharePoint Online site; null otherwise.</param>
+    /// <param name="permissions">The delegated Microsoft Graph permissions an organisation's own registration needs, as the message lists them.</param>
+    /// <param name="tenantRequired">Whether a cloud other than the global one needs the tenant named (Embedded, which has no site or address to take it from).</param>
     /// <param name="extra">What else the registration needs, after its permissions (", and registers it on the container type").</param>
     public static IEnumerable<ValidationMessage> Check(string? choice, MicrosoftCloud cloud, string? tenant, string clientId, string? siteHost, string permissions, bool tenantRequired, string extra = "")
     {
+        var written = string.IsNullOrWhiteSpace(tenant) ? "organizations" : tenant.Trim();
+        if (written.Any(char.IsWhiteSpace) || written.Contains('/'))
+        {
+            yield return new ValidationMessage("The tenant is organizations, a domain like contoso.onmicrosoft.com, or a tenant id.", TenantProperty);
+        }
+
+        if (!Guid.TryParse(clientId, out _))
+        {
+            yield return new ValidationMessage("The client ID is the app registration's Application (client) ID, a GUID.", ClientIdProperty);
+        }
+
         if (!MicrosoftCloud.IsChoice(choice))
         {
-            yield return new ValidationMessage($"The cloud is {MicrosoftCloud.AutomaticName}, {MicrosoftCloud.GlobalName} or {MicrosoftCloud.UsGovernmentName}.", nameof(SharePointSettings.Cloud));
+            yield return new ValidationMessage($"The cloud is {MicrosoftCloud.AutomaticName}, {MicrosoftCloud.GlobalName} or {MicrosoftCloud.UsGovernmentName}.", CloudProperty);
             yield break;
         }
 
         if (MicrosoftCloud.FromName(choice) is { } chosen && MicrosoftCloud.FromSiteHost(siteHost) is { } siteCloud && !ReferenceEquals(chosen, siteCloud))
         {
-            yield return new ValidationMessage($"{siteHost} is a site in the {siteCloud.Name} cloud: choose {MicrosoftCloud.AutomaticName} or {siteCloud.Name}.", nameof(SharePointSettings.Cloud));
+            yield return new ValidationMessage($"{siteHost} is a site in the {siteCloud.Name} cloud: choose {MicrosoftCloud.AutomaticName} or {siteCloud.Name}.", CloudProperty);
         }
 
         if (MicrosoftCloud.FromTenant(tenant) is { } tenantCloud && !ReferenceEquals(tenantCloud, cloud))
         {
-            yield return new ValidationMessage($"{tenant!.Trim()} is a tenant in the {tenantCloud.Name} cloud, not the {cloud.Name} cloud this source signs in to.", nameof(SharePointSettings.Tenant));
+            yield return new ValidationMessage($"{tenant!.Trim()} is a tenant in the {tenantCloud.Name} cloud, not the {cloud.Name} cloud this source signs in to.", TenantProperty);
         }
         else if (tenantRequired && !cloud.IsGlobal && (string.IsNullOrWhiteSpace(tenant) || string.Equals(tenant.Trim(), "organizations", StringComparison.OrdinalIgnoreCase)))
         {
-            yield return new ValidationMessage($"In the {cloud.Name} cloud, give your tenant: its domain, like contoso.{cloud.TenantDomain}, or its id.", nameof(SharePointSettings.Tenant));
+            yield return new ValidationMessage($"In the {cloud.Name} cloud, give your tenant: its domain, like contoso.{cloud.TenantDomain}, or its id.", TenantProperty);
         }
 
         if (NeedsOwnRegistration(cloud, clientId))
         {
-            yield return new ValidationMessage(OwnRegistrationNeeded(cloud, permissions, extra), nameof(SharePointSettings.ClientId));
+            yield return new ValidationMessage(OwnRegistrationNeeded(cloud, permissions, extra), ClientIdProperty);
         }
     }
 
     /// <summary>Whether the client ID is AnyFS's own in a cloud where it does not exist.</summary>
     public static bool NeedsOwnRegistration(MicrosoftCloud cloud, string clientId)
-        => !cloud.HasShippedRegistration && string.Equals(clientId, SharePointPlugin.DefaultClientId, StringComparison.OrdinalIgnoreCase);
+        => !cloud.HasShippedRegistration && string.Equals(clientId, EntraSignIn.DefaultClientId, StringComparison.OrdinalIgnoreCase);
 
     public static string OwnRegistrationNeeded(MicrosoftCloud cloud, string permissions, string extra = "")
         => $"AnyFS's own app registration exists only in Microsoft's global cloud. In the {cloud.Name} cloud, an administrator registers an app in your tenant " +

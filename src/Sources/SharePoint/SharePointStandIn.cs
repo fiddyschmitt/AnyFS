@@ -21,6 +21,3 @@ internal sealed record SharePointStandIn(
     Func<CancellationToken, bool, Task<string>> Token,
     Func<bool, CancellationToken, Task<IReadOnlyList<SessionCookie>>> Cookies,
     string BrowserName = "a stand-in browser");
-
-/// <summary>An app sign-in, done: who it is, and its bearer tokens (true after a 401: a fresh one), from MSAL or a test's stand-in.</summary>
-internal sealed record AppSignIn(string? Username, Func<CancellationToken, bool, Task<string>> Token);

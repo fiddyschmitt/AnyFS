@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sources.Microsoft365</AssemblyName>
+    <RootNamespace>AnyFS.Sources.Microsoft365</RootNamespace>
+  </PropertyGroup>
+  <!-- What the Microsoft 365 sources share (spec 7.0): the Microsoft clouds, the Microsoft identity platform's sign-in as
+       AnyFS's app registration or an organisation's own, and Microsoft Graph's calls at a tenant's pace. SharePoint's app
+       sign-ins use it, and Outlook's for Exchange Online. -->
+  <ItemGroup>
+    <!-- MSAL (MIT): the Microsoft identity platform sign-in; trim-clean (spike 9). Microsoft Graph is spoken with
+         HttpClient and System.Text.Json directly: the handful of calls a file system needs is not worth the Graph SDK's
+         size under the trimmed single-file publish. -->
+    <PackageReference Include="Microsoft.Identity.Client" />
+    <!-- System.Threading.RateLimiting (MIT, the .NET runtime's own): the pace of requests to a tenant (RequestPace) -->
+    <PackageReference Include="System.Threading.RateLimiting" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <!-- SignInRequiredException -->
+    <ProjectReference Include="..\Common\AnyFS.Sources.Common.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="AnyFS.Sources.Common" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
+  </ItemGroup>
+</Project>
