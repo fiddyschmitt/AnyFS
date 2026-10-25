@@ -21,7 +21,8 @@ internal static class CalendarFile
         Line(sb, "METHOD:PUBLISH");
         Line(sb, "BEGIN:VEVENT");
         Line(sb, "UID:" + (a.Uid ?? item.Summary.Id.Replace('/', '.') + "@anyfs.invalid"));
-        Line(sb, "DTSTAMP:" + Utc(item.Modified ?? item.Created ?? DateTimeOffset.UtcNow));
+        // the same each time the file is made (a file's bytes must not change while its size and date stay)
+        Line(sb, "DTSTAMP:" + Utc(item.Modified ?? item.Created ?? a.Start ?? item.Sent ?? item.Received ?? DateTimeOffset.UnixEpoch));
         if (a.Start is { } start)
         {
             if (a.AllDay)

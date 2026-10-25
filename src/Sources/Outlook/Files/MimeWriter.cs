@@ -394,10 +394,11 @@ internal static class MimeWriter
     {
         var html = item.BodyHtml ?? (item.BodyRtf is { } rtf && item.BodyText is null ? RtfText.HtmlFromRtf(rtf) : null);
         var text = item.BodyText ?? (html is null && item.BodyRtf is { } only ? RtfText.PlainText(only) : null);
+        var boundaries = new Boundaries(item.Summary.Id);
         Part content;
         if (html is not null && text is not null)
         {
-            content = new Multipart("alternative", [new TextPart("text/plain", text), new TextPart("text/html", html)]);
+            content = new Multipart("alternative", boundaries.Next(), [new TextPart("text/plain", text), new TextPart("text/html", html)]);
         }
         else if (html is not null)
         {
@@ -411,7 +412,7 @@ internal static class MimeWriter
         var inline = item.Attachments.Where(a => a.IsInline && a.ContentId is not null && !a.IsMessage).ToList();
         if (inline.Count > 0)
         {
-            content = new Multipart("related", [content, .. inline.Select(a => (Part)new FilePart(a, fileNameOf(a), inline: true))]);
+            content = new Multipart("related", boundaries.Next(), [content, .. inline.Select(a => (Part)new FilePart(a, fileNameOf(a), inline: true))]);
         }
 
         var rest = item.Attachments.Where(a => !inline.Contains(a)).ToList();
@@ -430,10 +431,27 @@ internal static class MimeWriter
                 }
             }
 
-            content = new Multipart("mixed", parts);
+            content = new Multipart("mixed", boundaries.Next(), parts);
         }
 
         return content;
+    }
+
+    /// <summary>
+    /// A message's multipart boundaries, the same each time the message is written: a file's bytes must not change while
+    /// its size and date stay (a message's files are made again every few minutes; a sync or backup tool comparing
+    /// contents saw message.eml change). Each is a hash of the item's id and the part's place, after "=_", which neither
+    /// quoted-printable nor base64 content can hold.
+    /// </summary>
+    private sealed class Boundaries(string itemId)
+    {
+        private int _count;
+
+        public string Next()
+        {
+            var hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes($"{itemId}#{++_count}"));
+            return "----=_AnyFS_" + Convert.ToHexStringLower(hash.AsSpan(0, 16));
+        }
     }
 
     private abstract class Part
@@ -566,24 +584,22 @@ internal static class MimeWriter
         public override void WriteContent(Stream s) => Base64(s, new MemoryStream(cms, writable: false));
     }
 
-    private sealed class Multipart(string subtype, IReadOnlyList<Part> parts) : Part
+    private sealed class Multipart(string subtype, string boundary, IReadOnlyList<Part> parts) : Part
     {
-        private readonly string _boundary = "----=_AnyFS_" + Guid.NewGuid().ToString("N");
-
-        public override void WriteHeaders(Stream s) => Ascii(s, $"Content-Type: multipart/{subtype}; boundary=\"{_boundary}\"\r\n");
+        public override void WriteHeaders(Stream s) => Ascii(s, $"Content-Type: multipart/{subtype}; boundary=\"{boundary}\"\r\n");
 
         public override void WriteContent(Stream s)
         {
             foreach (var part in parts)
             {
-                Ascii(s, $"--{_boundary}\r\n");
+                Ascii(s, $"--{boundary}\r\n");
                 part.WriteHeaders(s);
                 Ascii(s, "\r\n");
                 part.WriteContent(s);
                 Ascii(s, "\r\n");
             }
 
-            Ascii(s, $"--{_boundary}--\r\n");
+            Ascii(s, $"--{boundary}--\r\n");
         }
     }
 

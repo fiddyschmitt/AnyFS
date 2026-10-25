@@ -595,6 +595,32 @@ public class MimeWriterTests
         StringAssert.Contains(eml, "Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n");
     }
 
+    /// <summary>A message's files are made again every few minutes: the same bytes each time, or a sync tool sees them change.</summary>
+    [TestMethod]
+    public void TheSameMessageIsTheSameBytesEachTimeItIsWritten()
+    {
+        MailItem Item(string id) => new()
+        {
+            Summary = new MailItemSummary(id, MailItemKind.Message, "Hello", "Jane", null, null, null, 0, true),
+            MessageClass = "IPM.Note",
+            BodyText = "Hi",
+            BodyHtml = "<p>Hi</p>",
+            Attachments =
+            [
+                new MailAttachment("dot.png", "image/png", "dot", true, 3, _ => Task.FromResult<Stream>(new MemoryStream([1, 2, 3])), null),
+                File("a.txt", "text/plain", [65]),
+            ],
+        };
+
+        var first = MimeWriter.Build(Item("200024"));
+        CollectionAssert.AreEqual(first, MimeWriter.Build(Item("200024")), "written again, the same bytes");
+        var boundaries = System.Text.RegularExpressions.Regex.Matches(Encoding.ASCII.GetString(first), "boundary=\"([^\"]+)\"").Select(m => m.Groups[1].Value).ToList();
+        Assert.AreEqual(3, boundaries.Count);
+        Assert.AreEqual(3, boundaries.Distinct().Count(), "alternative, related and mixed each have their own");
+        Assert.IsTrue(boundaries.All(b => b.StartsWith("----=_AnyFS_", StringComparison.Ordinal)), "after =_, which no encoded content holds");
+        CollectionAssert.AreNotEqual(first, MimeWriter.Build(Item("200044")), "another item, other boundaries");
+    }
+
     // --- S/MIME as a data file keeps it ([MS-OXOSMIME] 2.1.3) -------------------------------------------------------------
 
     /// <summary>The signed entity as Outlook stores it: the whole multipart/signed entity, its own MIME-Version first, the Content-Type folded.</summary>
