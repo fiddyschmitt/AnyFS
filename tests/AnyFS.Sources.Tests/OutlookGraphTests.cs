@@ -60,7 +60,7 @@ public class OutlookGraphTests
         var server = new OutlookSettings { Path = "https://mail.contoso.com", SignInMethod = OutlookSettings.AppBrowser };
         Assert.AreEqual(OutlookSignIn.WindowsCurrent, server.EffectiveSignIn);
         Assert.IsTrue(plugin.Validate(server).Any(m => !m.IsError && m.Property == nameof(OutlookSettings.SignInMethod)));
-        Assert.IsFalse(plugin.Validate(server).Any(m => m.IsError));
+        Assert.AreEqual(OperatingSystem.IsWindows() ? 0 : 1, plugin.Validate(server).Count(m => m.IsError), "as yourself, which works on Windows only");
         Assert.IsTrue(plugin.Validate(new OutlookSettings { Path = "jane@contoso.com", SignInMethod = OutlookSettings.Windows }).Any(m => m.IsError && m.Property == nameof(OutlookSettings.SignInMethod)), "a mailbox on Exchange Online takes no Windows account");
     }
 

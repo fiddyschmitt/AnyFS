@@ -38,7 +38,7 @@ public class OutlookWebSessionTests
         var server = new OutlookSettings { Path = "https://mail.contoso.com/EWS/Exchange.asmx" };
         Assert.AreEqual(OutlookKind.Server, server.Kind);
         Assert.AreEqual(OutlookSignIn.WindowsCurrent, server.EffectiveSignIn, "the web session is Exchange Online's; a server takes a Windows account");
-        Assert.IsFalse(plugin.Validate(server).Any(m => m.IsError));
+        Assert.AreEqual(OperatingSystem.IsWindows() ? 0 : 1, plugin.Validate(server).Count(m => m.IsError), "as yourself, which works on Windows only");
         Assert.IsFalse(plugin.IsVisible(server, nameof(OutlookSettings.Cloud)));
         Assert.AreEqual(OutlookKind.None, new OutlookSettings { Path = "not an address" }.Kind);
         Assert.AreEqual(OutlookKind.DataFile, new OutlookSettings { Path = @"C:\mail\archive.ost" }.Kind);

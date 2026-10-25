@@ -72,8 +72,10 @@ public class OutlookPluginTests
     [TestMethod]
     public void TheFileNamesTheSource()
     {
-        Assert.AreEqual("archive", _plugin.SuggestName(new OutlookSettings { Path = @"C:\Users\me\Documents\Outlook Files\archive.pst" }));
-        Assert.AreEqual("jane@contoso.com", _plugin.SuggestName(new OutlookSettings { Path = @"C:\Users\jane\AppData\Local\Microsoft\Outlook\jane@contoso.com.ost" }));
+        var documents = OperatingSystem.IsWindows() ? @"C:\Users\me\Documents\Outlook Files\" : "/home/me/Documents/Outlook Files/";
+        var outlook = OperatingSystem.IsWindows() ? @"C:\Users\jane\AppData\Local\Microsoft\Outlook\" : "/home/jane/mail/";
+        Assert.AreEqual("archive", _plugin.SuggestName(new OutlookSettings { Path = documents + "archive.pst" }));
+        Assert.AreEqual("jane@contoso.com", _plugin.SuggestName(new OutlookSettings { Path = outlook + "jane@contoso.com.ost" }));
         Assert.IsNull(_plugin.SuggestName(new OutlookSettings()));
         var settings = new OutlookSettings { Path = "  \"C:\\mail\\old.pst\"  " };
         _plugin.NormaliseSettings(settings);
@@ -85,8 +87,8 @@ public class OutlookPluginTests
     {
         Assert.IsTrue(_plugin.Validate(new OutlookSettings()).Any(m => m.IsError && m.Property == nameof(OutlookSettings.Path)));
         var server = _plugin.Validate(new OutlookSettings { Path = "https://mail.contoso.com/EWS/Exchange.asmx" }).ToList();
-        Assert.IsFalse(server.Any(m => m.IsError), "a server's address with the default sign-in goes as yourself: nothing to type");
-        StringAssert.Contains(server.Single(m => m.Property == nameof(OutlookSettings.SignInMethod)).Message, "Windows account");
+        Assert.AreEqual(OperatingSystem.IsWindows() ? 0 : 1, server.Count(m => m.IsError), "a server's address with the default sign-in goes as yourself: nothing to type; elsewhere than Windows the choice is an error");
+        StringAssert.Contains(server.Single(m => m.Property == nameof(OutlookSettings.SignInMethod) && !m.IsError).Message, "Windows account");
         StringAssert.Contains(_plugin.Validate(new OutlookSettings { Path = @"C:\notes.txt" }).Single(m => m.IsError).Message, ".pst or .ost");
         var missing = _plugin.Validate(new OutlookSettings { Path = @"C:\no\such\file.pst" }).ToList();
         Assert.IsTrue(missing.Any(m => !m.IsError && m.Property == nameof(OutlookSettings.Path)), "a missing file is a warning: it may be on a drive not plugged in");
