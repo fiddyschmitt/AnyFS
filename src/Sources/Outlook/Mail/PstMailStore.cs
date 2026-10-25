@@ -1,5 +1,8 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using LibOutlook;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Sources.Outlook.Mail;
 
@@ -8,6 +11,11 @@ namespace AnyFS.Sources.Outlook.Mail;
 /// (Outlook's hidden ones left out unless asked for), each folder's items from its contents table (the summary cells,
 /// no item opened), and an item in full when it is opened. Items are named by their node id; an attached message by its
 /// parent's id and its place among the attachments ("200024/1"), since a PST gives it none of its own.
+///
+/// A file damaged in places (a heap whose records name allocations it has not, as an OST of years had) is served all but
+/// those places, as XstReader serves one: a folder whose own properties do not read keeps what its parent's table gives
+/// of it, an item whose own properties do not read is listed as its folder's table lists it (opening it says why it
+/// cannot be), a table that does not read lists what it gave before the fault, and each such place is logged once.
 /// </summary>
 internal sealed class PstMailStore : IMailStore
 {
@@ -19,26 +27,47 @@ internal sealed class PstMailStore : IMailStore
 
     private readonly string _path;
     private readonly bool _hidden;
+    private readonly ILogger _logger;
     private readonly object _gate = new();
+    private readonly ConcurrentDictionary<string, bool> _said = new(StringComparer.Ordinal);
     private PstFile _pst;
     private NamedIds _ids;
 
-    public PstMailStore(string path, bool includeHidden)
+    public PstMailStore(string path, bool includeHidden, ILogger? logger = null)
     {
         _path = path;
         _hidden = includeHidden;
+        _logger = logger ?? NullLogger.Instance;
         _pst = PstFile.Open(path);
-        _ids = new NamedIds(_pst.NamedProperties);
+        _ids = ReadNamedIds();
         Folders = MapFolders(_pst.TopFolder);
     }
 
-    public string Name => string.IsNullOrWhiteSpace(_pst.DisplayName) ? Path.GetFileNameWithoutExtension(_path) : _pst.DisplayName;
+    public string Name
+    {
+        get
+        {
+            try
+            {
+                return string.IsNullOrWhiteSpace(_pst.DisplayName) ? Path.GetFileNameWithoutExtension(_path) : _pst.DisplayName;
+            }
+            catch (PstException)
+            {
+                return Path.GetFileNameWithoutExtension(_path);
+            }
+        }
+    }
 
     public PstFormat Format => _pst.Format;
 
     public IReadOnlyList<MailFolder> Folders { get; private set; }
 
-    public Task<IReadOnlyList<MailItemSummary>> ItemsAsync(MailFolder folder, CancellationToken ct) => Task.FromResult<IReadOnlyList<MailItemSummary>>(Items(folder).ToList());
+    /// <summary>How many places of the file have not read in full so far (each logged once): folders, tables, items, the named-property map.</summary>
+    public int Damaged => _said.Count;
+
+    private string FileName => Path.GetFileName(_path);
+
+    public Task<IReadOnlyList<MailItemSummary>> ItemsAsync(MailFolder folder, CancellationToken ct) => Task.FromResult(Items(folder));
 
     public Task<MailItem?> OpenAsync(string itemId, CancellationToken ct) => Task.FromResult(Open(itemId));
 
@@ -48,25 +77,96 @@ internal sealed class PstMailStore : IMailStore
         lock (_gate)
         {
             _pst.Refresh();
-            _ids = new NamedIds(_pst.NamedProperties);
+            _ids = ReadNamedIds();
             Folders = MapFolders(_pst.TopFolder);
         }
 
         return Task.CompletedTask;
     }
 
-    internal IEnumerable<MailItemSummary> Items(MailFolder folder)
+    internal IReadOnlyList<MailItemSummary> Items(MailFolder folder)
     {
+        var items = new List<MailItemSummary>();
         var pstFolder = _pst.GetFolder(ParseNid(folder.Id));
-        if (pstFolder is null)
+        if (pstFolder is not null)
         {
-            yield break;
+            Gather(pstFolder.Messages, "items", folder, items);
+            if (_hidden)
+            {
+                Gather(pstFolder.AssociatedMessages, "hidden items", folder, items);
+            }
         }
 
-        var messages = _hidden ? pstFolder.Messages.Concat(pstFolder.AssociatedMessages) : pstFolder.Messages;
-        foreach (var message in messages)
+        return items;
+    }
+
+    /// <summary>A table's items into the list: one whose own properties do not read as its folder's table lists it; a table that faults gives what it gave before.</summary>
+    private void Gather(IEnumerable<PstMessage> messages, string what, MailFolder folder, List<MailItemSummary> into)
+    {
+        var before = into.Count;
+        try
         {
-            yield return Summarise(message, message.Nid.ToString("X", CultureInfo.InvariantCulture));
+            foreach (var message in messages)
+            {
+                if (Summary(message, folder) is { } summary)
+                {
+                    into.Add(summary);
+                }
+            }
+        }
+        catch (PstException ex)
+        {
+            Say($"{what}:{folder.Id}", "outlook: the {What} of '{Folder}' in {File} could not all be read, {Count} are listed: {Error}", what, folder.Name, FileName, into.Count - before, ex.Message);
+        }
+    }
+
+    private MailItemSummary? Summary(PstMessage message, MailFolder folder)
+    {
+        var id = message.Nid.ToString("X", CultureInfo.InvariantCulture);
+        try
+        {
+            return Summarise(message, id);
+        }
+        catch (PstException ex)
+        {
+            if (message.AsListed() is { } listed)
+            {
+                try
+                {
+                    var summary = Summarise(listed, id);
+                    Say($"item:{id}", "outlook: '{Subject}' in '{Folder}' of {File} is listed as its folder's table lists it; its own properties do not read: {Error}", summary.Subject, folder.Name, FileName, ex.Message);
+                    return summary;
+                }
+                catch (PstException)
+                {
+                    // not even the table's row: the item is left out
+                }
+            }
+
+            Say($"item:{id}", "outlook: an item of '{Folder}' in {File} could not be read and is left out: {Error}", folder.Name, FileName, ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>A damaged place, logged the first time it is met (a file Outlook writes is read again every few minutes).</summary>
+    private void Say(string place, string message, params object?[] args)
+    {
+        if (_said.TryAdd(place, true))
+        {
+            _logger.LogWarning(message, args);
+        }
+    }
+
+    private NamedIds ReadNamedIds()
+    {
+        try
+        {
+            return new NamedIds(_pst.NamedProperties);
+        }
+        catch (PstException ex)
+        {
+            Say("named", "outlook: the named-property map of {File} could not be read, so appointments' and contacts' details it names are left out: {Error}", FileName, ex.Message);
+            return NamedIds.None;
         }
     }
 
@@ -90,24 +190,58 @@ internal sealed class PstMailStore : IMailStore
 
     // --- folders ----------------------------------------------------------------------------------------------------------
 
+    /// <summary>The folders below one: of a folder whose own properties do not all read, what does (its name and kind come from its parent's table); subfolders that do not read are left out.</summary>
     private IReadOnlyList<MailFolder> MapFolders(PstFolder parent)
     {
         var list = new List<MailFolder>();
-        foreach (var folder in parent.Folders)
+        IReadOnlyList<PstFolder> children;
+        try
         {
-            if (!_hidden && folder.Properties.GetBoolean(AttributeHidden) == true)
+            children = parent.Folders;
+        }
+        catch (PstException ex)
+        {
+            Say($"folders:{parent.Nid:X}", "outlook: the subfolders of folder {Folder} in {File} could not be read and are left out: {Error}", parent.Nid.ToString("X", CultureInfo.InvariantCulture), FileName, ex.Message);
+            return list;
+        }
+
+        foreach (var folder in children)
+        {
+            string? problem = null;
+            T Read<T>(Func<T> read, T fallback)
+            {
+                try
+                {
+                    return read();
+                }
+                catch (PstException ex)
+                {
+                    problem ??= ex.Message;
+                    return fallback;
+                }
+            }
+
+            if (!_hidden && Read(() => folder.Properties.GetBoolean(AttributeHidden), null) == true)
             {
                 continue;
             }
 
-            list.Add(new MailFolder(
-                folder.Nid.ToString("X", CultureInfo.InvariantCulture),
-                folder.Name,
-                folder.ContainerClass,
+            var id = folder.Nid.ToString("X", CultureInfo.InvariantCulture);
+            var name = Read(() => folder.Name, "");
+            var mapped = new MailFolder(
+                id,
+                name.Length > 0 ? name : $"Folder {id}",
+                Read(() => folder.ContainerClass, null),
                 MapFolders(folder),
-                folder.ContentCount + (_hidden ? folder.AssociatedContentCount : 0),
-                Utc(folder.CreationTime),
-                Utc(folder.LastModificationTime)));
+                Read(() => folder.ContentCount + (_hidden ? folder.AssociatedContentCount : 0), 0),
+                Utc(Read(() => folder.CreationTime, null)),
+                Utc(Read(() => folder.LastModificationTime, null)));
+            if (problem is not null)
+            {
+                Say($"folder:{id}", "outlook: the folder '{Folder}' in {File} is shown with what reads of it; its own properties do not all read: {Error}", mapped.Name, FileName, problem);
+            }
+
+            list.Add(mapped);
         }
 
         return list;
@@ -329,6 +463,10 @@ internal sealed class PstMailStore : IMailStore
         private static readonly Guid Meeting = new("6ED8DA90-450B-101B-98DA-00AA003F1305");
         private static readonly Guid Address = new("00062004-0000-0000-C000-000000000046");
 
+        private NamedIds()
+        {
+        }
+
         public NamedIds(PstNamedProperties named)
         {
             AppointmentStart = named.Find(Appointment, 0x820D)?.PropertyId;
@@ -352,6 +490,9 @@ internal sealed class PstMailStore : IMailStore
             ImAddress = named.Find(Address, 0x8062)?.PropertyId;
             WebPage = named.Find(Address, 0x802B)?.PropertyId;
         }
+
+        /// <summary>None known: a file whose named-property map does not read.</summary>
+        public static NamedIds None { get; } = new();
 
         public ushort? AppointmentStart { get; }
 

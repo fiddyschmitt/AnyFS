@@ -232,7 +232,8 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
             };
             var top = string.Join(", ", store.Folders.Take(6).Select(f => f.Name)) + (store.Folders.Count > 6 ? ", …" : "");
             return new TestResult(folders > 0, $"{store.Name}: {kind} with {folders:N0} folder{(folders == 1 ? "" : "s")} and {items:N0} item{(items == 1 ? "" : "s")}{(top.Length == 0 ? "" : $" ({top})")}."
-                + (folders == 0 ? " The source would show nothing." : ""));
+                + (folders == 0 ? " The source would show nothing." : "")
+                + (store.Damaged > 0 ? $" Some of the file does not read in full ({store.Damaged} place{(store.Damaged == 1 ? "" : "s")}); the source serves the rest and its log names them." : ""));
         }
         catch (LibOutlook.PstException ex)
         {

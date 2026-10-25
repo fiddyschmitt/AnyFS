@@ -70,7 +70,7 @@ public sealed class OutlookSource : SourceBase
                 Context.ReportProgress($"Reading {Path.GetFileName(file)}");
                 try
                 {
-                    _store = await Task.Run(() => new PstMailStore(file, _settings.ShowHidden), ct).ConfigureAwait(false);
+                    _store = await Task.Run(() => new PstMailStore(file, _settings.ShowHidden, Logger), ct).ConfigureAwait(false);
                     _seen = Stamp(file);
                 }
                 catch (PstException ex)
@@ -127,6 +127,11 @@ public sealed class OutlookSource : SourceBase
         catch (PstException ex)
         {
             throw new SourceFailedException($"{Path.GetFileName(file)} could not be read as an Outlook data file: {ex.Message}", permanent: true, ex);
+        }
+
+        if (_store is PstMailStore { Damaged: > 0 } damaged)
+        {
+            Logger.LogWarning("outlook: {Count} places of {File} do not read in full (each named above); the rest of the file is served", damaged.Damaged, Path.GetFileName(file));
         }
 
         if (RefreshEvery > TimeSpan.Zero)
@@ -517,7 +522,10 @@ public sealed class OutlookSource : SourceBase
 
     // --- health -----------------------------------------------------------------------------------------------------------
 
-    /// <summary>Runs a read of the store: trouble upstream becomes Unavailable and Degraded, something gone NotFound; a success clears Degraded.</summary>
+    /// <summary>
+    /// Runs a read of the store: trouble upstream becomes Unavailable and Degraded, something gone NotFound; a success clears
+    /// Degraded. A data file's item that does not read is an I/O error of that item's alone: the rest of the file reads.
+    /// </summary>
     private async Task<T> RunAsync<T>(Func<Task<T>> read)
     {
         try
@@ -528,8 +536,7 @@ public sealed class OutlookSource : SourceBase
         }
         catch (PstException ex)
         {
-            MarkDegraded(ex.Message);
-            throw VfsException.Unavailable($"the Outlook data file could not be read: {ex.Message}");
+            throw new VfsException(VfsError.IoError, $"the Outlook data file does not read here: {ex.Message}");
         }
         catch (EwsException ex) when (ex.IsNotFound)
         {
