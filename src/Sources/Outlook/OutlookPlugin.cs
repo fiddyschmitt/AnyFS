@@ -13,7 +13,7 @@ namespace AnyFS.Sources.Outlook;
 /// A mailbox on Exchange Online through the web session (Outlook on the web, no app registration) or an app sign-in
 /// (Microsoft Graph), a mailbox on an Exchange server (EWS, a Windows account), or an Outlook data file (PST, OST).
 /// </summary>
-public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISettingVisibility
+public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISettingVisibility, IDetectable
 {
     /// <summary>The service the app sign-in and its Graph calls are for, as their messages and log lines name it.</summary>
     internal static readonly Microsoft365Service Service = new("Exchange Online", "outlook", "the mailbox");
@@ -180,6 +180,21 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
     }
 
     public Task<TestResult> TestAsync(object settings, IProgress<string> progress, CancellationToken ct) => TestAsync(settings, progress, null, ct);
+
+    /// <summary>Classic Outlook's profiles are in the Windows registry, and its data files in Windows folders.</summary>
+    public bool CanDetect => OperatingSystem.IsWindows();
+
+    /// <summary>The mailboxes and data files classic Outlook knows on this machine (<see cref="OutlookDetection"/>), read off the dialog's thread.</summary>
+    public async Task<IReadOnlyList<DetectedSource>> DetectAsync(IProgress<string> progress, CancellationToken ct)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return [];
+        }
+
+        progress.Report("Reading Outlook's profiles and data files");
+        return await Task.Run(() => OperatingSystem.IsWindows() ? OutlookDetection.Find(OutlookDetection.OnThisMachine()) : [], ct).ConfigureAwait(false);
+    }
 
     /// <summary>Opens the file, or signs in to the mailbox as the source will (a window where the saved sign-in has lapsed), and says what it holds.</summary>
     internal async Task<TestResult> TestAsync(object settings, IProgress<string> progress, OutlookStandIn? standIn, CancellationToken ct)
