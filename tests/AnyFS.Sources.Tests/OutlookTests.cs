@@ -86,8 +86,8 @@ public class OutlookPluginTests
     {
         var documents = OperatingSystem.IsWindows() ? @"C:\Users\me\Documents\Outlook Files\" : "/home/me/Documents/Outlook Files/";
         var outlook = OperatingSystem.IsWindows() ? @"C:\Users\jane\AppData\Local\Microsoft\Outlook\" : "/home/jane/mail/";
-        Assert.AreEqual("archive", _plugin.SuggestName(new OutlookSettings { Path = documents + "archive.pst" }));
-        Assert.AreEqual("jane@contoso.com", _plugin.SuggestName(new OutlookSettings { Path = outlook + "jane@contoso.com.ost" }));
+        Assert.AreEqual("archive.pst", _plugin.SuggestName(new OutlookSettings { Path = documents + "archive.pst" }));
+        Assert.AreEqual("jane@contoso.com.ost", _plugin.SuggestName(new OutlookSettings { Path = outlook + "jane@contoso.com.ost" }), "the whole name, as Outlook gave it");
         Assert.IsNull(_plugin.SuggestName(new OutlookSettings()));
         var settings = new OutlookSettings { Path = "  \"C:\\mail\\old.pst\"  " };
         _plugin.NormaliseSettings(settings);

@@ -42,7 +42,11 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
 
     public ISource CreateSource(object settings) => new OutlookSource((OutlookSettings)settings);
 
-    /// <summary>The mailbox's address, the server's host, or the file's name without its extension ("archive" for archive.pst).</summary>
+    /// <summary>
+    /// The mailbox's address with its cloud's Outlook on the web ("jane@agency.gov (outlook.office365.us)"; the address
+    /// alone while the cloud is left to the sign-in to find), Outlook on the web's host for its own address, the server's
+    /// host, or the file's name ("archive.pst").
+    /// </summary>
     public string? SuggestName(object settings)
     {
         var s = (OutlookSettings)settings;
@@ -53,9 +57,9 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
 
         var name = s.Kind switch
         {
-            OutlookKind.Mailbox => s.Address ?? s.WebHost!,
+            OutlookKind.Mailbox => s.Address is not { } address ? s.WebHost! : s.KnownCloud is { } cloud ? $"{address} ({cloud.OutlookHost})" : address,
             OutlookKind.Server => s.ServerUrl!.Host,
-            _ => Path.GetFileNameWithoutExtension(s.File.TrimEnd('\\', '/')),
+            _ => Path.GetFileName(s.File.TrimEnd('\\', '/')),
         };
         var safe = MailNames.Clean(MailNames.Replace(name));
         return safe.Length == 0 ? null : safe;

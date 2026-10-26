@@ -28,7 +28,10 @@ public class OutlookWebSessionTests
         var plugin = new OutlookPlugin();
         var mailbox = new OutlookSettings { Path = " Jane@Contoso.com " };
         Assert.AreEqual(OutlookKind.Mailbox, mailbox.Kind);
-        Assert.AreEqual("jane@contoso.com", plugin.SuggestName(mailbox));
+        Assert.AreEqual("jane@contoso.com", plugin.SuggestName(mailbox), "the cloud is the sign-in's to find: no host yet");
+        Assert.AreEqual("jane@agency.gov (outlook.office365.us)", plugin.SuggestName(new OutlookSettings { Path = "Jane@Agency.gov", Cloud = MicrosoftCloud.UsGovernmentName }));
+        Assert.AreEqual("jane@contoso.com (outlook.office.com)", plugin.SuggestName(new OutlookSettings { Path = "jane@contoso.com", Cloud = MicrosoftCloud.GlobalName }));
+        Assert.AreEqual("adele@contoso.onmicrosoft.com (outlook.office.com)", plugin.SuggestName(new OutlookSettings { Path = "adele@contoso.onmicrosoft.com" }), "a tenant's own domain says its cloud");
         plugin.NormaliseSettings(mailbox);
         Assert.AreEqual("jane@contoso.com", mailbox.Path);
         Assert.AreEqual(0, plugin.Validate(mailbox).Count(m => m.IsError), string.Join("; ", plugin.Validate(mailbox).Select(m => m.Message)));
