@@ -66,6 +66,14 @@ internal sealed class ItemFiles
         _ => 1,
     };
 
+    /// <summary>The names of the files an item makes in its folder, attachments aside, as <see cref="BuildAsync"/> names them: known before the item is opened.</summary>
+    public static string[] NamesOf(MailItemSummary item) => item.IsEvent ? [MailNames.EventMarkdown, MailNames.EventCalendar] : item.Kind switch
+    {
+        MailItemKind.Message => [MailNames.MessageMarkdown, MailNames.MessageMime],
+        MailItemKind.Appointment => [MailNames.MessageMarkdown, MailNames.MessageMime, MailNames.EventCalendar],
+        _ => [MailNames.ItemMarkdown(item.Kind)],
+    };
+
     public ItemFile? File(string name) => Files.FirstOrDefault(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase));
 
     public ItemFile? Attachment(string name) => Attachments.FirstOrDefault(f => string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase));

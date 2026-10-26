@@ -9,7 +9,8 @@ namespace AnyFS.Sources.Outlook.Mail;
 /// FindFolder (Outlook's own hidden folders left out unless asked for); each mail folder's items through
 /// SyncFolderItems, all of them the first time and only what changed after (the delta per folder the spec asks for);
 /// a calendar folder through a CalendarView over a window around now, recurring appointments expanded to their
-/// occurrences by the server; an item in full, MIME included, through GetItem when its folder is opened; attachments
+/// occurrences by the server; items in full, MIME included, through GetItem when their folders are opened, several in one
+/// request with all their attachments in the next (<see cref="OpenManyAsync"/>), or one alone with each attachment
 /// through GetAttachment when read. Item ids are the server's; an attached message is named by its parent's id and the
 /// attachment's, joined with '|'.
 /// </summary>
@@ -37,6 +38,8 @@ internal sealed class EwsMailStore : IMailStore
     public string Name { get; }
 
     public IReadOnlyList<MailFolder> Folders { get; private set; } = [];
+
+    public bool OpensTogether => true;
 
     /// <summary>How many items the synced folders hold between them (for logs and tests).</summary>
     public int ItemsKnown => _states.Values.Sum(s => s.Items.Count);
@@ -187,6 +190,87 @@ internal sealed class EwsMailStore : IMailStore
         }
 
         return item is null ? null : Build(item, id);
+    }
+
+    /// <summary>
+    /// The items in one GetItem, MIME included; then every attachment of theirs in GetAttachments of at most
+    /// <see cref="AttachmentsPerRequest"/> ids and <see cref="AttachmentBytesPerRequest"/> by the sizes the server gives
+    /// (a bigger one alone): a file's content, so its length is exact, and an attached item, so its message is made without
+    /// asking again. An attached message's own id (with '|') is opened alone.
+    /// </summary>
+    public async Task<IReadOnlyList<MailItem?>> OpenManyAsync(IReadOnlyList<string> itemIds, CancellationToken ct)
+    {
+        var whole = itemIds.Where(id => !id.Contains('|', StringComparison.Ordinal)).Distinct(StringComparer.Ordinal).ToList();
+        var fetched = await _ews.GetItemsAsync(whole, includeMime: true, ct).ConfigureAwait(false);
+        var items = new Dictionary<string, EwsItem>(StringComparer.Ordinal);
+        for (var i = 0; i < whole.Count; i++)
+        {
+            if (fetched[i] is { } item)
+            {
+                items[whole[i]] = item;
+            }
+        }
+
+        var contents = new Dictionary<string, EwsAttachmentContent>(StringComparer.Ordinal);
+        foreach (var chunk in Chunks(items.Values.SelectMany(i => i.Attachments).ToList()))
+        {
+            IReadOnlyList<EwsAttachmentContent?> got;
+            try
+            {
+                got = await _ews.GetAttachmentsAsync([.. chunk.Select(a => a.Id)], ct).ConfigureAwait(false);
+            }
+            catch (EwsException ex) when (!ex.Transient && ex.Code != "401")
+            {
+                // refused as a whole (a fault): each is fetched alone as its item's files are made, so one that fails fails its item alone
+                _logger.LogDebug("outlook: GetAttachment for {Count} attachments was refused ({Error}); each is asked for alone", chunk.Count, ex.Message);
+                continue;
+            }
+
+            for (var i = 0; i < chunk.Count; i++)
+            {
+                if (got[i] is { } content)
+                {
+                    contents[chunk[i].Id] = content;
+                }
+            }
+        }
+
+        var opened = new List<MailItem?>(itemIds.Count);
+        foreach (var id in itemIds)
+        {
+            opened.Add(id.Contains('|', StringComparison.Ordinal) ? await OpenAsync(id, ct).ConfigureAwait(false) : items.TryGetValue(id, out var item) ? Build(item, id, contents) : null);
+        }
+
+        return opened;
+    }
+
+    /// <summary>Attachments asked for at a time.</summary>
+    private const int AttachmentsPerRequest = 16;
+
+    /// <summary>What a GetAttachment may bring back at a time, by the sizes the server gives (8 MB); one bigger comes alone.</summary>
+    private const long AttachmentBytesPerRequest = 8L << 20;
+
+    private static IEnumerable<List<EwsAttachmentInfo>> Chunks(IReadOnlyList<EwsAttachmentInfo> attachments)
+    {
+        var chunk = new List<EwsAttachmentInfo>();
+        long bytes = 0;
+        foreach (var attachment in attachments)
+        {
+            if (chunk.Count > 0 && (chunk.Count == AttachmentsPerRequest || bytes + attachment.Size > AttachmentBytesPerRequest))
+            {
+                yield return chunk;
+                chunk = [];
+                bytes = 0;
+            }
+
+            chunk.Add(attachment);
+            bytes += attachment.Size;
+        }
+
+        if (chunk.Count > 0)
+        {
+            yield return chunk;
+        }
     }
 
     public void Dispose()
@@ -353,19 +437,32 @@ internal sealed class EwsMailStore : IMailStore
         return new MailItemSummary(id, kind, subject, sender, date, item.DateTimeCreated, item.LastModifiedTime, item.Size, item.HasAttachments) { IsEvent = isEvent };
     }
 
-    private MailItem Build(EwsItem item, string id)
+    /// <param name="contents">The attachments' contents fetched with the item (<see cref="OpenManyAsync"/>), by attachment id; one not there is fetched when read.</param>
+    private MailItem Build(EwsItem item, string id, IReadOnlyDictionary<string, EwsAttachmentContent>? contents = null)
     {
         var summary = Summarise(item, id, inCalendar: false);
-        var attachments = item.Attachments.Select(a => new MailAttachment(
-            a.IsItem && !a.Name.EndsWith(".eml", StringComparison.OrdinalIgnoreCase) ? a.Name + ".eml" : a.Name,
-            a.IsItem ? "message/rfc822" : Blank(a.ContentType) ?? ContentTypes.FromName(a.Name),
-            Blank(a.ContentId),
-            a.IsInline,
-            a.Size,
-            a.IsItem ? _ => Task.FromResult(Stream.Null) : ct => OpenAttachmentAsync(a.Id, ct),
-            a.IsItem ? ct => OpenEmbeddedAsync(id, a.Id, ct) : null,
-            a.IsContactPhoto,
-            ExactSize: false)).ToList();
+        var attachments = item.Attachments.Select(a =>
+        {
+            var name = a.IsItem && !a.Name.EndsWith(".eml", StringComparison.OrdinalIgnoreCase) ? a.Name + ".eml" : a.Name;
+            var contentType = a.IsItem ? "message/rfc822" : Blank(a.ContentType) ?? ContentTypes.FromName(a.Name);
+            if (contents?.GetValueOrDefault(a.Id) is not { } content)
+            {
+                return new MailAttachment(name, contentType, Blank(a.ContentId), a.IsInline, a.Size,
+                    a.IsItem ? _ => Task.FromResult(Stream.Null) : ct => OpenAttachmentAsync(a.Id, ct),
+                    a.IsItem ? ct => OpenEmbeddedAsync(id, a.Id, ct) : null,
+                    a.IsContactPhoto,
+                    ExactSize: false);
+            }
+
+            if (a.IsItem)
+            {
+                var embedded = content.Item is { } inner ? Build(inner, id + "|" + a.Id) : null;
+                return new MailAttachment(name, contentType, Blank(a.ContentId), a.IsInline, a.Size, _ => Task.FromResult(Stream.Null), _ => Task.FromResult(embedded), a.IsContactPhoto, ExactSize: false);
+            }
+
+            var bytes = content.Content ?? [];
+            return new MailAttachment(name, contentType, Blank(a.ContentId), a.IsInline, bytes.Length, _ => Task.FromResult<Stream>(new MemoryStream(bytes, writable: false)), null, a.IsContactPhoto, ExactSize: true);
+        }).ToList();
         var recipients = new List<MailRecipient>();
         recipients.AddRange(item.ToRecipients.Select(m => new MailRecipient(MailRecipientKind.To, Address(m))));
         recipients.AddRange(item.CcRecipients.Select(m => new MailRecipient(MailRecipientKind.Cc, Address(m))));

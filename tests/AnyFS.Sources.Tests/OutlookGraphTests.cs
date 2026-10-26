@@ -134,7 +134,7 @@ public class OutlookGraphTests
             CollectionAssert.AreEquivalent(new[] { "message.md", "message.eml", "attachments" }, (await OutlookFixtures.ListAsync(source, figures)).Select(e => e.Name).ToList());
             var eml = Encoding.ASCII.GetString(await OutlookFixtures.ReadAsync(source, $"{figures}/message.eml"));
             StringAssert.Contains(eml, "\r\nSubject: Quarterly figures\r\n");
-            Assert.AreEqual(1, Count(fake, p => p.StartsWith("me/messages/", StringComparison.Ordinal) && p.EndsWith("/$value", StringComparison.Ordinal) && !p.Contains("/attachments/", StringComparison.Ordinal)), "the .eml is the server's MIME");
+            Assert.AreEqual(2, Count(fake, p => p.StartsWith("me/messages/", StringComparison.Ordinal) && p.EndsWith("/$value", StringComparison.Ordinal) && !p.Contains("/attachments/", StringComparison.Ordinal)), "the .eml is the server's MIME: March's two messages, fetched together");
 
             var markdown = await OutlookFixtures.TextAsync(source, $"{figures}/message.md");
             StringAssert.Contains(markdown, "**From:** Adele Vance <adelev@fake.test>");
@@ -231,7 +231,7 @@ public class OutlookGraphTests
             var figures = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
             StringAssert.Contains(await OutlookFixtures.TextAsync(source, $"{figures}/message.eml"), "Subject: Quarterly figures");
             Assert.AreEqual(1, fake.Refusals, "the old token was refused once; the client asked for a fresh one");
-            Assert.AreEqual(2, throttled, "the throttled listing waited out its Retry-After and went again");
+            Assert.AreEqual(3, throttled, "March's two messages' attachments asked for together; the throttled one waited out its Retry-After and went again");
             Assert.AreEqual(ComponentHealth.Ready, context.LastHealth ?? ComponentHealth.Ready);
         }
     }

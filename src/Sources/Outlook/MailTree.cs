@@ -8,7 +8,15 @@ internal abstract class TreeNode(string name)
 {
     public string Name { get; } = name;
 
+    /// <summary>The folder the node is in (set as it is added); null for the root.</summary>
+    public DirNode? Parent { get; private set; }
+
     public abstract VfsEntry Entry { get; }
+
+    /// <summary>The item an item's folder or a contact's file is made of; null for a folder.</summary>
+    public virtual MailItemSummary? Item => null;
+
+    public void PlaceIn(DirNode parent) => Parent = parent;
 }
 
 /// <summary>A folder: one of the mailbox's, a year, a month. Children are looked up in either case.</summary>
@@ -36,6 +44,7 @@ internal sealed class DirNode(string name, MailFolder? folder, DateTimeOffset? c
     {
         _children.Add(node);
         _byName[node.Name] = node;
+        node.PlaceIn(this);
     }
 
     /// <summary>The year or month folder of this name, made when first needed.</summary>
@@ -92,7 +101,7 @@ internal sealed class DirNode(string name, MailFolder? folder, DateTimeOffset? c
 /// <summary>An item's folder: the message (or appointment, task, note) with its files inside, made when the folder is opened.</summary>
 internal sealed class ItemNode(string name, MailItemSummary item) : TreeNode(name)
 {
-    public MailItemSummary Item => item;
+    public override MailItemSummary Item => item;
 
     public override VfsEntry Entry => VfsEntry.Directory(Name, item.Date ?? item.Modified, item.Created ?? item.Date);
 }
@@ -100,7 +109,7 @@ internal sealed class ItemNode(string name, MailItemSummary item) : TreeNode(nam
 /// <summary>A contact: one .vcf file, made when it is listed or opened.</summary>
 internal sealed class ContactNode(string name, MailItemSummary item) : TreeNode(name)
 {
-    public MailItemSummary Item => item;
+    public override MailItemSummary Item => item;
 
     /// <summary>The entry before the card is made: its size is a placeholder until then (see <see cref="OutlookSource"/>).</summary>
     public override VfsEntry Entry => VfsEntry.File(Name, 0, item.Modified ?? item.Date, item.Created);
@@ -115,17 +124,21 @@ internal sealed class ContactNode(string name, MailItemSummary item) : TreeNode(
 /// </summary>
 internal sealed class MailTree
 {
-    private MailTree(DirNode root, long folders, long items, long files)
+    private MailTree(DirNode root, long folders, long items, long files, IReadOnlyDictionary<string, TreeNode> byId)
     {
         Root = root;
         FolderCount = folders;
         ItemCount = items;
         FileCount = files;
+        ById = byId;
     }
 
-    public static MailTree Empty { get; } = new(new DirNode("", null, null, null), 0, 0, 0);
+    public static MailTree Empty { get; } = new(new DirNode("", null, null, null), 0, 0, 0, new Dictionary<string, TreeNode>());
 
     public DirNode Root { get; }
+
+    /// <summary>Each item's node (its folder, or a contact's file), by the item's id.</summary>
+    public IReadOnlyDictionary<string, TreeNode> ById { get; }
 
     /// <summary>The folders, year and month folders and item folders.</summary>
     public long FolderCount { get; }
@@ -150,7 +163,7 @@ internal sealed class MailTree
         await AddFoldersAsync(root, store.Folders, store, ct, name => progress?.Invoke(++done, total, name)).ConfigureAwait(false);
         var counts = new Counts();
         Count(root, counts);
-        return new MailTree(root, counts.Folders, counts.Items, counts.Files);
+        return new MailTree(root, counts.Folders, counts.Items, counts.Files, counts.ById);
     }
 
     private static int CountFolders(IReadOnlyList<MailFolder> folders) => folders.Sum(f => 1 + CountFolders(f.Folders));
@@ -170,10 +183,12 @@ internal sealed class MailTree
                     counts.Folders++;
                     counts.Items++;
                     counts.Files += ItemFiles.CountOf(item.Item);
+                    counts.ById.TryAdd(item.Item.Id, item);
                     break;
-                case ContactNode:
+                case ContactNode contact:
                     counts.Items++;
                     counts.Files++;
+                    counts.ById.TryAdd(contact.Item.Id, contact);
                     break;
             }
         }
@@ -244,6 +259,7 @@ internal sealed class MailTree
 
     private sealed class Counts
     {
+        public readonly Dictionary<string, TreeNode> ById = new(StringComparer.Ordinal);
         public long Folders;
         public long Items;
         public long Files;

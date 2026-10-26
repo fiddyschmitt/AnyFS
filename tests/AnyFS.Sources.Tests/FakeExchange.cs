@@ -52,6 +52,9 @@ internal sealed partial class FakeExchange
     /// <summary>How many items GetItem was asked for, whatever the number of requests (several go in one).</summary>
     public int ItemsFetched { get; private set; }
 
+    /// <summary>How many items each GetItem asked for, in the order they came.</summary>
+    public List<int> ItemsPerRequest { get; } = [];
+
     /// <summary>How many attachments GetAttachment was asked for, whatever the number of requests.</summary>
     public int AttachmentsFetched { get; private set; }
 
@@ -412,6 +415,7 @@ internal sealed partial class FakeExchange
         // one response message per id asked for, in order, as Exchange answers
         var mime = shape?["IncludeMimeContent"]?.GetValue<bool>() == true;
         var messages = new List<JsonObject>();
+        ItemsPerRequest.Add(body["ItemIds"]?.AsArray().Count ?? 0);
         foreach (var asked in body["ItemIds"]?.AsArray() ?? [])
         {
             ItemsFetched++;
@@ -746,6 +750,7 @@ internal sealed partial class FakeExchange
     {
         var mime = string.Equals(operation.Element(M + "ItemShape")?.Element(T + "IncludeMimeContent")?.Value, "true", StringComparison.OrdinalIgnoreCase);
         var messages = new List<System.Xml.Linq.XElement>();
+        ItemsPerRequest.Add(operation.Element(M + "ItemIds")?.Elements(T + "ItemId").Count() ?? 0);
         foreach (var asked in operation.Element(M + "ItemIds")?.Elements(T + "ItemId") ?? [])
         {
             ItemsFetched++;

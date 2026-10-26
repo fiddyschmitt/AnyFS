@@ -390,7 +390,8 @@ public class OutlookWebSessionTests
                 refused.Headers.WwwAuthenticate.ParseAdd("Bearer");
                 return refused;
             };
-            var other = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Photo from the site visit");
+            // March's other message came with the figures above; April's is asked for now
+            var other = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/04", "Fwd: Photo from the site visit");
             var refusedTwice = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, $"{other}/message.eml"));
             Assert.AreEqual(VfsError.Unavailable, refusedTwice.Error);
             Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);

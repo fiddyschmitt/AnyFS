@@ -196,6 +196,33 @@ internal interface IMailStore : IDisposable
     /// <summary>An item with everything in it; null when the store no longer has it.</summary>
     Task<MailItem?> OpenAsync(string itemId, CancellationToken ct);
 
+    /// <summary>Whether <see cref="OpenManyAsync"/> opens several items at less cost than one at a time (a mailbox: one request); a data file opens them in turn.</summary>
+    bool OpensTogether => false;
+
+    /// <summary>
+    /// Several items opened together, in the order asked, each null when the store no longer has it or it does not read
+    /// (<see cref="OpenAsync"/> then says why); trouble with the store itself (the network, the sign-in) is thrown. A mailbox
+    /// asks its server for them in one request and for all their attachments in another, so each attachment comes with
+    /// its content and its exact length. By default each is opened in turn (a data file).
+    /// </summary>
+    async Task<IReadOnlyList<MailItem?>> OpenManyAsync(IReadOnlyList<string> itemIds, CancellationToken ct)
+    {
+        var opened = new List<MailItem?>(itemIds.Count);
+        foreach (var id in itemIds)
+        {
+            try
+            {
+                opened.Add(await OpenAsync(id, ct).ConfigureAwait(false));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                opened.Add(null);
+            }
+        }
+
+        return opened;
+    }
+
     /// <summary>Reads the folders (and what changed in them) afresh: the first call fills the store, later ones take in changes.</summary>
     Task RefreshAsync(CancellationToken ct);
 }

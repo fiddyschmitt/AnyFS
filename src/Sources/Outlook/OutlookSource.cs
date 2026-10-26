@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using AnyFS.Sdk;
 using AnyFS.Sources.Outlook.Ews;
 using AnyFS.Sources.Outlook.Files;
@@ -16,21 +17,42 @@ namespace AnyFS.Sources.Outlook;
 /// An Outlook source (spec 7.7): a mailbox on Exchange Online through the web session or an app sign-in, a mailbox on
 /// an Exchange server, or a PST or OST file; either way a mail store (<see cref="IMailStore"/>) whose folders and item
 /// names make the tree (<see cref="MailTree"/>), kept in memory, and whose items are opened when their folder is, each
-/// item a folder with the item as Markdown and .eml (or .ics, or a .vcf for a contact) and its attachments. Nothing of a
-/// message is written to disk. Every <see cref="OutlookSettings.RefreshMinutes"/> the store is asked what changed (a
-/// file: when it changed on disk; a mailbox: each folder's delta) and the tree swapped whole. Trouble upstream shows as
-/// Degraded until a read succeeds.
+/// item a folder with the item as Markdown and .eml (or .ics, or a .vcf for a contact) and its attachments. An item is
+/// opened with its neighbours, a mailbox's in one request (<see cref="PrepareAsync"/>), and its folder is listed after
+/// that from what its files came to (<see cref="ItemListings"/>: names, lengths, dates), kept between starts while the
+/// item is as it was. Nothing of a message is written to disk. Every <see cref="OutlookSettings.RefreshMinutes"/> the
+/// store is asked what changed (a file: when it changed on disk; a mailbox: each folder's delta) and the tree swapped
+/// whole. Trouble upstream shows as Degraded until a read succeeds.
 /// </summary>
 public sealed class OutlookSource : SourceBase, ICountable
 {
     private static readonly TimeSpan ItemsKeptFor = TimeSpan.FromMinutes(3);
     private const int ItemsKept = 512;
 
+    /// <summary>What the items' files kept in memory may come to, by their lengths (256 MB): the oldest go first.</summary>
+    private const long ItemsKeptBytes = 256L << 20;
+
+    /// <summary>Items opened together at most (<see cref="PrepareAsync"/>).</summary>
+    internal const int BatchItems = 16;
+
+    /// <summary>What items opened together may come to at most, by the sizes their folders list (8 MB): one bigger goes alone.</summary>
+    private const long BatchBytes = 8L << 20;
+
+    /// <summary>How often the items' listings are kept for the next start at most, while they change (and at every refresh and stop).</summary>
+    private static readonly TimeSpan ListingsKeptEvery = TimeSpan.FromMinutes(1);
+
     private readonly OutlookSettings _settings;
     private readonly OutlookStandIn? _standIn;
     private readonly CancellationTokenSource _stopping = new();
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
-    private readonly ConcurrentDictionary<string, (Lazy<Task<ItemFiles>> Files, DateTime At)> _items = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, KeptFiles> _items = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Task<ExceptionDispatchInfo?>> _pending = new(StringComparer.Ordinal);
+    private readonly ItemListings _listings = new();
+    private readonly SemaphoreSlim _listingsGate = new(1, 1);
+    private readonly Lock _trimGate = new();
+    private long _itemsBytes;
+    private long _listingsKept;
+    private DateTime _listingsKeptAt = DateTime.UtcNow;
     private volatile MailTree _tree = MailTree.Empty;
     private IMailStore? _store;
     private AddressBooks? _books;
@@ -135,6 +157,9 @@ public sealed class OutlookSource : SourceBase, ICountable
                 throw new SourceFailedException($"{file} is neither a mailbox's address, nor a server's, nor an Outlook data file (one ends in .pst or .ost).", permanent: true);
         }
 
+        // each item's listing as last made: a folder the item is still as it was in is served without asking for the item
+        _listings.Load(ListingsPath, StoreKey);
+
         // a mailbox listed before starts from that listing and asks for what changed since in the background
         var kept = _store is EwsMailStore mailbox ? MailboxIndexFile.Load(IndexPath, mailbox.Name, IndexShape) : null;
         if (kept is not null)
@@ -207,6 +232,53 @@ public sealed class OutlookSource : SourceBase, ICountable
 
     /// <summary>Where a mailbox's listing is kept between starts.</summary>
     private string IndexPath => Path.Combine(Context.StateDirectory, MailboxIndexFile.FileName);
+
+    /// <summary>Where the items' listings are kept between starts.</summary>
+    private string ListingsPath => Path.Combine(Context.StateDirectory, ItemListings.FileName);
+
+    /// <summary>Whose items the kept listings are of: the mailbox, or the data file by its full path.</summary>
+    private string StoreKey => _settings.Kind == OutlookKind.DataFile ? Path.GetFullPath(_settings.File!) : Store.Name;
+
+    /// <summary>
+    /// Keeps the items' listings for the next start when they changed since they were last kept, those of items no longer
+    /// listed left out: at once with <paramref name="now"/>, else at most every <see cref="ListingsKeptEvery"/>. With
+    /// <paramref name="wait"/> it waits for a keeping under way (the stop), else it leaves it to that one. Not before the
+    /// tree is built, which says which items are still there; a file that cannot be written is said and left.
+    /// </summary>
+    private async Task KeepListingsAsync(bool now, bool wait = false)
+    {
+        if (_listings.Changes == Interlocked.Read(ref _listingsKept) || !now && DateTime.UtcNow - _listingsKeptAt < ListingsKeptEvery || ReferenceEquals(_tree, MailTree.Empty))
+        {
+            return;
+        }
+
+        if (wait)
+        {
+            await _listingsGate.WaitAsync().ConfigureAwait(false);
+        }
+        else if (!await _listingsGate.WaitAsync(0).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        try
+        {
+            var changes = _listings.Changes;
+            var tree = _tree;
+            var kept = await Task.Run(() => _listings.Save(ListingsPath, StoreKey, tree.ById.ContainsKey)).ConfigureAwait(false);
+            Interlocked.Exchange(ref _listingsKept, changes);
+            _listingsKeptAt = DateTime.UtcNow;
+            Logger.LogDebug("outlook: kept the listings of {Count:N0} items for the next start", kept);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Logger.LogWarning("outlook: the items' listings could not be kept for the next start: {Error}", ex.Message);
+        }
+        finally
+        {
+            _listingsGate.Release();
+        }
+    }
 
     /// <summary>The settings a mailbox's listing depends on: one kept under others is not used.</summary>
     private string IndexShape => FormattableString.Invariant($"{_settings.Kind}|hidden={_settings.ShowHidden}|back={_settings.CalendarMonthsBack}|ahead={_settings.CalendarMonthsAhead}");
@@ -490,9 +562,10 @@ public sealed class OutlookSource : SourceBase, ICountable
             }
 
             Swap(await MailTree.BuildAsync(Store, ct, null, _books?.Node).ConfigureAwait(false));
-            _items.Clear();
+            ForgetFiles();
             Logger.LogInformation("outlook: {Name} read again in {Seconds:F1} s: {Folders:N0} folders, {Items:N0} items", Store.Name, Stopwatch.GetElapsedTime(started).TotalSeconds, _tree.FolderCount, _tree.ItemCount);
             await KeepListingAsync(ct).ConfigureAwait(false);
+            await KeepListingsAsync(now: true).ConfigureAwait(false);
             MarkHealthy();
         }
         finally
@@ -595,12 +668,19 @@ public sealed class OutlookSource : SourceBase, ICountable
                 return item.Entry;
             case ItemNode item:
                 {
-                    var files = await RunAsync(() => FilesAsync(item.Item, item.Name, ct)).ConfigureAwait(false);
+                    // the names in an item's folder are known before it is opened: another (Explorer's desktop.ini) is not looked for
+                    var inAttachments = rest[0].Equals(MailNames.AttachmentsFolder, StringComparison.OrdinalIgnoreCase);
+                    if (rest.Count > 2 || rest.Count == 2 && !inAttachments || rest.Count == 1 && !inAttachments && !ItemFiles.NamesOf(item.Item).Contains(rest[0], StringComparer.OrdinalIgnoreCase))
+                    {
+                        return null;
+                    }
+
+                    var listing = await RunAsync(() => ListingAsync(item, ct)).ConfigureAwait(false);
                     return rest.Count switch
                     {
-                        1 when files.File(rest[0]) is { } file => files.EntryOf(file),
-                        1 when files.HasAttachmentsFolder && rest[0].Equals(MailNames.AttachmentsFolder, StringComparison.OrdinalIgnoreCase) => files.AttachmentsEntry,
-                        2 when rest[0].Equals(MailNames.AttachmentsFolder, StringComparison.OrdinalIgnoreCase) && files.Attachment(rest[1]) is { } attachment => files.EntryOf(attachment),
+                        1 when listing.File(rest[0]) is { } file => listing.EntryOf(file),
+                        1 when inAttachments && listing.HasAttachmentsFolder => listing.AttachmentsEntry,
+                        2 when listing.Attachment(rest[1]) is { } attachment => listing.EntryOf(attachment),
                         _ => null,
                     };
                 }
@@ -653,27 +733,27 @@ public sealed class OutlookSource : SourceBase, ICountable
                 throw VfsException.NotADirectory(path);
             case ItemNode item:
                 {
-                    var files = await RunAsync(() => FilesAsync(item.Item, item.Name, ct)).ConfigureAwait(false);
+                    var listing = await RunAsync(() => ListingAsync(item, ct)).ConfigureAwait(false);
                     if (rest.Count == 0)
                     {
-                        foreach (var file in files.Files)
+                        foreach (var file in listing.Files)
                         {
-                            yield return files.EntryOf(file);
+                            yield return listing.EntryOf(file);
                         }
 
-                        if (files.HasAttachmentsFolder)
+                        if (listing.HasAttachmentsFolder)
                         {
-                            yield return files.AttachmentsEntry;
+                            yield return listing.AttachmentsEntry;
                         }
                     }
-                    else if (rest.Count == 1 && files.HasAttachmentsFolder && rest[0].Equals(MailNames.AttachmentsFolder, StringComparison.OrdinalIgnoreCase))
+                    else if (rest.Count == 1 && listing.HasAttachmentsFolder && rest[0].Equals(MailNames.AttachmentsFolder, StringComparison.OrdinalIgnoreCase))
                     {
-                        foreach (var attachment in files.Attachments)
+                        foreach (var attachment in listing.Attachments)
                         {
-                            yield return files.EntryOf(attachment);
+                            yield return listing.EntryOf(attachment);
                         }
                     }
-                    else if (rest.Count == 1 && files.File(rest[0]) is not null || rest.Count == 2 && files.Attachment(rest[1]) is not null)
+                    else if (rest.Count == 1 && listing.File(rest[0]) is not null || rest.Count == 2 && listing.Attachment(rest[1]) is not null)
                     {
                         throw VfsException.NotADirectory(path);
                     }
@@ -724,7 +804,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                     throw VfsException.NotFound(path);
                 }
 
-                var card = await RunAsync(() => FilesAsync(contact.Item, contact.Name, ct)).ConfigureAwait(false);
+                var card = await RunAsync(() => FilesAsync(contact, ct)).ConfigureAwait(false);
                 return new MemoryFile(card.Files[0].Bytes!, card.Files[0].What);
             case ItemNode item:
                 {
@@ -733,7 +813,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                         throw VfsException.IsADirectory(path);
                     }
 
-                    var files = await RunAsync(() => FilesAsync(item.Item, item.Name, ct)).ConfigureAwait(false);
+                    var files = await RunAsync(() => FilesAsync(item, ct)).ConfigureAwait(false);
                     var file = rest.Count switch
                     {
                         1 => files.File(rest[0]),
@@ -752,41 +832,335 @@ public sealed class OutlookSource : SourceBase, ICountable
 
     // --- items ------------------------------------------------------------------------------------------------------------
 
-    /// <summary>An item's files, made on the first ask and kept a while; the store is asked for the item again after that.</summary>
-    private Task<ItemFiles> FilesAsync(MailItemSummary item, string folderName, CancellationToken ct)
+    /// <summary>An item's files as made a little while ago, from the item as its folder lists it now, with what they come to in memory.</summary>
+    private sealed record KeptFiles(ItemFiles Files, string Stamp, DateTime At, long Bytes);
+
+    /// <summary>
+    /// An item's files: kept a while once made; on the first ask made with its neighbours' (<see cref="PrepareAsync"/>),
+    /// or, when those could not give it, alone, for the store to say why.
+    /// </summary>
+    private async Task<ItemFiles> FilesAsync(TreeNode node, CancellationToken ct)
     {
-        var now = DateTime.UtcNow;
-        if (_items.TryGetValue(item.Id, out var kept) && now - kept.At < ItemsKeptFor && !(kept.Files.IsValueCreated && kept.Files.Value.IsFaulted))
+        var item = node.Item!;
+        if (Kept(item) is { } kept)
         {
-            return kept.Files.Value;
+            return kept;
         }
 
-        if (_items.Count >= ItemsKept)
-        {
-            foreach (var old in _items.Where(e => now - e.Value.At >= ItemsKeptFor).Select(e => e.Key).ToList())
-            {
-                _items.TryRemove(old, out _);
-            }
+        await PrepareAsync(node, forFiles: true, ct).ConfigureAwait(false);
+        return Kept(item) ?? await AloneAsync(node, ct).ConfigureAwait(false);
+    }
 
-            if (_items.Count >= ItemsKept)
-            {
-                _items.Clear();
-            }
+    /// <summary>
+    /// What an item's folder lists (a contact's card's length): the listing kept from when the item's files were last
+    /// made, while its folder lists it as it was then; else made with its neighbours', or alone.
+    /// </summary>
+    private async Task<ItemListing> ListingAsync(TreeNode node, CancellationToken ct)
+    {
+        var item = node.Item!;
+        if (_listings.For(item) is { } listing)
+        {
+            return listing;
         }
 
-        var lazy = new Lazy<Task<ItemFiles>>(async () =>
+        // an S/MIME message's listing is not kept, but its files are, a while
+        if (Kept(item) is { } kept)
         {
-            var opened = await Store.OpenAsync(item.Id, CancellationToken.None).ConfigureAwait(false) ?? throw VfsException.NotFound(folderName);
-            return await ItemFiles.BuildAsync(opened, item, folderName, CancellationToken.None, _smimeKeys).ConfigureAwait(false);
-        });
-        _items[item.Id] = (lazy, now);
-        return lazy.Value;
+            return ItemListing.Of(kept);
+        }
+
+        await PrepareAsync(node, forFiles: false, ct).ConfigureAwait(false);
+        return _listings.For(item) ?? ItemListing.Of(Kept(item) ?? await AloneAsync(node, ct).ConfigureAwait(false));
     }
 
     private async Task<VfsEntry> CardEntryAsync(ContactNode contact, CancellationToken ct)
     {
-        var files = await FilesAsync(contact.Item, contact.Name, ct).ConfigureAwait(false);
-        return files.EntryOf(files.Files[0]);
+        var listing = await ListingAsync(contact, ct).ConfigureAwait(false);
+        return VfsEntry.File(contact.Name, listing.Files[0].Length, listing.Modified, listing.Created);
+    }
+
+    /// <summary>
+    /// Makes an item's files together with its neighbours' (spec 7.7): the item, then those after it in its folder (round
+    /// to the first), at most <see cref="BatchItems"/> of them and <see cref="BatchBytes"/> by the sizes the folder lists,
+    /// each without its files made (for a listing, without its listing either) and not being made. A mailbox opens them
+    /// together, in one request and their attachments in another, so a walk through a month of messages asks once for
+    /// every sixteen; a data file opens them in turn. Whoever asks for one of them meanwhile waits for that one, which is
+    /// let go as soon as it is made. When the store fails them as a whole for a reason of its own (the network, the
+    /// sign-in, a server too busy) they all fail with it; for another, or when it does not give one, that one is left to be
+    /// opened alone, which says why: one bad item does not fail its neighbours.
+    /// </summary>
+    /// <param name="forFiles">Whether the item's files are wanted (a file opened), not only what its folder lists.</param>
+    private async Task PrepareAsync(TreeNode node, bool forFiles, CancellationToken ct)
+    {
+        var item = node.Item!;
+        while (true)
+        {
+            if (_pending.TryGetValue(item.Id, out var running))
+            {
+                Ahead(node, forFiles);
+                Rethrow(await running.WaitAsync(ct).ConfigureAwait(false));
+                return;
+            }
+
+            var done = new TaskCompletionSource<ExceptionDispatchInfo?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!_pending.TryAdd(item.Id, done.Task))
+            {
+                continue;
+            }
+
+            // made by a batch that has just ended
+            if (Ready(item, forFiles))
+            {
+                Release(node, done, null);
+                return;
+            }
+
+            var batch = Neighbours(node, done, forFiles);
+            _ = Task.Run(() => MakeAsync(batch));
+            Ahead(node, forFiles);
+            Rethrow(await done.Task.WaitAsync(ct).ConfigureAwait(false));
+            return;
+        }
+    }
+
+    /// <summary>Throws a batch's failure when it is the store's as a whole, which asking for each item alone would only meet again.</summary>
+    private static void Rethrow(ExceptionDispatchInfo? failure)
+    {
+        if (failure?.SourceException is HttpRequestException or SignInRequiredException or IOException or OperationCanceledException or EwsException { Transient: true } or EwsException { Code: "401" })
+        {
+            failure.Throw();
+        }
+    }
+
+    /// <summary>
+    /// Starts the batch after the one an item is in, from the first item after it in its folder neither made nor being
+    /// made: a walk (FileLocator, a search) lists folders one at a time, so the next sixteen are on their way while it
+    /// lists the ones it waited for. Nobody waits for it; an item of it asked for meanwhile waits for that one as for any.
+    /// </summary>
+    private void Ahead(TreeNode node, bool forFiles)
+    {
+        var siblings = node.Parent?.Children ?? [];
+        var at = IndexIn(siblings, node);
+        for (var step = 1; at >= 0 && step < siblings.Count; step++)
+        {
+            var next = siblings[(at + step) % siblings.Count];
+            if (next.Item is not { } item || Ready(item, forFiles) || _pending.ContainsKey(item.Id))
+            {
+                continue;
+            }
+
+            var done = new TaskCompletionSource<ExceptionDispatchInfo?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (_pending.TryAdd(item.Id, done.Task))
+            {
+                var batch = Neighbours(next, done, forFiles);
+                _ = Task.Run(() => MakeAsync(batch));
+            }
+
+            return;
+        }
+    }
+
+    /// <summary>The item, then those after it in its folder (round to the first) still to be made and not being made, up to a batch, each taken (in <see cref="_pending"/>) with a waiter of its own.</summary>
+    private List<(TreeNode Node, TaskCompletionSource<ExceptionDispatchInfo?> Done)> Neighbours(TreeNode node, TaskCompletionSource<ExceptionDispatchInfo?> done, bool forFiles)
+    {
+        var chosen = new List<(TreeNode, TaskCompletionSource<ExceptionDispatchInfo?>)> { (node, done) };
+        var siblings = node.Parent?.Children ?? [];
+        var at = IndexIn(siblings, node);
+        var bytes = node.Item!.Size;
+        for (var step = 1; at >= 0 && step < siblings.Count && chosen.Count < BatchItems; step++)
+        {
+            var next = siblings[(at + step) % siblings.Count];
+            if (next.Item is not { } item || bytes + item.Size > BatchBytes || Ready(item, forFiles))
+            {
+                continue;
+            }
+
+            var waiter = new TaskCompletionSource<ExceptionDispatchInfo?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (_pending.TryAdd(item.Id, waiter.Task))
+            {
+                chosen.Add((next, waiter));
+                bytes += item.Size;
+            }
+        }
+
+        return chosen;
+    }
+
+    private static int IndexIn(IReadOnlyList<TreeNode> siblings, TreeNode node)
+    {
+        for (var i = 0; i < siblings.Count; i++)
+        {
+            if (ReferenceEquals(siblings[i], node))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>Makes a batch's files, letting each one's waiters go as it is made; a failure of the whole is theirs.</summary>
+    private async Task MakeAsync(List<(TreeNode Node, TaskCompletionSource<ExceptionDispatchInfo?> Done)> batch)
+    {
+        var released = new bool[batch.Count];
+        try
+        {
+            await MakeAsync([.. batch.Select(b => b.Node)], keepFiles: true, _stopping.Token, i =>
+            {
+                released[i] = true;
+                Release(batch[i].Node, batch[i].Done, null);
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            var failure = ExceptionDispatchInfo.Capture(ex);
+            for (var i = 0; i < batch.Count; i++)
+            {
+                if (!released[i])
+                {
+                    released[i] = true;
+                    Release(batch[i].Node, batch[i].Done, failure);
+                }
+            }
+        }
+        finally
+        {
+            for (var i = 0; i < batch.Count; i++)
+            {
+                if (!released[i])
+                {
+                    Release(batch[i].Node, batch[i].Done, null);
+                }
+            }
+        }
+    }
+
+    /// <summary>Lets an item's waiters go, and the item be made by another batch.</summary>
+    private void Release(TreeNode node, TaskCompletionSource<ExceptionDispatchInfo?> done, ExceptionDispatchInfo? failure)
+    {
+        _pending.TryRemove(new KeyValuePair<string, Task<ExceptionDispatchInfo?>>(node.Item!.Id, done.Task));
+        done.TrySetResult(failure);
+    }
+
+    /// <summary>
+    /// Opens the items (together where the store opens several at once, else in turn) and makes each one's files, keeping
+    /// its listing (with <paramref name="keepFiles"/>, the files too, a while), and tells <paramref name="made"/> of each
+    /// (by its place) as it is done with. One the store does not give, or whose files do not make, is left to be opened
+    /// alone, which says why.
+    /// </summary>
+    private async Task MakeAsync(IReadOnlyList<TreeNode> batch, bool keepFiles, CancellationToken ct, Action<int>? made = null)
+    {
+        var items = batch.Select(n => n.Item!).ToList();
+        var together = Store.OpensTogether ? await Store.OpenManyAsync([.. items.Select(i => i.Id)], ct).ConfigureAwait(false) : null;
+        for (var i = 0; i < batch.Count; i++)
+        {
+            try
+            {
+                var item = together is null ? await Store.OpenAsync(items[i].Id, ct).ConfigureAwait(false) : together[i];
+                if (item is not null)
+                {
+                    Made(items[i], await ItemFiles.BuildAsync(item, items[i], batch[i].Name, ct, _smimeKeys).ConfigureAwait(false), keepFiles);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Logger.LogDebug("outlook: '{Name}' was not made with its neighbours ({Error}); it is opened alone when asked for", batch[i].Name, ex.Message);
+            }
+            finally
+            {
+                made?.Invoke(i);
+            }
+        }
+
+        _ = KeepListingsAsync(now: false);
+    }
+
+    /// <summary>An item opened by itself and its files made and kept: what a batch did not give, so the store says why.</summary>
+    private async Task<ItemFiles> AloneAsync(TreeNode node, CancellationToken ct)
+    {
+        var item = node.Item!;
+        var opened = await Store.OpenAsync(item.Id, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(node.Name);
+        var files = await ItemFiles.BuildAsync(opened, item, node.Name, ct, _smimeKeys).ConfigureAwait(false);
+        Made(item, files, keepFiles: true);
+        return files;
+    }
+
+    /// <summary>An item's files just made: its listing kept, put right when the files came out otherwise; with <paramref name="keepFiles"/>, the files too, a while.</summary>
+    private void Made(MailItemSummary item, ItemFiles files, bool keepFiles)
+    {
+        if (!SmimeReader.IsSmime(files.Item))
+        {
+            _listings.Keep(item, ItemListing.Of(files));
+        }
+
+        if (keepFiles)
+        {
+            KeepFiles(item, files);
+        }
+    }
+
+    /// <summary>Whether what is wanted of the item is at hand: its files, or (not <paramref name="forFiles"/>) its listing.</summary>
+    private bool Ready(MailItemSummary item, bool forFiles) => Kept(item) is not null || !forFiles && _listings.For(item) is not null;
+
+    /// <summary>The item's files made a little while ago from the item as its folder lists it now; null for none.</summary>
+    private ItemFiles? Kept(MailItemSummary item)
+        => _items.TryGetValue(item.Id, out var kept) && DateTime.UtcNow - kept.At < ItemsKeptFor && kept.Stamp == ItemListings.StampOf(item) ? kept.Files : null;
+
+    /// <summary>Keeps an item's files a while: at most <see cref="ItemsKept"/> items and <see cref="ItemsKeptBytes"/> by their lengths, the oldest going first.</summary>
+    private void KeepFiles(MailItemSummary item, ItemFiles files)
+    {
+        var now = DateTime.UtcNow;
+        var bytes = files.Files.Sum(f => f.Length) + files.Attachments.Sum(f => f.Length);
+        var kept = new KeptFiles(files, ItemListings.StampOf(item), now, bytes);
+        while (true)
+        {
+            if (_items.TryGetValue(item.Id, out var old))
+            {
+                if (_items.TryUpdate(item.Id, kept, old))
+                {
+                    Interlocked.Add(ref _itemsBytes, bytes - old.Bytes);
+                    break;
+                }
+            }
+            else if (_items.TryAdd(item.Id, kept))
+            {
+                Interlocked.Add(ref _itemsBytes, bytes);
+                break;
+            }
+        }
+
+        if (_items.Count <= ItemsKept && Interlocked.Read(ref _itemsBytes) <= ItemsKeptBytes)
+        {
+            return;
+        }
+
+        lock (_trimGate)
+        {
+            foreach (var (id, old) in _items.OrderBy(e => e.Value.At).ToList())
+            {
+                if (now - old.At < ItemsKeptFor && _items.Count <= ItemsKept && Interlocked.Read(ref _itemsBytes) <= ItemsKeptBytes)
+                {
+                    break;
+                }
+
+                if (_items.TryRemove(new KeyValuePair<string, KeptFiles>(id, old)))
+                {
+                    Interlocked.Add(ref _itemsBytes, -old.Bytes);
+                }
+            }
+        }
+    }
+
+    /// <summary>Forgets the items' files kept a while (a refresh: they are made again when next asked for).</summary>
+    private void ForgetFiles()
+    {
+        foreach (var (id, old) in _items.ToList())
+        {
+            if (_items.TryRemove(new KeyValuePair<string, KeptFiles>(id, old)))
+            {
+                Interlocked.Add(ref _itemsBytes, -old.Bytes);
+            }
+        }
     }
 
     // --- health -----------------------------------------------------------------------------------------------------------
@@ -862,10 +1236,16 @@ public sealed class OutlookSource : SourceBase, ICountable
         {
         }
 
+        if (IsInitialised)
+        {
+            await KeepListingsAsync(now: true, wait: true).ConfigureAwait(false);
+        }
+
         _store?.Dispose();
         _directoryOwned?.Dispose();
         _stopping.Dispose();
         _refreshGate.Dispose();
+        _listingsGate.Dispose();
         await base.DisposeAsync().ConfigureAwait(false);
     }
 }
