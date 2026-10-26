@@ -45,6 +45,53 @@ public class OutlookWebSessionTests
     }
 
     [TestMethod]
+    public void OutlookOnTheWebsOwnAddressIsAnExchangeOnlineMailboxNotAServer()
+    {
+        // what a person in GCC High pastes from the browser: once taken for a server, and refused ("Bearer asked for")
+        var plugin = new OutlookPlugin();
+        var gcc = new OutlookSettings { Path = " https://outlook.office365.us/mail/inbox " };
+        Assert.AreEqual(OutlookKind.Mailbox, gcc.Kind);
+        Assert.IsNull(gcc.Address, "the mailbox is the one signed in to there");
+        Assert.IsNull(gcc.ServerUrl);
+        Assert.AreSame(MicrosoftCloud.UsGovernment, gcc.KnownCloud);
+        Assert.AreEqual(OutlookSignIn.WebSession, gcc.EffectiveSignIn);
+        Assert.AreEqual("outlook.office365.us", plugin.SuggestName(gcc));
+        Assert.AreEqual(0, plugin.Validate(gcc).Count(m => m.IsError), string.Join("; ", plugin.Validate(gcc).Select(m => m.Message)));
+        Assert.IsFalse(plugin.IsVisible(gcc, nameof(OutlookSettings.Cloud)), "the address names the cloud");
+        Assert.IsTrue(plugin.IsVisible(gcc, nameof(OutlookSettings.BrowserPath)));
+        Assert.IsFalse(plugin.IsVisible(gcc, nameof(OutlookSettings.Username)));
+        plugin.NormaliseSettings(gcc);
+        Assert.AreEqual("https://outlook.office365.us", gcc.Path);
+
+        foreach (var global in new[] { "https://outlook.office.com/mail/", "https://outlook.office365.com", "https://OUTLOOK.cloud.microsoft" })
+        {
+            var s = new OutlookSettings { Path = global };
+            Assert.AreEqual(OutlookKind.Mailbox, s.Kind, global);
+            Assert.AreSame(MicrosoftCloud.Global, s.KnownCloud, global);
+        }
+
+        // an app sign-in needs the mailbox's address; a Windows account is a server's
+        Assert.IsTrue(plugin.Validate(new OutlookSettings { Path = "https://outlook.office365.us", SignInMethod = OutlookSettings.AppBrowser }).Any(m => m.IsError && m.Property == nameof(OutlookSettings.SignInMethod)));
+        Assert.IsTrue(plugin.Validate(new OutlookSettings { Path = "https://outlook.office365.us", SignInMethod = OutlookSettings.WindowsCurrent }).Any(m => m.IsError && m.Property == nameof(OutlookSettings.SignInMethod)));
+        Assert.AreEqual(OutlookKind.Server, new OutlookSettings { Path = "https://mail.contoso.com/owa" }.Kind, "any other host is still a server");
+    }
+
+    [TestMethod]
+    public async Task AMailboxGivenByOutlookOnTheWebsAddressIsTheOneSignedInThere()
+    {
+        var fake = FakeExchange.Mailbox();
+        var settings = new OutlookSettings { Path = "https://outlook.office365.us", RefreshMinutes = 0, CalendarMonthsBack = 12, CalendarMonthsAhead = 3 };
+        var result = await new OutlookPlugin().TestAsync(settings, new Progress<string>(), fake.StandIn(), CancellationToken.None);
+        Assert.IsTrue(result.Success, result.Message);
+        StringAssert.StartsWith(result.Message, $"Signed in as {FakeExchange.Account} through the web session");
+
+        using var context = new TestSourceContext("outlook");
+        await using var source = new OutlookSource(settings, fake.StandIn());
+        await source.InitialiseAsync(context, CancellationToken.None);
+        CollectionAssert.IsSubsetOf(new[] { "Inbox", "Sent Items", "Calendar", "Contacts" }, (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList());
+    }
+
+    [TestMethod]
     public async Task TheTestButtonSignsInAndCountsTheFolders()
     {
         var fake = FakeExchange.Mailbox();

@@ -265,7 +265,7 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
                 var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
                 {
-                    throw new EwsException("401", $"{_url.Host} refused the Windows sign-in ({string.Join(", ", response.Headers.WwwAuthenticate.Select(w => w.Scheme))} asked for)");
+                    throw new EwsException("401", RefusedSignIn(_url.Host, response));
                 }
 
                 if (response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout)
@@ -321,6 +321,20 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
                 return message;
             }
         }
+    }
+
+    /// <summary>
+    /// What a 401 says. A server that offers no Windows sign-in (Negotiate, NTLM, Kerberos, Basic) but a bearer token is
+    /// Exchange Online, or a server set up for modern authentication alone, which no Windows account opens: said as such,
+    /// with what to give instead.
+    /// </summary>
+    internal static string RefusedSignIn(string host, HttpResponseMessage response)
+    {
+        var schemes = response.Headers.WwwAuthenticate.Select(w => w.Scheme).ToList();
+        string[] windows = ["Negotiate", "NTLM", "Kerberos", "Basic"];
+        return schemes.Contains("Bearer", StringComparer.OrdinalIgnoreCase) && !schemes.Any(s => windows.Contains(s, StringComparer.OrdinalIgnoreCase))
+            ? $"{host} asks for a Microsoft 365 sign-in (a bearer token), not a Windows account: it is Exchange Online, or a server set up for modern authentication only. For a mailbox in Exchange Online, give the mailbox's address (or Outlook on the web's, such as https://outlook.office365.us) and sign in with the web session."
+            : $"{host} refused the Windows sign-in ({string.Join(", ", schemes)} asked for)";
     }
 
     private static bool IsTransient(string code) => code is "ErrorServerBusy" or "ErrorTimeoutExpired" or "ErrorInternalServerTransientError" or "ErrorMailboxStoreUnavailable" or "ErrorTooManyObjectsOpened" or "ErrorConnectionFailed";

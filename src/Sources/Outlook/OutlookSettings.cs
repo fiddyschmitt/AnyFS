@@ -39,7 +39,7 @@ public sealed class OutlookSettings
     public const string Windows = WindowsAccount.WithPassword;
 
     [Setting("Mailbox, server or file", Required = true, Primary = true, Order = 0, Placeholder = @"jane@contoso.com, https://mail.contoso.com, or C:\Users\me\Documents\Outlook Files\archive.pst",
-        Hint = "A mailbox's address (Exchange Online, signed in through Outlook on the web in a browser window of AnyFS's own); an Exchange server's address (its Outlook on the web or EWS address, signed in with a Windows account: your own mailbox there); or an Outlook data file, a .pst (an archive, an exported mailbox) or a .ost (Outlook's offline copy of a mailbox, read while Outlook has it open).")]
+        Hint = "A mailbox's address (Exchange Online, signed in through Outlook on the web in a browser window of AnyFS's own), or Outlook on the web's own address for Exchange Online (https://outlook.office365.us for GCC High, https://outlook.office.com): the mailbox you sign in to there; an Exchange server's address (its Outlook on the web or EWS address, signed in with a Windows account: your own mailbox there); or an Outlook data file, a .pst (an archive, an exported mailbox) or a .ost (Outlook's offline copy of a mailbox, read while Outlook has it open).")]
     public string Path { get; set; } = "";
 
     [Setting("Sign in with", Order = 1, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [WebSession, AppBrowser, AppDeviceCode, WindowsCurrent, Windows],
@@ -101,13 +101,25 @@ public sealed class OutlookSettings
     /// <summary>Whether the field holds a server's address (an Exchange server's Outlook on the web or EWS address).</summary>
     internal bool IsServerUrl => ServerUrl is not null;
 
-    internal OutlookKind Kind => File is null ? OutlookKind.None : IsDataFile ? OutlookKind.DataFile : IsMailboxAddress ? OutlookKind.Mailbox : IsServerUrl ? OutlookKind.Server : OutlookKind.None;
+    internal OutlookKind Kind => File is null ? OutlookKind.None : IsDataFile ? OutlookKind.DataFile : IsMailboxAddress || WebCloud is not null ? OutlookKind.Mailbox : IsServerUrl ? OutlookKind.Server : OutlookKind.None;
 
-    /// <summary>The mailbox's address in lower case, for a mailbox source.</summary>
-    internal string? Address => Kind == OutlookKind.Mailbox ? File!.ToLowerInvariant() : null;
+    /// <summary>The mailbox's address in lower case, for a mailbox source given by its address; null for one given by Outlook on the web's (<see cref="WebCloud"/>).</summary>
+    internal string? Address => Kind == OutlookKind.Mailbox && WebCloud is null ? File!.ToLowerInvariant() : null;
 
-    /// <summary>The server's address as given, when it is an http(s) one with a host.</summary>
-    internal Uri? ServerUrl => File is { } f && Uri.TryCreate(f, UriKind.Absolute, out var url) && url.Scheme is "http" or "https" && !string.IsNullOrEmpty(url.Host) ? url : null;
+    /// <summary>
+    /// The cloud whose own Outlook on the web the field's address is (https://outlook.office365.us, GCC High's; the
+    /// global cloud's outlook.office.com and the rest): a mailbox on Exchange Online, the one signed in to there through the
+    /// web session, never an Exchange server, which a Windows account could not sign in to (it asks for a bearer token).
+    /// </summary>
+    internal MicrosoftCloud? WebCloud => MicrosoftCloud.FromOutlookHost(Url?.Host);
+
+    /// <summary>The host of Outlook on the web's address, in lower case, for a mailbox given that way; null otherwise.</summary>
+    internal string? WebHost => WebCloud is null ? null : Url!.Host.ToLowerInvariant();
+
+    /// <summary>The server's address as given, when it is an http(s) one with a host that is not Microsoft 365's own Outlook on the web.</summary>
+    internal Uri? ServerUrl => WebCloud is null ? Url : null;
+
+    private Uri? Url => File is { } f && Uri.TryCreate(f, UriKind.Absolute, out var url) && url.Scheme is "http" or "https" && !string.IsNullOrEmpty(url.Host) ? url : null;
 
     /// <summary>The server's EWS endpoint: the address as given when it names Exchange.asmx, else /EWS/Exchange.asmx on its host.</summary>
     internal Uri? EwsUrl
@@ -147,7 +159,7 @@ public sealed class OutlookSettings
     internal string? Domain => Address is { } address ? address[(address.LastIndexOf('@') + 1)..] : null;
 
     /// <summary>The cloud as far as the settings say: the one chosen, else the tenant's or the address's initial domain's; null when the realm lookup must tell.</summary>
-    internal MicrosoftCloud? KnownCloud => MicrosoftCloud.FromName(Cloud) ?? MicrosoftCloud.FromTenant(Tenant) ?? MicrosoftCloud.FromTenant(Domain);
+    internal MicrosoftCloud? KnownCloud => WebCloud ?? MicrosoftCloud.FromName(Cloud) ?? MicrosoftCloud.FromTenant(Tenant) ?? MicrosoftCloud.FromTenant(Domain);
 
     /// <summary>
     /// The tenant an app sign-in goes to in <paramref name="cloud"/>: the one given, organizations by default, except

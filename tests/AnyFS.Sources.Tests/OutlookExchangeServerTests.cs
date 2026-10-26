@@ -53,6 +53,34 @@ public class OutlookExchangeServerTests
     }
 
     [TestMethod]
+    public async Task AServerThatAsksForABearerTokenSaysWhatToGiveInstead()
+    {
+        // Exchange Online's EWS (or a server set up for modern authentication only) offers no Windows sign-in at all
+        var fake = FakeExchange.Mailbox();
+        fake.Intercept = (_, _) =>
+        {
+            var refused = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+            refused.Headers.WwwAuthenticate.Add(new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "client_id=\"00000002-0000-0ff1-ce00-000000000000\""));
+            return refused;
+        };
+        var result = await new OutlookPlugin().TestAsync(Settings(), new Progress<string>(), fake.StandIn(), CancellationToken.None);
+        Assert.IsFalse(result.Success);
+        StringAssert.Contains(result.Message, "asks for a Microsoft 365 sign-in");
+        StringAssert.Contains(result.Message, "web session");
+
+        // one that offers a Windows sign-in and refuses this one says just that
+        fake.Intercept = (_, _) =>
+        {
+            var refused = new HttpResponseMessage(HttpStatusCode.Unauthorized);
+            refused.Headers.WwwAuthenticate.Add(new System.Net.Http.Headers.AuthenticationHeaderValue("Negotiate"));
+            refused.Headers.WwwAuthenticate.Add(new System.Net.Http.Headers.AuthenticationHeaderValue("NTLM"));
+            return refused;
+        };
+        result = await new OutlookPlugin().TestAsync(Settings(), new Progress<string>(), fake.StandIn(), CancellationToken.None);
+        StringAssert.Contains(result.Message, "refused the Windows sign-in (Negotiate, NTLM asked for)");
+    }
+
+    [TestMethod]
     public async Task TheTestButtonSignsInOverSoapAndCountsTheFolders()
     {
         var fake = FakeExchange.Mailbox();

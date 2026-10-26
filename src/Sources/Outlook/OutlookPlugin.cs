@@ -53,7 +53,7 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
 
         var name = s.Kind switch
         {
-            OutlookKind.Mailbox => s.Address!,
+            OutlookKind.Mailbox => s.Address ?? s.WebHost!,
             OutlookKind.Server => s.ServerUrl!.Host,
             _ => Path.GetFileNameWithoutExtension(s.File.TrimEnd('\\', '/')),
         };
@@ -64,7 +64,8 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
     public void NormaliseSettings(object settings)
     {
         var s = (OutlookSettings)settings;
-        s.Path = s.Kind == OutlookKind.Mailbox ? s.Address! : s.File ?? "";
+        // a mailbox's address in lower case; Outlook on the web's as its origin (https://outlook.office365.us); else as given
+        s.Path = s.Address ?? (s.WebHost is { } web ? "https://" + web : s.File ?? "");
     }
 
     /// <summary>
@@ -79,7 +80,7 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
         {
             nameof(OutlookSettings.SignInMethod) or nameof(OutlookSettings.CalendarMonthsBack) => s.Kind is OutlookKind.Mailbox or OutlookKind.Server,
             nameof(OutlookSettings.CalendarMonthsAhead) => s.Kind is OutlookKind.Mailbox or OutlookKind.Server or OutlookKind.DataFile,
-            nameof(OutlookSettings.Cloud) => s.Kind == OutlookKind.Mailbox,
+            nameof(OutlookSettings.Cloud) => s.Kind == OutlookKind.Mailbox && s.WebCloud is null, // Outlook on the web's address names its cloud
             nameof(OutlookSettings.BrowserPath) => s.Kind == OutlookKind.Mailbox && !s.IsAppSignIn,
             nameof(OutlookSettings.Tenant) or nameof(OutlookSettings.ClientId) => s.Kind == OutlookKind.Mailbox && s.IsAppSignIn,
             nameof(OutlookSettings.Username) or nameof(OutlookSettings.Password) => s.Kind == OutlookKind.Server && s.EffectiveSignIn == OutlookSignIn.Windows,
@@ -134,12 +135,19 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
 
                 break;
             case OutlookKind.Mailbox:
-                if (s.EffectiveSignIn == OutlookSignIn.WebSession && !string.Equals(s.SignInMethod?.Trim(), OutlookSettings.WebSession, StringComparison.OrdinalIgnoreCase))
+                if (s.WebHost is { } web && !string.Equals(s.SignInMethod?.Trim(), OutlookSettings.WebSession, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Outlook on the web's address names no mailbox: whose it is, the web session's sign-in there says
+                    yield return new ValidationMessage(s.IsAppSignIn
+                        ? $"An app sign-in needs the mailbox's address here (jane@contoso.com). With Outlook on the web's address ({web}), sign in with {OutlookSettings.WebSession}."
+                        : $"{web} is Outlook on the web for Exchange Online: sign in with {OutlookSettings.WebSession}.", nameof(OutlookSettings.SignInMethod));
+                }
+                else if (s.EffectiveSignIn == OutlookSignIn.WebSession && !string.Equals(s.SignInMethod?.Trim(), OutlookSettings.WebSession, StringComparison.OrdinalIgnoreCase))
                 {
                     yield return new ValidationMessage($"A mailbox on Exchange Online signs in with {OutlookSettings.WebSession}, {OutlookSettings.AppBrowser} or {OutlookSettings.AppDeviceCode}.", nameof(OutlookSettings.SignInMethod));
                 }
 
-                if (s.IsAppSignIn)
+                if (s.IsAppSignIn && s.WebCloud is null)
                 {
                     foreach (var message in CloudSettings.Check(s.Cloud, s.KnownCloud ?? MicrosoftCloud.Global, s.Tenant, s.EffectiveClientId, siteHost: null, MailPermissions, tenantRequired: false))
                     {

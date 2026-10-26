@@ -258,31 +258,54 @@ public sealed class OutlookSource : SourceBase
             return (soap, directory, standIn?.Account ?? who, $"with a Windows account ({url.Host})");
         }
 
-        var address = s.Address ?? throw new SourceFailedException("The mailbox's address is missing.", permanent: true);
+        // a mailbox by its address, or by Outlook on the web's own (https://outlook.office365.us): then it is the one
+        // signed in to there, known once the web session's token is read
+        var address = s.Address;
+        if (address is null && s.WebCloud is null)
+        {
+            throw new SourceFailedException("The mailbox's address is missing.", permanent: true);
+        }
+
         if (s.IsAppSignIn)
         {
+            if (address is null)
+            {
+                throw new SourceFailedException($"An app sign-in needs the mailbox's address in place of {s.WebHost}; with Outlook on the web's address, sign in with the web session.", permanent: true);
+            }
+
             return await ConnectGraphAsync(s, address, standIn, logger, progress, hooks, ct).ConfigureAwait(false);
         }
 
         if (standIn is not null)
         {
-            var service = new OwaJsonService(standIn.Origin, address, standIn.Token, standIn.Handler(), logger);
+            var service = new OwaJsonService(standIn.Origin, address ?? standIn.Account, standIn.Token, standIn.Handler(), logger);
             return (service, service, standIn.Account, "through the web session (a stand-in)");
         }
 
         var browser = OutlookPlugin.BrowserFor(s) ?? throw new SourceFailedException("The web session needs Microsoft Edge, Google Chrome or Chromium installed, or the path of one under Browser.", permanent: true);
-        progress($"Finding {address}'s cloud");
-        var origin = (MicrosoftCloud.FromName(s.Cloud) ?? await MicrosoftCloud.FindAsync(address, null, ct).ConfigureAwait(false)).OutlookOrigin;
-        var session = new OwaTokenSession(origin, browser, OutlookPlugin.ProfileDir(address), logger);
+        MicrosoftCloud cloud;
+        if (s.WebCloud is { } named)
+        {
+            cloud = named;
+        }
+        else
+        {
+            progress($"Finding {address}'s cloud");
+            cloud = MicrosoftCloud.FromName(s.Cloud) ?? await MicrosoftCloud.FindAsync(address!, null, ct).ConfigureAwait(false);
+        }
+
+        // a browser profile of its own per mailbox address; for Outlook on the web's address, one per cloud
+        var origin = cloud.OutlookOrigin;
+        var session = new OwaTokenSession(origin, browser, OutlookPlugin.ProfileDir(address ?? cloud.OutlookHost), logger);
         progress($"Reading the sign-in to {origin.Host} from {session.BrowserName}");
         var first = await session.TokenAsync(interactive, progress, ct).ConfigureAwait(false);
-        var account = session.Account ?? address;
-        if (!string.Equals(account, address, StringComparison.OrdinalIgnoreCase))
+        var account = session.Account ?? address ?? cloud.OutlookHost;
+        if (address is not null && !string.Equals(account, address, StringComparison.OrdinalIgnoreCase))
         {
             logger.LogWarning("outlook: the browser profile for {Address} is signed in as {Account}", address, account);
         }
 
-        var live = new OwaJsonService(origin, address, async (renew, token) =>
+        var live = new OwaJsonService(origin, address ?? account.ToLowerInvariant(), async (renew, token) =>
         {
             if (renew)
             {
@@ -385,6 +408,12 @@ public sealed class OutlookSource : SourceBase
             try
             {
                 addresses.AddRange(await soap.ResolveAddressesAsync(alias, ct).ConfigureAwait(false));
+            }
+            catch (EwsException ex) when (ex.Code == "401")
+            {
+                // the server refuses the sign-in itself: the mailbox's listing says so, and there is no address book to look for
+                http.Dispose();
+                return null;
             }
             catch (EwsException ex)
             {

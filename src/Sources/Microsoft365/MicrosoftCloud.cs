@@ -121,6 +121,18 @@ public sealed class MicrosoftCloud
     /// <summary>The cloud a settings choice names; null for Automatic or anything not offered.</summary>
     public static MicrosoftCloud? FromName(string? name) => All.FirstOrDefault(c => string.Equals(c.Name, name?.Trim(), StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// The cloud whose own Outlook on the web <paramref name="host"/> is: outlook.office365.us the US Government's (GCC
+    /// High); outlook.office.com, outlook.office365.com and outlook.cloud.microsoft the global cloud's. Null for any other
+    /// host, an Exchange server's own included.
+    /// </summary>
+    public static MicrosoftCloud? FromOutlookHost(string? host) => host?.Trim().ToLowerInvariant() switch
+    {
+        "outlook.office365.us" => UsGovernment,
+        "outlook.office.com" or "outlook.office365.com" or "outlook.cloud.microsoft" => Global,
+        _ => null,
+    };
+
     /// <summary>Whether a settings value is one of the choices offered (empty counts as Automatic).</summary>
     public static bool IsChoice(string? name)
         => string.IsNullOrWhiteSpace(name) || string.Equals(name.Trim(), AutomaticName, StringComparison.OrdinalIgnoreCase) || FromName(name) is not null;
