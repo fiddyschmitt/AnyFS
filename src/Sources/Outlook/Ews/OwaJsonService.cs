@@ -189,7 +189,10 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
             }
         }
 
-        return new EwsSyncPage(Str(message, "SyncState") ?? syncState ?? "", changes, !message.TryGetProperty("IncludesLastItemInRange", out var last) || last.GetBoolean());
+        // the last page says IncludesLastItemInRange true, and the others leave it out: Outlook on the web's JSON leaves out
+        // a false one here (26-Oct-2026, page after page of a folder of 1,856 items without it, then true on the last). Taken
+        // for the last page, a missing one stopped every folder at its first page, and a mailbox showed only its newest mail.
+        return new EwsSyncPage(Str(message, "SyncState") ?? syncState ?? "", changes, message.TryGetProperty("IncludesLastItemInRange", out var last) && last.ValueKind == JsonValueKind.True);
     }
 
     public async Task<EwsItem?> GetItemAsync(string itemId, bool includeMime, CancellationToken ct)

@@ -5,6 +5,7 @@ using AnyFS.Sdk.Testing;
 using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.Outlook;
 using AnyFS.Sources.Outlook.Ews;
+using AnyFS.Sources.Outlook.Mail;
 
 namespace AnyFS.Sources.Tests;
 
@@ -104,6 +105,74 @@ public class OutlookWebSessionTests
         StringAssert.Contains(result.Message, "the Inbox holds 3 items");
         StringAssert.Contains(result.Message, "Inbox");
         CollectionAssert.AreEqual(new[] { "FindFolder" }, fake.Actions);
+    }
+
+    /// <summary>The fake's mailbox with twenty messages in May 2026 in the Inbox, the sync giving seven changes a page.</summary>
+    private static FakeExchange WithManyPages()
+    {
+        var fake = FakeExchange.Mailbox();
+        var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
+        for (var day = 1; day <= 20; day++)
+        {
+            fake.AddMessage(inbox, $"Report {day:D2}", ("Adele Vance", "adelev@fake.test"), new DateTimeOffset(2026, 5, day, 9, 0, 0, TimeSpan.Zero), $"<p>Day {day}.</p>", []);
+        }
+
+        fake.MostChangesPerPage = 7;
+        return fake;
+    }
+
+    [TestMethod]
+    public async Task AFolderOfManyPagesIsReadWhole()
+    {
+        // Outlook on the web says IncludesLastItemInRange on a sync's last page only; each folder was read to its first page
+        var fake = WithManyPages();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            Assert.AreEqual(20, (await OutlookFixtures.ListAsync(source, "Inbox/2026/05")).Count, "every page of the Inbox's 23 items, seven at a time");
+            Assert.AreEqual(2, (await OutlookFixtures.ListAsync(source, "Inbox/2026/03")).Count);
+        }
+    }
+
+    [TestMethod]
+    public async Task AMailboxKeptFromItsFoldersFirstPagesFillsInAtTheNextRefresh()
+    {
+        // as the source kept it before 26-Oct-2026: each folder synced to its first page alone, and kept so
+        var fake = WithManyPages();
+        fake.EveryPageSaysLast = true;
+        byte[] kept;
+        using (var first = new TestSourceContext("outlook"))
+        {
+            var source = new OutlookSource(Settings(false), fake.StandIn());
+            await source.InitialiseAsync(first, CancellationToken.None);
+            await using (source)
+            {
+                Assert.AreEqual(4, (await OutlookFixtures.ListAsync(source, "Inbox/2026/05")).Count, "the first page's seven: March's two, April's one and four of May's");
+            }
+
+            kept = await File.ReadAllBytesAsync(Path.Combine(first.StateDirectory, MailboxIndexFile.FileName));
+        }
+
+        // the next start serves what was kept and asks for what came after it: the rest of each folder
+        fake.EveryPageSaysLast = false;
+        var wholeReads = fake.FullSyncs;
+        using var second = new TestSourceContext("outlook");
+        await File.WriteAllBytesAsync(Path.Combine(second.StateDirectory, MailboxIndexFile.FileName), kept);
+        var restarted = new OutlookSource(Settings(false), fake.StandIn());
+        await restarted.InitialiseAsync(second, CancellationToken.None);
+        await using (restarted)
+        {
+            var may = 0;
+            for (var i = 0; i < 200 && may < 20; i++)
+            {
+                await Task.Delay(20);
+                may = (await OutlookFixtures.ListAsync(restarted, "Inbox/2026/05")).Count;
+            }
+
+            Assert.AreEqual(20, may, "filled in by the refresh at the start");
+            Assert.AreEqual(wholeReads, fake.FullSyncs, "no folder read whole again");
+        }
     }
 
     [TestMethod]

@@ -55,6 +55,12 @@ internal sealed partial class FakeExchange
     /// <summary>How many items each GetItem asked for, in the order they came.</summary>
     public List<int> ItemsPerRequest { get; } = [];
 
+    /// <summary>The most changes a SyncFolderItems page gives, whatever is asked for (a server may give fewer).</summary>
+    public int MostChangesPerPage { get; set; } = int.MaxValue;
+
+    /// <summary>A server that says each SyncFolderItems page is the last (as the source took Outlook on the web's to say, before 26-Oct-2026).</summary>
+    public bool EveryPageSaysLast { get; set; }
+
     /// <summary>How many attachments GetAttachment was asked for, whatever the number of requests.</summary>
     public int AttachmentsFetched { get; private set; }
 
@@ -479,7 +485,7 @@ internal sealed partial class FakeExchange
         }
 
         var changes = new JsonArray();
-        var max = body["MaxChangesReturned"]?.GetValue<int>() ?? 100;
+        var max = Math.Min(body["MaxChangesReturned"]?.GetValue<int>() ?? 100, MostChangesPerPage);
         var last = since;
         foreach (var (version, kind, itemId) in folder.Changes.Where(c => c.Version > since).Take(max))
         {
@@ -494,8 +500,15 @@ internal sealed partial class FakeExchange
             }
         }
 
-        var includesLast = folder.Changes.All(c => c.Version <= last);
-        return new JsonObject { ["__type"] = "SyncFolderItemsResponseMessage:#Exchange", ["SyncState"] = $"sync:{folder.Id}:{last}", ["IncludesLastItemInRange"] = includesLast, ["TotalCount"] = 0, ["Changes"] = new JsonObject { ["Changes"] = changes }, ["ResponseCode"] = "NoError", ["ResponseClass"] = "Success" };
+        // as Outlook on the web answers: IncludesLastItemInRange true on the last page, left out on the others (26-Oct-2026)
+        var includesLast = folder.Changes.All(c => c.Version <= last) || EveryPageSaysLast;
+        var message = new JsonObject { ["__type"] = "SyncFolderItemsResponseMessage:#Exchange", ["SyncState"] = $"sync:{folder.Id}:{last}", ["TotalCount"] = 0, ["Changes"] = new JsonObject { ["Changes"] = changes }, ["ResponseCode"] = "NoError", ["ResponseClass"] = "Success" };
+        if (includesLast)
+        {
+            message["IncludesLastItemInRange"] = true;
+        }
+
+        return message;
     }
 
     private Folder? Resolve(JsonNode? idNode)
