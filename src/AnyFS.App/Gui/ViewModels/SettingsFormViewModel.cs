@@ -24,9 +24,14 @@ public sealed partial class SettingsFormViewModel : ObservableObject
     /// </summary>
     private static readonly TimeSpan TestTimeout = TimeSpan.FromMinutes(10);
 
+    /// <summary>How long the Detect button waits: detection reads what is on this machine, so a minute is plenty.</summary>
+    private static readonly TimeSpan DetectTimeout = TimeSpan.FromMinutes(1);
+
     private readonly IValidatable? _validator;
     private readonly ITestable? _tester;
     private readonly ISettingVisibility? _visibility;
+    private readonly IDetectable? _detector;
+    private readonly IDialogs _dialogs;
 
     public SettingsFormViewModel(
         [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)] Type settingsType,
@@ -36,12 +41,15 @@ public sealed partial class SettingsFormViewModel : ObservableObject
         ISettingTextProvider? texts,
         IDialogs dialogs,
         ISettingVisibility? visibility = null,
-        bool liftPrimary = false)
+        bool liftPrimary = false,
+        IDetectable? detector = null)
     {
         Settings = settings;
         _validator = validator;
         _tester = tester;
         _visibility = visibility;
+        _detector = detector is { CanDetect: true } ? detector : null;
+        _dialogs = dialogs;
         Fields = PluginSettingsBinder.Describe(settingsType).Where(p => p.IsForThisPlatform).Select(p => new SettingFieldViewModel(p, texts, dialogs)).ToList();
         foreach (var field in Fields)
         {
@@ -63,7 +71,8 @@ public sealed partial class SettingsFormViewModel : ObservableObject
         }
 
         Groups = new ObservableCollection<SettingGroupViewModel>(groups);
-        TestCommand = new AsyncRelayCommand(TestAsync, () => HasTest && !TestRunning);
+        TestCommand = new AsyncRelayCommand(TestAsync, () => HasTest && !TestRunning && !DetectRunning);
+        DetectCommand = new AsyncRelayCommand(DetectAsync, () => HasDetect && !DetectRunning && !TestRunning);
         foreach (var field in Fields)
         {
             field.PropertyChanged += (_, e) =>
@@ -134,9 +143,37 @@ public sealed partial class SettingsFormViewModel : ObservableObject
 
     public bool HasTest => _tester is not null;
 
+    /// <summary>Whether the plugin can find sources of its kind on this machine (<see cref="IDetectable"/>, where <see cref="IDetectable.CanDetect"/>).</summary>
+    public bool HasDetect => _detector is not null;
+
+    /// <summary>The Detect button goes under the setting asked first when the dialog lifts it (it fills that setting), else beside Test.</summary>
+    public bool ShowDetectAbove => HasDetect && PrimaryField is not null;
+
+    public bool ShowDetectInForm => HasDetect && PrimaryField is null;
+
+    /// <summary>Whether the form's own row of buttons shows: Test, or Detect when it is not shown above.</summary>
+    public bool HasActions => HasTest || ShowDetectInForm;
+
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(TestCommand))]
+    [NotifyCanExecuteChangedFor(nameof(DetectCommand))]
+    [NotifyPropertyChangedFor(nameof(Busy))]
     public partial bool TestRunning { get; set; }
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(TestCommand))]
+    [NotifyCanExecuteChangedFor(nameof(DetectCommand))]
+    [NotifyPropertyChangedFor(nameof(Busy))]
+    public partial bool DetectRunning { get; set; }
+
+    /// <summary>A test is running, or a detection the form's own row shows (not one shown above, which has its own bar).</summary>
+    public bool Busy => TestRunning || DetectRunning && ShowDetectInForm;
+
+    /// <summary>What detection is looking at, what it found, or what it filled in.</summary>
+    [ObservableProperty]
+    public partial string? DetectMessage { get; set; }
+
+    public AsyncRelayCommand DetectCommand { get; }
 
     [ObservableProperty]
     public partial string? TestMessage { get; set; }
@@ -227,6 +264,65 @@ public sealed partial class SettingsFormViewModel : ObservableObject
         {
             TestRunning = false;
         }
+    }
+
+    /// <summary>The Detect button: what the plugin finds on this machine, offered as a list; the one chosen fills the form.</summary>
+    private async Task DetectAsync()
+    {
+        if (_detector is null)
+        {
+            return;
+        }
+
+        DetectRunning = true;
+        DetectMessage = "Looking on this computer...";
+        try
+        {
+            var progress = new Progress<string>(message => DetectMessage = message);
+            using var cts = new CancellationTokenSource(DetectTimeout);
+            var found = (await _detector.DetectAsync(progress, cts.Token)).Where(f => f.Settings.GetType() == Settings.GetType()).ToList();
+            if (found.Count == 0)
+            {
+                DetectMessage = "Found nothing on this computer.";
+                return;
+            }
+
+            var choice = await _dialogs.ChooseAsync("Found on this computer", "Choose one to fill in the form.", found.Select(f => f.Label).ToList());
+            if (choice is not { } index || index < 0 || index >= found.Count)
+            {
+                DetectMessage = null;
+                return;
+            }
+
+            Fill(found[index].Settings);
+            DetectMessage = "Filled in: " + found[index].Label;
+        }
+        catch (OperationCanceledException)
+        {
+            DetectMessage = "Detection timed out.";
+        }
+        catch (Exception ex)
+        {
+            DetectMessage = ex.GetBaseException().Message;
+        }
+        finally
+        {
+            DetectRunning = false;
+        }
+    }
+
+    /// <summary>Every field loaded from a detected source's settings, then written into <see cref="Settings"/> as if typed: the visibility and the name follow.</summary>
+    private void Fill(object detected)
+    {
+        foreach (var field in Fields)
+        {
+            field.Load(detected);
+            field.Error = null;
+            field.Warning = null;
+        }
+
+        FormError = null;
+        OnFieldChanged();
     }
 }
 

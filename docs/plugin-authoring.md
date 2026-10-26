@@ -145,6 +145,15 @@ To tidy settings before they are stored, implement `NormaliseSettings(settings)`
 and when it is edited, then stores what it leaves and starts the source from that. SharePoint sorts
 its site addresses there.
 
+When sources of your kind can be found on the machine itself, implement `IDetectable` to back a
+Detect button: `DetectAsync(progress, ct)` returns what you find as `DetectedSource`s, each a
+one-line label and a settings object of your own settings type, filled in. The dialog lists them,
+and the one chosen fills the form, the name following as it does when the person types; an empty
+list says nothing was found. Answer `CanDetect` false where you cannot look, which leaves the button
+out (the Outlook plugin reads classic Outlook's profiles, which are in the Windows registry).
+Detection should read only what is already on the machine and sign in to nothing. The button sits
+under the setting marked `Primary` in the Add source dialog, and beside Test otherwise.
+
 ## Prompts
 
 When a source needs something only the user has (a PIN, a one-time code, a passphrase that

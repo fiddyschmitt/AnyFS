@@ -392,7 +392,7 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
 
     private SettingsFormViewModel BuildForm(ISourcePlugin plugin, object settings)
     {
-        var form = new SettingsFormViewModel(plugin.SettingsType, settings, plugin as IValidatable, plugin as ITestable, plugin as ISettingTextProvider, _dialogs, plugin as ISettingVisibility, liftPrimary: true);
+        var form = new SettingsFormViewModel(plugin.SettingsType, settings, plugin as IValidatable, plugin as ITestable, plugin as ISettingTextProvider, _dialogs, plugin as ISettingVisibility, liftPrimary: true, plugin as IDetectable);
         form.Changed += OnFormChanged;
         return form;
     }

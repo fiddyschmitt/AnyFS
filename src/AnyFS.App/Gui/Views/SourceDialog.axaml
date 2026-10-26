@@ -54,6 +54,13 @@
         <StackPanel Grid.Column="2">
           <ContentControl Name="PrimaryField" Content="{Binding Form.PrimaryField, FallbackValue={x:Null}}" ContentTemplate="{StaticResource FieldTemplates}"
                           IsVisible="{Binding Form.PrimaryField, Converter={x:Static ObjectConverters.IsNotNull}, FallbackValue=False}" />
+          <!-- the plugin's Detect (IDetectable): fills that setting, and the rest, from what it finds on this computer -->
+          <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,0,0,10" IsVisible="{Binding Form.ShowDetectAbove, FallbackValue=False}">
+            <Button Name="DetectButton" Content="Detect" Command="{Binding Form.DetectCommand, FallbackValue={x:Null}}"
+                    ToolTip.Tip="Find sources of this type on this computer and fill in the form from one" />
+            <ProgressBar IsIndeterminate="True" Width="60" Height="4" MinWidth="60" IsVisible="{Binding Form.DetectRunning, FallbackValue=False}" VerticalAlignment="Center" />
+            <TextBlock Text="{Binding Form.DetectMessage, FallbackValue={x:Null}}" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="380" />
+          </StackPanel>
           <TextBlock Classes="caption" Text="Name *" />
           <TextBox Name="NameBox" Text="{Binding Name}" />
           <TextBlock Classes="hint" Text="{Binding NameHint}" />

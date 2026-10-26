@@ -345,6 +345,54 @@ public class SettingsFormTests
         Assert.IsTrue(inPlace.Groups.SelectMany(g => g.Fields).Any(f => f.PropertyName == nameof(AddressSettings.Address)));
     }
 
+    /// <summary>A plugin that finds two sources of its kind on this machine, or none, or cannot look here.</summary>
+    private sealed class DetectingPlugin(bool canDetect = true, bool findNone = false) : IDetectable
+    {
+        public bool CanDetect => canDetect;
+
+        public Task<IReadOnlyList<DetectedSource>> DetectAsync(IProgress<string> progress, CancellationToken ct)
+            => Task.FromResult<IReadOnlyList<DetectedSource>>(findNone
+                ? []
+                : [new DetectedSource("Files on files-01", new AddressSettings { Address = "files-01", Port = 2222 }), new DetectedSource("Files on files-02", new AddressSettings { Address = "files-02" })]);
+    }
+
+    [TestMethod]
+    public async Task DetectOffersWhatThePluginFindsAndFillsTheFormFromTheOneChosen()
+    {
+        var dialogs = new FakeDialogs { OnChoose = (_, _, _) => 0 };
+        var settings = new AddressSettings { Retries = 9 };
+        var form = new SettingsFormViewModel(typeof(AddressSettings), settings, null, null, null, dialogs, liftPrimary: true, detector: new DetectingPlugin());
+        Assert.IsTrue(form.HasDetect);
+        Assert.IsTrue(form.ShowDetectAbove, "under the setting it fills, which the dialog lifts");
+        Assert.IsFalse(form.ShowDetectInForm);
+        var changes = 0;
+        form.Changed += (_, _) => changes++;
+
+        await form.DetectCommand.ExecuteAsync(null);
+        CollectionAssert.AreEqual(new[] { "Files on files-01", "Files on files-02" }, dialogs.Choices.Single().Options.ToList());
+        Assert.AreEqual("files-01", settings.Address, "the form's own settings, filled in");
+        Assert.AreEqual(2222, settings.Port);
+        Assert.AreEqual(3, settings.Retries, "every field comes from the source found");
+        Assert.AreEqual("files-01", form.PrimaryField!.Text);
+        Assert.IsTrue(changes > 0, "the dialog hears of it, so the name follows");
+        Assert.AreEqual("Filled in: Files on files-01", form.DetectMessage);
+        Assert.IsTrue(form.Validate());
+
+        dialogs.OnChoose = (_, _, _) => null;
+        await form.DetectCommand.ExecuteAsync(null);
+        Assert.AreEqual("files-01", settings.Address, "dismissed: nothing changes");
+
+        var none = new SettingsFormViewModel(typeof(AddressSettings), new AddressSettings(), null, null, null, dialogs, liftPrimary: true, detector: new DetectingPlugin(findNone: true));
+        await none.DetectCommand.ExecuteAsync(null);
+        Assert.AreEqual("Found nothing on this computer.", none.DetectMessage);
+        Assert.AreEqual(2, dialogs.Choices.Count, "nothing to choose from: no list");
+
+        Assert.IsFalse(new SettingsFormViewModel(typeof(AddressSettings), new AddressSettings(), null, null, null, dialogs, detector: new DetectingPlugin(canDetect: false)).HasDetect, "a plugin that cannot look here has no button");
+        var edit = new SettingsFormViewModel(typeof(AddressSettings), new AddressSettings(), null, null, null, dialogs, detector: new DetectingPlugin());
+        Assert.IsTrue(edit.ShowDetectInForm, "not lifted (an edit): beside Test");
+        Assert.IsTrue(edit.HasActions);
+    }
+
     [TestMethod]
     public void EveryChangeIsReportedWithTheSettingsAlreadyWritten()
     {

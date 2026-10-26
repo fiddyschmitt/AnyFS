@@ -98,3 +98,23 @@ public interface ITestable
 {
     Task<TestResult> TestAsync(object settings, IProgress<string> progress, CancellationToken ct);
 }
+
+/// <summary>A source of a plugin's kind found on this machine: a line that says what it is, and its settings, ready to use.</summary>
+/// <param name="Label">One line, shown in a list to choose from: "Mailbox jane@contoso.com (Exchange Online)".</param>
+/// <param name="Settings">The plugin's own settings object (an instance of its <see cref="ISourcePlugin.SettingsType"/>), filled in.</param>
+public sealed record DetectedSource(string Label, object Settings);
+
+/// <summary>
+/// A plugin that can find sources of its kind on this machine (the dialog's Detect button): an Outlook profile's
+/// mailboxes and data files, say. The dialog offers what is found, one to choose, and fills the form from the one
+/// chosen, the name following as it does when the person types. An empty list says nothing was found. Detection reads
+/// what is already on the machine; it signs in to nothing.
+/// </summary>
+public interface IDetectable
+{
+    /// <summary>Whether detection can run on this machine; false leaves the button out (Outlook's profiles are read on Windows only). Optional: the default is true.</summary>
+    bool CanDetect => true;
+
+    /// <param name="progress">What is being looked at, for the line beside the button.</param>
+    Task<IReadOnlyList<DetectedSource>> DetectAsync(IProgress<string> progress, CancellationToken ct);
+}
