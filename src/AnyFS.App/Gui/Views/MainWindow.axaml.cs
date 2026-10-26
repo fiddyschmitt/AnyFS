@@ -12,8 +12,14 @@ namespace AnyFS.App.Gui.Views;
 
 public partial class MainWindow : Window
 {
-    /// <summary>How long the window's thread may take to get to a probe before the wait is logged.</summary>
-    internal static readonly TimeSpan StallWorthLogging = TimeSpan.FromSeconds(1);
+    /// <summary>
+    /// How long the window's thread may take to get to a probe before the wait is logged: a quarter second, as a background
+    /// collection on a machine short of memory holds it up for less than one (26-Oct-2026).
+    /// </summary>
+    internal static readonly TimeSpan StallWorthLogging = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>At most one such line this often, so a window held up again and again does not fill the log.</summary>
+    internal static readonly TimeSpan StallLoggedEvery = TimeSpan.FromSeconds(10);
 
     private readonly GuiHost _host;
     private readonly DispatcherTimer _timer;
@@ -24,6 +30,9 @@ public partial class MainWindow : Window
 
     // when the probe in flight was sent (a Stopwatch timestamp), 0 when none is
     private long _probeSent;
+
+    // when a wait was last logged (a Stopwatch timestamp), 0 before the first; the window's thread's own
+    private long _stallLogged;
 
     public MainWindow(GuiHost host)
     {
@@ -51,9 +60,11 @@ public partial class MainWindow : Window
     public MainViewModel ViewModel { get; }
 
     /// <summary>
-    /// Every second, from outside, how long the window's thread takes to get to a probe: a wait of a second or more is logged
-    /// with how much of it the garbage collector held every thread, so a sluggish window says why (the user, 23-Oct-2026:
-    /// "When enumerating at startup, the UI becomes less responsive").
+    /// Every second, from outside, how long the window's thread takes to get to a probe: a long wait is logged with how much
+    /// of it the garbage collector held every thread and how much of the machine's memory is in use, so a sluggish window
+    /// says why (the user, 23-Oct-2026: "When enumerating at startup, the UI becomes less responsive"). A thread that waits
+    /// for a background collection, as every thread allocating does once memory is short (26-Oct-2026), is not held by it:
+    /// the memory says so instead.
     /// </summary>
     private void Probe()
     {
@@ -70,13 +81,18 @@ public partial class MainWindow : Window
         {
             var waited = Stopwatch.GetElapsedTime(sent);
             Interlocked.Exchange(ref _probeSent, 0);
-            if (waited >= StallWorthLogging)
+            if (waited >= StallWorthLogging && (_stallLogged == 0 || Stopwatch.GetElapsedTime(_stallLogged) >= StallLoggedEvery))
             {
-                _host.Logger.LogInformation("window: its thread was busy for {Milliseconds:F0} ms (the garbage collector held every thread for {Paused:F0} ms of it, {Full} full collections; {Heap:N0} MiB in use)",
-                    waited.TotalMilliseconds, (GC.GetTotalPauseDuration() - paused).TotalMilliseconds, GC.CollectionCount(2) - full, GC.GetTotalMemory(false) >> 20);
+                _stallLogged = Stopwatch.GetTimestamp();
+                var memory = GC.GetGCMemoryInfo();
+                _host.Logger.LogInformation("window: its thread was busy for {Milliseconds:F0} ms (the garbage collector held every thread for {Paused:F0} ms of it, {Full} full collections; {Heap:N0} MiB in use; the machine's memory {Load}% in use, which the collector takes to be high from {High}%)",
+                    waited.TotalMilliseconds, (GC.GetTotalPauseDuration() - paused).TotalMilliseconds, GC.CollectionCount(2) - full, GC.GetTotalMemory(false) >> 20,
+                    Percent(memory.MemoryLoadBytes, memory.TotalAvailableMemoryBytes), Percent(memory.HighMemoryLoadThresholdBytes, memory.TotalAvailableMemoryBytes));
             }
         }, DispatcherPriority.Input);
     }
+
+    private static long Percent(long part, long whole) => whole > 0 ? (long)Math.Round(part * 100.0 / whole) : 0;
 
     /// <summary>Changes arrive on any thread; the UI picks them up within a quarter second, and every second regardless.</summary>
     private void OnEngineChanged() => Interlocked.Exchange(ref _dirty, 1);

@@ -380,8 +380,13 @@ public class HeadlessWindowTests
         };
     }
 
+    /// <summary>
+    /// The window held up for more than a quarter second says so in the log, with how much of the machine's memory is in use
+    /// (a background collection holds up every thread that allocates once memory is short, 26-Oct-2026); held up again at
+    /// once, it does not say so again.
+    /// </summary>
     [TestMethod]
-    public async Task AWindowThatIsBusyForMoreThanASecondSaysSoInTheLog()
+    public async Task AWindowThatIsHeldUpSaysSoInTheLog()
     {
         var root = Path.Combine(Path.GetTempPath(), "anyfs-tests", "window-" + Guid.NewGuid().ToString("N"));
         try
@@ -397,7 +402,9 @@ public class HeadlessWindowTests
                 window.Show();
                 await Task.Delay(1500);
 
-                // the window's thread held up: the watchdog's probe waits behind it
+                // the window's thread held up: the watchdog's probe waits behind it; then held up again
+                Thread.Sleep(MainWindow.StallWorthLogging + TimeSpan.FromMilliseconds(800));
+                await Task.Delay(1500);
                 Thread.Sleep(MainWindow.StallWorthLogging + TimeSpan.FromMilliseconds(800));
                 await Task.Delay(1500);
 
@@ -409,6 +416,8 @@ public class HeadlessWindowTests
             var log = await File.ReadAllTextAsync(Path.Combine(root, "anyfs.log"));
             StringAssert.Contains(log, "window: its thread was busy for");
             StringAssert.Contains(log, "the garbage collector held every thread for");
+            StringAssert.Contains(log, "% in use, which the collector takes to be high from ");
+            Assert.AreEqual(1, log.Split('\n').Count(l => l.Contains("window: its thread was busy for", StringComparison.Ordinal)), "once in ten seconds: " + log);
         }
         finally
         {
