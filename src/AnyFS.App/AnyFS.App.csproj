@@ -167,4 +167,14 @@
          this). -->
     <_UseManagedNtlm>true</_UseManagedNtlm>
   </PropertyGroup>
+  <ItemGroup>
+    <!-- When the garbage collector takes the machine's memory load to be high. By default that is from 90% in use (below 80 GB
+         of memory), and from 95% a thread that runs out of room while a background collection is under way waits for the
+         whole collection. The window's thread allocates as it draws, so with 200,000 3DX documents and two mailboxes of
+         100,000 items listing at the start (the user, 26-Oct-2026) it stopped for 0.35 to 0.5 s every few seconds on a machine
+         at 95%, and now and then a full compacting collection held every thread for a second. AnyFS is small next to the
+         machine's memory, which Microsoft's guidance says may take a higher threshold: 97% (the waits from 99%), at the cost
+         of a heap that is let grow more between 90% and 97%. -->
+    <RuntimeHostConfigurationOption Include="System.GC.HighMemoryPercent" Value="97" />
+  </ItemGroup>
 </Project>
