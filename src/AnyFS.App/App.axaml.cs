@@ -24,6 +24,7 @@ public partial class App : Application
             Host = GuiHost.Create(Options ?? new GuiOptions());
             PluginIcons.Registry = Host.Engine.Registry;
             ApplyTheme(Host.Engine.Settings.App.Theme);
+            WindowEdges.FollowEveryWindow();
             var window = new MainWindow(Host);
             desktop.MainWindow = window;
             desktop.ShutdownMode = ShutdownMode.OnMainWindowClose;
