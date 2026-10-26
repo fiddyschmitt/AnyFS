@@ -197,12 +197,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
         JsonElement message;
         try
         {
-            message = await CallAsync("GetItem", new JsonObject
-            {
-                ["__type"] = "GetItemRequest:#Exchange",
-                ["ItemShape"] = new JsonObject { ["__type"] = "ItemResponseShape:#Exchange", ["BaseShape"] = "AllProperties", ["IncludeMimeContent"] = includeMime, ["BodyType"] = "HTML" },
-                ["ItemIds"] = new JsonArray(new JsonObject { ["__type"] = "ItemId:#Exchange", ["Id"] = itemId }),
-            }, ct).ConfigureAwait(false);
+            message = await CallAsync("GetItem", GetItemBody([itemId], includeMime), ct).ConfigureAwait(false);
         }
         catch (EwsException ex) when (ex.IsNotFound)
         {
@@ -217,18 +212,55 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
         JsonElement message;
         try
         {
-            // OWA takes the request without a shape (Spike 14); an attached item comes with its MIME all the same
-            message = await CallAsync("GetAttachment", new JsonObject
-            {
-                ["__type"] = "GetAttachmentRequest:#Exchange",
-                ["AttachmentIds"] = new JsonArray(new JsonObject { ["__type"] = "AttachmentId:#Exchange", ["Id"] = attachmentId }),
-            }, ct).ConfigureAwait(false);
+            message = await CallAsync("GetAttachment", GetAttachmentBody([attachmentId]), ct).ConfigureAwait(false);
         }
         catch (EwsException ex) when (ex.IsNotFound)
         {
             return null;
         }
 
+        return AttachmentOf(message);
+    }
+
+    public async Task<IReadOnlyList<EwsItem?>> GetItemsAsync(IReadOnlyList<string> itemIds, bool includeMime, CancellationToken ct)
+    {
+        if (itemIds.Count == 0)
+        {
+            return [];
+        }
+
+        var messages = await CallAllAsync("GetItem", GetItemBody(itemIds, includeMime), ct).ConfigureAwait(false);
+        return [.. itemIds.Select((_, i) => Answered(messages, i, "GetItem") is { } m && m.TryGetProperty("Items", out var items) && items.GetArrayLength() > 0 ? ItemOf(items[0]) : null)];
+    }
+
+    public async Task<IReadOnlyList<EwsAttachmentContent?>> GetAttachmentsAsync(IReadOnlyList<string> attachmentIds, CancellationToken ct)
+    {
+        if (attachmentIds.Count == 0)
+        {
+            return [];
+        }
+
+        var messages = await CallAllAsync("GetAttachment", GetAttachmentBody(attachmentIds), ct).ConfigureAwait(false);
+        return [.. attachmentIds.Select((_, i) => Answered(messages, i, "GetAttachment") is { } m ? AttachmentOf(m) : null)];
+    }
+
+    private static JsonObject GetItemBody(IEnumerable<string> itemIds, bool includeMime) => new()
+    {
+        ["__type"] = "GetItemRequest:#Exchange",
+        ["ItemShape"] = new JsonObject { ["__type"] = "ItemResponseShape:#Exchange", ["BaseShape"] = "AllProperties", ["IncludeMimeContent"] = includeMime, ["BodyType"] = "HTML" },
+        ["ItemIds"] = new JsonArray(itemIds.Select(id => (JsonNode)new JsonObject { ["__type"] = "ItemId:#Exchange", ["Id"] = id }).ToArray()),
+    };
+
+    // OWA takes the request without a shape (Spike 14); an attached item comes with its MIME all the same
+    private static JsonObject GetAttachmentBody(IEnumerable<string> attachmentIds) => new()
+    {
+        ["__type"] = "GetAttachmentRequest:#Exchange",
+        ["AttachmentIds"] = new JsonArray(attachmentIds.Select(id => (JsonNode)new JsonObject { ["__type"] = "AttachmentId:#Exchange", ["Id"] = id }).ToArray()),
+    };
+
+    /// <summary>A GetAttachment response message's attachment: a file's bytes, or an attached item; null for none.</summary>
+    private static EwsAttachmentContent? AttachmentOf(JsonElement message)
+    {
         if (!message.TryGetProperty("Attachments", out var attachments) || attachments.GetArrayLength() == 0)
         {
             return null;
@@ -240,13 +272,31 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
         return new EwsAttachmentContent(Str(a, "Name") ?? "", Str(a, "ContentType"), content, item);
     }
 
+    /// <summary>The <paramref name="index"/>th of several response messages when it succeeded; null when it is an error (that id alone, said in the debug log) or missing.</summary>
+    private JsonElement? Answered(IReadOnlyList<JsonElement> messages, int index, string action)
+    {
+        if (index >= messages.Count)
+        {
+            return null;
+        }
+
+        var message = messages[index];
+        if (Str(message, "ResponseClass") is "Error")
+        {
+            _logger.LogDebug("outlook: {Action} answered {Code} for one of {Count} ids", action, Str(message, "ResponseCode") ?? "Error", messages.Count);
+            return null;
+        }
+
+        return message;
+    }
+
     // --- the directory (address books) ------------------------------------------------------------------------------------
 
     public async Task<IReadOnlyList<AddressList>> AddressListsAsync(CancellationToken ct)
     {
         // GetPeopleFilters takes no envelope (Spike 11: a body of "{}") and answers the People page's filters: the mailbox's
         // own contact folders (a folder id with a parent folder) and then the organisation's address lists (a GUID, no parent)
-        var answer = await SendAsync("GetPeopleFilters", "{}", "People", whole: true, ct).ConfigureAwait(false);
+        var answer = await SendAsync("GetPeopleFilters", "{}", "People", Answer.Whole, ct).ConfigureAwait(false);
         var filters = answer.ValueKind == JsonValueKind.Array ? answer : Values(answer, "Body").Any() ? answer.GetProperty("Body") : default;
         var lists = new List<AddressList>();
         if (filters.ValueKind != JsonValueKind.Array)
@@ -352,7 +402,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
             ["PersonaShape"] = shape,
             ["ShouldResolveOneOffEmailAddress"] = false,
         };
-        return SendAsync("FindPeople", Envelope("FindPeople", request), "People", whole: true, ct);
+        return SendAsync("FindPeople", Envelope("FindPeople", request), "People", Answer.Whole, ct);
     }
 
     /// <summary>
@@ -508,14 +558,27 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
     // --- the call -----------------------------------------------------------------------------------------------------------
 
     /// <summary>One operation: its first response message, checked.</summary>
-    private Task<JsonElement> CallAsync(string action, JsonObject body, CancellationToken ct) => SendAsync(action, Envelope(action, body), "Mail", whole: false, ct);
+    private Task<JsonElement> CallAsync(string action, JsonObject body, CancellationToken ct) => SendAsync(action, Envelope(action, body), "Mail", Answer.First, ct);
 
-    /// <summary>
-    /// One request: its first response message, checked; or with <paramref name="whole"/> the answer as it is, checked for
-    /// an error (People's operations answer no response message). Paced, signed, tried again on a 401 (once, with a fresh
-    /// token) and on a hold.
-    /// </summary>
-    private async Task<JsonElement> SendAsync(string action, string envelope, string app, bool whole, CancellationToken ct)
+    /// <summary>One operation on several ids: its response messages, one per id in the order asked, each unchecked (an error answers that id alone).</summary>
+    private async Task<IReadOnlyList<JsonElement>> CallAllAsync(string action, JsonObject body, CancellationToken ct)
+        => [.. (await SendAsync(action, Envelope(action, body), "Mail", Answer.All, ct).ConfigureAwait(false)).EnumerateArray()];
+
+    /// <summary>What a request's answer is taken as.</summary>
+    private enum Answer
+    {
+        /// <summary>Its first response message, checked.</summary>
+        First,
+
+        /// <summary>Every response message, as an array, each unchecked; tried again when every one says the server is busy.</summary>
+        All,
+
+        /// <summary>The answer as it is, checked for an error: People's operations answer no response message.</summary>
+        Whole,
+    }
+
+    /// <summary>One request, its answer taken as <paramref name="answer"/> says. Paced, signed, tried again on a 401 (once, with a fresh token) and on a hold.</summary>
+    private async Task<JsonElement> SendAsync(string action, string envelope, string app, Answer answer, CancellationToken ct)
     {
         var renew = false;
         for (var attempt = 1; ; attempt++)
@@ -595,12 +658,12 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
                         throw new EwsException(Str(fault, "ResponseCode") ?? ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture), $"{action}: {Str(fault, "FaultMessage") ?? Trim(text)}", transient);
                     }
 
-                    if (whole)
+                    if (answer == Answer.Whole)
                     {
-                        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("Body", out var answer) && answer.ValueKind == JsonValueKind.Object && Str(answer, "ResponseClass") is "Error")
+                        if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("Body", out var body) && body.ValueKind == JsonValueKind.Object && Str(body, "ResponseClass") is "Error")
                         {
-                            var code = Str(answer, "ResponseCode") ?? "Error";
-                            throw new EwsException(code, $"{action}: {Str(answer, "MessageText") ?? code}");
+                            var code = Str(body, "ResponseCode") ?? "Error";
+                            throw new EwsException(code, $"{action}: {Str(body, "MessageText") ?? code}");
                         }
 
                         return root.Clone();
@@ -611,11 +674,22 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
                         throw new EwsException("NoResponse", $"{action}: {_origin.Host} answered without a response message ({Trim(text)})");
                     }
 
+                    if (answer == Answer.All)
+                    {
+                        if (attempt < Attempts && items.EnumerateArray().All(m => Str(m, "ResponseClass") is "Error" && IsTransient(Str(m, "ResponseCode"))))
+                        {
+                            _pace.Hold(TimeSpan.FromSeconds(10));
+                            continue;
+                        }
+
+                        return items.Clone();
+                    }
+
                     var message = items[0];
                     if (Str(message, "ResponseClass") is "Error")
                     {
                         var code = Str(message, "ResponseCode") ?? "Error";
-                        var transient = code is "ErrorServerBusy" or "ErrorTimeoutExpired" or "ErrorInternalServerTransientError" or "ErrorMailboxStoreUnavailable" or "ErrorTooManyObjectsOpened" or "ErrorConnectionFailed";
+                        var transient = IsTransient(code);
                         if (transient && attempt < Attempts)
                         {
                             _pace.Hold(message.TryGetProperty("MessageXml", out _) ? null : TimeSpan.FromSeconds(10));
@@ -630,6 +704,8 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
             }
         }
     }
+
+    private static bool IsTransient(string? code) => code is "ErrorServerBusy" or "ErrorTimeoutExpired" or "ErrorInternalServerTransientError" or "ErrorMailboxStoreUnavailable" or "ErrorTooManyObjectsOpened" or "ErrorConnectionFailed";
 
     private static string Envelope(string action, JsonObject body) => new JsonObject
     {

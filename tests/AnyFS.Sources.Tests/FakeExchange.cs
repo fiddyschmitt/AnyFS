@@ -49,6 +49,12 @@ internal sealed partial class FakeExchange
     /// <summary>How many times a folder's items were asked for whole (a sync with no state, a delta with no token): what a listing kept between starts spares.</summary>
     public int FullSyncs { get; private set; }
 
+    /// <summary>How many items GetItem was asked for, whatever the number of requests (several go in one).</summary>
+    public int ItemsFetched { get; private set; }
+
+    /// <summary>How many attachments GetAttachment was asked for, whatever the number of requests.</summary>
+    public int AttachmentsFetched { get; private set; }
+
     /// <summary>Answers a request instead of the fake when it returns one (a 429 with Retry-After, say).</summary>
     public Func<HttpRequestMessage, string, HttpResponseMessage?>? Intercept { get; set; }
 
@@ -238,6 +244,23 @@ internal sealed partial class FakeExchange
         }
     }
 
+    /// <summary>Changes an item as a client saving it would: what <paramref name="change"/> does, a later last-modified time, its MIME and size anew, and an update in its folder's log.</summary>
+    public void Update(Item item, Action<Item> change)
+    {
+        lock (_gate)
+        {
+            change(item);
+            item.Modified = (item.Modified ?? DateTimeOffset.UtcNow) + TimeSpan.FromMinutes(1);
+            if (item.Type == "Message")
+            {
+                item.Mime = Mime(item);
+                item.Size = item.Mime.Length;
+            }
+
+            _folders[item.FolderId].Log("Update", item.Id);
+        }
+    }
+
     public void Delete(Item item)
     {
         lock (_gate)
@@ -386,14 +409,18 @@ internal sealed partial class FakeExchange
             return Text(400, """{"Body":{"ErrorCode":400,"ExceptionName":"OwaMethodArgumentException","FaultMessage":"Invalid argument used to call method GetItem","IsTransient":false,"ResponseCode":"BadRequest"}}""");
         }
 
-        var id = body["ItemIds"]?[0]?["Id"]?.GetValue<string>() ?? "";
-        if (!_items.TryGetValue(id, out var item))
+        // one response message per id asked for, in order, as Exchange answers
+        var mime = shape?["IncludeMimeContent"]?.GetValue<bool>() == true;
+        var messages = new List<JsonObject>();
+        foreach (var asked in body["ItemIds"]?.AsArray() ?? [])
         {
-            return Ok("GetItem", Error("ItemInfoResponseMessage", "ErrorItemNotFound", "The specified object was not found in the store."));
+            ItemsFetched++;
+            messages.Add(_items.TryGetValue(asked?["Id"]?.GetValue<string>() ?? "", out var item)
+                ? new JsonObject { ["__type"] = "ItemInfoResponseMessage:#Exchange", ["Items"] = new JsonArray(ItemJson(item, full: true, mime: mime)), ["ResponseClass"] = "Success", ["ResponseCode"] = "NoError" }
+                : Error("ItemInfoResponseMessage", "ErrorItemNotFound", "The specified object was not found in the store."));
         }
 
-        var mime = shape?["IncludeMimeContent"]?.GetValue<bool>() == true;
-        return Ok("GetItem", new JsonObject { ["__type"] = "ItemInfoResponseMessage:#Exchange", ["Items"] = new JsonArray(ItemJson(item, full: true, mime: mime)), ["ResponseClass"] = "Success", ["ResponseCode"] = "NoError" });
+        return Ok("GetItem", [.. messages]);
     }
 
     private HttpResponseMessage GetAttachment(JsonObject body)
@@ -403,17 +430,24 @@ internal sealed partial class FakeExchange
             return Text(400, """{"Body":{"ErrorCode":400,"ExceptionName":"OwaMethodArgumentException","FaultMessage":"Invalid argument used to call method GetAttachment","IsTransient":false,"ResponseCode":"BadRequest"}}""");
         }
 
-        var id = body["AttachmentIds"]?[0]?["Id"]?.GetValue<string>() ?? "";
-        if (!_attachments.TryGetValue(id, out var found))
+        var messages = new List<JsonObject>();
+        foreach (var asked in body["AttachmentIds"]?.AsArray() ?? [])
         {
-            return Ok("GetAttachment", Error("AttachmentInfoResponseMessage", "ErrorAttachmentNotFound", "The attachment could not be found."));
+            AttachmentsFetched++;
+            if (!_attachments.TryGetValue(asked?["Id"]?.GetValue<string>() ?? "", out var found))
+            {
+                messages.Add(Error("AttachmentInfoResponseMessage", "ErrorAttachmentNotFound", "The attachment could not be found."));
+                continue;
+            }
+
+            var (_, a) = found;
+            JsonObject json = a.Embedded is { } embedded
+                ? new JsonObject { ["__type"] = "ItemAttachment:#Exchange", ["AttachmentId"] = new JsonObject { ["Id"] = a.Id }, ["Name"] = a.Name, ["ContentType"] = a.ContentType, ["Item"] = ItemJson(embedded, full: true, mime: true) }
+                : new JsonObject { ["__type"] = "FileAttachment:#Exchange", ["Content"] = Convert.ToBase64String(a.Content ?? []), ["AttachmentId"] = new JsonObject { ["Id"] = a.Id }, ["Name"] = a.Name, ["ContentType"] = a.ContentType };
+            messages.Add(new JsonObject { ["__type"] = "AttachmentInfoResponseMessage:#Exchange", ["Attachments"] = new JsonArray(json), ["ResponseClass"] = "Success", ["ResponseCode"] = "NoError" });
         }
 
-        var (_, a) = found;
-        JsonObject json = a.Embedded is { } embedded
-            ? new JsonObject { ["__type"] = "ItemAttachment:#Exchange", ["AttachmentId"] = new JsonObject { ["Id"] = a.Id }, ["Name"] = a.Name, ["ContentType"] = a.ContentType, ["Item"] = ItemJson(embedded, full: true, mime: true) }
-            : new JsonObject { ["__type"] = "FileAttachment:#Exchange", ["Content"] = Convert.ToBase64String(a.Content ?? []), ["AttachmentId"] = new JsonObject { ["Id"] = a.Id }, ["Name"] = a.Name, ["ContentType"] = a.ContentType };
-        return Ok("GetAttachment", new JsonObject { ["__type"] = "AttachmentInfoResponseMessage:#Exchange", ["Attachments"] = new JsonArray(json), ["ResponseClass"] = "Success", ["ResponseCode"] = "NoError" });
+        return Ok("GetAttachment", [.. messages]);
     }
 
     private JsonObject SyncFolderItems(JsonObject body)
@@ -593,12 +627,12 @@ internal sealed partial class FakeExchange
 
     private static JsonObject Error(string type, string code, string text) => new() { ["__type"] = $"{type}:#Exchange", ["ResponseClass"] = "Error", ["ResponseCode"] = code, ["MessageText"] = text };
 
-    private static HttpResponseMessage Ok(string action, JsonObject message)
+    private static HttpResponseMessage Ok(string action, params JsonObject[] messages)
     {
         var envelope = new JsonObject
         {
             ["Header"] = new JsonObject { ["ServerVersionInfo"] = new JsonObject { ["MajorVersion"] = 15, ["MinorVersion"] = 21, ["Version"] = "V2018_01_08" } },
-            ["Body"] = new JsonObject { ["__type"] = $"{action}Response:#Exchange", ["ResponseMessages"] = new JsonObject { ["Items"] = new JsonArray(message) } },
+            ["Body"] = new JsonObject { ["__type"] = $"{action}Response:#Exchange", ["ResponseMessages"] = new JsonObject { ["Items"] = new JsonArray([.. messages]) } },
         };
         return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(envelope.ToJsonString(), Encoding.UTF8, "application/json") };
     }
@@ -649,7 +683,7 @@ internal sealed partial class FakeExchange
 
         lock (_gate)
         {
-            System.Xml.Linq.XElement message = action switch
+            object message = action switch
             {
                 "FindFolder" => SoapFindFolder(),
                 "FindItem" => SoapFindItem(operation),
@@ -707,32 +741,43 @@ internal sealed partial class FakeExchange
                 new System.Xml.Linq.XElement(T + "Items", page.Select(i => ItemXml(i, full: false, mime: false)))));
     }
 
-    private System.Xml.Linq.XElement SoapGetItem(System.Xml.Linq.XElement operation)
+    /// <summary>One response message per id asked for, in order, as Exchange answers.</summary>
+    private List<System.Xml.Linq.XElement> SoapGetItem(System.Xml.Linq.XElement operation)
     {
-        var id = (string?)operation.Element(M + "ItemIds")?.Element(T + "ItemId")?.Attribute("Id") ?? "";
-        if (!_items.TryGetValue(id, out var item))
+        var mime = string.Equals(operation.Element(M + "ItemShape")?.Element(T + "IncludeMimeContent")?.Value, "true", StringComparison.OrdinalIgnoreCase);
+        var messages = new List<System.Xml.Linq.XElement>();
+        foreach (var asked in operation.Element(M + "ItemIds")?.Elements(T + "ItemId") ?? [])
         {
-            return SoapError("GetItemResponseMessage", "ErrorItemNotFound", "The specified object was not found in the store.");
+            ItemsFetched++;
+            messages.Add(_items.TryGetValue((string?)asked.Attribute("Id") ?? "", out var item)
+                ? new System.Xml.Linq.XElement(M + "GetItemResponseMessage", new System.Xml.Linq.XAttribute("ResponseClass", "Success"), new System.Xml.Linq.XElement(M + "ResponseCode", "NoError"),
+                    new System.Xml.Linq.XElement(M + "Items", ItemXml(item, full: true, mime: mime)))
+                : SoapError("GetItemResponseMessage", "ErrorItemNotFound", "The specified object was not found in the store."));
         }
 
-        var mime = string.Equals(operation.Element(M + "ItemShape")?.Element(T + "IncludeMimeContent")?.Value, "true", StringComparison.OrdinalIgnoreCase);
-        return new System.Xml.Linq.XElement(M + "GetItemResponseMessage", new System.Xml.Linq.XAttribute("ResponseClass", "Success"), new System.Xml.Linq.XElement(M + "ResponseCode", "NoError"),
-            new System.Xml.Linq.XElement(M + "Items", ItemXml(item, full: true, mime: mime)));
+        return messages;
     }
 
-    private System.Xml.Linq.XElement SoapGetAttachment(System.Xml.Linq.XElement operation)
+    private List<System.Xml.Linq.XElement> SoapGetAttachment(System.Xml.Linq.XElement operation)
     {
-        var id = (string?)operation.Element(M + "AttachmentIds")?.Element(T + "AttachmentId")?.Attribute("Id") ?? "";
-        if (!_attachments.TryGetValue(id, out var found))
+        var messages = new List<System.Xml.Linq.XElement>();
+        foreach (var asked in operation.Element(M + "AttachmentIds")?.Elements(T + "AttachmentId") ?? [])
         {
-            return SoapError("GetAttachmentResponseMessage", "ErrorAttachmentNotFound", "The attachment could not be found.");
+            AttachmentsFetched++;
+            if (!_attachments.TryGetValue((string?)asked.Attribute("Id") ?? "", out var found))
+            {
+                messages.Add(SoapError("GetAttachmentResponseMessage", "ErrorAttachmentNotFound", "The attachment could not be found."));
+                continue;
+            }
+
+            var (_, a) = found;
+            var xml = a.Embedded is { } embedded
+                ? new System.Xml.Linq.XElement(T + "ItemAttachment", new System.Xml.Linq.XElement(T + "AttachmentId", new System.Xml.Linq.XAttribute("Id", a.Id)), new System.Xml.Linq.XElement(T + "Name", a.Name), new System.Xml.Linq.XElement(T + "ContentType", a.ContentType), ItemXml(embedded, full: true, mime: true))
+                : new System.Xml.Linq.XElement(T + "FileAttachment", new System.Xml.Linq.XElement(T + "AttachmentId", new System.Xml.Linq.XAttribute("Id", a.Id)), new System.Xml.Linq.XElement(T + "Name", a.Name), new System.Xml.Linq.XElement(T + "ContentType", a.ContentType), new System.Xml.Linq.XElement(T + "Content", Convert.ToBase64String(a.Content ?? [])));
+            messages.Add(new System.Xml.Linq.XElement(M + "GetAttachmentResponseMessage", new System.Xml.Linq.XAttribute("ResponseClass", "Success"), new System.Xml.Linq.XElement(M + "ResponseCode", "NoError"), new System.Xml.Linq.XElement(M + "Attachments", xml)));
         }
 
-        var (_, a) = found;
-        var xml = a.Embedded is { } embedded
-            ? new System.Xml.Linq.XElement(T + "ItemAttachment", new System.Xml.Linq.XElement(T + "AttachmentId", new System.Xml.Linq.XAttribute("Id", a.Id)), new System.Xml.Linq.XElement(T + "Name", a.Name), new System.Xml.Linq.XElement(T + "ContentType", a.ContentType), ItemXml(embedded, full: true, mime: true))
-            : new System.Xml.Linq.XElement(T + "FileAttachment", new System.Xml.Linq.XElement(T + "AttachmentId", new System.Xml.Linq.XAttribute("Id", a.Id)), new System.Xml.Linq.XElement(T + "Name", a.Name), new System.Xml.Linq.XElement(T + "ContentType", a.ContentType), new System.Xml.Linq.XElement(T + "Content", Convert.ToBase64String(a.Content ?? [])));
-        return new System.Xml.Linq.XElement(M + "GetAttachmentResponseMessage", new System.Xml.Linq.XAttribute("ResponseClass", "Success"), new System.Xml.Linq.XElement(M + "ResponseCode", "NoError"), new System.Xml.Linq.XElement(M + "Attachments", xml));
+        return messages;
     }
 
     private System.Xml.Linq.XElement SoapSyncFolderItems(System.Xml.Linq.XElement operation)

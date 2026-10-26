@@ -168,9 +168,7 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
         XElement message;
         try
         {
-            message = await CallAsync("GetItem", new XElement(M + "GetItem",
-                new XElement(M + "ItemShape", new XElement(T + "BaseShape", "AllProperties"), new XElement(T + "IncludeMimeContent", includeMime ? "true" : "false"), new XElement(T + "BodyType", "HTML")),
-                new XElement(M + "ItemIds", new XElement(T + "ItemId", new XAttribute("Id", itemId)))), ct).ConfigureAwait(false);
+            message = await CallAsync("GetItem", GetItemBody([itemId], includeMime), ct).ConfigureAwait(false);
         }
         catch (EwsException ex) when (ex.IsNotFound)
         {
@@ -186,15 +184,49 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
         XElement message;
         try
         {
-            message = await CallAsync("GetAttachment", new XElement(M + "GetAttachment",
-                new XElement(M + "AttachmentShape", new XElement(T + "IncludeMimeContent", "true"), new XElement(T + "BodyType", "HTML")),
-                new XElement(M + "AttachmentIds", new XElement(T + "AttachmentId", new XAttribute("Id", attachmentId)))), ct).ConfigureAwait(false);
+            message = await CallAsync("GetAttachment", GetAttachmentBody([attachmentId]), ct).ConfigureAwait(false);
         }
         catch (EwsException ex) when (ex.IsNotFound)
         {
             return null;
         }
 
+        return AttachmentOf(message);
+    }
+
+    public async Task<IReadOnlyList<EwsItem?>> GetItemsAsync(IReadOnlyList<string> itemIds, bool includeMime, CancellationToken ct)
+    {
+        if (itemIds.Count == 0)
+        {
+            return [];
+        }
+
+        var messages = await CallAllAsync("GetItem", GetItemBody(itemIds, includeMime), ct).ConfigureAwait(false);
+        return [.. itemIds.Select((_, i) => Answered(messages, i, "GetItem")?.Element(M + "Items")?.Elements().FirstOrDefault() is { } item ? ItemOf(item) : null)];
+    }
+
+    public async Task<IReadOnlyList<EwsAttachmentContent?>> GetAttachmentsAsync(IReadOnlyList<string> attachmentIds, CancellationToken ct)
+    {
+        if (attachmentIds.Count == 0)
+        {
+            return [];
+        }
+
+        var messages = await CallAllAsync("GetAttachment", GetAttachmentBody(attachmentIds), ct).ConfigureAwait(false);
+        return [.. attachmentIds.Select((_, i) => Answered(messages, i, "GetAttachment") is { } m ? AttachmentOf(m) : null)];
+    }
+
+    private static XElement GetItemBody(IEnumerable<string> itemIds, bool includeMime) => new(M + "GetItem",
+        new XElement(M + "ItemShape", new XElement(T + "BaseShape", "AllProperties"), new XElement(T + "IncludeMimeContent", includeMime ? "true" : "false"), new XElement(T + "BodyType", "HTML")),
+        new XElement(M + "ItemIds", itemIds.Select(id => new XElement(T + "ItemId", new XAttribute("Id", id)))));
+
+    private static XElement GetAttachmentBody(IEnumerable<string> attachmentIds) => new(M + "GetAttachment",
+        new XElement(M + "AttachmentShape", new XElement(T + "IncludeMimeContent", "true"), new XElement(T + "BodyType", "HTML")),
+        new XElement(M + "AttachmentIds", attachmentIds.Select(id => new XElement(T + "AttachmentId", new XAttribute("Id", id)))));
+
+    /// <summary>A GetAttachment response message's attachment: a file's bytes, or an attached item; null for none.</summary>
+    private static EwsAttachmentContent? AttachmentOf(XElement message)
+    {
         var a = message.Element(M + "Attachments")?.Elements().FirstOrDefault();
         if (a is null)
         {
@@ -204,6 +236,24 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
         var content = Text(a, "Content") is { } base64 ? Convert.FromBase64String(base64) : null;
         var inner = a.Name == T + "ItemAttachment" ? a.Elements().FirstOrDefault(e => e.Name.Namespace == T && e.Name.LocalName is "Message" or "CalendarItem" or "Contact" or "Task" or "Item" or "MeetingRequest" or "MeetingResponse" or "MeetingCancellation" or "PostItem") : null;
         return new EwsAttachmentContent(Text(a, "Name") ?? "", Text(a, "ContentType"), content, inner is null ? null : ItemOf(inner));
+    }
+
+    /// <summary>The <paramref name="index"/>th of several response messages when it succeeded; null when it is an error (that id alone, said in the debug log) or missing.</summary>
+    private XElement? Answered(IReadOnlyList<XElement> messages, int index, string operation)
+    {
+        if (index >= messages.Count)
+        {
+            return null;
+        }
+
+        var message = messages[index];
+        if (IsError(message))
+        {
+            _logger.LogDebug("outlook: {Operation} answered {Code} for one of {Count} ids", operation, Text(message, "ResponseCode", M) ?? "Error", messages.Count);
+            return null;
+        }
+
+        return message;
     }
 
     /// <summary>
@@ -238,7 +288,13 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
     // --- the call -----------------------------------------------------------------------------------------------------------
 
     /// <summary>One operation: its first response message, checked. Paced; tried again on a hold (a busy server, 503) and on a dropped connection.</summary>
-    private async Task<XElement> CallAsync(string operation, XElement body, CancellationToken ct)
+    private async Task<XElement> CallAsync(string operation, XElement body, CancellationToken ct) => (await SendAsync(operation, body, all: false, ct).ConfigureAwait(false))[0];
+
+    /// <summary>One operation on several ids: its response messages, one per id in the order asked, each unchecked (an error answers that id alone); tried again when every one says the server is busy.</summary>
+    private Task<IReadOnlyList<XElement>> CallAllAsync(string operation, XElement body, CancellationToken ct) => SendAsync(operation, body, all: true, ct);
+
+    /// <summary>One request: its first response message, checked, or with <paramref name="all"/> every one of them unchecked.</summary>
+    private async Task<IReadOnlyList<XElement>> SendAsync(string operation, XElement body, bool all, CancellationToken ct)
     {
         var envelope = new XDocument(new XDeclaration("1.0", "utf-8", null), new XElement(S + "Envelope",
             new XAttribute(XNamespace.Xmlns + "soap", S), new XAttribute(XNamespace.Xmlns + "t", T), new XAttribute(XNamespace.Xmlns + "m", M),
@@ -303,9 +359,25 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
                     throw new EwsException(code, $"{operation}: {reason}", transient);
                 }
 
-                var message = document.Descendants(M + "ResponseMessages").FirstOrDefault()?.Elements().FirstOrDefault()
-                    ?? throw new EwsException("NoResponse", $"{operation}: {_url.Host} answered without a response message ({Trim(text)})");
-                if (string.Equals((string?)message.Attribute("ResponseClass"), "Error", StringComparison.OrdinalIgnoreCase))
+                var messages = document.Descendants(M + "ResponseMessages").FirstOrDefault()?.Elements().ToList() ?? [];
+                if (messages.Count == 0)
+                {
+                    throw new EwsException("NoResponse", $"{operation}: {_url.Host} answered without a response message ({Trim(text)})");
+                }
+
+                if (all)
+                {
+                    if (attempt < Attempts && messages.All(m => IsError(m) && IsTransient(Text(m, "ResponseCode", M) ?? "")))
+                    {
+                        _pace.Hold(TimeSpan.FromSeconds(10));
+                        continue;
+                    }
+
+                    return messages;
+                }
+
+                var message = messages[0];
+                if (IsError(message))
                 {
                     var code = Text(message, "ResponseCode", M) ?? "Error";
                     var transient = IsTransient(code);
@@ -318,10 +390,12 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
                     throw new EwsException(code, $"{operation}: {Text(message, "MessageText", M) ?? code}", transient);
                 }
 
-                return message;
+                return [message];
             }
         }
     }
+
+    private static bool IsError(XElement message) => string.Equals((string?)message.Attribute("ResponseClass"), "Error", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// What a 401 says. A server that offers no Windows sign-in (Negotiate, NTLM, Kerberos, Basic) but a bearer token is

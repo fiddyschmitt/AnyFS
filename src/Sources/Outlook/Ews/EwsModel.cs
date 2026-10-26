@@ -202,4 +202,43 @@ internal interface IEwsService
 
     /// <summary>An attachment's content: a file's bytes, or an attached item with its MIME; null when it is gone.</summary>
     Task<EwsAttachmentContent?> GetAttachmentAsync(string attachmentId, CancellationToken ct);
+
+    /// <summary>
+    /// Several items in full, as <see cref="GetItemAsync"/> gives one, in one request where the service takes several ids
+    /// (EWS does); in the order asked, each null when it is gone or the server would not give it (<see cref="GetItemAsync"/>
+    /// then says why). Trouble with the request itself is thrown. By default each is asked for alone, all at once (the
+    /// mailbox's pace lets four through at a time).
+    /// </summary>
+    Task<IReadOnlyList<EwsItem?>> GetItemsAsync(IReadOnlyList<string> itemIds, bool includeMime, CancellationToken ct)
+        => EwsBatch.OneByOneAsync(itemIds, id => GetItemAsync(id, includeMime, ct));
+
+    /// <summary>Several attachments' contents, as <see cref="GetAttachmentAsync"/> gives one, in one request where the service takes several ids; in the order asked, each null when it is gone or not given.</summary>
+    Task<IReadOnlyList<EwsAttachmentContent?>> GetAttachmentsAsync(IReadOnlyList<string> attachmentIds, CancellationToken ct)
+        => EwsBatch.OneByOneAsync(attachmentIds, id => GetAttachmentAsync(id, ct));
+}
+
+/// <summary>Asking for several items or attachments of a service that takes one id per request (Microsoft Graph).</summary>
+internal static class EwsBatch
+{
+    /// <summary>
+    /// Each id asked for alone, all at once: the mailbox's pace lets four through at a time. One the server refuses is null,
+    /// for the single call to say why when it is asked for again; trouble with the service itself (the sign-in, a server too
+    /// busy to answer) is thrown.
+    /// </summary>
+    public static async Task<IReadOnlyList<T?>> OneByOneAsync<T>(IReadOnlyList<string> ids, Func<string, Task<T?>> get)
+        where T : class
+    {
+        var asked = ids.Select(async id =>
+        {
+            try
+            {
+                return await get(id).ConfigureAwait(false);
+            }
+            catch (EwsException ex) when (ex.Code != "401" && !ex.Transient)
+            {
+                return null;
+            }
+        });
+        return await Task.WhenAll(asked).ConfigureAwait(false);
+    }
 }
