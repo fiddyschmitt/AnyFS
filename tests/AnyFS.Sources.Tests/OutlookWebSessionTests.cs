@@ -402,5 +402,20 @@ public class OutlookWebSessionTests
         StringAssert.StartsWith(card, "BEGIN:VCARD\r\n");
         StringAssert.Contains(card, "\r\nEMAIL;TYPE=INTERNET,PREF:");
         Assert.AreEqual(cards[0].Length, Encoding.UTF8.GetByteCount(card));
+
+        // the sandbox's people have titles, departments and offices: fields Exchange Online gives only when asked for
+        var texts = new List<string>();
+        foreach (var entry in cards)
+        {
+            texts.Add(await OutlookFixtures.TextAsync(source, "Address Books/Default Global Address List/" + entry.Name));
+        }
+
+        Assert.IsTrue(texts.Any(t => Line(t, "TITLE:") is not null), "a card with a title");
+        Assert.IsTrue(texts.Any(t => Line(t, "ORG:")?.Contains(';', StringComparison.Ordinal) == true), "a card with a department (ORG's second part)");
+        Assert.IsTrue(texts.Any(t => Line(t, "ADR;TYPE=WORK:")?.Split(';')[2] is { Length: > 0 }), "a card with an office (the work address's extended part)");
     }
+
+    /// <summary>A card's line that starts so, unfolded; null for none.</summary>
+    private static string? Line(string card, string start)
+        => card.Replace("\r\n ", "", StringComparison.Ordinal).Split("\r\n").FirstOrDefault(l => l.StartsWith(start, StringComparison.Ordinal));
 }

@@ -41,21 +41,21 @@ internal sealed partial class FakeExchange
     }
 
     /// <summary>
-    /// A person as the lab's Exchange Server SE gave one (26-Oct-2026): the default shape's fields, and those asked for
-    /// beside it (title, departments, office, business and mobile telephones, business address, IM), the many-valued ones as
-    /// attributed values. <see cref="FindPeople"/> leaves out what was not asked for.
+    /// A person as Exchange Online gave one through Outlook on the web (26-Oct-2026): the default shape's fields, and those
+    /// asked for beside it (title, departments, office, business address, IM), the many-valued ones as attributed values
+    /// under the JSON's own names ("DepartmentsArray"). <see cref="FindPeople"/> leaves out what was not asked for. No
+    /// telephone: Exchange Online refuses every telephone field over an address list.
     /// </summary>
     public static JsonObject Person(string name, string email, string? given = null, string? surname = null, string? title = null, string? department = null, string? company = null,
-        string? office = null, string? phone = null, string? mobile = null, string? city = null, string? street = null)
+        string? office = null, string? city = null, string? street = null)
     {
         static JsonArray Attributed(JsonNode value) => new(new JsonObject { ["Value"] = value, ["Attributions"] = new JsonArray("0") });
-        var mailbox = new JsonObject { ["__type"] = "EmailAddress:#Exchange", ["Name"] = name, ["EmailAddress"] = email, ["RoutingType"] = "SMTP", ["MailboxType"] = "Mailbox" };
+        var mailbox = new JsonObject { ["Name"] = name, ["EmailAddress"] = email, ["RoutingType"] = "SMTP", ["MailboxType"] = "Mailbox" };
         var person = new JsonObject
         {
-            ["__type"] = "Persona:#Exchange",
-            ["PersonaId"] = new JsonObject { ["__type"] = "ItemId:#Exchange", ["Id"] = "AAUQ" + Convert.ToBase64String(Encoding.UTF8.GetBytes(email)) },
-            ["PersonaType"] = "Person",
-            ["CreationTime"] = "0001-01-02T00:00:00Z",
+            ["PersonaId"] = new JsonObject { ["Id"] = "AAUQ" + Convert.ToBase64String(Encoding.UTF8.GetBytes(email)) },
+            ["PersonaTypeString"] = "Person",
+            ["CreationTimeString"] = "0001-01-02T00:00:00Z",
             ["DisplayName"] = name,
             ["DisplayNameFirstLast"] = name,
             ["DisplayNameLastFirst"] = name,
@@ -63,36 +63,26 @@ internal sealed partial class FakeExchange
             ["GivenName"] = given,
             ["Surname"] = surname,
             ["CompanyName"] = company,
+            ["Title"] = title,
             ["EmailAddress"] = mailbox,
             ["EmailAddresses"] = new JsonArray(mailbox.DeepClone(), new JsonObject { ["Name"] = name, ["EmailAddress"] = "/o=ExchangeLabs/ou=Exchange Administrative Group (FYDIBOHF23SPDLT)/cn=Recipients/cn=" + name.Replace(" ", "", StringComparison.Ordinal), ["RoutingType"] = "EX" }),
+            ["ImAddress"] = "sip:" + email.ToLowerInvariant(),
             ["WorkCity"] = city,
             ["RelevanceScore"] = 2147483647,
-            ["Title"] = title,
-            ["ImAddress"] = "sip:" + email.ToLowerInvariant(),
         };
         if (department is not null)
         {
-            person["Departments"] = Attributed(department);
+            person["DepartmentsArray"] = Attributed(department);
         }
 
         if (office is not null)
         {
-            person["OfficeLocations"] = Attributed(office);
-        }
-
-        if (phone is not null)
-        {
-            person["BusinessPhoneNumbers"] = Attributed(new JsonObject { ["Number"] = phone, ["Type"] = "Business" });
-        }
-
-        if (mobile is not null)
-        {
-            person["MobilePhones"] = Attributed(new JsonObject { ["Number"] = mobile, ["Type"] = "Mobile" });
+            person["OfficeLocationsArray"] = Attributed(office);
         }
 
         if (street is not null)
         {
-            person["BusinessAddresses"] = Attributed(new JsonObject { ["Street"] = street, ["City"] = city, ["Type"] = "Business", ["LocationUri"] = email, ["LocationSource"] = "Contact" });
+            person["BusinessAddressesArray"] = Attributed(new JsonObject { ["Street"] = street, ["City"] = city, ["State"] = null, ["Country"] = null, ["PostalCode"] = null, ["PostOfficeBox"] = null, ["Type"] = "Business", ["LocationUri"] = email, ["LocationSource"] = "Contact" });
         }
 
         return person;
@@ -138,7 +128,7 @@ internal sealed partial class FakeExchange
         {
             answer = new JsonObject { ["__type"] = "FindPeopleResponseMessage:#Exchange", ["ResponseClass"] = "Error", ["ResponseCode"] = "ErrorInvalidIdMalformed", ["MessageText"] = "Id is malformed." };
         }
-        else if (asked.Count > 0 && (RefuseFullerPersonaShape || asked.Any(f => !AskedFields.ContainsKey(f))))
+        else if (asked.Count > 0 && (RefuseFullerPersonaShape || asked.Any(f => !AskedFields.ContainsKey(f) || RefusedPersonaFields.Contains(f))))
         {
             answer = new JsonObject { ["__type"] = "FindPeopleResponseMessage:#Exchange", ["ResponseClass"] = "Error", ["ResponseCode"] = "ErrorInvalidArgument", ["MessageText"] = "Invalid shape specification." };
         }
@@ -177,15 +167,16 @@ internal sealed partial class FakeExchange
     /// <summary>Whether FindPeople refuses any field asked for beside its default shape, as a server stricter than the lab's might.</summary>
     public bool RefuseFullerPersonaShape { get; set; }
 
-    /// <summary>The fields a FindPeople may ask for beside the default shape (those the lab's server took), and the persona's property each is.</summary>
+    /// <summary>The fields FindPeople refuses beside its default shape, alone or with others, as a server that takes fewer than the lab's.</summary>
+    public HashSet<string> RefusedPersonaFields { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>The fields a FindPeople may ask for beside the default shape (those Exchange Online took), and the persona's property each is; any other is refused.</summary>
     private static readonly Dictionary<string, string> AskedFields = new(StringComparer.Ordinal)
     {
         ["persona:Title"] = "Title",
-        ["persona:Departments"] = "Departments",
-        ["persona:OfficeLocations"] = "OfficeLocations",
-        ["persona:BusinessPhoneNumbers"] = "BusinessPhoneNumbers",
-        ["persona:MobilePhones"] = "MobilePhones",
-        ["persona:BusinessAddresses"] = "BusinessAddresses",
+        ["persona:Departments"] = "DepartmentsArray",
+        ["persona:OfficeLocations"] = "OfficeLocationsArray",
+        ["persona:BusinessAddresses"] = "BusinessAddressesArray",
         ["persona:ImAddress"] = "ImAddress",
     };
 

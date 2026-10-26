@@ -32,7 +32,7 @@ public class OutlookAddressBookTests
     {
         var fake = FakeExchange.Mailbox();
         var gal = fake.AddAddressList("Default Global Address List");
-        gal.People.Add(FakeExchange.Person("Adele Vance", "AdeleV@fake.test", "Adele", "Vance", "Retail Manager", "Retail", "Contoso", "18/2111", "+1 918 555 0101", "+1 555 0199", "Tulsa"));
+        gal.People.Add(FakeExchange.Person("Adele Vance", "AdeleV@fake.test", "Adele", "Vance", "Retail Manager", "Retail", "Contoso", "18/2111", "Tulsa", "2 Main St"));
         gal.People.Add(FakeExchange.Person("Alex Wilber", "AlexW@fake.test", "Alex", "Wilber", "Marketing Assistant", "Marketing", city: "Seattle"));
         gal.People.Add(FakeExchange.Person("Alex Wilber", "AlexW2@fake.test", "Alex", "Wilber", "Engineer", "Engineering"));
         gal.People.Add(FakeExchange.Person("All Company", "allcompany@fake.test"));
@@ -61,7 +61,7 @@ public class OutlookAddressBookTests
 
             var card = await OutlookFixtures.TextAsync(source, Gal + "/Adele Vance.vcf");
             Assert.AreEqual(gal[0].Length, Encoding.UTF8.GetByteCount(card), "the listing gives the card's length");
-            foreach (var line in new[] { "FN:Adele Vance", "N:Vance;Adele;;;", "ORG:Contoso;Retail", "TITLE:Retail Manager", "EMAIL;TYPE=INTERNET,PREF:AdeleV@fake.test", "TEL;TYPE=WORK,VOICE:+1 918 555 0101", "TEL;TYPE=CELL,VOICE:+1 555 0199", "ADR;TYPE=WORK:;18/2111;;Tulsa;;;", "X-MS-IMADDRESS:sip:adelev@fake.test" })
+            foreach (var line in new[] { "FN:Adele Vance", "N:Vance;Adele;;;", "ORG:Contoso;Retail", "TITLE:Retail Manager", "EMAIL;TYPE=INTERNET,PREF:AdeleV@fake.test", "ADR;TYPE=WORK:;18/2111;2 Main St;Tulsa;;;", "X-MS-IMADDRESS:sip:adelev@fake.test" })
             {
                 StringAssert.Contains(card, line + "\r\n");
             }
@@ -205,10 +205,58 @@ public class OutlookAddressBookTests
             StringAssert.Contains(card, "ORG:Contoso\r\n", "the default shape's company");
             StringAssert.Contains(card, "EMAIL;TYPE=INTERNET,PREF:AdeleV@fake.test\r\n");
             Assert.IsFalse(card.Contains("TITLE:", StringComparison.Ordinal), "no title without the fields asked for beside the default ones");
-            Assert.AreEqual(2, fake.Actions.Count(a => a == "FindPeople"), "refused once, then the default shape");
+            Assert.AreEqual(1 + 5 + 1, fake.Actions.Count(a => a == "FindPeople"), "refused once, each field alone, then the default shape");
             await OutlookFixtures.ListAsync(source, "Address Books/All Rooms");
-            Assert.AreEqual(3, fake.Actions.Count(a => a == "FindPeople"), "the default shape alone from then on");
+            Assert.AreEqual(8, fake.Actions.Count(a => a == "FindPeople"), "the default shape alone from then on");
         }
+    }
+
+    [TestMethod]
+    public async Task AServerThatRefusesOneCardFieldStillGivesTheOthers()
+    {
+        // a server that takes fewer of the fields than Exchange Online did on 26-Oct-2026
+        var fake = WithDirectory();
+        fake.RefusedPersonaFields.Add("persona:OfficeLocations");
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            var card = await OutlookFixtures.TextAsync(source, Gal + "/Adele Vance.vcf");
+            foreach (var line in new[] { "TITLE:Retail Manager", "ORG:Contoso;Retail", "ADR;TYPE=WORK:;;2 Main St;Tulsa;;;", "X-MS-IMADDRESS:sip:adelev@fake.test" })
+            {
+                StringAssert.Contains(card, line + "\r\n", "a field the server takes");
+            }
+
+            Assert.IsFalse(card.Contains("18/2111", StringComparison.Ordinal), "the office, which the server refuses, is not asked for");
+            Assert.AreEqual(1 + 5 + 1, fake.Actions.Count(a => a == "FindPeople"), "refused once, each field alone, then the page with those taken");
+            await OutlookFixtures.ListAsync(source, "Address Books/All Rooms");
+            Assert.AreEqual(8, fake.Actions.Count(a => a == "FindPeople"), "the fields taken asked for from then on, in one request");
+        }
+    }
+
+    [TestMethod]
+    public void ExchangeOnlinesPersonasAreReadWithTheirArrayNamedFields()
+    {
+        // a persona as Exchange Online's FindPeople gave it on 26-Oct-2026 (the sandbox's address made the fake's)
+        using var online = JsonDocument.Parse("""
+            {"PersonaId":{"Id":"AAUQAKMDFRyboZRMofTcwQ7bVy0="},"PersonaTypeString":"Person","CreationTimeString":"0001-01-02T00:00:00Z","DisplayName":"Alex Wilber",
+             "DisplayNameFirstLast":"Alex Wilber","DisplayNameLastFirst":"Alex Wilber","FileAs":"","GivenName":"Alex","Surname":"Wilber","Title":"Marketing Assistant",
+             "EmailAddress":{"Name":"Alex Wilber","EmailAddress":"AlexW@fake.test","RoutingType":"SMTP","MailboxType":"Mailbox"},
+             "EmailAddresses":[{"Name":"Alex Wilber","EmailAddress":"AlexW@fake.test","RoutingType":"SMTP","MailboxType":"Mailbox"}],
+             "ImAddress":"sip:alexw@fake.test","WorkCity":"San Diego","RelevanceScore":2147483647,
+             "OfficeLocationsArray":[{"Value":"131/1104","Attributions":["0"]}],"ImAddressesArray":[{"Value":"sip:alexw@fake.test","Attributions":["0"]}],
+             "BusinessAddressesArray":[{"Value":{"Street":"9256 Towne Center Dr., Suite 400","City":"San Diego","State":"CA","Country":"United States","PostalCode":"92121",
+               "PostOfficeBox":null,"Type":"Business","LocationUri":"AlexW@fake.test","LocationSource":"Contact"},"Attributions":["0"]}],
+             "DepartmentsArray":[{"Value":"Marketing","Attributions":["0"]}],"ADObjectId":"1c1503a3-a19b-4c94-a1f4-dcc10edb572d"}
+            """);
+        var alex = OwaJsonService.PersonaOf(online.RootElement)!;
+        Assert.AreEqual("Person", alex.Kind);
+        Assert.AreEqual("Marketing", alex.Department);
+        Assert.AreEqual("131/1104", alex.Office);
+        CollectionAssert.AreEqual(new[] { new DirectoryAddress("WORK", "9256 Towne Center Dr., Suite 400", "San Diego", "CA", "92121", "United States") }, alex.Addresses.ToList());
+        var card = Encoding.UTF8.GetString(Outlook.Files.ContactFile.Build(alex));
+        StringAssert.Contains(card, "ORG:;Marketing\r\n");
+        StringAssert.Contains(card.Replace("\r\n ", "", StringComparison.Ordinal), """ADR;TYPE=WORK:;131/1104;9256 Towne Center Dr.\, Suite 400;San Diego;CA;92121;United States""" + "\r\n", "the comma escaped, the line unfolded");
     }
 
     [TestMethod]

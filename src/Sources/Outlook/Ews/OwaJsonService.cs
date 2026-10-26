@@ -33,14 +33,16 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
     ];
 
     /// <summary>
-    /// The persona fields FindPeople is asked for beside its default shape, which gives the names, the addresses, the
-    /// company and the city but no title, department, office or telephone: those the lab's Exchange Server SE took, one by
-    /// one, on 26-Oct-2026 (it refused persona:Department, PhoneNumber, HomePhones, Titles and CompanyNames as an
-    /// invalid shape, and the same server code answers Outlook on the web).
+    /// The persona fields FindPeople is asked for beside its default shape, which gives the names, the addresses and the
+    /// city but no title, department or office: those Exchange Online took over an address list on 26-Oct-2026. It
+    /// refused every telephone field there (BusinessPhoneNumbers, MobilePhones, PhoneNumber, HomePhones, OtherTelephones,
+    /// the faxes and the rest), Titles and Department, and the AllProperties base shape, all as an invalid shape; so a
+    /// directory entry's card has no telephone. A server that refuses these is asked for each alone
+    /// (<see cref="PersonaFieldsTakenAsync"/>).
     /// </summary>
-    private static readonly string[] PersonaProperties =
+    private static readonly string[] PersonaFields =
     [
-        "persona:Title", "persona:Departments", "persona:OfficeLocations", "persona:BusinessPhoneNumbers", "persona:MobilePhones", "persona:BusinessAddresses", "persona:ImAddress",
+        "persona:Title", "persona:Departments", "persona:OfficeLocations", "persona:BusinessAddresses", "persona:ImAddress",
     ];
 
     private readonly Uri _origin;
@@ -49,8 +51,10 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
     private readonly MailboxPace _pace;
     private readonly ILogger _logger;
 
-    /// <summary>Whether the server refused <see cref="PersonaProperties"/>: its default persona shape alone is asked for since.</summary>
-    private volatile bool _defaultPersonaShape;
+    private readonly SemaphoreSlim _personaGate = new(1, 1);
+
+    /// <summary>The persona fields this server takes, found when it refused <see cref="PersonaFields"/>; null until then.</summary>
+    private volatile string[]? _personaFields;
 
     /// <param name="origin">Outlook on the web's origin for the cloud (https://outlook.office.com).</param>
     /// <param name="token">The bearer; true asks for a fresh one after a 401.</param>
@@ -266,17 +270,17 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
 
     public async Task<DirectoryPage> AddressListPageAsync(string listId, int offset, int count, CancellationToken ct)
     {
+        var fields = _personaFields ?? PersonaFields;
         JsonElement answer;
         try
         {
-            answer = await FindPeopleAsync(listId, offset, count, fuller: !_defaultPersonaShape, ct).ConfigureAwait(false);
+            answer = await FindPeopleAsync(listId, offset, count, fields, ct).ConfigureAwait(false);
         }
-        catch (EwsException ex) when (!_defaultPersonaShape && ex.Code == "ErrorInvalidArgument")
+        catch (EwsException ex) when (fields.Length > 0 && ex.Code == "ErrorInvalidArgument")
         {
-            // "Invalid shape specification": a server that takes fewer fields than the lab's; its default shape from now on
-            _logger.LogInformation("outlook: {Host} refused the persona fields asked for beside the default ones ({Error}); asking for the default ones alone", _origin.Host, ex.Message);
-            _defaultPersonaShape = true;
-            answer = await FindPeopleAsync(listId, offset, count, fuller: false, ct).ConfigureAwait(false);
+            // "Invalid shape specification": a server that takes fewer of the fields than the lab's
+            fields = await PersonaFieldsTakenAsync(listId, fields, ex, ct).ConfigureAwait(false);
+            answer = await FindPeopleAsync(listId, offset, count, fields, ct).ConfigureAwait(false);
         }
 
         var body = answer.ValueKind == JsonValueKind.Object && answer.TryGetProperty("Body", out var b) && b.ValueKind == JsonValueKind.Object ? b : answer;
@@ -284,13 +288,59 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
         return new DirectoryPage(entries, Int(body, "TotalNumberOfPeopleInView"));
     }
 
-    /// <summary>One FindPeople over an address list: its default shape, and with <paramref name="fuller"/> <see cref="PersonaProperties"/> beside it.</summary>
-    private Task<JsonElement> FindPeopleAsync(string listId, int offset, int count, bool fuller, CancellationToken ct)
+    /// <summary>
+    /// After the server refused <paramref name="refused"/>: the persona fields it takes, each of <see cref="PersonaFields"/>
+    /// asked for alone over a page of one, once for the service (a page that comes meanwhile waits for the answer). Should
+    /// the server refuse even those later, the default shape alone is asked for from then on.
+    /// </summary>
+    private async Task<string[]> PersonaFieldsTakenAsync(string listId, string[] refused, EwsException ex, CancellationToken ct)
+    {
+        await _personaGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (_personaFields is { } known && !ReferenceEquals(known, refused))
+            {
+                return known;
+            }
+
+            if (_personaFields is not null)
+            {
+                _logger.LogInformation("outlook: {Host} refused the persona fields it took before ({Error}); asking for the default ones alone", _origin.Host, ex.Message);
+                return _personaFields = [];
+            }
+
+            var taken = new List<string>();
+            var left = new List<string>();
+            foreach (var field in PersonaFields)
+            {
+                try
+                {
+                    await FindPeopleAsync(listId, 0, 1, [field], ct).ConfigureAwait(false);
+                    taken.Add(field);
+                }
+                catch (EwsException alone) when (alone.Code == "ErrorInvalidArgument")
+                {
+                    left.Add(field);
+                }
+            }
+
+            _logger.LogInformation("outlook: {Host} refused the persona fields asked for beside the default ones ({Error}); it takes {Taken} and not {Left}",
+                _origin.Host, ex.Message, taken.Count > 0 ? string.Join(", ", taken) : "none of them", left.Count > 0 ? string.Join(", ", left) : "none");
+            return _personaFields = [.. taken];
+        }
+        finally
+        {
+            _personaGate.Release();
+        }
+    }
+
+    /// <summary>One FindPeople over an address list: its default shape, with <paramref name="fields"/> beside it.</summary>
+    private Task<JsonElement> FindPeopleAsync(string listId, int offset, int count, IReadOnlyList<string> fields, CancellationToken ct)
     {
         var shape = new JsonObject { ["__type"] = "PersonaResponseShape:#Exchange", ["BaseShape"] = "Default" };
-        if (fuller)
+        if (fields.Count > 0)
         {
-            shape["AdditionalProperties"] = Properties(PersonaProperties);
+            shape["AdditionalProperties"] = Properties([.. fields]);
         }
 
         var request = new JsonObject
@@ -334,7 +384,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
 
         foreach (var list in new[] { "EmailAddresses", "Emails1", "Emails2", "Emails3" })
         {
-            foreach (var e in Values(p, list))
+            foreach (var e in Many(p, list))
             {
                 Email(e);
             }
@@ -368,7 +418,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
             ("HomePhones", "HOME,VOICE"), ("HomePhones2", "HOME,VOICE"), ("WorkFaxes", "WORK,FAX"), ("HomeFaxes", "HOME,FAX"), ("Pagers", "PAGER"), ("OtherTelephones", "VOICE"),
         })
         {
-            foreach (var e in Values(p, list))
+            foreach (var e in Many(p, list))
             {
                 Phone(type, e);
             }
@@ -377,7 +427,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
         var addresses = new List<DirectoryAddress>();
         foreach (var (list, type) in new[] { ("BusinessAddresses", "WORK"), ("HomeAddresses", "HOME"), ("OtherAddresses", "POSTAL") })
         {
-            foreach (var e in Values(p, list))
+            foreach (var e in Many(p, list))
             {
                 var a = Inner(e);
                 var address = new DirectoryAddress(type, Blank(Str(a, "Street")), Blank(Str(a, "City")), Blank(Str(a, "State")), Blank(Str(a, "PostalCode")), Blank(Str(a, "Country")));
@@ -394,7 +444,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
         }
 
         var id = p.TryGetProperty("PersonaId", out var persona) && persona.ValueKind == JsonValueKind.Object ? Str(persona, "Id") : null;
-        return new DirectoryEntry(Blank(id) ?? emails.FirstOrDefault() ?? name, name, Blank(Str(p, "PersonaType")))
+        return new DirectoryEntry(Blank(id) ?? emails.FirstOrDefault() ?? name, name, Blank(Str(p, "PersonaType")) ?? Blank(Str(p, "PersonaTypeString")))
         {
             GivenName = Text(p, "GivenName", "GivenNames"),
             MiddleName = Text(p, "MiddleName", "MiddleNames"),
@@ -422,7 +472,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
             return text;
         }
 
-        foreach (var e in many is null ? [] : Values(p, many))
+        foreach (var e in many is null ? [] : Many(p, many))
         {
             var value = Inner(e);
             if (Blank(value.ValueKind == JsonValueKind.String ? value.GetString() : null) is { } found)
@@ -449,6 +499,9 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
 
     private static IEnumerable<JsonElement> Values(JsonElement e, string name)
         => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array ? v.EnumerateArray() : [];
+
+    /// <summary>A persona's many-valued field, named as EWS names it ("Departments") or as Outlook on the web's JSON does ("DepartmentsArray", Exchange Online on 26-Oct-2026).</summary>
+    private static IEnumerable<JsonElement> Many(JsonElement p, string name) => Values(p, name).Concat(Values(p, name + "Array"));
 
     private static string? Blank(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
 
