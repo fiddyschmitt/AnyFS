@@ -834,45 +834,54 @@ public sealed class OutlookSource : SourceBase, ICountable
         using var slots = new SemaphoreSlim(2, 2);
         var running = new List<Task>();
         ExceptionDispatchInfo? stopped = null;
-        foreach (var folder in todo.GroupBy(n => n.Parent))
+        try
         {
-            var batch = new List<(TreeNode Node, TaskCompletionSource<ExceptionDispatchInfo?> Done)>();
-            long bytes = 0;
-            foreach (var node in folder)
+            foreach (var folder in todo.GroupBy(n => n.Parent))
             {
-                // one listed meanwhile, or being made for whoever browses, is left to that
-                var item = node.Item!;
-                if (Ready(item, forFiles: false))
+                var batch = new List<(TreeNode Node, TaskCompletionSource<ExceptionDispatchInfo?> Done)>();
+                long bytes = 0;
+                foreach (var node in folder)
                 {
-                    continue;
-                }
-
-                if (batch.Count > 0 && (batch.Count == BatchItems || bytes + item.Size > BatchBytes))
-                {
-                    if (!await StartAsync(batch).ConfigureAwait(false))
+                    // one listed meanwhile, or being made for whoever browses, is left to that
+                    var item = node.Item!;
+                    if (Ready(item, forFiles: false))
                     {
-                        return await EndedAsync().ConfigureAwait(false);
+                        continue;
                     }
 
-                    batch = [];
-                    bytes = 0;
+                    if (batch.Count > 0 && (batch.Count == BatchItems || bytes + item.Size > BatchBytes))
+                    {
+                        if (!await StartAsync(batch).ConfigureAwait(false))
+                        {
+                            return await EndedAsync().ConfigureAwait(false);
+                        }
+
+                        batch = [];
+                        bytes = 0;
+                    }
+
+                    var waiter = new TaskCompletionSource<ExceptionDispatchInfo?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                    if (_pending.TryAdd(item.Id, waiter.Task))
+                    {
+                        batch.Add((node, waiter));
+                        bytes += item.Size;
+                    }
                 }
 
-                var waiter = new TaskCompletionSource<ExceptionDispatchInfo?>(TaskCreationOptions.RunContinuationsAsynchronously);
-                if (_pending.TryAdd(item.Id, waiter.Task))
+                if (batch.Count > 0 && !await StartAsync(batch).ConfigureAwait(false))
                 {
-                    batch.Add((node, waiter));
-                    bytes += item.Size;
+                    return await EndedAsync().ConfigureAwait(false);
                 }
             }
 
-            if (batch.Count > 0 && !await StartAsync(batch).ConfigureAwait(false))
-            {
-                return await EndedAsync().ConfigureAwait(false);
-            }
+            return await EndedAsync().ConfigureAwait(false);
         }
-
-        return await EndedAsync().ConfigureAwait(false);
+        finally
+        {
+            // a pass cut short (its count cancelled as the source stops) still waits for the batches it started: they give
+            // back their slots as they end, which is not after the slots are gone, and what they throw is not left unobserved
+            await Task.WhenAll(running).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        }
 
         // a batch made when a slot is free; false (its items let go) once the store has failed as a whole
         async Task<bool> StartAsync(List<(TreeNode Node, TaskCompletionSource<ExceptionDispatchInfo?> Done)> taken)

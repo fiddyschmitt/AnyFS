@@ -272,6 +272,43 @@ public class OutlookItemListingTests
         }
     }
 
+    /// <summary>
+    /// A count cut short as the source stops (the window closed while two mailboxes were counting, 26-Oct-2026) waits for
+    /// the batches it had started: they gave their slots back after the pass had let the slots go, and each of those
+    /// failures was left to the finalizer ("a background task failed and nothing awaited it").
+    /// </summary>
+    [TestMethod]
+    public async Task ACountCutShortWaitsForTheBatchesItStarted()
+    {
+        var fake = WithMay(out _);
+        using var arrived = new SemaphoreSlim(0);
+        using var held = new ManualResetEventSlim();
+        fake.Intercept = (_, action) =>
+        {
+            if (action == "GetItem")
+            {
+                arrived.Release();
+                held.Wait(TimeSpan.FromSeconds(30));
+            }
+
+            return null;
+        };
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            using var cut = new CancellationTokenSource();
+            var counting = ((ICountable)source).CountFilesAsync(cut.Token);
+            Assert.IsTrue(await arrived.WaitAsync(TimeSpan.FromSeconds(10)), "a batch is under way");
+            await cut.CancelAsync();
+            await Task.Delay(300);
+            Assert.IsFalse(counting.IsCompleted, "the count waits for the batches it started");
+
+            held.Set();
+            await Assert.ThrowsAsync<OperationCanceledException>(() => counting);
+        }
+    }
+
     [TestMethod]
     public async Task ADataFilesCountTakesInEveryAttachmentAndIsWholeAtTheNextStart()
     {
