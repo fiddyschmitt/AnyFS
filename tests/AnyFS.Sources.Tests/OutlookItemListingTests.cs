@@ -222,6 +222,109 @@ public class OutlookItemListingTests
         }
     }
 
+    [TestMethod]
+    public async Task CountingOnStartListsEveryItemAndKeepsNewMailListed()
+    {
+        var fake = WithMay(out _);
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "so far: no message opened yet");
+            Assert.AreEqual(source.Tree.FileCount, source.Counters.FilesKnown);
+
+            await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+            Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+            Assert.AreEqual(source.Tree.FileCount + 3 + 20, source.Counters.FilesKnown, "every attachment: the mailbox's three and May's twenty");
+            Assert.IsTrue(fake.ItemsPerRequest.All(n => n <= OutlookSource.BatchItems), string.Join(",", fake.ItemsPerRequest));
+            List<(string Message, double? Fraction)> progress;
+            lock (context.Progress)
+            {
+                progress = [.. context.Progress];
+            }
+
+            Assert.AreEqual(1.0, progress[^1].Fraction, "how far it got, to the end: " + progress[^1].Message);
+            StringAssert.StartsWith(progress[^1].Message, "Counting files: ");
+
+            // every folder is listed now without asking
+            var asked = Count(fake, "GetItem");
+            foreach (var folder in (await ItemFoldersAsync(source, May)).Concat(await ItemFoldersAsync(source, "Inbox/2026/03")))
+            {
+                await OutlookFixtures.ListAsync(source, folder);
+            }
+
+            Assert.IsNotNull(await source.StatAsync("Contacts/Adele Vance.vcf", CancellationToken.None));
+            Assert.AreEqual(asked, Count(fake, "GetItem"));
+
+            // new mail found by a refresh is listed behind it, and the count is whole again
+            var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
+            fake.AddMessage(inbox, "Late report", ("Adele Vance", "adelev@fake.test"), new DateTimeOffset(2026, 5, 28, 9, 0, 0, TimeSpan.Zero), "<p>Late.</p>",
+                [new FakeExchange.Attachment("late.txt", "text/plain", Encoding.ASCII.GetBytes("late"), false, null)]);
+            var before = source.Counters.FilesKnown;
+            await source.RefreshAsync(CancellationToken.None);
+            for (var i = 0; i < 200 && source.Counters.State != EnumerationState.Complete; i++)
+            {
+                await Task.Delay(10);
+            }
+
+            Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+            Assert.AreEqual(before + 3, source.Counters.FilesKnown, "its message.md, message.eml and attachment");
+        }
+    }
+
+    [TestMethod]
+    public async Task ADataFilesCountTakesInEveryAttachmentAndIsWholeAtTheNextStart()
+    {
+        var settings = new OutlookSettings { Path = OutlookFixtures.Pst("unicode.pst"), RefreshMinutes = 0 };
+        byte[] listings;
+        long counted;
+        using (var first = new TestSourceContext("outlook"))
+        {
+            var source = new OutlookSource(settings);
+            await source.InitialiseAsync(first, CancellationToken.None);
+            await using (source)
+            {
+                Assert.AreEqual(EnumerationState.Unknown, source.Counters.State);
+                await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+                Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+                counted = source.Counters.FilesKnown;
+                Assert.IsTrue(counted > source.Tree.FileCount, $"the attachments: {counted} of {source.Tree.FileCount} without");
+            }
+
+            listings = await File.ReadAllBytesAsync(Path.Combine(first.StateDirectory, ItemListings.FileName));
+        }
+
+        using var second = new TestSourceContext("outlook");
+        await File.WriteAllBytesAsync(Path.Combine(second.StateDirectory, ItemListings.FileName), listings);
+        var restarted = new OutlookSource(settings);
+        await restarted.InitialiseAsync(second, CancellationToken.None);
+        await using (restarted)
+        {
+            Assert.AreEqual(EnumerationState.Complete, restarted.Counters.State, "every item's listing kept");
+            Assert.AreEqual(counted, restarted.Counters.FilesKnown);
+        }
+    }
+
+    [TestMethod]
+    public async Task AMessageThatWillNotListLeavesTheCountSoFar()
+    {
+        var fake = FakeExchange.Mailbox();
+        var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
+        var bad = Attachment(fake, inbox, 2, "damaged.bin");
+        var poison = $"\"{bad.Attachments.Single().Id}\"";
+        fake.Intercept = (request, action) => action == "GetAttachment" && request.Content!.ReadAsStringAsync().Result.Contains(poison, StringComparison.Ordinal)
+            ? new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("""{"Body":{"ErrorCode":500,"ExceptionName":"StoragePermanentException","FaultMessage":"The attachment could not be read.","IsTransient":false,"ResponseCode":"ErrorInternalServerError"}}""", Encoding.UTF8, "application/json") }
+            : null;
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+            Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "one message did not list: the count is so far");
+            Assert.AreEqual(source.Tree.FileCount + 3, source.Counters.FilesKnown, "the rest's attachments are counted");
+        }
+    }
+
     private static FakeExchange.Item Attachment(FakeExchange fake, FakeExchange.Folder inbox, int day, string name)
         => fake.AddMessage(inbox, $"Minutes {day}", ("Diego Siciliani", "diegos@fake.test"), new DateTimeOffset(2026, 6, day, 9, 0, 0, TimeSpan.Zero), "<p>Attached.</p>",
             [new FakeExchange.Attachment(name, "application/octet-stream", Encoding.ASCII.GetBytes(name), false, null)]);

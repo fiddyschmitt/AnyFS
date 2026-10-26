@@ -155,7 +155,7 @@ public class OutlookSourceTests
             CollectionAssert.Contains(month.Select(e => e.Name[(e.Name.LastIndexOf(" - ", StringComparison.Ordinal) + 3)..]).ToList(), "Forwarded_ site visit", "a colon is no part of a folder name");
             Assert.IsTrue(month.All(e => e.Modified is not null), "item folders carry the item's date");
 
-            Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+            Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "so far: a message's attachments are known once it is opened");
             Assert.IsTrue(source.Counters.FilesKnown >= 13, $"{source.Counters.FilesKnown} files");
             Assert.AreEqual(ComponentHealth.Ready, context.LastHealth ?? ComponentHealth.Ready);
         }

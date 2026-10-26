@@ -117,7 +117,7 @@ public class OutlookWebSessionTests
             Assert.IsFalse(fake.Actions.Contains("GetItem"), "no item is opened to build the tree");
             Assert.AreEqual(1, fake.Actions.Count(a => a == "FindFolder"));
             Assert.AreEqual(6, fake.Actions.Count(a => a == "SyncFolderItems"), "each shown folder but the calendar was synced once: " + string.Join(",", fake.Actions));
-            Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+            Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "so far: a message's attachments are known once it is opened");
             var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
             CollectionAssert.AreEquivalent(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, root);
             CollectionAssert.AreEquivalent(new[] { "Adele Vance.vcf" }, (await OutlookFixtures.ListAsync(source, "Contacts")).Select(e => e.Name).ToList(), "the Recipient Cache under Contacts is Outlook's own");

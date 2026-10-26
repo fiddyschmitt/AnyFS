@@ -43,7 +43,14 @@ public sealed class TestSourceContext : ISourceContext, IDisposable
 
     public List<PromptRequest> Prompts { get; } = [];
 
-    public void ReportProgress(string message, double? fraction = null) => Progress.Add((message, fraction));
+    /// <summary>Recorded under a lock: a source may report from several tasks at once (Outlook's count).</summary>
+    public void ReportProgress(string message, double? fraction = null)
+    {
+        lock (Progress)
+        {
+            Progress.Add((message, fraction));
+        }
+    }
 
     public void ReportHealth(ComponentHealth health, string? detail = null) => HealthReports.Add((health, detail));
 

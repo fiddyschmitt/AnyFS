@@ -42,7 +42,7 @@ internal sealed record ItemListing(IReadOnlyList<ListedFile> Files, IReadOnlyLis
 /// item's folder lists it with the same stamp, its listing serves without the store being asked for the item, so a walk
 /// through folders already seen asks nothing, and from one start to the next too: kept in the source's state folder
 /// with the local time zone (the Markdown gives local times). Put right whenever the item is opened and its files come
-/// out otherwise. An S/MIME message's is not kept: what it shows depends on the certificates at hand.
+/// out otherwise. An S/MIME message's is kept for the session alone: what it shows depends on the certificates at hand.
 /// </summary>
 internal sealed class ItemListings
 {
@@ -54,7 +54,7 @@ internal sealed class ItemListings
 
     public const string FileName = "item-listings.json.gz";
 
-    private readonly ConcurrentDictionary<string, (string Stamp, ItemListing Listing)> _kept = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (string Stamp, ItemListing Listing, bool Lasting)> _kept = new(StringComparer.Ordinal);
     private long _changes;
 
     public int Count => _kept.Count;
@@ -70,24 +70,25 @@ internal sealed class ItemListings
     public ItemListing? For(MailItemSummary item) => _kept.TryGetValue(item.Id, out var kept) && kept.Stamp == StampOf(item) ? kept.Listing : null;
 
     /// <summary>Keeps an item's listing as made from it now; true when that changed what was kept (none before, the item changed since, or other lengths).</summary>
-    public bool Keep(MailItemSummary item, ItemListing listing)
+    /// <param name="lasting">Whether it is kept for the next start too; else for the session alone.</param>
+    public bool Keep(MailItemSummary item, ItemListing listing, bool lasting = true)
     {
         var stamp = StampOf(item);
         while (true)
         {
             if (_kept.TryGetValue(item.Id, out var kept))
             {
-                if (kept.Stamp == stamp && kept.Listing.SameAs(listing))
+                if (kept.Stamp == stamp && kept.Listing.SameAs(listing) && kept.Lasting == lasting)
                 {
                     return false;
                 }
 
-                if (!_kept.TryUpdate(item.Id, (stamp, listing), kept))
+                if (!_kept.TryUpdate(item.Id, (stamp, listing, lasting), kept))
                 {
                     continue;
                 }
             }
-            else if (!_kept.TryAdd(item.Id, (stamp, listing)))
+            else if (!_kept.TryAdd(item.Id, (stamp, listing, lasting)))
             {
                 continue;
             }
@@ -108,7 +109,7 @@ internal sealed class ItemListings
 
         foreach (var kept in index.Items)
         {
-            _kept.TryAdd(kept.Id, (kept.Stamp, new ItemListing(kept.Files, kept.Attachments ?? [], kept.Modified, kept.Created)));
+            _kept.TryAdd(kept.Id, (kept.Stamp, new ItemListing(kept.Files, kept.Attachments ?? [], kept.Modified, kept.Created), true));
         }
     }
 
@@ -121,7 +122,7 @@ internal sealed class ItemListings
             _kept.TryRemove(gone, out _);
         }
 
-        var items = _kept.Select(e => new KeptListing(e.Key, e.Value.Stamp, e.Value.Listing.Files, e.Value.Listing.HasAttachmentsFolder ? e.Value.Listing.Attachments : null, e.Value.Listing.Modified, e.Value.Listing.Created)).ToList();
+        var items = _kept.Where(e => e.Value.Lasting).Select(e => new KeptListing(e.Key, e.Value.Stamp, e.Value.Listing.Files, e.Value.Listing.HasAttachmentsFolder ? e.Value.Listing.Attachments : null, e.Value.Listing.Modified, e.Value.Listing.Created)).ToList();
         StateFile.Save(path, new ItemListingIndex(Version, store, TimeZoneInfo.Local.Id, items), ItemListingsJson.Default.ItemListingIndex);
         return items.Count;
     }

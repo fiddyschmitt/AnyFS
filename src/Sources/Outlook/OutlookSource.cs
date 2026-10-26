@@ -50,9 +50,23 @@ public sealed class OutlookSource : SourceBase, ICountable
     private readonly ItemListings _listings = new();
     private readonly SemaphoreSlim _listingsGate = new(1, 1);
     private readonly Lock _trimGate = new();
+    private readonly SemaphoreSlim _listAllGate = new(1, 1);
+    private readonly Lock _countGate = new();
     private long _itemsBytes;
     private long _listingsKept;
     private DateTime _listingsKeptAt = DateTime.UtcNow;
+
+    /// <summary>The tree <see cref="Count"/> counts, with what its listed items' files add to its numbers and how many of its items are not listed.</summary>
+    private MailTree _countedTree = MailTree.Empty;
+    private long _extraFiles;
+    private long _extraFolders;
+    private long _unlisted;
+
+    /// <summary>Whether "Count files on start" asked for every item's listing: then items new since are listed as refreshes find them.</summary>
+    private volatile bool _listingAll;
+
+    /// <summary>How many listings of every item are under way: the count is then on its way (InProgress), not only so far (Unknown).</summary>
+    private int _listing;
     private volatile MailTree _tree = MailTree.Empty;
     private IMailStore? _store;
     private AddressBooks? _books;
@@ -563,6 +577,7 @@ public sealed class OutlookSource : SourceBase, ICountable
 
             Swap(await MailTree.BuildAsync(Store, ct, null, _books?.Node).ConfigureAwait(false));
             ForgetFiles();
+            ListNewBehind();
             Logger.LogInformation("outlook: {Name} read again in {Seconds:F1} s: {Folders:N0} folders, {Items:N0} items", Store.Name, Stopwatch.GetElapsedTime(started).TotalSeconds, _tree.FolderCount, _tree.ItemCount);
             await KeepListingAsync(ct).ConfigureAwait(false);
             await KeepListingsAsync(now: true).ConfigureAwait(false);
@@ -609,35 +624,315 @@ public sealed class OutlookSource : SourceBase, ICountable
     private void Swap(MailTree tree)
     {
         _tree = tree;
+        Recount(tree);
         Count();
     }
 
     /// <summary>
-    /// The counts: the tree's, and the address books' entries known. Exact once every address list's entries are known (a
-    /// list is read when first opened); until then they are a lower bound ("1,204+"), as a lazy source's, and "Count files
-    /// on start" reads the rest (<see cref="CountFilesAsync"/>).
+    /// The counts: the tree's, with an item's files as its listing has them (its attachments too) once it has been listed,
+    /// and the address books' entries known. Exact once every item has been listed (a message's attachments are known
+    /// only once it is opened) and every address list read (its entries are read when it is first opened); until then a
+    /// lower bound ("1,204+"), as a lazy source's, and "Count files on start" lists and reads the rest
+    /// (<see cref="CountFilesAsync"/>), meanwhile on its way (InProgress).
     /// </summary>
     private void Count()
     {
-        var tree = _tree;
         var books = _books;
-        var state = books is null || books.EntriesKnown ? EnumerationState.Complete
-            : Counters.State == EnumerationState.InProgress ? EnumerationState.InProgress : EnumerationState.Unknown;
-        Counters.Set(tree.FileCount + (books?.FileCount ?? 0), tree.FolderCount + (books?.FolderCount ?? 0), state);
+        long files;
+        long folders;
+        bool listed;
+        lock (_countGate)
+        {
+            files = _countedTree.FileCount + _extraFiles;
+            folders = _countedTree.FolderCount + _extraFolders;
+            listed = _unlisted == 0;
+        }
+
+        var state = listed && (books is null || books.EntriesKnown) ? EnumerationState.Complete
+            : Volatile.Read(ref _listing) > 0 ? EnumerationState.InProgress : EnumerationState.Unknown;
+        Counters.Set(files + (books?.FileCount ?? 0), folders + (books?.FolderCount ?? 0), state);
     }
 
-    /// <summary>
-    /// "Count files on start": the mail was counted as the start listed it; what is left is the address lists not read yet,
-    /// read now, one at a time. (The host's walk would open every message for its attachments, which are not counted.)
-    /// </summary>
-    public async Task CountFilesAsync(CancellationToken ct)
+    /// <summary>Counts a new tree's items against their listings, afresh: what the listed ones add, how many are not listed.</summary>
+    private void Recount(MailTree tree)
     {
-        if (_books is { } books)
+        lock (_countGate)
         {
-            await books.ReadUnreadAsync(ct).ConfigureAwait(false);
+            long files = 0;
+            long folders = 0;
+            long unlisted = 0;
+            foreach (var node in tree.ById.Values)
+            {
+                if (node is not ItemNode item)
+                {
+                    continue;
+                }
+
+                if (_listings.For(item.Item) is { } listing)
+                {
+                    files += listing.FileCount - ItemFiles.CountOf(item.Item);
+                    folders += listing.HasAttachmentsFolder ? 1 : 0;
+                }
+                else
+                {
+                    unlisted++;
+                }
+            }
+
+            _countedTree = tree;
+            _extraFiles = files;
+            _extraFolders = folders;
+            _unlisted = unlisted;
+        }
+    }
+
+    /// <summary>Keeps an item's listing (<paramref name="lasting"/>: for the next start too) and counts what that changes, for an item of the tree as it lists it.</summary>
+    private void Listed(MailItemSummary item, ItemListing listing, bool lasting)
+    {
+        lock (_countGate)
+        {
+            var before = _listings.For(item);
+            if (!_listings.Keep(item, listing, lasting))
+            {
+                return;
+            }
+
+            if (_countedTree.ById.GetValueOrDefault(item.Id) is ItemNode { Item: var counted } && ItemListings.StampOf(counted) == ItemListings.StampOf(item))
+            {
+                _extraFiles += listing.FileCount - (before?.FileCount ?? ItemFiles.CountOf(item));
+                _extraFolders += (listing.HasAttachmentsFolder ? 1 : 0) - (before?.HasAttachmentsFolder == true ? 1 : 0);
+                if (before is null)
+                {
+                    _unlisted--;
+                }
+            }
         }
 
         Count();
+    }
+
+    /// <summary>
+    /// "Count files on start" (spec 6.8): the address lists not read yet are read, then every item not listed yet is
+    /// listed (<see cref="ListAllAsync"/>), so the count takes in every attachment and is exact; and from then on, items new
+    /// since are listed as the refreshes find them. The host's walk would have done the same an item at a time.
+    /// </summary>
+    public async Task CountFilesAsync(CancellationToken ct)
+    {
+        _listingAll = true;
+        Interlocked.Increment(ref _listing);
+        try
+        {
+            if (_books is { } books)
+            {
+                await books.ReadUnreadAsync(ct).ConfigureAwait(false);
+            }
+
+            await ListAllAsync(report: true, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _listing);
+            Count();
+        }
+    }
+
+    /// <summary>After a refresh, when "Count files on start" asked for every item's listing: the items new since, listed behind.</summary>
+    private void ListNewBehind()
+    {
+        if (!_listingAll)
+        {
+            return;
+        }
+
+        var stopping = _stopping.Token;
+        _ = Task.Run(async () =>
+        {
+            Interlocked.Increment(ref _listing);
+            try
+            {
+                await ListAllAsync(report: false, stopping).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (stopping.IsCancellationRequested)
+            {
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _listing);
+                Count();
+            }
+        }, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Lists every item not listed yet: a folder's items a batch at a time (<see cref="BatchItems"/>), two batches at once
+    /// (of the four requests a mailbox takes at a time, two are left to whoever browses), their files not kept; the count
+    /// grows as it goes. An item that does not list is left to its folder's opening, which says why; when the store fails
+    /// as a whole (the network, the sign-in, a server too busy) the listing waits, a minute and then longer, and goes on.
+    /// Items found meanwhile (a refresh) are listed before it ends. With <paramref name="report"/> (the host's count), how
+    /// far it got shows on the tile. One at a time.
+    /// </summary>
+    private async Task ListAllAsync(bool report, CancellationToken ct)
+    {
+        await _listAllGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            var tried = new HashSet<string>(StringComparer.Ordinal);
+            var pause = TimeSpan.FromMinutes(1);
+            var started = Stopwatch.GetTimestamp();
+            var done = 0;
+            while (true)
+            {
+                var todo = _tree.ById.Values.Where(n => !tried.Contains(n.Item!.Id) && _listings.For(n.Item!) is null).ToList();
+                if (todo.Count == 0)
+                {
+                    break;
+                }
+
+                var total = done + todo.Count;
+                if (done == 0)
+                {
+                    Logger.LogInformation("outlook: listing {Count:N0} items of {Name} for the count", todo.Count, Store.Name);
+                }
+
+                var failure = await PassAsync(todo, tried, listed =>
+                {
+                    var now = Interlocked.Add(ref done, listed);
+                    if (report)
+                    {
+                        Context.ReportProgress($"Counting files: {now:N0} of {total:N0} items", (double)now / total);
+                    }
+                }, ct).ConfigureAwait(false);
+                if (failure is null)
+                {
+                    continue;
+                }
+
+                Logger.LogWarning("outlook: listing the items for the count waits {Minutes:F0} minutes for the mailbox: {Error}", pause.TotalMinutes, failure.SourceException.Message);
+                await Task.Delay(pause, ct).ConfigureAwait(false);
+                pause = TimeSpan.FromTicks(Math.Min(pause.Ticks * 2, TimeSpan.FromMinutes(15).Ticks));
+            }
+
+            if (done > 0)
+            {
+                Logger.LogInformation("outlook: listed {Count:N0} items of {Name} in {Seconds:F0} s", done, Store.Name, Stopwatch.GetElapsedTime(started).TotalSeconds);
+            }
+        }
+        finally
+        {
+            _listAllGate.Release();
+            await KeepListingsAsync(now: true).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// One pass of <see cref="ListAllAsync"/> over <paramref name="todo"/>: each folder's items in batches, two at once;
+    /// tells <paramref name="listed"/> how many each batch took and marks them <paramref name="tried"/>. Stops at a failure
+    /// of the store as a whole and returns it (that batch's items left untried); null when it went through.
+    /// </summary>
+    private async Task<ExceptionDispatchInfo?> PassAsync(List<TreeNode> todo, HashSet<string> tried, Action<int> listed, CancellationToken ct)
+    {
+        using var slots = new SemaphoreSlim(2, 2);
+        var running = new List<Task>();
+        ExceptionDispatchInfo? stopped = null;
+        foreach (var folder in todo.GroupBy(n => n.Parent))
+        {
+            var batch = new List<(TreeNode Node, TaskCompletionSource<ExceptionDispatchInfo?> Done)>();
+            long bytes = 0;
+            foreach (var node in folder)
+            {
+                // one listed meanwhile, or being made for whoever browses, is left to that
+                var item = node.Item!;
+                if (Ready(item, forFiles: false))
+                {
+                    continue;
+                }
+
+                if (batch.Count > 0 && (batch.Count == BatchItems || bytes + item.Size > BatchBytes))
+                {
+                    if (!await StartAsync(batch).ConfigureAwait(false))
+                    {
+                        return await EndedAsync().ConfigureAwait(false);
+                    }
+
+                    batch = [];
+                    bytes = 0;
+                }
+
+                var waiter = new TaskCompletionSource<ExceptionDispatchInfo?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (_pending.TryAdd(item.Id, waiter.Task))
+                {
+                    batch.Add((node, waiter));
+                    bytes += item.Size;
+                }
+            }
+
+            if (batch.Count > 0 && !await StartAsync(batch).ConfigureAwait(false))
+            {
+                return await EndedAsync().ConfigureAwait(false);
+            }
+        }
+
+        return await EndedAsync().ConfigureAwait(false);
+
+        // a batch made when a slot is free; false (its items let go) once the store has failed as a whole
+        async Task<bool> StartAsync(List<(TreeNode Node, TaskCompletionSource<ExceptionDispatchInfo?> Done)> taken)
+        {
+            try
+            {
+                await slots.WaitAsync(ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                Let(taken);
+                throw;
+            }
+
+            if (Volatile.Read(ref stopped) is not null)
+            {
+                slots.Release();
+                Let(taken);
+                return false;
+            }
+
+            running.Add(Task.Run(async () =>
+            {
+                try
+                {
+                    var failure = await MakeAsync(taken, keepFiles: false).ConfigureAwait(false);
+                    if (Systemic(failure))
+                    {
+                        Interlocked.CompareExchange(ref stopped, failure, null);
+                        return;
+                    }
+
+                    lock (tried)
+                    {
+                        tried.UnionWith(taken.Select(t => t.Node.Item!.Id));
+                    }
+
+                    listed(taken.Count);
+                }
+                finally
+                {
+                    slots.Release();
+                }
+            }, CancellationToken.None));
+            return true;
+        }
+
+        void Let(List<(TreeNode Node, TaskCompletionSource<ExceptionDispatchInfo?> Done)> taken)
+        {
+            foreach (var (node, done) in taken)
+            {
+                Release(node, done, null);
+            }
+        }
+
+        async Task<ExceptionDispatchInfo?> EndedAsync()
+        {
+            await Task.WhenAll(running).ConfigureAwait(false);
+            return Volatile.Read(ref stopped);
+        }
     }
 
     // --- listing and stat -------------------------------------------------------------------------------------------------
@@ -926,11 +1221,15 @@ public sealed class OutlookSource : SourceBase, ICountable
     /// <summary>Throws a batch's failure when it is the store's as a whole, which asking for each item alone would only meet again.</summary>
     private static void Rethrow(ExceptionDispatchInfo? failure)
     {
-        if (failure?.SourceException is HttpRequestException or SignInRequiredException or IOException or OperationCanceledException or EwsException { Transient: true } or EwsException { Code: "401" })
+        if (Systemic(failure))
         {
-            failure.Throw();
+            failure!.Throw();
         }
     }
+
+    /// <summary>Whether a batch's failure is the store's as a whole (the network, the sign-in, a server too busy, the source stopping), not its items'.</summary>
+    private static bool Systemic(ExceptionDispatchInfo? failure)
+        => failure?.SourceException is HttpRequestException or SignInRequiredException or IOException or OperationCanceledException or EwsException { Transient: true } or EwsException { Code: "401" };
 
     /// <summary>
     /// Starts the batch after the one an item is in, from the first item after it in its folder neither made nor being
@@ -999,13 +1298,13 @@ public sealed class OutlookSource : SourceBase, ICountable
         return -1;
     }
 
-    /// <summary>Makes a batch's files, letting each one's waiters go as it is made; a failure of the whole is theirs.</summary>
-    private async Task MakeAsync(List<(TreeNode Node, TaskCompletionSource<ExceptionDispatchInfo?> Done)> batch)
+    /// <summary>Makes a batch's files, letting each one's waiters go as it is made; a failure of the whole is theirs, and returned.</summary>
+    private async Task<ExceptionDispatchInfo?> MakeAsync(List<(TreeNode Node, TaskCompletionSource<ExceptionDispatchInfo?> Done)> batch, bool keepFiles = true)
     {
         var released = new bool[batch.Count];
         try
         {
-            await MakeAsync([.. batch.Select(b => b.Node)], keepFiles: true, _stopping.Token, i =>
+            await MakeAsync([.. batch.Select(b => b.Node)], keepFiles, _stopping.Token, i =>
             {
                 released[i] = true;
                 Release(batch[i].Node, batch[i].Done, null);
@@ -1022,6 +1321,8 @@ public sealed class OutlookSource : SourceBase, ICountable
                     Release(batch[i].Node, batch[i].Done, failure);
                 }
             }
+
+            return failure;
         }
         finally
         {
@@ -1033,6 +1334,8 @@ public sealed class OutlookSource : SourceBase, ICountable
                 }
             }
         }
+
+        return null;
     }
 
     /// <summary>Lets an item's waiters go, and the item be made by another batch.</summary>
@@ -1088,10 +1391,8 @@ public sealed class OutlookSource : SourceBase, ICountable
     /// <summary>An item's files just made: its listing kept, put right when the files came out otherwise; with <paramref name="keepFiles"/>, the files too, a while.</summary>
     private void Made(MailItemSummary item, ItemFiles files, bool keepFiles)
     {
-        if (!SmimeReader.IsSmime(files.Item))
-        {
-            _listings.Keep(item, ItemListing.Of(files));
-        }
+        // an S/MIME message's for the session alone: what it shows depends on the certificates at hand
+        Listed(item, ItemListing.Of(files), lasting: !SmimeReader.IsSmime(files.Item));
 
         if (keepFiles)
         {
@@ -1236,6 +1537,12 @@ public sealed class OutlookSource : SourceBase, ICountable
         {
         }
 
+        // a listing of every item under way ends at the cancellation; what its last batches made is kept with the rest
+        if (await _listAllGate.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false))
+        {
+            _listAllGate.Release();
+        }
+
         if (IsInitialised)
         {
             await KeepListingsAsync(now: true, wait: true).ConfigureAwait(false);
@@ -1245,7 +1552,6 @@ public sealed class OutlookSource : SourceBase, ICountable
         _directoryOwned?.Dispose();
         _stopping.Dispose();
         _refreshGate.Dispose();
-        _listingsGate.Dispose();
         await base.DisposeAsync().ConfigureAwait(false);
     }
 }
