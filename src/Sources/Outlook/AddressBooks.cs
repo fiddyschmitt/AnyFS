@@ -138,6 +138,18 @@ internal sealed class AddressBooks
         }
     }
 
+    /// <summary>Whether every list's entries are known (read, or kept from the last start), so <see cref="FileCount"/> is all of them; true when there are no lists.</summary>
+    public bool EntriesKnown
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _folders.All(f => _views.ContainsKey(f.List.Id) || _kept.ContainsKey(f.List.Id));
+            }
+        }
+    }
+
     public long FolderCount => HasLists ? 1 + _folders.Count : 0;
 
     /// <summary>Told when what the folder holds changes (lists or a list read), for the source's counts.</summary>
@@ -280,6 +292,36 @@ internal sealed class AddressBooks
         return view;
     }
 
+    /// <summary>
+    /// Reads every list whose entries are not known yet, one at a time ("Count files on start": the source's count is then
+    /// all of them); a list that cannot be read is said and left to its first ask.
+    /// </summary>
+    public async Task ReadUnreadAsync(CancellationToken ct)
+    {
+        foreach (var folder in _folders)
+        {
+            bool known;
+            lock (_gate)
+            {
+                known = _views.ContainsKey(folder.List.Id) || _kept.ContainsKey(folder.List.Id);
+            }
+
+            if (known)
+            {
+                continue;
+            }
+
+            try
+            {
+                await MembersAsync(folder.List, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested && !_stopping.IsCancellationRequested)
+            {
+                _logger.LogWarning("outlook: the address list {List} of {Mailbox} could not be read for the count; it is read when opened: {Error}", folder.List.Name, _mailbox, ex.Message);
+            }
+        }
+    }
+
     /// <summary>A list's entries the first time they are asked for: as kept at the last start, else read.</summary>
     private Task<AddressListView> FirstAsync(AddressList list)
     {
@@ -291,11 +333,23 @@ internal sealed class AddressBooks
         AddressListMembers? kept;
         lock (_gate)
         {
-            _kept.Remove(list.Id, out kept);
+            _kept.TryGetValue(list.Id, out kept);
         }
 
         // a big list's files take a moment to make (every card's length): off the asker's thread
-        return kept is null ? ReadAsync(list, null, _stopping) : Task.Run(() => _views.GetOrAdd(list.Id, _ => new AddressListView(list, kept.Taken, kept.Entries)));
+        return kept is null ? ReadAsync(list, null, _stopping) : Task.Run(() => Serve(list, kept));
+    }
+
+    /// <summary>A kept list's view, which serves in place of what was kept: swapped in at once, so the entries are counted once throughout.</summary>
+    private AddressListView Serve(AddressList list, AddressListMembers kept)
+    {
+        var made = new AddressListView(list, kept.Taken, kept.Entries);
+        lock (_gate)
+        {
+            var view = _views.GetOrAdd(list.Id, made);
+            _kept.Remove(list.Id);
+            return view;
+        }
     }
 
     /// <summary>Reads a list's entries whole, dates them (an entry as it was keeps its date), and serves and keeps them.</summary>

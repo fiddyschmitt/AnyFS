@@ -21,7 +21,7 @@ namespace AnyFS.Sources.Outlook;
 /// file: when it changed on disk; a mailbox: each folder's delta) and the tree swapped whole. Trouble upstream shows as
 /// Degraded until a read succeeds.
 /// </summary>
-public sealed class OutlookSource : SourceBase
+public sealed class OutlookSource : SourceBase, ICountable
 {
     private static readonly TimeSpan ItemsKeptFor = TimeSpan.FromMinutes(3);
     private const int ItemsKept = 512;
@@ -539,11 +539,32 @@ public sealed class OutlookSource : SourceBase
         Count();
     }
 
-    /// <summary>The counts: the tree's, and the address books' entries read so far.</summary>
+    /// <summary>
+    /// The counts: the tree's, and the address books' entries known. Exact once every address list's entries are known (a
+    /// list is read when first opened); until then they are a lower bound ("1,204+"), as a lazy source's, and "Count files
+    /// on start" reads the rest (<see cref="CountFilesAsync"/>).
+    /// </summary>
     private void Count()
     {
         var tree = _tree;
-        Counters.Set(tree.FileCount + (_books?.FileCount ?? 0), tree.FolderCount + (_books?.FolderCount ?? 0), EnumerationState.Complete);
+        var books = _books;
+        var state = books is null || books.EntriesKnown ? EnumerationState.Complete
+            : Counters.State == EnumerationState.InProgress ? EnumerationState.InProgress : EnumerationState.Unknown;
+        Counters.Set(tree.FileCount + (books?.FileCount ?? 0), tree.FolderCount + (books?.FolderCount ?? 0), state);
+    }
+
+    /// <summary>
+    /// "Count files on start": the mail was counted as the start listed it; what is left is the address lists not read yet,
+    /// read now, one at a time. (The host's walk would open every message for its attachments, which are not counted.)
+    /// </summary>
+    public async Task CountFilesAsync(CancellationToken ct)
+    {
+        if (_books is { } books)
+        {
+            await books.ReadUnreadAsync(ct).ConfigureAwait(false);
+        }
+
+        Count();
     }
 
     // --- listing and stat -------------------------------------------------------------------------------------------------

@@ -101,7 +101,11 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   `CountFilesAsync` instead (Mirror walks every configured path at the same time). A source with a
   cheaper listing of its own can pass it to `TreeCount.CountAsync` from there, as SSHFS does with
   SFTP. Return `true` from the plugin's `IsQuickToCount` when that walk is cheap for your kind of
-  source (local disks): the checkbox then defaults on for new sources of it.
+  source (local disks): the checkbox then defaults on for new sources of it. Say `Complete` only
+  when the number is the whole tree: the window drops the "+" for it, and the host skips the count
+  for a source already `Complete` when its start ends (Outlook's address lists are read when
+  first opened, so its count says `Unknown` until every list has been, and its `CountFilesAsync`
+  reads the rest).
 
 ## Settings
 

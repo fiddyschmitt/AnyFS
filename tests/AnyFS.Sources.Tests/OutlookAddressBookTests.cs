@@ -81,6 +81,51 @@ public class OutlookAddressBookTests
     }
 
     [TestMethod]
+    public async Task TheCountIsSoFarUntilEveryListIsReadAsCountingOnStartDoes()
+    {
+        var fake = WithDirectory();
+        byte[] kept;
+        using (var context = new TestSourceContext("outlook"))
+        {
+            var source = await StartAsync(fake, context);
+            await using (source)
+            {
+                Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "no list read yet: the count is so far (\"1,204+\")");
+                Assert.AreEqual(source.Tree.FileCount, source.Counters.FilesKnown);
+                await OutlookFixtures.ListAsync(source, Gal);
+                Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "one list of three read");
+                Assert.AreEqual(source.Tree.FileCount + 4, source.Counters.FilesKnown);
+
+                // "Count files on start" asks the source, which reads the lists left, not the host's walk through every message
+                var reads = fake.Actions.Count(a => a == "FindPeople");
+                await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+                Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+                Assert.AreEqual(source.Tree.FileCount + 5, source.Counters.FilesKnown, "every list's entries");
+                Assert.AreEqual(reads + 3, fake.Actions.Count(a => a == "FindPeople"), "the rooms, and the empty list twice (a cold answer); the global list not again");
+                Assert.IsFalse(fake.Actions.Contains("GetItem"), "no message opened");
+            }
+
+            kept = await File.ReadAllBytesAsync(Path.Combine(context.StateDirectory, AddressBookIndexFile.FileName));
+        }
+
+        // the next start has every list as kept: exact at once, nothing read
+        fake.Actions.Clear();
+        using var again = new TestSourceContext("outlook");
+        await File.WriteAllBytesAsync(Path.Combine(again.StateDirectory, AddressBookIndexFile.FileName), kept);
+        var restarted = await StartAsync(fake, again);
+        await using (restarted)
+        {
+            Assert.AreEqual(EnumerationState.Complete, restarted.Counters.State);
+            Assert.AreEqual(restarted.Tree.FileCount + 5, restarted.Counters.FilesKnown);
+            Assert.AreEqual(4, (await OutlookFixtures.ListAsync(restarted, Gal)).Count);
+            await restarted.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(restarted.Tree.FileCount + 5, restarted.Counters.FilesKnown, "a kept list served is counted once");
+            Assert.AreEqual(EnumerationState.Complete, restarted.Counters.State);
+            Assert.IsFalse(fake.Actions.Contains("FindPeople"), string.Join(",", fake.Actions));
+        }
+    }
+
+    [TestMethod]
     public async Task ABigListIsReadAPageAtATimeAndAColdOneTwice()
     {
         var fake = FakeExchange.Mailbox();
