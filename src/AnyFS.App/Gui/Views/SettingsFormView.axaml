@@ -20,14 +20,26 @@
       </ItemsControl.ItemTemplate>
     </ItemsControl>
     <TextBlock Classes="error" Text="{Binding FormError}" IsVisible="{Binding FormError, Converter={x:Static ObjectConverters.IsNotNull}}" />
-    <StackPanel Orientation="Horizontal" Spacing="10" IsVisible="{Binding HasActions}" Margin="0,4,0,0">
-      <!-- Detect sits here only where the dialog does not lift the setting it fills (an edit), else under that setting -->
-      <Button Content="Detect" Command="{Binding DetectCommand}" IsVisible="{Binding ShowDetectInForm}"
-              ToolTip.Tip="Find sources of this type on this computer and fill in the form from one" />
-      <Button Content="Test" Command="{Binding TestCommand}" IsVisible="{Binding HasTest}" />
-      <ProgressBar IsIndeterminate="True" Width="60" Height="4" MinWidth="60" IsVisible="{Binding Busy}" VerticalAlignment="Center" />
-      <TextBlock Text="{Binding TestMessage}" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="380" />
-      <TextBlock Text="{Binding DetectMessage}" IsVisible="{Binding ShowDetectInForm}" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="380" />
-    </StackPanel>
+    <DockPanel IsVisible="{Binding HasActions}" Margin="0,4,0,0">
+      <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" Spacing="10">
+        <!-- Detect sits here only where the dialog does not lift the setting it fills (an edit), else under that setting -->
+        <Button Content="Detect" Command="{Binding DetectCommand}" IsVisible="{Binding ShowDetectInForm}"
+                ToolTip.Tip="Find sources of this type on this computer and fill in the form from one" />
+        <Button Content="Test" Command="{Binding TestCommand}" IsVisible="{Binding HasTest}" />
+        <ProgressBar IsIndeterminate="True" Width="60" Height="4" MinWidth="60" IsVisible="{Binding Busy}" VerticalAlignment="Center" />
+      </StackPanel>
+      <!-- what they say takes the rest of the row, to the dialog's edge, and wraps there; one with nothing to say takes no line -->
+      <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
+        <TextBlock Text="{Binding TestMessage}" TextWrapping="Wrap" IsVisible="{Binding TestMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}" />
+        <TextBlock Text="{Binding DetectMessage}" TextWrapping="Wrap">
+          <TextBlock.IsVisible>
+            <MultiBinding Converter="{x:Static BoolConverters.And}">
+              <Binding Path="ShowDetectInForm" />
+              <Binding Path="DetectMessage" Converter="{x:Static StringConverters.IsNotNullOrEmpty}" />
+            </MultiBinding>
+          </TextBlock.IsVisible>
+        </TextBlock>
+      </StackPanel>
+    </DockPanel>
   </StackPanel>
 </UserControl>

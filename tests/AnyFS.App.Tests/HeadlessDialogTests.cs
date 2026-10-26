@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using AnyFS.App.Gui.ViewModels;
 using AnyFS.App.Gui.Views;
 using AnyFS.Core.Plugins;
@@ -142,6 +143,92 @@ public class HeadlessDialogTests
             {
             }
         }
+    }
+
+    [TestMethod]
+    public async Task WhatDetectSaysTakesTheRowToTheDialogsEdge()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "anyfs-tests", "dialogs-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await Session.Dispatch(async () =>
+            {
+                var registry = new PluginRegistry();
+                registry.AddBuiltIn(new DetectingPlugin());
+                registry.AddBuiltIn(new FakeMountProvider());
+                await using var engine = new AnyFsEngine(SettingsPaths.Resolve(Path.Combine(root, "settings")), registry, NullLoggerFactory.Instance);
+                engine.Load();
+                await engine.StartAsync(null, CancellationToken.None);
+                var source = new SourceDialogViewModel(engine, new FakeDialogs(), null, null, askPath: true);
+                var dialog = new SourceDialog(source);
+                dialog.Show();
+                source.Form!.DetectMessage = "Filled in: Offline copy of jane@agency.gov (" + string.Join(Path.DirectorySeparatorChar, "C:", "Users", "jane", "AppData", "Local", "Microsoft", "Outlook", "jane@agency.gov.ost") + ")";
+                await Task.Delay(50);
+
+                var message = dialog.FindControl<TextBlock>("DetectMessage")!;
+                var name = dialog.FindControl<TextBox>("NameBox")!;
+                static double RightOf(Control control, Visual window) => control.TranslatePoint(new Point(control.Bounds.Width, 0), window)!.Value.X;
+                Assert.IsTrue(source.Form.ShowDetectAbove);
+                Assert.AreEqual(RightOf(name, dialog), RightOf(message, dialog), 1, "to the column's right edge, as the Name box");
+                var width = message.Bounds.Width;
+
+                dialog.Width += 300;
+                await Task.Delay(50);
+                Assert.AreEqual(width + 300, message.Bounds.Width, 1, "the dialog made wider, so is the message");
+                Assert.AreEqual(RightOf(name, dialog), RightOf(message, dialog), 1);
+
+                // editing, where Detect sits beside Test in the form: the same
+                var form = new SettingsFormViewModel(typeof(DetectedSettings), new DetectedSettings(), null, null, null, new FakeDialogs(), detector: new DetectingPlugin()) { DetectMessage = "Found nothing on this computer." };
+                var window = new Window { Width = 700, Content = new SettingsFormView { DataContext = form } };
+                window.Show();
+                await Task.Delay(50);
+                var said = window.GetVisualDescendants().OfType<TextBlock>().Single(t => t.Text == form.DetectMessage);
+                Assert.IsTrue(form.ShowDetectInForm);
+                Assert.AreEqual(window.Bounds.Width, RightOf(said, window), 1, "to the window's edge");
+                dialog.Close();
+                window.Close();
+                return true;
+            }, CancellationToken.None);
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    /// <summary>A source type with a Detect button (that finds nothing), whose form lifts its address as Outlook's does.</summary>
+    private sealed class DetectingPlugin : ISourcePlugin, IDetectable
+    {
+        public string TypeId => "detecting";
+
+        public string DisplayName => "Detecting";
+
+        public string Description => "a source type with a Detect button";
+
+        public string TypeFolder => "detecting";
+
+        public Stream? OpenIcon() => null;
+
+        [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
+        public Type SettingsType => typeof(DetectedSettings);
+
+        public object CreateDefaultSettings() => new DetectedSettings();
+
+        public ISource CreateSource(object settings) => throw new NotSupportedException("never started");
+
+        public Task<IReadOnlyList<DetectedSource>> DetectAsync(IProgress<string> progress, CancellationToken ct) => Task.FromResult<IReadOnlyList<DetectedSource>>([]);
+    }
+
+    private sealed class DetectedSettings
+    {
+        [Setting("Address", Required = true, Primary = true)]
+        public string Address { get; set; } = "";
     }
 
     [TestMethod]

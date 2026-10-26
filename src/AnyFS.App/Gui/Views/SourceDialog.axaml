@@ -55,12 +55,13 @@
           <ContentControl Name="PrimaryField" Content="{Binding Form.PrimaryField, FallbackValue={x:Null}}" ContentTemplate="{StaticResource FieldTemplates}"
                           IsVisible="{Binding Form.PrimaryField, Converter={x:Static ObjectConverters.IsNotNull}, FallbackValue=False}" />
           <!-- the plugin's Detect (IDetectable): fills that setting, and the rest, from what it finds on this computer -->
-          <StackPanel Orientation="Horizontal" Spacing="10" Margin="0,0,0,10" IsVisible="{Binding Form.ShowDetectAbove, FallbackValue=False}">
-            <Button Name="DetectButton" Content="Detect" Command="{Binding Form.DetectCommand, FallbackValue={x:Null}}"
+          <DockPanel Margin="0,0,0,10" IsVisible="{Binding Form.ShowDetectAbove, FallbackValue=False}">
+            <Button DockPanel.Dock="Left" Name="DetectButton" Content="Detect" Command="{Binding Form.DetectCommand, FallbackValue={x:Null}}"
                     ToolTip.Tip="Find sources of this type on this computer and fill in the form from one" />
-            <ProgressBar IsIndeterminate="True" Width="60" Height="4" MinWidth="60" IsVisible="{Binding Form.DetectRunning, FallbackValue=False}" VerticalAlignment="Center" />
-            <TextBlock Text="{Binding Form.DetectMessage, FallbackValue={x:Null}}" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="380" />
-          </StackPanel>
+            <ProgressBar DockPanel.Dock="Left" IsIndeterminate="True" Width="60" Height="4" MinWidth="60" Margin="10,0,0,0" IsVisible="{Binding Form.DetectRunning, FallbackValue=False}" VerticalAlignment="Center" />
+            <!-- what it found takes the rest of the row, to the dialog's edge, and wraps there -->
+            <TextBlock Name="DetectMessage" Text="{Binding Form.DetectMessage, FallbackValue={x:Null}}" Margin="10,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap" />
+          </DockPanel>
           <TextBlock Classes="caption" Text="Name *" />
           <TextBox Name="NameBox" Text="{Binding Name}" />
           <TextBlock Classes="hint" Text="{Binding NameHint}" />
