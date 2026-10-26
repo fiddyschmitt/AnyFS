@@ -444,6 +444,29 @@ public class OutlookWebSessionTests
         var text = await OutlookFixtures.TextAsync(source, VfsPath.Join(first, eml.Name));
         StringAssert.Contains(text, "\r\nSubject: ");
 
+        // the month's messages listed sixteen to a GetItem, their attachments in GetAttachments: what each folder lists is
+        // what its files come to when read
+        var month = VfsPath.Join(VfsPath.Join("Inbox", years.First(e => e.Name.Length == 4).Name), months[0].Name);
+        foreach (var folder in items.Where(e => e.IsDirectory).Take(40).Select(e => VfsPath.Join(month, e.Name)))
+        {
+            var listed = await OutlookFixtures.ListAsync(source, folder);
+            var inside = listed.Where(f => !f.IsDirectory).Select(f => (Path: VfsPath.Join(folder, f.Name), f.Length)).ToList();
+            if (listed.Any(f => f.IsDirectory && f.Name == "attachments"))
+            {
+                inside.AddRange((await OutlookFixtures.ListAsync(source, folder + "/attachments")).Select(f => (Path: VfsPath.Join(folder + "/attachments", f.Name), f.Length)));
+            }
+
+            foreach (var (path, length) in inside)
+            {
+                Assert.AreEqual(length, (await OutlookFixtures.ReadAsync(source, path)).Length, path);
+            }
+        }
+
+        // Count files on start: every item listed, every list read, the count whole
+        await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(EnumerationState.Complete, source.Counters.State, "every item listed");
+        Assert.IsTrue(source.Counters.FilesKnown > source.Tree.FileCount, $"{source.Counters.FilesKnown:N0} files, {source.Tree.FileCount:N0} without the attachments and the address books");
+
         // the organisation's address lists (the sandbox's: the Default Global Address List and nine more, Spike 11)
         CollectionAssert.Contains(root, "Address Books");
         CollectionAssert.Contains((await OutlookFixtures.ListAsync(source, "Address Books")).Select(e => e.Name).ToList(), "Default Global Address List");
