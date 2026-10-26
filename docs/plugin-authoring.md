@@ -108,6 +108,8 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   reads the rest). An `ICountable` source is asked whenever the option is on, `Complete` or not, so
   that it knows the option is on (return at once when nothing is left); what it says with
   `Context.ReportProgress` while it counts shows on its tile ("Counting files: 1,200 of 20,000").
+  When `CountFilesAsync` returns the count is `Complete`, unless the source set `Unknown` itself
+  because some of it could not be counted.
 
 ## Settings
 

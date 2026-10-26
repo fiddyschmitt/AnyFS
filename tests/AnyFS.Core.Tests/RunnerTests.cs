@@ -263,6 +263,13 @@ public class SourceRunnerTests
         await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready after counting");
         Assert.AreEqual((44L, true), runner.Handle.FileCount());
 
+        // a source that could count only part says so, and the host leaves it so: "40+"
+        var part = new SelfCountingPlugin { PartOnly = true };
+        await using var partly = Runner(new MemoryPluginSettings(), countOnStart: true, plugin: part);
+        partly.Start();
+        await Wait.UntilAsync(() => part.Counted == 1 && partly.Handle.Status.State == ComponentState.Ready, what: "counted and ready");
+        Assert.AreEqual((40L, false), partly.Handle.FileCount());
+
         // the option off: not asked
         var unasked = new SelfCountingPlugin { CompleteAtStart = true };
         await using var other = Runner(new MemoryPluginSettings(), countOnStart: false, plugin: unasked);
@@ -280,6 +287,9 @@ public class SourceRunnerTests
 
         /// <summary>Held open while counting, after saying how far it got; null counts at once.</summary>
         public TaskCompletionSource? Gate { get; init; }
+
+        /// <summary>Counts what it can and says the count is not whole (Unknown).</summary>
+        public bool PartOnly { get; init; }
 
         public string TypeId => "selfcount";
 
@@ -327,6 +337,13 @@ public class SourceRunnerTests
                 Context.ReportProgress("Counting: 1 of 2 messages", 0.5);
                 await gate.Task.WaitAsync(ct);
                 Counters.Add(2, 0);
+                return;
+            }
+
+            if (plugin.PartOnly)
+            {
+                Counters.Add(40, 3);
+                Counters.SetState(EnumerationState.Unknown);
                 return;
             }
 

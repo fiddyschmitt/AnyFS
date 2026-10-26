@@ -66,7 +66,8 @@ public interface ISourcePlugin
 /// directory-by-directory walk: it knows a faster way (Mirror walks every configured path at once).
 /// Update <see cref="ISource.Counters"/> as you go (the tile shows the running total, and what
 /// <see cref="ISourceContext.ReportProgress"/> says meanwhile); the host sets the state to
-/// <see cref="EnumerationState.Complete"/> when the task finishes. It is asked whenever the option is on, even
+/// <see cref="EnumerationState.Complete"/> when the task finishes, unless the source set it otherwise itself
+/// (<see cref="EnumerationState.Unknown"/>: some of it could not be counted). It is asked whenever the option is on, even
 /// when the source says <see cref="EnumerationState.Complete"/> as its start ends, so that it knows the option is
 /// on (Outlook goes on listing new mail as it comes): return at once when there is nothing left to count.
 /// </summary>

@@ -293,11 +293,17 @@ public sealed class SourceRunner : IAsyncDisposable
         }
     }
 
-    /// <summary>The status stays "Counting files" throughout: the number itself is the source's counters, which the lists show under it.</summary>
+    /// <summary>
+    /// The status stays "Counting files" throughout: the number itself is the source's counters, which the lists show under
+    /// it. Complete when it ends, unless the source said otherwise itself (Unknown: some of it could not be counted).
+    /// </summary>
     private static async Task CountViaSourceAsync(ISource source, ICountable countable, CancellationToken ct)
     {
         await countable.CountFilesAsync(ct).ConfigureAwait(false);
-        source.Counters.SetState(EnumerationState.Complete);
+        if (source.Counters.State == EnumerationState.InProgress)
+        {
+            source.Counters.SetState(EnumerationState.Complete);
+        }
     }
 
     /// <summary>
