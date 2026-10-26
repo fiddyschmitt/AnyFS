@@ -196,5 +196,29 @@ public class OutlookExchangeServerTests
         StringAssert.Contains(text, "\r\nSubject: ");
         var markdown = await OutlookFixtures.TextAsync(source, VfsPath.Join(first, files.Single(f => f.Name.EndsWith(".md", StringComparison.Ordinal)).Name));
         StringAssert.Contains(markdown, "**From:**");
+
+        // the organisation's address books over NSPI (Spike 16): the Global Address List and the lab's lists
+        CollectionAssert.Contains(root, "Address Books");
+        var lists = (await OutlookFixtures.ListAsync(source, "Address Books")).Select(e => e.Name).ToList();
+        CollectionAssert.Contains(lists, "Global Address List");
+        CollectionAssert.Contains(lists, "Lab People");
+        var cards = await OutlookFixtures.ListAsync(source, "Address Books/Global Address List");
+        Assert.IsTrue(cards.Count > 0, "the global address list has people");
+        var texts = new List<string>();
+        foreach (var card in cards)
+        {
+            var vcard = await OutlookFixtures.TextAsync(source, "Address Books/Global Address List/" + card.Name);
+            StringAssert.StartsWith(vcard, "BEGIN:VCARD\r\n");
+            texts.Add(vcard.Replace("\r\n ", "", StringComparison.Ordinal));
+        }
+
+        // ex_other's card carries what only the server gives in a listing: a title, a department, phones and an address
+        var other = texts.Single(t => t.Contains("\r\nFN:Exchange Other\r\n", StringComparison.Ordinal));
+        StringAssert.Contains(other, "\r\nTITLE:Lab Engineer\r\n");
+        StringAssert.Contains(other, "\r\nORG:AnyFS Lab;Testing\r\n");
+        StringAssert.Contains(other, "\r\nTEL;TYPE=WORK,VOICE:");
+        StringAssert.Contains(other, "\r\nTEL;TYPE=CELL,VOICE:");
+        StringAssert.Contains(other, "\r\nADR;TYPE=WORK:;Building 4"); // the office is the work address's extended part
+        StringAssert.Contains(other, ";1 Lab Street;Sydney;NSW;2000;Australia\r\n");
     }
 }

@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Http;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using AnyFS.Sdk;
@@ -32,6 +34,7 @@ public sealed class OutlookSource : SourceBase
     private volatile MailTree _tree = MailTree.Empty;
     private IMailStore? _store;
     private AddressBooks? _books;
+    private IDisposable? _directoryOwned;
     private Task _refreshing = Task.CompletedTask;
     private (long Length, DateTime Written) _seen;
     private bool _degraded;
@@ -112,13 +115,16 @@ public sealed class OutlookSource : SourceBase
                         () => secrets.Get("msal-cache") is { } saved ? Convert.FromBase64String(saved) : null,
                         bytes => secrets.Set("msal-cache", Convert.ToBase64String(bytes)),
                         (title, message) => Context.PromptAsync(new PromptRequest(PromptKind.YesNo, title, message), ct));
-                    var (service, account, how) = await ConnectAsync(_settings, _standIn, Logger, interactive: true, message => Context.ReportProgress(message), hooks, ct).ConfigureAwait(false);
+                    var (service, directory, account, how) = await ConnectAsync(_settings, _standIn, Logger, interactive: true, message => Context.ReportProgress(message), hooks, ct).ConfigureAwait(false);
                     _store = new EwsMailStore(service, _settings.Kind == OutlookKind.Server ? $"{account} on {_settings.ServerUrl!.Host}" : account, _settings.ShowHidden, _settings.CalendarMonthsBack, _settings.CalendarMonthsAhead, Logger);
-                    if (service is IAddressBookService directory)
+                    if (directory is not null)
                     {
-                        // the organisation's address lists, where the service reaches them (the web session's People)
+                        // the organisation's address lists, where the service reaches them (the web session's People, a server's NSPI)
                         _books = new AddressBooks(directory, _store.Name, Path.Combine(Context.StateDirectory, AddressBookIndexFile.FileName), Logger, DirectoryColdPause, _stopping.Token);
                         _books.Updated += Count;
+
+                        // the web session's directory is its mail service (disposed with the store); a server's is its own
+                        _directoryOwned = ReferenceEquals(directory, service) ? null : directory as IDisposable;
                     }
 
                     Logger.LogInformation("outlook: signed in as {Account} {How}", account, how);
@@ -237,7 +243,7 @@ public sealed class OutlookSource : SourceBase
     /// browser (a window when <paramref name="interactive"/> and the saved sign-in has lapsed), an app sign-in and
     /// Microsoft Graph, or a Windows account to a server. Also who the account is and how it signed in, for messages.
     /// </summary>
-    internal static async Task<(IEwsService Service, string Account, string How)> ConnectAsync(OutlookSettings s, OutlookStandIn? standIn, ILogger logger, bool interactive, Action<string> progress, SignInHooks? hooks, CancellationToken ct)
+    internal static async Task<(IEwsService Service, IAddressBookService? Directory, string Account, string How)> ConnectAsync(OutlookSettings s, OutlookStandIn? standIn, ILogger logger, bool interactive, Action<string> progress, SignInHooks? hooks, CancellationToken ct)
     {
         if (s.Kind == OutlookKind.Server)
         {
@@ -247,7 +253,9 @@ public sealed class OutlookSource : SourceBase
             var endpoint = standIn is null ? url : new Uri(standIn.Origin, url.PathAndQuery);
             var soap = new SoapEwsService(endpoint, WindowsAccount.Credentials(s.IsWindowsCurrent, s.Username, s.Password), s.TrustAnyCertificate, standIn?.Handler(), $"{url.Host}|{who}", logger);
             progress($"Signing in to {url.Host} as {who}");
-            return (soap, standIn?.Account ?? who, $"with a Windows account ({url.Host})");
+            // the organisation's address books over NSPI, where the real server is reached (a test's stand-in does not speak it)
+            var directory = standIn is null ? await ServerAddressBookAsync(s, soap, url.Host, who, logger, ct).ConfigureAwait(false) : null;
+            return (soap, directory, standIn?.Account ?? who, $"with a Windows account ({url.Host})");
         }
 
         var address = s.Address ?? throw new SourceFailedException("The mailbox's address is missing.", permanent: true);
@@ -259,7 +267,7 @@ public sealed class OutlookSource : SourceBase
         if (standIn is not null)
         {
             var service = new OwaJsonService(standIn.Origin, address, standIn.Token, standIn.Handler(), logger);
-            return (service, standIn.Account, "through the web session (a stand-in)");
+            return (service, service, standIn.Account, "through the web session (a stand-in)");
         }
 
         var browser = OutlookPlugin.BrowserFor(s) ?? throw new SourceFailedException("The web session needs Microsoft Edge, Google Chrome or Chromium installed, or the path of one under Browser.", permanent: true);
@@ -285,7 +293,7 @@ public sealed class OutlookSource : SourceBase
             return await session.TokenAsync(interactive: false, _ => { }, token).ConfigureAwait(false);
         }, null, logger);
         _ = first;
-        return (live, account, $"through the web session ({session.BrowserName}, {origin.Host})");
+        return (live, live, account, $"through the web session ({session.BrowserName}, {origin.Host})");
     }
 
     /// <summary>
@@ -293,7 +301,7 @@ public sealed class OutlookSource : SourceBase
     /// the organisation's own signed in to there (silently from the saved sign-in when it can, else the browser or a
     /// device code), then Microsoft Graph at the mailbox's pace.
     /// </summary>
-    private static async Task<(IEwsService Service, string Account, string How)> ConnectGraphAsync(OutlookSettings s, string address, OutlookStandIn? standIn, ILogger logger, Action<string> progress, SignInHooks? hooks, CancellationToken ct)
+    private static async Task<(IEwsService Service, IAddressBookService? Directory, string Account, string How)> ConnectGraphAsync(OutlookSettings s, string address, OutlookStandIn? standIn, ILogger logger, Action<string> progress, SignInHooks? hooks, CancellationToken ct)
     {
         var cloud = s.KnownCloud;
         if (cloud is null)
@@ -343,7 +351,74 @@ public sealed class OutlookSource : SourceBase
         }
 
         var graph = new GraphClient(signIn.Token, logger, OutlookPlugin.Service, handler: standIn?.Handler(), cloud: cloud, pace: RequestPace.For(GraphEwsService.PaceKey(cloud, address)));
-        return (new GraphEwsService(graph, address, s.ShowHidden, logger), account, cloud.IsGlobal ? "with an app sign-in (Microsoft Graph)" : $"with an app sign-in (Microsoft Graph, {cloud.Name})");
+        return (new GraphEwsService(graph, address, s.ShowHidden, logger), null, account, cloud.IsGlobal ? "with an app sign-in (Microsoft Graph)" : $"with an app sign-in (Microsoft Graph, {cloud.Name})");
+    }
+
+    /// <summary>
+    /// A server's organisation address books over NSPI (spec 7.7; Spike 16): Autodiscover of the mapiHttp address book
+    /// endpoint for the signed-in mailbox, reached with the same Windows sign-in as EWS. Null when Autodiscover offers no
+    /// such endpoint (an older server, or MAPI over HTTP turned off) or anything goes wrong; the mailbox is served regardless.
+    /// </summary>
+    private static async Task<IAddressBookService?> ServerAddressBookAsync(OutlookSettings s, SoapEwsService soap, string host, string who, ILogger logger, CancellationToken ct)
+    {
+        var handler = new HttpClientHandler
+        {
+            Credentials = WindowsAccount.Credentials(s.IsWindowsCurrent, s.Username, s.Password),
+            PreAuthenticate = true,
+            UseCookies = false,
+            AutomaticDecompression = DecompressionMethods.All,
+        };
+        if (s.TrustAnyCertificate)
+        {
+            handler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
+        }
+
+        var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd("AnyFS");
+        try
+        {
+            // Autodiscover asks by the mailbox's SMTP address: resolved from the login name, with the login name and the host's own domain as fallbacks
+            var login = s.EffectiveSignIn == OutlookSignIn.Windows && !string.IsNullOrWhiteSpace(s.Username) ? s.Username!.Trim() : Environment.UserName;
+            var backslash = (char)92; // DOMAIN\name: keep only the name
+            var alias = login.Contains(backslash) ? login[(login.LastIndexOf(backslash) + 1)..] : login;
+            var addresses = new List<string>();
+            try
+            {
+                addresses.AddRange(await soap.ResolveAddressesAsync(alias, ct).ConfigureAwait(false));
+            }
+            catch (EwsException ex)
+            {
+                logger.LogInformation("outlook: {Host} could not resolve {Alias}'s address ({Error}); trying the login name and the host's domain for the address book", host, alias, ex.Message);
+            }
+
+            if (login.Contains('@'))
+            {
+                addresses.Add(login);
+            }
+
+            if (!IPAddress.TryParse(host, out _) && host.IndexOf('.') is > 0 and var dot)
+            {
+                addresses.Add($"{alias}@{host[(dot + 1)..]}");
+                addresses.Add($"{alias}@{host}");
+            }
+
+            var book = await ExchangeAutodiscover.AddressBookUrlAsync(http, s.ServerUrl!, addresses, logger, ct).ConfigureAwait(false);
+            if (book is null)
+            {
+                logger.LogInformation("outlook: {Host} offers no MAPI over HTTP address book; the Address Books folder is left out", host);
+                http.Dispose();
+                return null;
+            }
+
+            logger.LogInformation("outlook: {Host}'s address book is served over NSPI", host);
+            return new NspiAddressBook(book, http, MailboxPace.For($"{s.EwsUrl!.Host}|{who}"), logger);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or SignInRequiredException or EwsException || ex is TaskCanceledException && !ct.IsCancellationRequested)
+        {
+            logger.LogWarning("outlook: {Host}'s address book could not be set up; the Address Books folder is left out: {Error}", host, ex.Message);
+            http.Dispose();
+            return null;
+        }
     }
 
     // --- refresh ----------------------------------------------------------------------------------------------------------
@@ -738,6 +813,7 @@ public sealed class OutlookSource : SourceBase
         }
 
         _store?.Dispose();
+        _directoryOwned?.Dispose();
         _stopping.Dispose();
         _refreshGate.Dispose();
         await base.DisposeAsync().ConfigureAwait(false);

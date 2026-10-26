@@ -206,6 +206,35 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
         return new EwsAttachmentContent(Text(a, "Name") ?? "", Text(a, "ContentType"), content, inner is null ? null : ItemOf(inner));
     }
 
+    /// <summary>
+    /// The signed-in mailbox's own SMTP addresses, resolved from its login name (ResolveNames against Active Directory);
+    /// for the address book's Autodiscover, which asks by address. Empty when the name resolves to nothing.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ResolveAddressesAsync(string name, CancellationToken ct)
+    {
+        XElement message;
+        try
+        {
+            message = await CallAsync("ResolveNames", new XElement(M + "ResolveNames", new XAttribute("ReturnFullContactData", "true"), new XAttribute("SearchScope", "ActiveDirectory"),
+                new XElement(M + "UnresolvedEntry", name)), ct).ConfigureAwait(false);
+        }
+        catch (EwsException ex) when (ex.Code is "ErrorNameResolutionNoResults" or "ErrorNameResolutionNoMailbox")
+        {
+            return [];
+        }
+
+        var addresses = new List<string>();
+        foreach (var mailbox in message.Descendants(T + "Mailbox"))
+        {
+            if (string.Equals(Text(mailbox, "RoutingType"), "SMTP", StringComparison.OrdinalIgnoreCase) && Text(mailbox, "EmailAddress") is { Length: > 0 } smtp && !addresses.Contains(smtp, StringComparer.OrdinalIgnoreCase))
+            {
+                addresses.Add(smtp);
+            }
+        }
+
+        return addresses;
+    }
+
     // --- the call -----------------------------------------------------------------------------------------------------------
 
     /// <summary>One operation: its first response message, checked. Paced; tried again on a hold (a busy server, 503) and on a dropped connection.</summary>

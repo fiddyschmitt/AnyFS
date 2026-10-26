@@ -84,6 +84,15 @@ if (-not (Get-AddressList -Identity 'Lab People' -ErrorAction SilentlyContinue))
     Say "address list 'Lab People' made"
 }
 
+# directory details on ex_other so a card has a title, department, office, phones and an address (read live over NSPI);
+# idempotent, and kept here so a rebuilt lab still shows them (they were set by hand when the address books were first tried)
+if (Get-Mailbox -Identity 'ex_other' -ErrorAction SilentlyContinue) {
+    Set-User -Identity 'ex_other' -Title 'Lab Engineer' -Department 'Testing' -Company 'AnyFS Lab' -Office 'Building 4, 2.10' `
+        -Phone '+61 2 5550 0101' -MobilePhone '+61 400 000 001' `
+        -StreetAddress '1 Lab Street' -City 'Sydney' -StateOrProvince 'NSW' -PostalCode '2000' -CountryOrRegion 'AU' | Out-Null
+    Say 'ex_other given a title, phones, office and address'
+}
+
 # public folders: a mailbox for them and one folder
 if (-not (Get-Mailbox -PublicFolder -ErrorAction SilentlyContinue)) {
     New-Mailbox -PublicFolder -Name 'PF Mailbox 1' -OrganizationalUnit $ou | Out-Null

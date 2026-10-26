@@ -189,8 +189,9 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
 
         try
         {
-            var (service, account, how) = await OutlookSource.ConnectAsync(s, standIn, NullLogger.Instance, interactive: true, progress.Report, hooks: null, ct).ConfigureAwait(false);
+            var (service, directory, account, how) = await OutlookSource.ConnectAsync(s, standIn, NullLogger.Instance, interactive: true, progress.Report, hooks: null, ct).ConfigureAwait(false);
             using (service as IDisposable)
+            using (ReferenceEquals(directory, service) ? null : directory as IDisposable)
             {
                 progress.Report($"Signed in as {account}; listing the folders");
                 var folders = await service.FindFoldersAsync(ct).ConfigureAwait(false);
