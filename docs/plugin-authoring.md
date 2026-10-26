@@ -102,10 +102,12 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   cheaper listing of its own can pass it to `TreeCount.CountAsync` from there, as SSHFS does with
   SFTP. Return `true` from the plugin's `IsQuickToCount` when that walk is cheap for your kind of
   source (local disks): the checkbox then defaults on for new sources of it. Say `Complete` only
-  when the number is the whole tree: the window drops the "+" for it, and the host skips the count
+  when the number is the whole tree: the window drops the "+" for it, and the host skips its walk
   for a source already `Complete` when its start ends (Outlook's address lists are read when
   first opened, so its count says `Unknown` until every list has been, and its `CountFilesAsync`
-  reads the rest).
+  reads the rest). An `ICountable` source is asked whenever the option is on, `Complete` or not, so
+  that it knows the option is on (return at once when nothing is left); what it says with
+  `Context.ReportProgress` while it counts shows on its tile ("Counting files: 1,200 of 20,000").
 
 ## Settings
 

@@ -179,9 +179,10 @@ public sealed class SourceRunner : IAsyncDisposable
 
     internal void OnProgress(string message, double? fraction)
     {
-        if (Handle.Status.State == ComponentState.Starting)
+        // while it starts, and while it counts its own files ("Counting files: 1,200 of 20,000 messages")
+        if (Handle.Status.State is ComponentState.Starting or ComponentState.Enumerating)
         {
-            Handle.Status = new ComponentStatus(ComponentState.Starting, message, fraction);
+            Handle.Status = new ComponentStatus(Handle.Status.State, message, fraction);
         }
     }
 
@@ -223,7 +224,8 @@ public sealed class SourceRunner : IAsyncDisposable
                 Handle.Current = source;
                 Handle.Status = _pendingHealth is { } pending ? StatusFor(pending, _pendingHealthDetail) : ComponentStatus.ReadyStatus;
                 _logger.LogInformation("source {Source} ({Type}) is {State}", Definition.Name, Definition.Type, Handle.Status.State.ToString().ToLowerInvariant());
-                if (Definition.CountFilesOnStart && source.Counters.State != EnumerationState.Complete)
+                // a source that counts itself is asked even when it says Complete: it learns the option is on
+                if (Definition.CountFilesOnStart && (source is ICountable || source.Counters.State != EnumerationState.Complete))
                 {
                     await CountAsync(source, ct).ConfigureAwait(false);
                 }

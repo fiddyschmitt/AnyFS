@@ -247,9 +247,39 @@ public class SourceRunnerTests
         await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready after counting");
     }
 
+    [TestMethod]
+    public async Task CountOnStartAsksACountableSourceThatSaysItIsCompleteAndShowsItsProgress()
+    {
+        // a source whose count is exact at its start is still asked, so that it knows the option is on; what it says while it counts shows
+        var gate = new TaskCompletionSource();
+        var plugin = new SelfCountingPlugin { CompleteAtStart = true, Gate = gate };
+        await using var runner = Runner(new MemoryPluginSettings(), countOnStart: true, plugin: plugin);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Status.Text == "Counting: 1 of 2 messages", what: "the source's progress while it counts");
+        Assert.AreEqual(ComponentState.Enumerating, runner.Handle.Status.State);
+        Assert.AreEqual(0.5, runner.Handle.Status.Progress);
+        Assert.AreEqual(1, plugin.Counted);
+        gate.SetResult();
+        await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready after counting");
+        Assert.AreEqual((44L, true), runner.Handle.FileCount());
+
+        // the option off: not asked
+        var unasked = new SelfCountingPlugin { CompleteAtStart = true };
+        await using var other = Runner(new MemoryPluginSettings(), countOnStart: false, plugin: unasked);
+        other.Start();
+        await Wait.UntilAsync(() => other.Handle.Status.State == ComponentState.Ready, what: "ready");
+        Assert.AreEqual(0, unasked.Counted);
+    }
+
     private sealed class SelfCountingPlugin : ISourcePlugin
     {
         public int Counted;
+
+        /// <summary>Whether the source's count is exact as its start ends (42 files, 3 folders).</summary>
+        public bool CompleteAtStart { get; init; }
+
+        /// <summary>Held open while counting, after saying how far it got; null counts at once.</summary>
+        public TaskCompletionSource? Gate { get; init; }
 
         public string TypeId => "selfcount";
 
@@ -271,7 +301,15 @@ public class SourceRunnerTests
     /// <summary>Lists nothing (a walk would find 0 files) but reports 42 files and 3 folders through <see cref="ICountable"/>.</summary>
     private sealed class SelfCountingSource(SelfCountingPlugin plugin) : SourceBase, ICountable
     {
-        protected override Task OnInitialiseAsync(CancellationToken ct) => Task.CompletedTask;
+        protected override Task OnInitialiseAsync(CancellationToken ct)
+        {
+            if (plugin.CompleteAtStart)
+            {
+                Counters.Set(42, 3, EnumerationState.Complete);
+            }
+
+            return Task.CompletedTask;
+        }
 
         public override async IAsyncEnumerable<VfsEntry> ListAsync(string path, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
         {
@@ -284,6 +322,14 @@ public class SourceRunnerTests
         public async Task CountFilesAsync(CancellationToken ct)
         {
             Interlocked.Increment(ref plugin.Counted);
+            if (plugin.Gate is { } gate)
+            {
+                Context.ReportProgress("Counting: 1 of 2 messages", 0.5);
+                await gate.Task.WaitAsync(ct);
+                Counters.Add(2, 0);
+                return;
+            }
+
             Counters.Add(40, 3);
             await Task.Delay(20, ct);
             Counters.Add(2, 0);

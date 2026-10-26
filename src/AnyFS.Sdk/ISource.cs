@@ -64,8 +64,11 @@ public interface ISourcePlugin
 /// <summary>
 /// A source that counts its own tree when "Count files on start" is on, instead of the host's generic
 /// directory-by-directory walk: it knows a faster way (Mirror walks every configured path at once).
-/// Update <see cref="ISource.Counters"/> as you go (the tile shows the running total); the host sets
-/// the state to <see cref="EnumerationState.Complete"/> when the task finishes.
+/// Update <see cref="ISource.Counters"/> as you go (the tile shows the running total, and what
+/// <see cref="ISourceContext.ReportProgress"/> says meanwhile); the host sets the state to
+/// <see cref="EnumerationState.Complete"/> when the task finishes. It is asked whenever the option is on, even
+/// when the source says <see cref="EnumerationState.Complete"/> as its start ends, so that it knows the option is
+/// on (Outlook goes on listing new mail as it comes): return at once when there is nothing left to count.
 /// </summary>
 public interface ICountable
 {
@@ -141,7 +144,7 @@ public interface ISourceContext
 
     ISecretStore Secrets { get; }
 
-    /// <summary>Shown while the source is Starting: "Logging in...", with an optional 0..1 fraction.</summary>
+    /// <summary>Shown while the source is Starting ("Logging in...") or counting its files (<see cref="ICountable"/>), with an optional 0..1 fraction.</summary>
     void ReportProgress(string message, double? fraction = null);
 
     /// <summary>Changes the source's health after it has started (a root went away: Degraded; came back: Ready).</summary>
