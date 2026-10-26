@@ -1,0 +1,28 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+        xmlns:sys="using:System"
+        x:Class="AnyFS.App.Gui.Views.ChooseDialog"
+        x:DataType="vm:ChooseDialogViewModel"
+        Title="{Binding Title}"
+        MinWidth="560" MinHeight="200" SizeToContent="WidthAndHeight" CanResize="True"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+  <!-- one of several (what Detect found, an imported source's clash): as wide as the longest choice, up to most of the
+       screen (ShowAsync), then wrapped; resizable, the list taking the room. The least width is the content's, since a
+       window sized to its content is not held to its own MinWidth (the headless platform, 26-Oct-2026) -->
+  <DockPanel Margin="16" MinWidth="528">
+    <TextBlock DockPanel.Dock="Top" Text="{Binding Message}" TextWrapping="Wrap" MaxWidth="560" HorizontalAlignment="Left" IsVisible="{Binding HasMessage}" Margin="0,0,0,12" />
+    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="0,16,0,0">
+      <Button Content="OK" IsDefault="True" Click="Ok_Click" IsEnabled="{Binding HasChoice}" MinWidth="80" />
+      <Button Content="Cancel" IsCancel="True" Click="Cancel_Click" MinWidth="80" />
+    </StackPanel>
+    <ListBox Name="ChoiceList" ItemsSource="{Binding Choices}" SelectedIndex="{Binding SelectedIndex}" DoubleTapped="ChoiceList_DoubleTapped"
+             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+      <ListBox.ItemTemplate>
+        <DataTemplate x:DataType="sys:String">
+          <TextBlock Text="{Binding}" TextWrapping="Wrap" />
+        </DataTemplate>
+      </ListBox.ItemTemplate>
+    </ListBox>
+  </DockPanel>
+</Window>

@@ -1,6 +1,5 @@
 using AnyFS.App.Gui.Services;
 using AnyFS.App.Gui.ViewModels;
-using AnyFS.Sdk;
 using Avalonia.Controls;
 using Avalonia.Input.Platform;
 using Avalonia.Platform.Storage;
@@ -26,13 +25,8 @@ public sealed class AvaloniaDialogs(Window owner, ITextClipboard clipboard) : ID
         return new ConfirmAnswer(button, dialog.Checked);
     }
 
-    public async Task<int?> ChooseAsync(string title, string message, IReadOnlyList<string> options)
-    {
-        // the plugin prompt dialog already knows how to offer a choice
-        var prompt = new PromptDialogViewModel(title, new PromptRequest(PromptKind.Choice, title, message, options));
-        var result = await new PromptDialog(prompt).ShowDialog<PromptResult?>(owner);
-        return result is { Answered: true } ? result.ChoiceIndex : null;
-    }
+    public Task<int?> ChooseAsync(string title, string message, IReadOnlyList<string> options)
+        => new ChooseDialog(new ChooseDialogViewModel(title, message, options)).ShowAsync(owner);
 
     public async Task<string?> PickSaveFileAsync(string suggestedName)
     {

@@ -69,6 +69,7 @@ public class HeadlessDialogTests
                     await ShowAsync(new PromptDialog(new PromptDialogViewModel("aus-files-01", request)));
                 }
 
+                await ShowAsync(new ChooseDialog(new ChooseDialogViewModel("Found on this computer", "Choose one to fill in the form.", ["one", "two"])));
                 await ShowAsync(new ConfirmDialog(new ConfirmDialogViewModel("Delete collection", "Delete 'work'?", "Delete", "No", "Cancel", "Also delete the orphaned sources", true)));
                 await ShowAsync(new ConfirmDialog(new ConfirmDialogViewModel("Oops", "Something went wrong.", "OK", cancelText: null)));
                 await ShowAsync(new TextDialog(new TextDialogViewModel("Mount command", "sudo mount -t nfs host:/work ~/anyfs/work", clipboard)));
@@ -141,6 +142,54 @@ public class HeadlessDialogTests
             {
             }
         }
+    }
+
+    [TestMethod]
+    public async Task TheChooserFitsItsLongestChoiceUpToMostOfTheScreen()
+    {
+        await Session.Dispatch(async () =>
+        {
+            var owner = new Window { Width = 800, Height = 600 };
+            owner.Show();
+            try
+            {
+                // Detect's finds as a work PC's Outlook gives them; the offline copy's path is the longest
+                const string mailbox = "Mailbox jane@agency.gov (Exchange Online, US Government (GCC High))";
+                var ost = $"Offline copy of jane@agency.gov ({string.Join(Path.DirectorySeparatorChar, "C:", "Users", "jane", "AppData", "Local", "Microsoft", "Outlook", "jane@agency.gov.ost")})";
+                var narrow = await ChooseAsync(owner, ["one", "two"]);
+                var fitted = await ChooseAsync(owner, [mailbox, ost]);
+                var capped = await ChooseAsync(owner, [mailbox, string.Concat(Enumerable.Repeat(ost + " ", 3))]);
+
+                Assert.AreEqual(560, narrow.Width, 1, $"short choices: the least width, not {narrow.Width}");
+                Assert.IsTrue(fitted.Width > narrow.Width && fitted.Width < fitted.MaxWidth, $"wider, to fit the path: {fitted.Width} of at most {fitted.MaxWidth}");
+                Assert.AreEqual(fitted.Heights[0], fitted.Heights[1], 0.5, $"the path on one line, as the mailbox: {string.Join(", ", fitted.Heights)}");
+                Assert.IsTrue(capped.Width > fitted.Width && capped.Width <= capped.MaxWidth, $"no wider than most of the screen: {capped.Width} of {capped.MaxWidth}");
+                Assert.IsTrue(capped.Heights[1] > 1.5 * capped.Heights[0], $"a choice longer than that wraps: {string.Join(", ", capped.Heights)}");
+                Assert.IsTrue(capped.CanResize);
+            }
+            finally
+            {
+                owner.Close();
+            }
+
+            return true;
+        }, CancellationToken.None);
+    }
+
+    /// <summary>What a chooser came out as: its width, the most it may take, whether it resizes, and each choice's height.</summary>
+    private sealed record Chooser(double Width, double MaxWidth, bool CanResize, double[] Heights);
+
+    /// <summary>Shows a chooser over <paramref name="owner"/>, notes how it came out, and closes it without a choice.</summary>
+    private static async Task<Chooser> ChooseAsync(Window owner, IReadOnlyList<string> choices)
+    {
+        var dialog = new ChooseDialog(new ChooseDialogViewModel("Found on this computer", "Choose one to fill in the form.", choices));
+        var chosen = dialog.ShowAsync(owner);
+        await Task.Delay(50);
+        var shown = new Chooser(dialog.Bounds.Width, dialog.MaxWidth, dialog.CanResize,
+            dialog.GetVisualDescendants().OfType<ListBoxItem>().Select(i => i.GetVisualDescendants().OfType<TextBlock>().First().Bounds.Height).ToArray());
+        dialog.Close(null);
+        Assert.IsNull(await chosen, "closed without a choice");
+        return shown;
     }
 
     private static async Task ShowAsync(Window window)

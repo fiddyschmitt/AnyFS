@@ -799,6 +799,27 @@ public sealed partial class ConfirmDialogViewModel : ObservableObject
     public partial bool Checked { get; set; }
 }
 
+/// <summary>One of several, as a list (what Detect found, an imported source's clash): the first chosen to begin with.</summary>
+public sealed partial class ChooseDialogViewModel(string title, string message, IReadOnlyList<string> choices) : ObservableObject
+{
+    public string Title { get; } = title;
+
+    public string Message { get; } = message;
+
+    public bool HasMessage => Message.Length > 0;
+
+    public IReadOnlyList<string> Choices { get; } = choices;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasChoice))]
+    public partial int SelectedIndex { get; set; } = choices.Count > 0 ? 0 : -1;
+
+    public bool HasChoice => SelectedIndex >= 0 && SelectedIndex < Choices.Count;
+
+    /// <summary>The index chosen, or null for none.</summary>
+    public int? Chosen => HasChoice ? SelectedIndex : null;
+}
+
 public sealed class TextDialogViewModel(string title, string text, ITextClipboard clipboard)
 {
     public string Title { get; } = title;
