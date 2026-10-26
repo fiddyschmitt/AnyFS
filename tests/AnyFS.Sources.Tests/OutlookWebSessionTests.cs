@@ -91,7 +91,7 @@ public class OutlookWebSessionTests
         using var context = new TestSourceContext("outlook");
         await using var source = new OutlookSource(settings, fake.StandIn());
         await source.InitialiseAsync(context, CancellationToken.None);
-        CollectionAssert.IsSubsetOf(new[] { "Inbox", "Sent Items", "Calendar", "Contacts" }, (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList());
+        CollectionAssert.IsSubsetOf(new[] { "Inbox", "Calendar", "Contacts" }, (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList());
     }
 
     [TestMethod]
@@ -107,6 +107,38 @@ public class OutlookWebSessionTests
     }
 
     [TestMethod]
+    public async Task AFolderWithNothingInItIsNotShownUntilSomethingIs()
+    {
+        var fake = FakeExchange.Mailbox();
+        var top = fake.Folders.Values.Single(f => f.IsRoot);
+        var journal = fake.AddFolder("Journal", "IPF.Journal", top, "journal");
+        var archive = fake.AddFolder("Archive", "IPF.Note", top, null);
+        fake.AddFolder("2019", "IPF.Note", archive, null);
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
+            CollectionAssert.AreEquivalent(new[] { "Inbox", "Calendar", "Contacts" }, root, "Journal, Drafts, Sent Items and Deleted Items are empty; Archive holds only an empty folder");
+            Assert.IsNull(await source.StatAsync("Journal", CancellationToken.None));
+
+            // something in it, found by a refresh: shown
+            fake.AddMessage(journal, "Phone call with Adele", ("Adele Vance", "adelev@fake.test"), new DateTimeOffset(2026, 6, 1, 9, 0, 0, TimeSpan.Zero), "<p>Called.</p>", []);
+            await source.RefreshAsync(CancellationToken.None);
+            CollectionAssert.Contains((await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList(), "Journal");
+        }
+
+        // asked for Outlook's hidden folders, the empty ones are shown too
+        var (all, context2) = await StartAsync(fake, hidden: true);
+        await using (all)
+        using (context2)
+        {
+            CollectionAssert.IsSubsetOf(new[] { "Archive", "Drafts", "Sent Items", "Deleted Items" }, (await OutlookFixtures.ListAsync(all, "")).Select(e => e.Name).ToList());
+            CollectionAssert.AreEqual(new[] { "2019" }, (await OutlookFixtures.ListAsync(all, "Archive")).Select(e => e.Name).ToList());
+        }
+    }
+
+    [TestMethod]
     public async Task TheMailboxTreeLeavesOutlooksOwnFoldersOut()
     {
         var fake = FakeExchange.Mailbox();
@@ -119,7 +151,7 @@ public class OutlookWebSessionTests
             Assert.AreEqual(6, fake.Actions.Count(a => a == "SyncFolderItems"), "each shown folder but the calendar was synced once: " + string.Join(",", fake.Actions));
             Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "so far: a message's attachments are known once it is opened");
             var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
-            CollectionAssert.AreEquivalent(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, root);
+            CollectionAssert.AreEquivalent(new[] { "Inbox", "Calendar", "Contacts" }, root, "the empty Sent Items, Drafts and Deleted Items are not shown");
             CollectionAssert.AreEquivalent(new[] { "Adele Vance.vcf" }, (await OutlookFixtures.ListAsync(source, "Contacts")).Select(e => e.Name).ToList(), "the Recipient Cache under Contacts is Outlook's own");
             Assert.AreEqual(1, fake.Actions.Count(a => a == "GetItem"), "a contact is opened for its card's size when its folder is listed");
             CollectionAssert.AreEquivalent(new[] { "2026", "Projects" }, (await OutlookFixtures.ListAsync(source, "Inbox")).Select(e => e.Name).ToList());
@@ -432,7 +464,11 @@ public class OutlookWebSessionTests
         await using var source = new OutlookSource(new OutlookSettings { Path = address!, RefreshMinutes = 0, CalendarMonthsBack = 12, CalendarMonthsAhead = 3 });
         await source.InitialiseAsync(context, CancellationToken.None);
         var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
-        CollectionAssert.IsSubsetOf(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, root);
+        CollectionAssert.Contains(root, "Inbox");
+        foreach (var folder in root.Where(n => n != "Address Books"))
+        {
+            Assert.IsTrue((await OutlookFixtures.ListAsync(source, folder)).Count > 0, $"{folder}: a folder shown has something in it");
+        }
         var years = await OutlookFixtures.ListAsync(source, "Inbox");
         Assert.IsTrue(years.Count > 0);
         var months = await OutlookFixtures.ListAsync(source, VfsPath.Join("Inbox", years.First(e => e.Name.Length == 4).Name));

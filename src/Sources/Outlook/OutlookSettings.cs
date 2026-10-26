@@ -70,7 +70,7 @@ public sealed class OutlookSettings
     public string? BrowserPath { get; set; }
 
     [Setting("Show hidden items", Advanced = true, Order = 11,
-        Hint = "Outlook's own hidden folders and items (views, rules, settings, its people caches), which Outlook never shows.")]
+        Hint = "Outlook's own hidden folders and items (views, rules, settings, its people caches), which Outlook never shows; and folders with nothing in them, which are otherwise left out.")]
     public bool ShowHidden { get; set; }
 
     [Setting("Look for changes every (minutes)", Advanced = true, Order = 12,

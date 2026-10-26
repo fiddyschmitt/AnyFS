@@ -140,7 +140,8 @@ public class OutlookSourceTests
         using (context)
         {
             var root = await OutlookFixtures.ListAsync(source, "");
-            CollectionAssert.IsSubsetOf(new[] { "Inbox", "Contacts", "Calendar", "Deleted Items" }, root.Select(e => e.Name).ToList());
+            CollectionAssert.IsSubsetOf(new[] { "Inbox", "Contacts", "Calendar" }, root.Select(e => e.Name).ToList());
+            Assert.IsFalse(root.Any(e => e.Name == "Deleted Items"), "the fixture's Deleted Items is empty, so not shown");
             Assert.IsTrue(root.All(e => e.IsDirectory));
             Assert.IsFalse(root.Any(e => e.Name == "Search Root"), "Outlook's own folders under the root are not the user's tree");
 
@@ -392,7 +393,7 @@ public class OutlookSourceTests
         CollectionAssert.AreEqual(new[] { "2026" }, (await OutlookFixtures.ListAsync(source, "Inbox/Projects")).Select(e => e.Name).ToList(), "and its mail, in a table of its own");
         var month = await OutlookFixtures.ListAsync(source, "Inbox/2026/10");
         Assert.AreEqual(5, month.Count, "the damaged mail is listed from the Inbox's table, its own properties not read: " + string.Join(", ", month.Select(e => e.Name)));
-        Assert.AreEqual(0, (await OutlookFixtures.ListAsync(source, "Contacts")).Count, "a contents table that does not read lists nothing");
+        Assert.IsNull(await source.StatAsync("Contacts", CancellationToken.None), "a contents table that does not read lists nothing: the folder, with nothing in it, is not shown");
         Assert.IsTrue((await OutlookFixtures.ListAsync(source, "Calendar")).Count > 0, "the other folders are whole");
 
         // the damaged mail says why it does not open; the others open, and the source stays healthy
@@ -601,7 +602,7 @@ public class OutlookSourceTests
         await using var source = new OutlookSource(new OutlookSettings { Path = ost!, RefreshMinutes = 0 });
         await source.InitialiseAsync(context, CancellationToken.None);
         var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
-        CollectionAssert.IsSubsetOf(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, root);
+        CollectionAssert.IsSubsetOf(new[] { "Inbox", "Drafts", "Deleted Items", "Calendar" }, root, "the capture's Sent Items and Contacts are empty, so not shown");
         CollectionAssert.DoesNotContain(root, "Conversation Action Settings", "Outlook's hidden folders are left out");
         var inboxMonths = await OutlookFixtures.ListAsync(source, "Inbox/2026");
         Assert.IsTrue(inboxMonths.Count > 0);

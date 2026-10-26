@@ -194,7 +194,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                 await _books.StartAsync(ct).ConfigureAwait(false);
             }
 
-            Swap(await MailTree.BuildAsync(_store, ct, (done, total, name) => Context.ReportProgress($"Listing {name} ({done} of {total} folders)", total == 0 ? null : (double)done / total), _books?.Node).ConfigureAwait(false));
+            Swap(await MailTree.BuildAsync(_store, ct, (done, total, name) => Context.ReportProgress($"Listing {name} ({done} of {total} folders)", total == 0 ? null : (double)done / total), _books?.Node, _settings.ShowHidden).ConfigureAwait(false));
             if (kept is null)
             {
                 await KeepListingAsync(ct).ConfigureAwait(false);
@@ -575,7 +575,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                 await _books.RefreshAsync(ct).ConfigureAwait(false);
             }
 
-            Swap(await MailTree.BuildAsync(Store, ct, null, _books?.Node).ConfigureAwait(false));
+            Swap(await MailTree.BuildAsync(Store, ct, null, _books?.Node, _settings.ShowHidden).ConfigureAwait(false));
             ForgetFiles();
             ListNewBehind();
             Logger.LogInformation("outlook: {Name} read again in {Seconds:F1} s: {Folders:N0} folders, {Items:N0} items", Store.Name, Stopwatch.GetElapsedTime(started).TotalSeconds, _tree.FolderCount, _tree.ItemCount);

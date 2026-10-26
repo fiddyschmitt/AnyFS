@@ -103,7 +103,7 @@ public class OutlookGraphTests
             Assert.IsTrue(deltas.Count > 5, "the Inbox's three messages came two to a page");
             Assert.AreEqual(1, Count(fake, p => p.EndsWith("/contacts/delta", StringComparison.Ordinal)));
             Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "so far: a message's attachments are known once it is opened");
-            CollectionAssert.AreEquivalent(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList());
+            CollectionAssert.AreEquivalent(new[] { "Inbox", "Calendar", "Contacts" }, (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList(), "the empty Sent Items, Drafts and Deleted Items are not shown");
             CollectionAssert.AreEquivalent(new[] { "Adele Vance.vcf" }, (await OutlookFixtures.ListAsync(source, "Contacts")).Select(e => e.Name).ToList());
             CollectionAssert.AreEquivalent(new[] { "2026", "Projects" }, (await OutlookFixtures.ListAsync(source, "Inbox")).Select(e => e.Name).ToList());
             CollectionAssert.AreEquivalent(new[] { "03", "04" }, (await OutlookFixtures.ListAsync(source, "Inbox/2026")).Select(e => e.Name).ToList());
@@ -280,7 +280,12 @@ public class OutlookGraphTests
         using var context = new TestSourceContext("outlook", Environment.GetEnvironmentVariable("ANYFS_TEST_GRAPH_LOG") is { Length: > 0 } log ? new SpoTestServer.FileLogger(log) : null);
         await using var source = new OutlookSource(settings);
         await source.InitialiseAsync(context, CancellationToken.None);
-        CollectionAssert.IsSubsetOf(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList());
+        var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
+        CollectionAssert.Contains(root, "Inbox");
+        foreach (var folder in root)
+        {
+            Assert.IsTrue((await OutlookFixtures.ListAsync(source, folder)).Count > 0, $"{folder}: a folder shown has something in it");
+        }
 
         // every attachment of the Inbox's messages (Spike 12's two drafts have a CSV and an inline image) is as long as its file says
         var read = 0;

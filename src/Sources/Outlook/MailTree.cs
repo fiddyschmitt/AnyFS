@@ -150,7 +150,8 @@ internal sealed class MailTree
 
     /// <param name="progress">Told of each folder as it is listed (how many are done, how many there are, the folder's name); null for nobody.</param>
     /// <param name="addressBooks">The address books' folder, put at the root first (a mailbox folder of its name is numbered); null for none.</param>
-    public static async Task<MailTree> BuildAsync(IMailStore store, CancellationToken ct, Action<int, int, string>? progress, AddressBooksNode? addressBooks = null)
+    /// <param name="showEmpty">Whether folders with nothing in them are shown (with Outlook's hidden ones, when asked for); else left out.</param>
+    public static async Task<MailTree> BuildAsync(IMailStore store, CancellationToken ct, Action<int, int, string>? progress, AddressBooksNode? addressBooks = null, bool showEmpty = false)
     {
         var root = new DirNode("", null, null, null);
         if (addressBooks is not null)
@@ -160,7 +161,7 @@ internal sealed class MailTree
 
         var total = CountFolders(store.Folders);
         var done = 0;
-        await AddFoldersAsync(root, store.Folders, store, ct, name => progress?.Invoke(++done, total, name)).ConfigureAwait(false);
+        await AddFoldersAsync(root, store.Folders, store, ct, name => progress?.Invoke(++done, total, name), showEmpty).ConfigureAwait(false);
         var counts = new Counts();
         Count(root, counts);
         return new MailTree(root, counts.Folders, counts.Items, counts.Files, counts.ById);
@@ -219,16 +220,25 @@ internal sealed class MailTree
         return (node, new ArraySegment<string>(segments, i, segments.Length - i));
     }
 
-    private static async Task AddFoldersAsync(DirNode parent, IReadOnlyList<MailFolder> folders, IMailStore store, CancellationToken ct, Action<string> listed)
+    /// <summary>
+    /// The folders under <paramref name="parent"/>, each with its items and its own folders. A folder left with nothing in
+    /// it (no item, and no folder with one: Journal, RSS Feeds, an empty Drafts) is not shown (the user, 26-Oct-2026: "Folders
+    /// such as 'Journal' that are empty, let's not show them"), unless <paramref name="showEmpty"/>; a refresh that finds
+    /// something in it shows it.
+    /// </summary>
+    private static async Task AddFoldersAsync(DirNode parent, IReadOnlyList<MailFolder> folders, IMailStore store, CancellationToken ct, Action<string> listed, bool showEmpty)
     {
         foreach (var folder in folders)
         {
             ct.ThrowIfCancellationRequested();
             var dir = new DirNode(parent.Unique(MailNames.Folder(folder.Name), isFile: false), folder, folder.Created, folder.Modified);
-            parent.Add(dir);
             AddItems(dir, await store.ItemsAsync(folder, ct).ConfigureAwait(false));
             listed(folder.Name);
-            await AddFoldersAsync(dir, folder.Folders, store, ct, listed).ConfigureAwait(false);
+            await AddFoldersAsync(dir, folder.Folders, store, ct, listed, showEmpty).ConfigureAwait(false);
+            if (showEmpty || dir.Children.Count > 0)
+            {
+                parent.Add(dir);
+            }
         }
     }
 

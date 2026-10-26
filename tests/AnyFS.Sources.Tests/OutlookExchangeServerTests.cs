@@ -100,7 +100,7 @@ public class OutlookExchangeServerTests
         using (context)
         {
             var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
-            CollectionAssert.AreEquivalent(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, root);
+            CollectionAssert.AreEquivalent(new[] { "Inbox", "Calendar", "Contacts" }, root, "the empty Sent Items, Drafts and Deleted Items are not shown");
             Assert.AreEqual(6, fake.Actions.Count(a => a == "SyncFolderItems"));
 
             var figures = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/03", "Quarterly figures");
@@ -211,7 +211,11 @@ public class OutlookExchangeServerTests
         await using var source = new OutlookSource(settings);
         await source.InitialiseAsync(context, CancellationToken.None);
         var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
-        CollectionAssert.IsSubsetOf(new[] { "Inbox", "Sent Items", "Drafts", "Deleted Items", "Calendar", "Contacts" }, root);
+        CollectionAssert.Contains(root, "Inbox");
+        foreach (var folder in root.Where(n => n != "Address Books"))
+        {
+            Assert.IsTrue((await OutlookFixtures.ListAsync(source, folder)).Count > 0, $"{folder}: a folder shown has something in it");
+        }
         var years = await OutlookFixtures.ListAsync(source, "Inbox");
         Assert.IsTrue(years.Count > 0, "the Inbox is empty: the lab's seeded messages are missing");
         var year = VfsPath.Join("Inbox", years.First(e => e.Name.Length == 4).Name);
