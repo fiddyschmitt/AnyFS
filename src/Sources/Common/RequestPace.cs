@@ -2,25 +2,20 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Threading.RateLimiting;
 
-namespace AnyFS.Sources.Microsoft365;
+namespace AnyFS.Sources.Common;
 
 /// <summary>
-/// How fast AnyFS sends requests to one SharePoint Online tenant (by its host, or by the account where there is none),
-/// from every source, client and worker together: <see cref="PerSecond"/> a second on average, with up to
-/// <see cref="Burst"/> at once after a quiet spell (a token bucket), so a folder opened in a hurry is not kept waiting
-/// while a crawl stays within SharePoint Online's published default of 3,000 requests in 5 minutes for a user
-/// (spec 7.3); and when SharePoint throttles all the same (429 or 503 with Retry-After: a person's browser and other
-/// apps share that limit), none at all until the time it gave has passed, as Microsoft asks of a client with many
-/// threads. Requests wait their turn, oldest first, rather than fail. SharePoint Server has no such limit and goes
-/// unpaced.
+/// How fast AnyFS sends requests to one service (a host, or an account where there is none), from every source, client
+/// and worker together: so many a second on average, with up to a burst at once after a quiet spell (a token bucket), so a
+/// folder opened in a hurry is not kept waiting while a crawl stays within what the service allows; and when the service
+/// throttles all the same (429 or 503 with Retry-After: a person's browser and other apps share its limit), none at all
+/// until the time it gave has passed, as Microsoft and GitLab ask of a client with many threads. Requests wait their turn,
+/// oldest first, rather than fail. Each service gives its own numbers: SharePoint Online's and Graph's are
+/// <c>MicrosoftPace</c>'s (spec 7.3), GitLab's its source's (spec 7.8).
 /// </summary>
 public sealed class RequestPace
 {
-    public const int PerSecond = 10;
-
-    public const int Burst = 100;
-
-    // a Retry-After past this is taken as this (the longest seen in the lab was 120 s)
+    // a Retry-After past this is taken as this (the longest seen in the SharePoint lab was 120 s)
     private static readonly TimeSpan LongestHold = TimeSpan.FromMinutes(10);
 
     private static readonly ConcurrentDictionary<string, RequestPace> Paces = new(StringComparer.OrdinalIgnoreCase);
@@ -43,13 +38,13 @@ public sealed class RequestPace
         });
     }
 
-    /// <summary>The pace for <paramref name="key"/> (a SharePoint Online host, or an account), shared by all that ask for it.</summary>
-    public static RequestPace For(string key) => Paces.GetOrAdd(key, _ => new RequestPace(Burst, PerSecond));
+    /// <summary>
+    /// The pace for <paramref name="key"/> (a service's host, or an account), shared by all that ask for it. The first to
+    /// ask sets its numbers: a key belongs to one service, which always gives the same.
+    /// </summary>
+    public static RequestPace For(string key, int burst, int perSecond) => Paces.GetOrAdd(key, _ => new RequestPace(burst, perSecond));
 
-    /// <summary>The pace for a site's host when it is SharePoint Online's (.sharepoint.com, .sharepoint.us); null for SharePoint Server.</summary>
-    public static RequestPace? ForHost(string host) => MicrosoftCloud.FromSiteHost(host) is null ? null : For(host);
-
-    /// <summary>Sets the pace for <paramref name="key"/>: a test's stand-in tenant, which need not be spared as SharePoint Online must.</summary>
+    /// <summary>Sets the pace for <paramref name="key"/>: a test's stand-in service, which need not be spared as the real one must.</summary>
     internal static void Use(string key, RequestPace pace) => Paces[key] = pace;
 
     /// <summary>Waits for a request's turn: past any hold, then for a token, then past a hold that began meanwhile.</summary>

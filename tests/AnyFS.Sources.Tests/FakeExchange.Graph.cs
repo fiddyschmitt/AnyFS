@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json.Nodes;
+using AnyFS.Sources.Common;
 using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.Outlook.Ews;
 
@@ -27,7 +28,7 @@ internal sealed partial class FakeExchange
     static FakeExchange()
     {
         // the fake need not be spared as Exchange Online must: every test's source goes at its own speed
-        RequestPace.Use(GraphEwsService.PaceKey(MicrosoftCloud.Global, Account), new RequestPace(burst: 1_000_000, perSecond: RequestPace.PerSecond));
+        RequestPace.Use(GraphEwsService.PaceKey(MicrosoftCloud.Global, Account), new RequestPace(burst: 1_000_000, perSecond: MicrosoftPace.PerSecond));
     }
 
     /// <summary>The most a delta page holds whatever the Prefer header asks (Graph sends ten when not asked), so that every test pages.</summary>

@@ -459,7 +459,7 @@ public sealed class OutlookSource : SourceBase, ICountable
             logger.LogWarning("outlook: the app sign-in for {Address} is {Account}, whose mailbox is the one read", address, account);
         }
 
-        var graph = new GraphClient(signIn.Token, logger, OutlookPlugin.Service, handler: standIn?.Handler(), cloud: cloud, pace: RequestPace.For(GraphEwsService.PaceKey(cloud, address)));
+        var graph = new GraphClient(signIn.Token, logger, OutlookPlugin.Service, handler: standIn?.Handler(), cloud: cloud, pace: MicrosoftPace.For(GraphEwsService.PaceKey(cloud, address)));
         return (new GraphEwsService(graph, address, s.ShowHidden, logger), null, account, cloud.IsGlobal ? "with an app sign-in (Microsoft Graph)" : $"with an app sign-in (Microsoft Graph, {cloud.Name})");
     }
 

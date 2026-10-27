@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
+using AnyFS.Sources.Common;
 using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.SharePoint;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -63,11 +64,11 @@ public class RequestPaceTests
     [TestMethod]
     public void OnlySharePointOnlineIsPacedAndOneTenantSharesItsPace()
     {
-        Assert.IsNull(RequestPace.ForHost("intranet.contoso.local"), "SharePoint Server has no such limit");
-        Assert.IsNull(RequestPace.ForHost("192.168.0.92"));
-        Assert.IsNotNull(RequestPace.ForHost("acme.sharepoint.us"));
-        Assert.AreSame(RequestPace.ForHost("contoso.sharepoint.com"), RequestPace.ForHost("CONTOSO.SharePoint.com"), "every source and client for one tenant together");
-        Assert.AreNotSame(RequestPace.ForHost("contoso.sharepoint.com"), RequestPace.ForHost("fabrikam.sharepoint.com"));
+        Assert.IsNull(MicrosoftPace.ForHost("intranet.contoso.local"), "SharePoint Server has no such limit");
+        Assert.IsNull(MicrosoftPace.ForHost("192.168.0.92"));
+        Assert.IsNotNull(MicrosoftPace.ForHost("acme.sharepoint.us"));
+        Assert.AreSame(MicrosoftPace.ForHost("contoso.sharepoint.com"), MicrosoftPace.ForHost("CONTOSO.SharePoint.com"), "every source and client for one tenant together");
+        Assert.AreNotSame(MicrosoftPace.ForHost("contoso.sharepoint.com"), MicrosoftPace.ForHost("fabrikam.sharepoint.com"));
     }
 
     [TestMethod]

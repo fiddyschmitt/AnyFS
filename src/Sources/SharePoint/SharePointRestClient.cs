@@ -55,7 +55,7 @@ internal sealed partial class SharePointRestClient : IDisposable
         _logger = logger;
         _onTrouble = onTrouble;
         _onSuccess = onSuccess;
-        _pace = RequestPace.ForHost(SiteUrl.Host);
+        _pace = MicrosoftPace.ForHost(SiteUrl.Host);
         if (handler is null)
         {
             var sockets = new SocketsHttpHandler
@@ -86,7 +86,7 @@ internal sealed partial class SharePointRestClient : IDisposable
         _http = parent._http;
         _ownsHttp = false;
         _logger = parent._logger;
-        _pace = RequestPace.ForHost(SiteUrl.Host);
+        _pace = MicrosoftPace.ForHost(SiteUrl.Host);
         _probe = probe || parent._probe;
         _onTrouble = _probe ? null : parent._onTrouble;
         _onSuccess = _probe ? null : parent._onSuccess;

@@ -11,8 +11,6 @@
          HttpClient and System.Text.Json directly: the handful of calls a file system needs is not worth the Graph SDK's
          size under the trimmed single-file publish. -->
     <PackageReference Include="Microsoft.Identity.Client" />
-    <!-- System.Threading.RateLimiting (MIT, the .NET runtime's own): the pace of requests to a tenant (RequestPace) -->
-    <PackageReference Include="System.Threading.RateLimiting" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />

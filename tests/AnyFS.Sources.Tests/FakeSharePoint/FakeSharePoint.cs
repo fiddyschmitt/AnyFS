@@ -137,7 +137,7 @@ internal sealed partial class FakeSharePoint : IDisposable
     {
         if (!Paced)
         {
-            RequestPace.Use(key, new RequestPace(burst: 1_000_000, perSecond: RequestPace.PerSecond));
+            RequestPace.Use(key, new RequestPace(burst: 1_000_000, perSecond: MicrosoftPace.PerSecond));
         }
     }
 
