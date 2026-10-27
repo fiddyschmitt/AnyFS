@@ -5,6 +5,7 @@ using AnyFS.Mounts.Http;
 using AnyFS.Mounts.Smb;
 using AnyFS.Mounts.WebDav;
 using AnyFS.Mounts.WinFsp;
+using AnyFS.Sources.GitLab;
 using AnyFS.Sources.Mirror;
 using AnyFS.Sources.Outlook;
 using AnyFS.Sources.SharePoint;
@@ -24,6 +25,7 @@ public static class BuiltIns
         registry.AddBuiltIn(new SharePointPlugin());
         registry.AddBuiltIn(new ThreeDXPlugin());
         registry.AddBuiltIn(new OutlookPlugin());
+        registry.AddBuiltIn(new GitLabPlugin());
         registry.AddBuiltIn(new WinFspMountProvider());
         registry.AddBuiltIn(new FuseMountProvider());
         registry.AddBuiltIn(new SmbMountProvider());

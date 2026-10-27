@@ -22,6 +22,7 @@
     <ProjectReference Include="..\..\src\Sources\SharePoint\AnyFS.Sources.SharePoint.csproj" />
     <ProjectReference Include="..\..\src\Sources\ThreeDX\AnyFS.Sources.ThreeDX.csproj" />
     <ProjectReference Include="..\..\src\Sources\Outlook\AnyFS.Sources.Outlook.csproj" />
+    <ProjectReference Include="..\..\src\Sources\GitLab\AnyFS.Sources.GitLab.csproj" />
     <ProjectReference Include="..\fixtures\MakeTree\MakeTree.csproj" />
     <ProjectReference Include="..\fixtures\SharePointSignIn\SharePointSignIn.csproj" />
   </ItemGroup>

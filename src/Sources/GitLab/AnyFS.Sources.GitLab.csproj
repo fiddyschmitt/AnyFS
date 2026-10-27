@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sources.GitLab</AssemblyName>
+    <RootNamespace>AnyFS.Sources.GitLab</RootNamespace>
+  </PropertyGroup>
+  <!-- The GitLab source (spec 7.8): GitLab's REST API (v4) and GraphQL over HttpClient and System.Text.Json directly, no
+       GitLab SDK (the few dozen calls a file system needs are not worth one under the trimmed single-file publish). -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <!-- the request pace, the web session (with its Selenium WebDriver fallback), Windows account credentials,
+         ResponseStream, MemoryFile, StateFile -->
+    <ProjectReference Include="..\Common\AnyFS.Sources.Common.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="AnyFS.Sources.Common" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- the type's icon (OpenIcon): a branch on a rounded square of GitLab's orange, drawn for AnyFS (27-Oct-2026; GitLab's
+         tanuki is a trademark) -->
+    <EmbeddedResource Include="Assets\gitlab.png" LogicalName="gitlab.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
+  </ItemGroup>
+</Project>
