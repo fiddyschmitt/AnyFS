@@ -7,6 +7,7 @@
 #   * windows/provision.ps1  -> what runs inside the Windows VM (the Vagrantfile passes it its part)
 #   * mac.ps1, macos/        -> `mac:` (the macOS VM, which runs on the Mac mini)
 #   * tests/AnyFS.TestLab    -> every machine's role, address and login (Lab.cs, for the E2E tests)
+#   * the GitLab server      -> `gitlab:` (ansible/tasks/gitlab.yml: its image, tokens and Kerberos service account)
 #
 # After changing a value:
 #   memory_mb / cpus / ip    ->  vagrant reload --provision <name>
@@ -144,6 +145,20 @@ machines:
     cpus: 4
     image: ExchangeServerSE-x64.iso
 
+  # The GitLab server: GitLab and a runner in Docker on Debian, signed in to through the same domain (LDAP, and Kerberos
+  # with a keytab the domain controller makes). `vagrant up anyfs-dc-1 anyfs-gitlab-1` builds it (half an hour the
+  # first time: Debian's updates, GitLab's image, its first start, the seed). It is what the GitLab source reads from
+  # (provisioning/gitlab/README.md). Off by default, like the other servers.
+  - name: anyfs-gitlab-1
+    os: linux
+    role: gitlab
+    autostart: false
+    ip: 192.168.0.85
+    box: bento/debian-13
+    box_version: "202510.26.0"
+    memory_mb: 8192                  # GitLab's docs: 8 GB will do for a small instance, with Puma and Sidekiq turned down
+    cpus: 4
+
 linux:
   # On the upstream machine: the fixture tree the tests generate there (tests/fixtures/MakeTree), which
   # Samba shares as [fixture] and the SSHFS source serves over sshd.
@@ -186,6 +201,19 @@ exchange:
     other:  { user: ex_other, password: "AnyFS-lab-mail-2026!" }   # a second mailbox: who the seeded mail is from
   shared_mailbox: "Lab Shared"               # a shared mailbox the tester has full access to
   pst_fixtures: "../tests/LibOutlook.Tests/fixtures"   # imported into the tester's mailbox: mail with attachments, a contact, an appointment
+
+# The GitLab server (the machine with role gitlab). GitLab Enterprise Edition with no licence runs as the Free tier; the
+# Enterprise image because its Kerberos sign-in is Enterprise-only. It signs people in through the SharePoint farms'
+# domain: LDAP (the tester, sharepoint.accounts.tester, signs in as ANYFS\sp_user) and Kerberos, with the keytab of the
+# service account below, which the domain controller makes. Throwaway values for this lab only.
+gitlab:
+  image: "gitlab/gitlab-ee:19.5.1-ee.0"     # pinned: GitLab releases monthly
+  runner_image: "gitlab/gitlab-runner:v19.5.1"
+  host: anyfs-gitlab-1.anyfs.lab            # its name in the domain's DNS and its Kerberos service principal's (HTTP/<host>)
+  root_password: "LtXsDkZhCi-DujA6KejJC"
+  root_token: "anyfs-lab-dTk4MRYqrMGNmsLTMH3CCij6"       # root's personal access token (api, sudo): the seed's
+  service_account: { user: svc_gitlab, password: "hpMU9rwAWF-Dgtdd4SaoK" }   # GitLab's LDAP bind; the Kerberos service principal maps to it
+  tester_token: "anyfs-lab-xMTJaKGp3buxS6dWaA4kDmnM"   # the tester's personal access token (read_api, read_repository): the token sign-in's tests
 
 # The Mac mini runs the macOS test VM (tart, on Apple's Virtualization framework); only a Mac can.
 # Vagrant runs there for it, with the vagrant-tart provider. mac.ps1 drives it from this PC: it copies

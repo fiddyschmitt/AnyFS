@@ -15,12 +15,14 @@ two OSes' machines reach each host's mounts, so each OS is tested as a client of
 | `anyfs-dc-1` | the SharePoint farms' domain controller: Active Directory, DNS, the farms' accounts (off by default) | Windows Server 2022 Core (evaluation) | 192.168.0.91 | VirtualBox, this PC | `windows/dc-provision.ps1` |
 | `anyfs-sp-1` | SQL Server 2022 Developer + SharePoint Server Subscription Edition, a one-server farm the SharePoint Server source reads from (off by default) | Windows Server 2022 (evaluation) | 192.168.0.92 | VirtualBox, this PC | `windows/sp-provision.ps1`, `windows/sp-farm-configuration.ps1` |
 | `anyfs-sp-2` | SQL Server 2022 Developer + SharePoint Server 2019, a second one-server farm in the same domain, for the older on-premises API (off by default) | Windows Server 2019 (evaluation) | 192.168.0.90 | VirtualBox, this PC | `windows/sp-provision.ps1`, `windows/sp-farm-configuration.ps1` |
+| `anyfs-ex-1` | Exchange Server Subscription Edition, one Mailbox server in the same domain, which the Outlook source's on-premises store reads from (off by default) | Windows Server 2022 (evaluation) | 192.168.0.89 | VirtualBox, this PC | `windows/ex-provision.ps1`, `windows/ex-configure.ps1` |
+| `anyfs-gitlab-1` | GitLab Enterprise Edition (no licence: the Free tier) and a runner in Docker, signing in through the same domain (LDAP, Kerberos), which the GitLab source reads from (off by default) | Debian 13 | 192.168.0.85 | VirtualBox, this PC | `ansible/tasks/gitlab.yml` |
 | this PC | runs the tests; publishes the builds and shares them into the VMs | Windows 11 | 192.168.0.31 | | |
 
-The domain controller and the two farms are not mount hosts and `vagrant up` leaves them alone
-(`autostart: false`): the domain controller and one farm need 18 GB of memory between them, and a farm
-takes well over an hour to build the first time. `sharepoint/README.md` covers them and the
-Microsoft 365 side of the SharePoint tests.
+The domain controller, the two farms, the Exchange server and the GitLab server are not mount hosts and `vagrant up`
+leaves them alone (`autostart: false`): the domain controller and one farm need 18 GB of memory between them, and a
+farm takes well over an hour to build the first time. `sharepoint/README.md` covers the farms and the Microsoft 365 side
+of the SharePoint tests, `exchange/README.md` the Exchange server, `gitlab/README.md` the GitLab server.
 
 **Vagrant** builds and runs the VMs. **Ansible** (Linux), a PowerShell script (Windows) and a shell
 script (macOS) configure what's inside them. You edit one file, `settings.yml`, and can rebuild any
@@ -108,12 +110,15 @@ PASS/WARN/FAIL lines; a FAIL stops Vagrant there.
 | `settings.yml` | The only file you normally edit: the machines, their roles, addresses and sizes, the logins, the Mac |
 | `Vagrantfile` | The VirtualBox VMs: box, CPU/RAM, bridged network, shared folders, provisioners, smoke tests |
 | `ansible/playbook.yml` | The configuration inside each Linux VM; what a VM gets depends on its role |
-| `ansible/tasks/` | `base.yml` (every VM), `upstream.yml` (sshd, Samba, the SSHFS key), `host.yml` (fuse3) |
+| `ansible/tasks/` | `base.yml` (every VM), `upstream.yml` (sshd, Samba, the SSHFS key), `host.yml` (fuse3), `gitlab.yml` (GitLab and its runner in Docker, the domain's Kerberos and LDAP, the seed) |
+| `ansible/templates/gitlab*`, `ansible/templates/krb5.conf.j2`, `ansible/files/gitlab-*` | The GitLab server's configuration, Compose file and env file, the domain's realm, its seed and the tokens it makes |
 | `ansible/templates/smoke-test.sh.j2` | A Linux VM's smoke test (`/opt/anyfs/smoke-test.sh`) |
 | `windows/provision.ps1` | The configuration inside the Windows VM (OpenSSH, WinFsp, WebClient, RunRemote, autologon) |
 | `windows/smoke-test.ps1` | The Windows VM's smoke test (`C:\anyfs-lab\smoke-test.ps1`) |
-| `windows/dc-provision.ps1`, `windows/dc-smoke-test.ps1` | The SharePoint farms' domain controller: the forest, DNS, the accounts; its smoke test |
+| `windows/dc-provision.ps1`, `windows/dc-smoke-test.ps1` | The lab's domain controller: the forest, DNS, the accounts, GitLab's Kerberos service account and keytab; its smoke test |
 | `windows/sp-provision.ps1`, `windows/sp-farm-configuration.ps1`, `windows/sp-test-user.ps1`, `windows/sp-smoke-test.ps1` | A SharePoint farm: domain join, SQL Server, the farm as SharePointDsc describes it, the test account's rights in the test site; its smoke test |
+| `windows/ex-provision.ps1`, `windows/ex-configure.ps1`, `windows/ex-smoke-test.ps1`, `exchange/README.md` | The Exchange server: domain join, its prerequisites and setup, the mailboxes and the rest of its configuration; its smoke test |
+| `gitlab/README.md` | The GitLab server: what it holds and how the GitLab source reaches it |
 | `sharepoint/README.md`, `sharepoint/register-app.ps1`, `sharepoint/embedded-rig.ps1` | The SharePoint test rigs (Microsoft 365 and on-premises), the app registration AnyFS ships, and the SharePoint Embedded rig in the sandbox tenant |
 | `mac.ps1` | Runs Vagrant for the macOS VM on the Mac, from this PC, over SSH |
 | `macos/Vagrantfile`, `macos/provision.sh` | The macOS VM (tart, pinned MAC address) and what runs inside it |

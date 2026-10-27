@@ -6,11 +6,13 @@
 #   every machine      base.yml       Debian up to date, the test account, the lab key, the client tools
 #   role: upstream     upstream.yml   sshd for the SSHFS source, the Samba share of the fixture tree
 #   role: host         host.yml       fuse3 for the FUSE mount
+#   role: gitlab       gitlab.yml     GitLab and a runner in Docker, the domain's Kerberos and LDAP, the seed
 #
 # Inputs:
 #   settings.yml (vars_files)   the lab: machines, accounts, paths
 #   machine (extra_vars)        this machine's own entry from settings.yml
 #   lab_pubkey (extra_vars)     the lab's SSH public key
+#   dc (extra_vars)             the domain controller's name and address, or null (a gitlab machine needs one)
 #
 # Each task declares a state, so re-running `vagrant provision` changes nothing unless something
 # drifted. The machine's smoke test (/opt/anyfs/smoke-test.sh, from templates/) isn't run here: the
@@ -38,6 +40,10 @@
       ansible.builtin.import_tasks: tasks/host.yml
       when: machine.role == 'host'
 
+    - name: The GitLab server
+      ansible.builtin.import_tasks: tasks/gitlab.yml
+      when: machine.role == 'gitlab'
+
   handlers:
     - name: systemctl daemon-reload
       ansible.builtin.systemd_service:
@@ -52,3 +58,9 @@
       ansible.builtin.service:
         name: smbd
         state: restarted
+
+    # A changed gitlab.rb or keytab, when GitLab was already running (a first start reads both itself)
+    - name: Reconfigure GitLab
+      ansible.builtin.command: docker exec gitlab gitlab-ctl reconfigure
+      changed_when: true
+      when: gitlab_before.stdout | default('') == 'true'

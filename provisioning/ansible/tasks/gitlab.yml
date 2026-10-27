@@ -1,0 +1,156 @@
+---
+# The GitLab server (provisioning/gitlab/README.md): GitLab Enterprise Edition with no licence (the Free tier; the
+# Enterprise image for its Kerberos sign-in) and a runner, in Docker; people sign in through the domain (LDAP, and
+# Kerberos with the keytab the domain controller made for the service account); then the seed: what the GitLab
+# source's tests read.
+
+- name: Docker, git with LFS, and the Kerberos client tools (the smoke test signs in with a ticket)
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose
+      - git
+      - git-lfs
+      - krb5-user
+    state: present
+
+- name: Docker runs at boot
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+# The domain's DNS knows the name; this machine resolves through VirtualBox, which does not.
+- name: The server's own name resolves to its LAN address here
+  ansible.builtin.lineinfile:
+    path: /etc/hosts
+    regexp: '\s{{ gitlab.host | regex_escape }}(\s|$)'
+    line: "{{ machine.ip }} {{ gitlab.host }}"
+
+- name: Kerberos knows the domain's realm and its KDC, the domain controller, by address
+  ansible.builtin.template:
+    src: krb5.conf.j2
+    dest: /etc/krb5.conf
+    mode: "0644"
+
+- name: GitLab's and the runner's folders
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - /srv/gitlab
+    - /srv/gitlab/config
+    - /srv/gitlab/logs
+    - /srv/gitlab/data
+    - /srv/gitlab-runner
+    - /srv/gitlab-runner/config
+
+# The service account fetches its own keytab; nothing else in the lab holds its key.
+- name: What the seed, the smoke test and the keytab fetch read (root's only)
+  ansible.builtin.template:
+    src: gitlab-lab.env.j2
+    dest: /root/.gitlab-lab.env
+    mode: "0600"
+  no_log: true
+
+- name: The service account's sign-in for the domain controller's share (root's only)
+  ansible.builtin.copy:
+    dest: /root/.gitlab-svc.auth
+    content: |
+      username = {{ gitlab.service_account.user }}
+      password = {{ gitlab.service_account.password }}
+      domain = {{ sharepoint.netbios }}
+    mode: "0600"
+  no_log: true
+
+# A container that is not running yet reads its configuration and keytab as it starts; one already running is
+# reconfigured when either changes (the handler), never both at once
+- name: Is GitLab running already?
+  ansible.builtin.command: docker inspect --format {% raw %}'{{.State.Running}}'{% endraw %} gitlab
+  register: gitlab_before
+  changed_when: false
+  failed_when: false
+
+- name: The keytab, from the domain controller's share (is anyfs-dc-1 up and provisioned?)
+  ansible.builtin.command: smbclient //{{ dc.ip }}/gitlab -A /root/.gitlab-svc.auth -c "get http.keytab /srv/gitlab/http.keytab.fetched"
+  changed_when: false
+
+- name: The keytab in GitLab's configuration folder
+  ansible.builtin.copy:
+    src: /srv/gitlab/http.keytab.fetched
+    dest: /srv/gitlab/config/http.keytab
+    remote_src: true
+    mode: "0600"
+  notify: Reconfigure GitLab
+
+- name: GitLab's configuration
+  ansible.builtin.template:
+    src: gitlab.rb.j2
+    dest: /srv/gitlab/config/gitlab.rb
+    mode: "0600"
+  no_log: true
+  notify: Reconfigure GitLab
+
+- name: GitLab and its runner, as Docker Compose runs them
+  ansible.builtin.template:
+    src: gitlab-compose.yml.j2
+    dest: /srv/gitlab/docker-compose.yml
+    mode: "0644"
+
+- name: GitLab and its runner running
+  ansible.builtin.command: docker compose -f /srv/gitlab/docker-compose.yml up -d
+  register: compose_up
+  changed_when: "'Started' in compose_up.stderr or 'Created' in compose_up.stderr or 'Recreated' in compose_up.stderr"
+
+- name: GitLab is healthy (its first start takes several minutes)
+  ansible.builtin.command: docker inspect --format {% raw %}'{{.State.Health.Status}}'{% endraw %} gitlab
+  register: gitlab_health
+  until: gitlab_health.stdout == 'healthy'
+  retries: 90
+  delay: 10
+  changed_when: false
+
+# GitLab runs as git inside its container; the keytab is copied in as root
+- name: The keytab is GitLab's to read
+  ansible.builtin.command: docker exec gitlab sh -c 'chown git:git /etc/gitlab/http.keytab && chmod 0600 /etc/gitlab/http.keytab'
+  changed_when: false
+
+- name: A changed configuration or keytab applied now, before the seed
+  ansible.builtin.meta: flush_handlers
+
+- name: GitLab is healthy again
+  ansible.builtin.command: docker inspect --format {% raw %}'{{.State.Health.Status}}'{% endraw %} gitlab
+  register: gitlab_health
+  until: gitlab_health.stdout == 'healthy'
+  retries: 60
+  delay: 10
+  changed_when: false
+
+# healthy comes before the first start's reconfigure has finished (its migrations and restarts)
+- name: No reconfigure is running
+  ansible.builtin.command: docker exec gitlab pgrep -f 'omnibus-ctl gitlab .*reconfigure'
+  register: reconfiguring
+  until: reconfiguring.rc == 1
+  retries: 90
+  delay: 10
+  changed_when: false
+  failed_when: reconfiguring.rc not in [0, 1]
+
+- name: The seed's scripts
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/opt/anyfs/{{ item }}"
+    mode: "0755"
+  loop:
+    - gitlab-seed.sh
+    - gitlab-tokens.rb
+
+- name: The seed (each step looks before it makes, so a re-run changes nothing)
+  ansible.builtin.command: /opt/anyfs/gitlab-seed.sh /root/.gitlab-lab.env
+  register: seed
+  changed_when: "'made' in seed.stdout"
+
+- name: What the seed did
+  ansible.builtin.debug:
+    var: seed.stdout_lines

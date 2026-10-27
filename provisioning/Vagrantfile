@@ -59,6 +59,9 @@ exchange_media_dir = File.expand_path(exchange.fetch("media"), __dir__)
 exchange_pst_dir = File.expand_path(exchange.fetch("pst_fixtures"), __dir__)
 FileUtils.mkdir_p(exchange_media_dir)
 
+# The GitLab server (the machine with role gitlab): the domain controller makes its Kerberos service account and keytab.
+gitlab = settings.fetch("gitlab")
+
 # Each machine's smoke test runs after every `vagrant up`, `reload` and `provision` (after any
 # restart the provisioning needed): its PASS/WARN/FAIL lines are shown, and a FAIL stops Vagrant there.
 class LabSmokeTestFailed < Vagrant::Errors::VagrantError
@@ -138,6 +141,9 @@ Vagrant.configure("2") do |config|
           node.vm.synced_folder settings.fetch("windows").fetch("runremote_dir"), "C:/anyfs-lab/runremote",
                                 id: "runremote", SharedFoldersEnableSymlinksCreate: false
 
+          # the lab's domain, when it has one: its names (the GitLab server's, the KDC's) resolve through the domain
+          # controller, so Kerberos works from here without joining the domain
+          dc = settings.fetch("machines").find { |x| x.fetch("role") == "dc" }
           node.vm.provision "file", source: "windows/smoke-test.ps1", destination: "C:/anyfs-lab/smoke-test.ps1"
           node.vm.provision "shell", path: "windows/provision.ps1",
                                      env: { "LAB_PUBKEY" => lab_pubkey,
@@ -145,7 +151,9 @@ Vagrant.configure("2") do |config|
                                             "LAB_PASSWORD" => account.fetch("password"),
                                             "UPSTREAM_IP" => upstream.fetch("ip"),
                                             "WINFSP_MSI" => winfsp.fetch("asset"),
-                                            "WINFSP_SHA256" => winfsp.fetch("sha256") }
+                                            "WINFSP_SHA256" => winfsp.fetch("sha256"),
+                                            "LAB_DOMAIN" => dc ? sharepoint.fetch("domain") : "",
+                                            "DC_IP" => dc ? dc.fetch("ip") : "" }
 
           # The autologon change takes a restart to show: the provisioner leaves a marker when it changed
           # something that needs one. Then the smoke test.
@@ -178,8 +186,16 @@ Vagrant.configure("2") do |config|
                      "SP_TEST_USER" => sp_accounts.fetch("tester").fetch("user"),
                      "SP_TEST_PASSWORD" => sp_accounts.fetch("tester").fetch("password") }
           if m.fetch("role") == "dc"
-            sp_servers = settings.fetch("machines").select { |x| %w[sharepoint exchange].include?(x.fetch("role")) }
-            abort("#{name}: a dc needs a machine with role sharepoint or exchange in settings.yml") if sp_servers.empty?
+            sp_servers = settings.fetch("machines").select { |x| %w[sharepoint exchange gitlab].include?(x.fetch("role")) }
+            abort("#{name}: a dc needs a machine with role sharepoint, exchange or gitlab in settings.yml") if sp_servers.empty?
+            # the GitLab server's Kerberos service account, its principal HTTP/<host> and the keytab GitLab fetches (none without a gitlab machine)
+            gitlab_env = if sp_servers.any? { |x| x.fetch("role") == "gitlab" }
+                           { "GITLAB_HOST" => gitlab.fetch("host"),
+                             "GITLAB_SERVICE_USER" => gitlab.fetch("service_account").fetch("user"),
+                             "GITLAB_SERVICE_PASSWORD" => gitlab.fetch("service_account").fetch("password") }
+                         else
+                           {}
+                         end
             # Short WinRM waits: its provisioner is quick, and a refused logon (see above) should surface in minutes.
             node.winrm.timeout = 300
             node.winrm.retry_limit = 2
@@ -187,8 +203,9 @@ Vagrant.configure("2") do |config|
             node.vm.provision "file", source: "windows/dc-smoke-test.ps1", destination: "C:/anyfs-lab/smoke-test.ps1"
             node.vm.provision "shell", path: "windows/dc-provision.ps1",
                                        env: sp_env.merge("SP_SAFE_MODE_PASSWORD" => sharepoint.fetch("safe_mode_password"),
-                                                         # name=ip;name=ip: an A record for each SharePoint machine
+                                                         # name=ip;name=ip: an A record for each server in the domain
                                                          "SP_SERVERS" => sp_servers.map { |x| "#{x.fetch("name")}=#{x.fetch("ip")}" }.join(";"))
+                                                 .merge(gitlab_env)
           elsif m.fetch("role") == "sharepoint"
             dc = settings.fetch("machines").find { |x| x.fetch("role") == "dc" } or
               abort("#{name}: a sharepoint machine needs a machine with role dc in settings.yml")
@@ -302,10 +319,12 @@ Vagrant.configure("2") do |config|
 
         # ansible_local: Vagrant installs Ansible INSIDE the guest and runs the playbook there (Ansible
         # can't be a control node on Windows). The machine's own entry from settings.yml is handed to the
-        # play as `machine`.
+        # play as `machine`; a GitLab server also gets the domain controller's (its LDAP, its KDC, its keytab share).
+        dc = settings.fetch("machines").find { |x| x.fetch("role") == "dc" }
+        abort("#{name}: a gitlab machine needs a machine with role dc in settings.yml") if m.fetch("role") == "gitlab" && dc.nil?
         node.vm.provision "ansible_local" do |ansible|
           ansible.playbook   = "ansible/playbook.yml"
-          ansible.extra_vars = { machine: m, lab_pubkey: lab_pubkey }
+          ansible.extra_vars = { machine: m, lab_pubkey: lab_pubkey, dc: dc ? { name: dc.fetch("name"), ip: dc.fetch("ip") } : nil }
         end
 
         # The play brings Debian up to date, the kernel included, and names the kernel the VM should

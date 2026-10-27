@@ -37,6 +37,17 @@ Check 'C:\anyfs-lab\anyfs writable' {
     Set-Content $probe 'x'; Remove-Item $probe; $true
 }
 Check 'curl.exe' { Get-Command curl.exe -ErrorAction SilentlyContinue }
+# the lab's domain, when there is one: the domain controller answers for its names (it may be halted: a WARN)
+$nrpt = @(Get-DnsClientNrptRule | Where-Object { $_.Comment -like 'AnyFS lab*' })
+if ($nrpt.Count -gt 0) {
+    Pass "the lab domain ($(@($nrpt[0].Namespace) -join ', ')) resolves through $(@($nrpt[0].NameServers) -join ', ')"
+    $domain = @($nrpt[0].Namespace | Where-Object { -not $_.StartsWith('.') })[0]
+    if (Resolve-DnsName "_kerberos._tcp.$domain" -Type SRV -DnsOnly -QuickTimeout -ErrorAction SilentlyContinue) {
+        Pass "the realm's KDC is found ($domain)"
+    } else {
+        Warn "the realm's KDC is not found ($domain): is the domain controller up?"
+    }
+}
 
 # The account logs on at boot, and RunRemote starts in that session: give both a couple of minutes.
 $deadline = (Get-Date).AddMinutes(3)

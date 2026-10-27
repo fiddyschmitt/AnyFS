@@ -13,7 +13,8 @@
 
     Inputs (from the Vagrantfile): LAB_PUBKEY, the lab's SSH public key; LAB_USER and LAB_PASSWORD, the
     account the tests use (the box's own); UPSTREAM_IP, the Linux machine whose Samba share the Mirror
-    UNC rows use; WINFSP_MSI and WINFSP_SHA256, the pinned installer under \\vboxsvr\winfsp.
+    UNC rows use; WINFSP_MSI and WINFSP_SHA256, the pinned installer under \\vboxsvr\winfsp; LAB_DOMAIN and DC_IP,
+    the lab's domain and its domain controller (empty without one).
 #>
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -93,6 +94,21 @@ if ($cap -ne 4294967295 -and $cap -ne -1) {
     Restart-Service WebClient -ErrorAction SilentlyContinue
 }
 Start-Service WebClient
+
+# --- The lab's domain resolves through its domain controller (when settings.yml has one) ----------
+# A name resolution policy rule for anyfs.lab and its names only: Windows asks the domain controller for those (the
+# GitLab server's name, which Kerberos needs, and the realm's KDC), the router for everything else. The machine stays
+# out of the domain; a Windows account signs in with its domain name and password.
+if ($env:LAB_DOMAIN -and $env:DC_IP) {
+    $namespaces = @(".$($env:LAB_DOMAIN)", $env:LAB_DOMAIN)
+    $rules = @(Get-DnsClientNrptRule | Where-Object { $_.Namespace | Where-Object { $namespaces -contains $_ } })
+    $good = $rules.Count -eq 1 -and @($rules[0].NameServers) -contains $env:DC_IP -and @($rules[0].Namespace).Count -eq 2
+    if (-not $good) {
+        $rules | ForEach-Object { Remove-DnsClientNrptRule -Name $_.Name -Force }
+        Add-DnsClientNrptRule -Namespace $namespaces -NameServers $env:DC_IP -Comment 'AnyFS lab: the domain controller answers for the lab domain' | Out-Null
+        Clear-DnsClientCache
+    }
+}
 
 # --- RunRemote: starts anyfs inside the logged-on session, when the tests ask (UDP 8888) ----------
 # Installed from the PC's build (shared in as \\vboxsvr\runremote). It runs at logon, and every two

@@ -1,0 +1,18 @@
+# Written by the AnyFS lab's playbook: the domain's realm, its KDC by address (this machine's DNS is VirtualBox's,
+# which does not know the domain). GitLab's container reads it too.
+[libdefaults]
+    default_realm = {{ sharepoint.domain | upper }}
+    dns_lookup_kdc = false
+    dns_lookup_realm = false
+    rdns = false
+    udp_preference_limit = 0
+
+[realms]
+    {{ sharepoint.domain | upper }} = {
+        kdc = {{ dc.ip }}
+        admin_server = {{ dc.ip }}
+    }
+
+[domain_realm]
+    .{{ sharepoint.domain }} = {{ sharepoint.domain | upper }}
+    {{ sharepoint.domain }} = {{ sharepoint.domain | upper }}

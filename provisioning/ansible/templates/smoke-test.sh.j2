@@ -40,4 +40,44 @@ check "fuse3 (fusermount3 and libfuse3.so.3 or .so.4; the provider resolves eith
 check "user_allow_other in /etc/fuse.conf" grep -qx user_allow_other /etc/fuse.conf
 check "/dev/fuse" test -c /dev/fuse
 {% endif %}
+{% if machine.role == 'gitlab' %}
+
+# the seed's values (tokens, the tester's password): root's only, read without a shell parsing them
+while IFS='=' read -r key value; do
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    export "$key=$value"
+done < /root/.gitlab-lab.env
+api="http://{{ gitlab.host }}/api/v4"
+# after a boot GitLab takes minutes to start: give it ten
+for _ in $(seq 1 120); do
+    [ "$(docker inspect --format '{% raw %}{{.State.Health.Status}}{% endraw %}' gitlab 2>/dev/null)" = healthy ] &&
+        [ "$(curl -s -o /dev/null -w '%{http_code}' "http://{{ gitlab.host }}/users/sign_in")" = 200 ] && break
+    sleep 5
+done
+check "service docker" systemctl is-active --quiet docker
+check "GitLab's container is healthy" bash -c '[ "$(docker inspect --format "{% raw %}{{.State.Health.Status}}{% endraw %}" gitlab)" = healthy ]'
+check "the runner's container is running" bash -c '[ "$(docker inspect --format "{% raw %}{{.State.Running}}{% endraw %}" gitlab-runner)" = true ]'
+check "GitLab answers at http://{{ gitlab.host }}" bash -c '[ "$(curl -s -o /dev/null -w "%{http_code}" http://{{ gitlab.host }}/users/sign_in)" = 200 ]'
+check "the keytab holds HTTP/{{ gitlab.host }}@{{ sharepoint.domain | upper }}" bash -c 'klist -k /srv/gitlab/config/http.keytab | grep -q "HTTP/{{ gitlab.host }}@{{ sharepoint.domain | upper }}"'
+check "the keytab is GitLab's to read (git, 0600)" bash -c '[ "$(docker exec gitlab stat -c "%U %a" /etc/gitlab/http.keytab)" = "git 600" ]'
+check "the tester's token reads the API as $TESTER_USER" bash -c '[ "$(curl -s -H "PRIVATE-TOKEN: $TESTER_TOKEN" "'"$api"'/user" | jq -r .username)" = "$TESTER_USER" ]'
+check "root's token reads the API" bash -c '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "PRIVATE-TOKEN: $ROOT_TOKEN" "'"$api"'/user")" = 200 ]'
+check "the runner anyfs-lab is online" bash -c 'curl -s -H "PRIVATE-TOKEN: $ROOT_TOKEN" "'"$api"'/runners/all?type=instance_type" | jq -e "any(.[]; .description == \"anyfs-lab\" and .status == \"online\")"'
+check "the pipeline on anyfs/tools/app's main passed" bash -c '[ "$(curl -s -H "PRIVATE-TOKEN: $ROOT_TOKEN" "'"$api"'/projects/anyfs%2Ftools%2Fapp/pipelines?ref=main&per_page=1" | jq -r ".[0].status")" = success ]'
+# Kerberos end to end: a ticket for the tester from the domain controller, and GitLab's Kerberos sign-in taking it
+kerberos_sign_in() {
+    local cache jar code
+    cache=$(mktemp); jar=$(mktemp)
+    export KRB5CCNAME="FILE:$cache"
+    printf '%s' "$TESTER_PASSWORD" | kinit "$TESTER_USER@$REALM" >/dev/null 2>&1 || { rm -f "$cache" "$jar"; return 1; }
+    code=$(curl -s -o /dev/null -w "%{http_code} %{redirect_url}" --negotiate -u : -c "$jar" -b "$jar" "http://{{ gitlab.host }}/users/auth/kerberos/negotiate")
+    curl -s -L -o /dev/null -c "$jar" -b "$jar" "${code#* }"
+    local who
+    who=$(curl -s -b "$jar" "$api/user" | jq -r .username)
+    kdestroy >/dev/null 2>&1 || true
+    rm -f "$cache" "$jar"
+    [ "$who" = "$TESTER_USER" ]
+}
+check "a Kerberos ticket for $TESTER_USER@$REALM signs in to GitLab" kerberos_sign_in
+{% endif %}
 exit $fail

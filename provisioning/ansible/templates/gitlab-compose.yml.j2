@@ -1,0 +1,34 @@
+# Written by the AnyFS lab's playbook: GitLab and its runner. `docker compose -f /srv/gitlab/docker-compose.yml ...`
+services:
+  gitlab:
+    image: {{ gitlab.image }}
+    container_name: gitlab
+    hostname: {{ gitlab.host }}
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - /srv/gitlab/config:/etc/gitlab
+      - /srv/gitlab/logs:/var/log/gitlab
+      - /srv/gitlab/data:/var/opt/gitlab
+      - /etc/krb5.conf:/etc/krb5.conf:ro
+    shm_size: 256m
+    networks:
+      lab:
+        # the runner and its jobs reach GitLab by the name its pages give
+        aliases:
+          - {{ gitlab.host }}
+
+  runner:
+    image: {{ gitlab.runner_image }}
+    container_name: gitlab-runner
+    restart: always
+    depends_on:
+      - gitlab
+    volumes:
+      - /srv/gitlab-runner/config:/etc/gitlab-runner
+    networks:
+      - lab
+
+networks:
+  lab: {}

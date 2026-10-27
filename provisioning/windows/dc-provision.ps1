@@ -10,7 +10,8 @@
 
     Inputs (from the Vagrantfile): LAB_PUBKEY, LAB_USER, LAB_PASSWORD; SP_DOMAIN, SP_NETBIOS,
     SP_SAFE_MODE_PASSWORD; SP_SETUP_USER/_PASSWORD, SP_FARM_USER/_PASSWORD, SP_TEST_USER/_PASSWORD;
-    SP_SERVERS, the SharePoint machines' DNS records as name=ip;name=ip.
+    SP_SERVERS, the servers' DNS records as name=ip;name=ip. With a GitLab server in settings.yml also GITLAB_HOST,
+    GITLAB_SERVICE_USER and GITLAB_SERVICE_PASSWORD: its Kerberos service account, principal and keytab.
 #>
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -168,6 +169,59 @@ foreach ($a in $accounts) {
     }
 }
 
+# --- The GitLab server's Kerberos service account (with a gitlab machine in settings.yml) -----------------------
+# GitLab takes a Kerberos ticket for HTTP/<its host> with a keytab: the key of the account the principal maps to. ktpass
+# maps the principal to the account, sets its password and writes the keytab (AES256 only: the account is marked for AES,
+# as GitLab's Kerberos page asks). The account is also GitLab's LDAP bind. The GitLab machine fetches the keytab from the
+# share below as this account (its own key), so no key leaves this PC for a VM. ktpass runs again only when something
+# drifted, since each run makes a new key version and the keytab GitLab holds would stop opening tickets.
+$gitlabKeytab = 'C:\anyfs-lab\gitlab\http.keytab'
+if ($env:GITLAB_HOST) {
+    foreach ($name in 'GITLAB_SERVICE_USER', 'GITLAB_SERVICE_PASSWORD') {
+        if (-not [Environment]::GetEnvironmentVariable($name)) { throw "$name is not set (the Vagrantfile passes it with GITLAB_HOST)" }
+    }
+    $svc = $env:GITLAB_SERVICE_USER
+    $realm = $env:SP_DOMAIN.ToUpperInvariant()
+    $principal = "HTTP/$($env:GITLAB_HOST)"
+    New-Item -ItemType Directory -Force -Path (Split-Path $gitlabKeytab) | Out-Null
+    $secure = ConvertTo-SecureString $env:GITLAB_SERVICE_PASSWORD -AsPlainText -Force
+    $account = Get-ADUser -Filter "SamAccountName -eq '$svc'" -Properties ServicePrincipalNames, KerberosEncryptionType -ErrorAction SilentlyContinue
+    $why = $null
+    if (-not $account) {
+        New-ADUser -Name $svc -SamAccountName $svc -Path $ou -AccountPassword $secure -Enabled $true -PasswordNeverExpires $true `
+            -CannotChangePassword $true -KerberosEncryptionType AES128, AES256 `
+            -Description 'The GitLab server: its LDAP bind, and the account its Kerberos service principal maps to' | Out-Null
+        $why = 'the account is new'
+    } else {
+        Set-ADUser -Identity $svc -Enabled $true -PasswordNeverExpires $true -CannotChangePassword $true -KerberosEncryptionType AES128, AES256
+        Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+        $context = New-Object System.DirectoryServices.AccountManagement.PrincipalContext 'Domain'
+        if (-not $context.ValidateCredentials($svc, $env:GITLAB_SERVICE_PASSWORD)) { $why = 'its password is not the one in settings.yml' }
+        elseif ($account.ServicePrincipalNames -notcontains $principal) { $why = "$principal is not mapped to it" }
+        elseif (-not (Test-Path $gitlabKeytab)) { $why = 'there is no keytab' }
+    }
+    if ($why) {
+        # -pass sets the password (a new key version) and writes its key; -mapop set leaves the principal as the account's
+        # only one. ktpass reports on stderr, which Windows PowerShell turns into errors that 'Stop' would throw at.
+        Remove-Item -Force $gitlabKeytab -ErrorAction SilentlyContinue
+        $ErrorActionPreference = 'Continue'
+        $out = & ktpass.exe -princ "$principal@$realm" -mapuser "$($env:SP_NETBIOS)\$svc" -pass $env:GITLAB_SERVICE_PASSWORD `
+            -crypto AES256-SHA1 -ptype KRB5_NT_PRINCIPAL -mapop set +answer -out $gitlabKeytab 2>&1 | ForEach-Object { "$_" }
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        if ($code -ne 0 -or -not (Test-Path $gitlabKeytab)) {
+            throw "ktpass failed ($code): $(($out | Where-Object { $_ -notmatch 'pass' }) -join ' | ')"
+        }
+        Write-Host "GitLab: $principal@$realm mapped to $svc and its keytab written ($why): $(($out | Where-Object { $_ -match 'salt|kvno|Key created' }) -join ' | ')"
+    }
+    if (-not (Get-SmbShare -Name gitlab -ErrorAction SilentlyContinue)) {
+        New-SmbShare -Name gitlab -Path (Split-Path $gitlabKeytab) -ReadAccess "$($env:SP_NETBIOS)\$svc" | Out-Null
+    }
+    icacls.exe (Split-Path $gitlabKeytab) /grant "$($env:SP_NETBIOS)\${svc}:(OI)(CI)R" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'icacls failed on the keytab folder' }
+}
+
 # --- Summary ------------------------------------------------------------------------------------
 $os = Get-CimInstance Win32_OperatingSystem
-Write-Host "$($env:COMPUTERNAME): $($os.Caption) build $($os.BuildNumber), domain controller for $($domain.DNSRoot) ($($domain.NetBIOSName)), DNS forwarding to $($forwarders -join ', '), accounts $(($accounts | ForEach-Object Name) -join ', '), sshd $((Get-Service sshd).Status)"
+$gitlabSummary = if ($env:GITLAB_HOST) { ", GitLab's service account $($env:GITLAB_SERVICE_USER) with its keytab" } else { '' }
+Write-Host "$($env:COMPUTERNAME): $($os.Caption) build $($os.BuildNumber), domain controller for $($domain.DNSRoot) ($($domain.NetBIOSName)), DNS forwarding to $($forwarders -join ', '), accounts $(($accounts | ForEach-Object Name) -join ', ')$gitlabSummary, sshd $((Get-Service sshd).Status)"

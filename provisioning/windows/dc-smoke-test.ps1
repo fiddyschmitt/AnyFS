@@ -43,6 +43,16 @@ if ($system.DomainRole -lt 4) {
     $farms = @($domainRecords | Where-Object { $_.HostName -like 'anyfs-sp-*' })
     if ($farms.Count -eq 0) { Warn 'no DNS record for a SharePoint server yet' }
     foreach ($sp in $farms) { Pass "DNS has $($sp.HostName) at $($sp.RecordData.IPv4Address.IPAddressToString)" }
+    foreach ($other in @($domainRecords | Where-Object { $_.HostName -like 'anyfs-ex-*' -or $_.HostName -like 'anyfs-gitlab-*' })) {
+        Pass "DNS has $($other.HostName) at $($other.RecordData.IPv4Address.IPAddressToString)"
+    }
+    # the GitLab server's Kerberos service account, when there is one
+    $gitlab = Get-ADUser -Filter "SamAccountName -eq 'svc_gitlab'" -Properties ServicePrincipalNames, KerberosEncryptionType -ErrorAction SilentlyContinue
+    if ($gitlab) {
+        Check 'svc_gitlab is enabled and marked for AES' { $gitlab.Enabled -and ($gitlab.KerberosEncryptionType -match 'AES256') }
+        Check "svc_gitlab holds GitLab's principal ($($gitlab.ServicePrincipalNames -join ', '))" { @($gitlab.ServicePrincipalNames | Where-Object { $_ -like 'HTTP/anyfs-gitlab-*' }).Count -eq 1 }
+        Check 'the keytab C:\anyfs-lab\gitlab\http.keytab and its share \\anyfs-dc-1\gitlab' { (Test-Path 'C:\anyfs-lab\gitlab\http.keytab') -and (Get-SmbShare -Name gitlab -ErrorAction Stop) }
+    }
 }
 
 if ($script:failed) { exit 1 }

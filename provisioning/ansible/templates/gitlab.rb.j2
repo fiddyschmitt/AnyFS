@@ -1,0 +1,44 @@
+# Written by the AnyFS lab's playbook (templates/gitlab.rb.j2). A change here is applied by `vagrant provision
+# anyfs-gitlab-1` (gitlab-ctl reconfigure in the container).
+external_url 'http://{{ gitlab.host }}'
+gitlab_rails['initial_root_password'] = '{{ gitlab.root_password }}'
+
+# --- A small machine: fewer Puma workers and Sidekiq threads, no metrics, nothing the lab does not use -------------
+puma['worker_processes'] = 2
+sidekiq['concurrency'] = 10
+prometheus_monitoring['enable'] = false
+gitlab_kas['enable'] = false
+registry['enable'] = false
+gitlab_rails['usage_ping_enabled'] = false
+gitlab_rails['gitlab_default_projects_features_container_registry'] = false
+
+# --- LDAP: the domain's accounts sign in as themselves (the tester is ANYFS\sp_user) ---------------------------------
+gitlab_rails['ldap_enabled'] = true
+gitlab_rails['ldap_servers'] = {
+  'main' => {
+    'label' => '{{ sharepoint.netbios }}',
+    'host' => '{{ dc.ip }}',
+    'port' => 389,
+    'encryption' => 'plain',
+    'uid' => 'sAMAccountName',
+    'active_directory' => true,
+    'bind_dn' => 'CN={{ gitlab.service_account.user }},OU=AnyFS Lab,{{ sharepoint.domain.split(".") | map("regex_replace", "^", "DC=") | join(",") }}',
+    'password' => '{{ gitlab.service_account.password }}',
+    'base' => 'OU=AnyFS Lab,{{ sharepoint.domain.split(".") | map("regex_replace", "^", "DC=") | join(",") }}',
+    'allow_username_or_email_login' => true,
+  }
+}
+
+# --- Kerberos: a ticket for HTTP/{{ gitlab.host }} signs a domain account in (Enterprise Edition; no licence needed) ---
+# The keytab is the service account's (the domain controller's ktpass). A Kerberos sign-in is linked to the account's LDAP
+# identity: the ticket's name is the account's sAMAccountName and its realm the LDAP base's domain.
+gitlab_rails['omniauth_enabled'] = true
+gitlab_rails['omniauth_allow_single_sign_on'] = ['kerberos']
+gitlab_rails['omniauth_block_auto_created_users'] = false
+gitlab_rails['kerberos_enabled'] = true
+gitlab_rails['kerberos_keytab'] = '/etc/gitlab/http.keytab'
+gitlab_rails['kerberos_simple_ldap_linking_allowed_realms'] = ['{{ sharepoint.domain }}']
+# Git over HTTP takes Negotiate on a port of its own only: on port 80 CI's clones (a token in the URL) need Basic alone
+gitlab_rails['kerberos_use_dedicated_port'] = true
+gitlab_rails['kerberos_port'] = 8443
+gitlab_rails['kerberos_https'] = false
