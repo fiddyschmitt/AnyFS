@@ -59,6 +59,13 @@ public abstract class WebSignInTarget(Uri page, string profileDir)
     /// <summary>What the person can do instead when no browser can sign in, after "install Firefox": ", or use an app sign-in (Sign in with)".</summary>
     public virtual string OtherWayIn => "";
 
+    /// <summary>
+    /// Hosts the browser may answer a Windows sign-in challenge (Negotiate: Kerberos) for with the person's own Windows
+    /// sign-in, as a browser does for its intranet zone: a server whose sign-in page offers Kerberos (GitLab's) needs it,
+    /// since a Chromium browser answers no Negotiate for a name with dots unless told to. Empty by default.
+    /// </summary>
+    public virtual IReadOnlyList<string> NegotiateHosts => [];
+
     /// <summary>Whether a cookie the browser holds is part of the session: by default those that go to the page's host.</summary>
     public virtual bool Keeps(SessionCookie cookie) => SessionCookie.DomainMatches(cookie.Domain, Page.Host);
 

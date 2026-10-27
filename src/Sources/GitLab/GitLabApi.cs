@@ -13,8 +13,7 @@ namespace AnyFS.Sources.GitLab;
 /// (<see cref="RequestPace"/>, by host) with at most so many open at once; a throttled answer (429, 503 with
 /// Retry-After) held and tried again; a server error or a dropped connection tried again twice; a refusal of the sign-in
 /// (401) renewed once through the session and tried again; pages followed by their Link header, offset and keyset alike;
-/// errors as <see cref="VfsException"/>s by status. GraphQL with a browser session carries the session's CSRF token, as
-/// GitLab's own pages send it.
+/// errors as <see cref="VfsException"/>s by status.
 /// </summary>
 internal sealed class GitLabApi : IDisposable
 {
@@ -140,9 +139,7 @@ internal sealed class GitLabApi : IDisposable
         var body = new JsonObject { ["query"] = query, ["variables"] = variables }.ToJsonString();
         using var response = await SendAsync(() =>
         {
-            var request = new HttpRequestMessage(HttpMethod.Post, Address.GraphQl) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-            request.Options.Set(GitLabSession.GraphQlRequest, true);
-            return request;
+            return new HttpRequestMessage(HttpMethod.Post, Address.GraphQl) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
         }, "graphql", ct).ConfigureAwait(false);
         var doc = await ReadJsonAsync(response, "graphql", ct).ConfigureAwait(false);
         if (doc.RootElement.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array && errors.GetArrayLength() > 0)

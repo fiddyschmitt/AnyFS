@@ -58,7 +58,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
     protected override async Task OnInitialiseAsync(CancellationToken ct)
     {
-        _session = new GitLabSession(_settings, Logger, _standIn);
+        _session = new GitLabSession(_settings, Logger, _standIn, Context.Secrets);
         await _session.SignInAsync(interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
         _api = new GitLabApi(_session, _settings.Concurrency, Logger);
         _listings = new Listings(_stopping.Token);
@@ -474,7 +474,11 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         }
 
         _api?.Dispose();
-        _session?.Dispose();
+        if (_session is not null)
+        {
+            _session.Save();
+            _session.Dispose();
+        }
         _stopping.Dispose();
         await base.DisposeAsync().ConfigureAwait(false);
     }

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text.Json;
 using AnyFS.Sdk;
@@ -5,32 +6,52 @@ using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.GitLab;
 
-/// <summary>What a test (or the Test button) changes about a GitLab session: what sends its requests, whether a session kept from before is used.</summary>
-internal sealed record GitLabStandIn(Func<HttpMessageHandler> Handler);
+/// <summary>
+/// What a test (or the Test button) changes about a GitLab session: what sends its requests; for the web session, what
+/// stands in for the browser (the cookies a sign-in in it would give; interactive or not); and whether a session kept
+/// from before is used.
+/// </summary>
+internal sealed record GitLabStandIn(Func<HttpMessageHandler> Handler, Func<bool, CancellationToken, Task<IReadOnlyList<SessionCookie>>>? Browser = null, bool UseKept = true);
 
 /// <summary>
 /// A GitLab source's sign-in and the client its requests go through (spec 7.8). First it finds the installation behind
 /// the address (where its <c>/api/v4</c> answers: the host, or a path for one installed at a relative URL); then it signs
 /// in the way the settings say. An access token goes on every request as GitLab's API asks (PRIVATE-TOKEN); a refused
-/// token is final. The client follows no redirects itself, so a sign-in page in place of data is seen for what it is.
+/// token is final. The web session takes the cookies of a browser of AnyFS's own signed in on the server's own page
+/// (<see cref="GitLabSignInTarget"/>), and the API takes GitLab's session cookie as it takes a token (spike A); a refused
+/// request renews it with the browser headless, once for every request refused with it. The cookies are kept in the
+/// source's secret store for the next start, and handed from the settings dialog's Test to the source it starts. The
+/// client follows no redirects itself, so a sign-in page in place of data is seen for what it is.
 /// </summary>
 internal sealed class GitLabSession : IDisposable
 {
-    /// <summary>Marks a request as GraphQL's (a POST), which a browser session must send with its CSRF token.</summary>
-    public static readonly HttpRequestOptionsKey<bool> GraphQlRequest = new("anyfs.gitlab.graphql");
+    public const string CookiesSecret = "gitlab-cookies";
 
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(120);
+    private static readonly TimeSpan RecentFor = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan MinRenewalInterval = TimeSpan.FromSeconds(30);
+
+    // the cookies of a sign-in just made, by installation: the Test's, for the source started from the same dialog
+    private static readonly ConcurrentDictionary<string, (string Cookies, DateTime At)> Recent = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly ILogger _logger;
+    private readonly ISecretStore? _secrets;
+    private readonly GitLabStandIn? _standIn;
     private readonly HttpMessageHandler _handler;
+    private readonly SemaphoreSlim _renewGate = new(1, 1);
+    private BrowserSession? _browser;
+    private DateTime _renewedAt;
+    private int _generation;
 
-    public GitLabSession(GitLabSettings settings, ILogger logger, GitLabStandIn? standIn = null)
+    public GitLabSession(GitLabSettings settings, ILogger logger, GitLabStandIn? standIn = null, ISecretStore? secrets = null)
     {
         Settings = settings;
         _logger = logger;
+        _secrets = secrets;
+        _standIn = standIn;
         Url = settings.Url ?? throw new SourceFailedException("The address is not an http or https address.", permanent: true);
         Method = settings.EffectiveSignIn;
-        Cookies = new CookieContainer(capacity: 300, perDomainCapacity: 100, maxCookieSize: 16 * 1024);
+        Cookies = CookieJar.New();
         HttpMessageHandler inner;
         if (standIn is not null)
         {
@@ -78,11 +99,11 @@ internal sealed class GitLabSession : IDisposable
 
     public CookieContainer Cookies { get; }
 
-    /// <summary>How the source signed in, for messages ("with an access token").</summary>
+    /// <summary>How the source signed in, for messages ("with an access token", "with Microsoft Edge").</summary>
     public string How { get; private set; } = "";
 
     /// <summary>How many times the sign-in has been renewed: a request remembers it, so one renewal serves every request that lapsed with it.</summary>
-    public int Generation { get; private set; }
+    public int Generation => Volatile.Read(ref _generation);
 
     /// <summary>Whether a refused request may be signed in again: not with a token, which only a person can replace.</summary>
     public bool CanRenew => Method != GitLabSignIn.AccessToken;
@@ -118,8 +139,10 @@ internal sealed class GitLabSession : IDisposable
     }
 
     /// <summary>
-    /// Signs in for the source's start or the Test; throws <see cref="SourceFailedException"/> (permanent for a refusal that
-    /// only new settings can change) when no sign-in can be had.
+    /// Signs in for the source's start or the Test: a web session's cookies kept from before (or just made by the Test) while
+    /// GitLab takes them, else the way the settings say, with a browser window only when <paramref name="interactive"/>.
+    /// Throws <see cref="SourceFailedException"/> (permanent for a refusal only new settings can change) when no sign-in
+    /// can be had.
     /// </summary>
     public async Task SignInAsync(bool interactive, Action<string> progress, CancellationToken ct)
     {
@@ -138,14 +161,96 @@ internal sealed class GitLabSession : IDisposable
                 How = "with an access token";
                 break;
 
+            case GitLabSignIn.WebSession:
+                if (await KeptAsync(ct).ConfigureAwait(false))
+                {
+                    How = "with the session kept from before";
+                    break;
+                }
+
+                try
+                {
+                    await BrowserSignInAsync(interactive, progress, ct).ConfigureAwait(false);
+                }
+                catch (SignInRequiredException ex)
+                {
+                    throw new SourceFailedException(ex.Message, ex.Permanent, ex);
+                }
+
+                break;
+
             default:
-                throw new SourceFailedException($"Signing in with {Settings.SignInMethod} is not available yet: choose Access token.", permanent: true);
+                throw new SourceFailedException($"Signing in with {Settings.SignInMethod} is not available yet: choose Access token or Web session.", permanent: true);
         }
 
-        _logger.LogInformation("gitlab: signed in to {Host} as {User} {How}", Url.Host, User.Username, How);
+        _logger.LogInformation("gitlab: signed in to {Host} as {User} {How}", Url.Host, User!.Username, How);
+        Save();
     }
 
-    /// <summary>The signed-in account, or null where GitLab refuses the sign-in (401).</summary>
+    /// <summary>The cookies of a sign-in just made, or kept from the last run, while GitLab takes them.</summary>
+    private async Task<bool> KeptAsync(CancellationToken ct)
+    {
+        if (_standIn is { UseKept: false })
+        {
+            return false;
+        }
+
+        // a sign-in just made (the Test's) first, then the one kept from the last run
+        var recent = Recent.TryGetValue(Address.Server.AbsoluteUri, out var r) && DateTime.UtcNow - r.At < RecentFor ? r.Cookies : null;
+        foreach (var kept in new[] { recent, _secrets?.Get(CookiesSecret) }.OfType<string>().Distinct(StringComparer.Ordinal))
+        {
+            CookieJar.Clear(Cookies);
+            if (CookieJar.Import(Cookies, kept, Address.Server.Host) <= 0)
+            {
+                continue;
+            }
+
+            if (await WhoAsync(ct).ConfigureAwait(false) is { } user)
+            {
+                User = user;
+                return true;
+            }
+        }
+
+        _logger.LogInformation("gitlab: no session kept from before for {Host} that GitLab still takes", Url.Host);
+        CookieJar.Clear(Cookies);
+        return false;
+    }
+
+    /// <summary>The web session's sign-in in a browser of AnyFS's own: its cookies, then GitLab asked who they are.</summary>
+    private async Task BrowserSignInAsync(bool interactive, Action<string> progress, CancellationToken ct)
+    {
+        var cookies = await BrowserCookiesAsync(interactive, progress, ct).ConfigureAwait(false);
+        CookieJar.Clear(Cookies);
+        CookieJar.Add(Cookies, cookies);
+        User = await WhoAsync(ct).ConfigureAwait(false)
+            ?? throw new SignInRequiredException($"{BrowserName} signed in to {Url.Host}, but GitLab's API does not take its session from AnyFS");
+        How = $"with {BrowserName}";
+        _logger.LogInformation("gitlab: signed in to {Host} with {Browser} ({Count} cookies)", Url.Host, BrowserName, cookies.Count);
+    }
+
+    private Task<IReadOnlyList<SessionCookie>> BrowserCookiesAsync(bool interactive, Action<string> progress, CancellationToken ct)
+    {
+        if (_standIn?.Browser is { } browser)
+        {
+            return browser(interactive, ct);
+        }
+
+        var session = Browser();
+        if (!session.CanSignIn)
+        {
+            throw new SignInRequiredException("No Edge, Chrome, Chromium or Firefox was found for the web session's sign-in. Install one, set the Browser path under Advanced, or sign in with an access token.", permanent: true);
+        }
+
+        return session.SignInAsync(interactive, progress, ct);
+    }
+
+    private string BrowserName => _standIn?.Browser is not null ? "the browser" : Browser().BrowserName;
+
+    private BrowserSession Browser()
+        => _browser ??= new BrowserSession(BrowserLocator.Find(Settings.Browser, "ANYFS_GITLAB_BROWSER"), new GitLabSignInTarget(Address.Server, Settings.TrustAnyCertificate), _logger);
+
+    /// <summary>The signed-in account, or null where GitLab refuses the sign-in (a 401, or a redirect to its sign-in page).</summary>
     private async Task<GlUser?> WhoAsync(CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Address.Api, "user"));
@@ -165,7 +270,7 @@ internal sealed class GitLabSession : IDisposable
         return GlUser.Parse(doc.RootElement);
     }
 
-    /// <summary>Adds what the sign-in needs to a request: the token's header.</summary>
+    /// <summary>Adds what the sign-in needs to a request: the token's header (a session's cookies go by themselves).</summary>
     public ValueTask AuthorizeAsync(HttpRequestMessage request, CancellationToken ct)
     {
         if (Method == GitLabSignIn.AccessToken && Settings.Token is { } token)
@@ -179,19 +284,75 @@ internal sealed class GitLabSession : IDisposable
 
     /// <summary>
     /// After a request seen at <paramref name="seen"/> (its <see cref="Generation"/>) was refused: signs in again once for
-    /// every request that was refused with it. A token cannot be renewed.
+    /// every request refused with it, without anyone (the browser headless, on the profile that keeps the person's
+    /// sign-in). A token cannot be renewed; a renewal that needs a person, or a server that refuses the session again at
+    /// once, throws a <see cref="VfsException"/> saying so (the source shows Degraded; Retry signs in with a window).
     /// </summary>
-    public Task RenewAsync(int seen, CancellationToken ct)
+    public async Task RenewAsync(int seen, CancellationToken ct)
     {
-        _ = seen;
-        _ = ct;
-        throw new VfsException(VfsError.Unavailable, $"GitLab ({Url.Host}) no longer takes {Settings.Who}: give a new one and Retry the source.");
+        if (!CanRenew)
+        {
+            throw new VfsException(VfsError.Unavailable, $"GitLab ({Url.Host}) no longer takes {Settings.Who}: give a new one and Retry the source.");
+        }
+
+        await _renewGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (Generation != seen)
+            {
+                return;
+            }
+
+            if (DateTime.UtcNow - _renewedAt < MinRenewalInterval)
+            {
+                throw new VfsException(VfsError.Unavailable, $"GitLab ({Url.Host}) refused the session again just after it was renewed; Retry the source to sign in again.");
+            }
+
+            _renewedAt = DateTime.UtcNow;
+            _logger.LogInformation("gitlab: the session for {Host} was refused; signing in again without a window", Url.Host);
+            try
+            {
+                await BrowserSignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false);
+            }
+            catch (SignInRequiredException ex)
+            {
+                throw new VfsException(VfsError.Unavailable, $"The GitLab sign-in has lapsed and AnyFS could not sign in again without you ({ex.Message}); Retry the source to sign in.", ex);
+            }
+
+            Interlocked.Increment(ref _generation);
+            Save();
+        }
+        finally
+        {
+            _renewGate.Release();
+        }
+    }
+
+    /// <summary>Keeps a web session's cookies: in the secret store for the next start, and for a source started from the dialog whose Test made them.</summary>
+    public void Save()
+    {
+        if (Method == GitLabSignIn.AccessToken)
+        {
+            return;
+        }
+
+        var json = CookieJar.Export(Cookies);
+        Recent[Address.Server.AbsoluteUri] = (json, DateTime.UtcNow);
+        try
+        {
+            _secrets?.Set(CookiesSecret, json);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
+        {
+            _logger.LogWarning("gitlab: the session could not be kept for the next start: {Error}", ex.Message);
+        }
     }
 
     public void Dispose()
     {
         Http.Dispose();
         _handler.Dispose();
+        _renewGate.Dispose();
     }
 
     /// <summary>

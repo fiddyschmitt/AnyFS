@@ -639,10 +639,52 @@ internal sealed partial class FakeGitLab
             : new Response(404, Encoding.UTF8.GetBytes("<html>not found</html>"), "text/html");
     }
 
-    /// <summary>The account a browser session's cookie signs in as: none yet.</summary>
-    private static User? SessionUser(Request r)
+    private readonly Dictionary<string, User> _sessions = new(StringComparer.Ordinal);
+
+    /// <summary>A sign-in in a browser: the session cookie GitLab sets for <paramref name="user"/>.</summary>
+    public IReadOnlyList<AnyFS.Sources.Common.SessionCookie> SignInBrowser(User user)
     {
-        _ = r;
+        lock (_gate)
+        {
+            var id = Guid.NewGuid().ToString("N");
+            _sessions[id] = user;
+            return [new AnyFS.Sources.Common.SessionCookie("_gitlab_session", id, new Uri(Origin).Host, "/", Secure: false, HttpOnly: true)];
+        }
+    }
+
+    /// <summary>Every browser session ends (an expiry, a sign-out): their cookies are refused from now on.</summary>
+    public void EndSessions()
+    {
+        lock (_gate)
+        {
+            _sessions.Clear();
+        }
+    }
+
+    public User UserNamed(string username)
+    {
+        lock (_gate)
+        {
+            return _users.Single(u => u.Username == username);
+        }
+    }
+
+    /// <summary>The account a browser session's cookie signs in as.</summary>
+    private User? SessionUser(Request r)
+    {
+        if (!r.Headers.TryGetValue("Cookie", out var header))
+        {
+            return null;
+        }
+
+        foreach (var part in header.Split(';', StringSplitOptions.TrimEntries))
+        {
+            if (part.StartsWith("_gitlab_session=", StringComparison.Ordinal) && _sessions.TryGetValue(part["_gitlab_session=".Length..], out var user))
+            {
+                return user;
+            }
+        }
+
         return null;
     }
 

@@ -1,6 +1,7 @@
 using System.Text;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
+using AnyFS.Sources.Common;
 using AnyFS.Sources.GitLab;
 
 namespace AnyFS.Sources.Tests;
@@ -863,6 +864,149 @@ public class ZipDirectoryTests
     {
         var bytes = new byte[1000];
         await Assert.ThrowsExactlyAsync<InvalidDataException>(() => ZipDirectory.ReadAsync(bytes.Length, (o, l, _) => Task.FromResult(bytes.AsSpan((int)o, l).ToArray()), CancellationToken.None));
+    }
+}
+
+/// <summary>
+/// The web session (spec 7.8): a browser's cookies, which GitLab's API takes as it takes a token (spike A), kept between
+/// starts and renewed without a window. The browser is a stand-in that signs in to the fake; each test has a host of its own
+/// (a sign-in just made is shared by every source of its server in the process).
+/// </summary>
+[TestClass]
+public class GitLabWebSessionTests
+{
+    private static int _hosts;
+
+    private sealed class Browser(FakeGitLab fake)
+    {
+        public List<bool> Calls { get; } = [];
+
+        public bool NeedsAPerson { get; set; }
+
+        public Task<IReadOnlyList<SessionCookie>> SignInAsync(bool interactive, CancellationToken ct)
+        {
+            Calls.Add(interactive);
+            if (NeedsAPerson && !interactive)
+            {
+                throw new SignInRequiredException("the browser sign-in for the server has lapsed; sign in again", permanent: false);
+            }
+
+            return Task.FromResult(fake.SignInBrowser(fake.UserNamed("tester")));
+        }
+    }
+
+    private static FakeGitLab Lab() => GitLabSeed.Lab(origin: $"https://gitlab-ws{Interlocked.Increment(ref _hosts)}.fake.test");
+
+    private static async Task<GitLabSource> StartAsync(FakeGitLab fake, Browser browser, TestSourceContext context, string path = "/anyfs/docs")
+    {
+        var settings = new GitLabSettings { Address = fake.Server + path, SignInMethod = GitLabSettings.WebSession };
+        var source = new GitLabSource(settings, new GitLabStandIn(fake.Handler, browser.SignInAsync));
+        await source.InitialiseAsync(context, CancellationToken.None);
+        return source;
+    }
+
+    private static async Task<string[]> NamesAsync(ISource source, string path)
+    {
+        var names = new List<string>();
+        await foreach (var e in source.ListAsync(path, CancellationToken.None))
+        {
+            names.Add(e.Name);
+        }
+
+        return names.ToArray();
+    }
+
+    private static async Task<byte[]> ReadAsync(ISource source, string path)
+    {
+        await using var file = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
+        var buffer = new byte[file.Length];
+        await file.ReadFullyAsync(0, buffer, CancellationToken.None);
+        return buffer;
+    }
+
+    [TestMethod]
+    public async Task TheBrowsersSessionSignsInAndIsKept()
+    {
+        var fake = Lab();
+        var browser = new Browser(fake);
+        using var context = new TestSourceContext();
+        await using (var source = await StartAsync(fake, browser, context))
+        {
+            Assert.AreEqual("tester", source.Session.User?.Username);
+            StringAssert.Contains(source.Session.How, "with the browser");
+            CollectionAssert.Contains(await NamesAsync(source, ""), "issues");
+            CollectionAssert.AreEqual(new[] { true }, browser.Calls, "the start may show a window");
+        }
+
+        Assert.IsNotNull(context.Secrets.Get(GitLabSession.CookiesSecret), "the session is kept for the next start");
+    }
+
+    [TestMethod]
+    public async Task TheNextStartUsesTheKeptSessionWithoutTheBrowser()
+    {
+        var fake = Lab();
+        var browser = new Browser(fake);
+        using var context = new TestSourceContext();
+        await (await StartAsync(fake, browser, context)).DisposeAsync();
+        await using var again = await StartAsync(fake, browser, context);
+        Assert.AreEqual(1, browser.Calls.Count, "no second browser sign-in");
+        Assert.AreEqual("with the session kept from before", again.Session.How);
+    }
+
+    [TestMethod]
+    public async Task ALapsedSessionIsRenewedWithoutAWindow()
+    {
+        var fake = Lab();
+        var browser = new Browser(fake);
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, browser, context);
+        fake.EndSessions();
+        CollectionAssert.Contains(await NamesAsync(source, "issues"), "#1 Install fails on Debian");
+        CollectionAssert.AreEqual(new[] { true, false }, browser.Calls, "renewed headless");
+        Assert.AreEqual(1, source.Session.Generation);
+    }
+
+    [TestMethod]
+    public async Task ARenewalThatNeedsAPersonLeavesTheSourceDegraded()
+    {
+        var fake = Lab();
+        var browser = new Browser(fake);
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, browser, context);
+        fake.EndSessions();
+        browser.NeedsAPerson = true;
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, "issues"));
+        Assert.AreEqual(VfsError.Unavailable, ex.Error);
+        StringAssert.Contains(ex.Message, "Retry the source");
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+    }
+
+    [TestMethod]
+    public async Task WithASessionAWikisEmbeddedFilesAreFilesTheLinksPointAt()
+    {
+        var fake = Lab();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, new Browser(fake), context);
+        CollectionAssert.AreEqual(new[] { "guides", "home.md", "notes.asciidoc", "Ünïcödé-résumé.md", "attachments" }, await NamesAsync(source, "wiki"));
+        CollectionAssert.AreEqual(new[] { GitLabSeed.DiagramHash, GitLabSeed.ShotHash }, await NamesAsync(source, "wiki/attachments"));
+        CollectionAssert.AreEqual(GitLabSeed.Diagram, await ReadAsync(source, $"wiki/attachments/{GitLabSeed.DiagramHash}/diagram.png"));
+        Assert.AreEqual("a screenshot", Encoding.UTF8.GetString(await ReadAsync(source, $"wiki/attachments/{GitLabSeed.ShotHash}/shot 1.png")));
+        StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, "wiki/home.md")), $"(attachments/{GitLabSeed.DiagramHash}/diagram.png)");
+        StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, "wiki/guides/install/linux.md")), $"(../../attachments/{GitLabSeed.ShotHash}/shot%201.png)");
+    }
+
+    [TestMethod]
+    public async Task TheTestButtonsSignInIsHandedToTheSource()
+    {
+        var fake = Lab();
+        var browser = new Browser(fake);
+        var settings = new GitLabSettings { Address = fake.Server + "/anyfs/docs", SignInMethod = GitLabSettings.WebSession };
+        var result = await GitLabPlugin.TestAsync(settings, new Progress<string>(), new GitLabStandIn(fake.Handler, browser.SignInAsync), CancellationToken.None);
+        Assert.IsTrue(result.Success, result.Message);
+        StringAssert.Contains(result.Message, "with the browser");
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, browser, context);
+        Assert.AreEqual(1, browser.Calls.Count, "the source took the Test's sign-in");
     }
 }
 

@@ -181,7 +181,7 @@ internal sealed class WebDriverSession
         IWebDriver driver;
         try
         {
-            driver = await Task.Run(() => Start(browser, profile, headless), ct).ConfigureAwait(false);
+            driver = await Task.Run(() => Start(browser, profile, headless, _target.NegotiateHosts), ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is WebDriverException or InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
         {
@@ -388,7 +388,7 @@ internal sealed class WebDriverSession
         return (page, cookies);
     }
 
-    private static IWebDriver Start(WebDriverBrowser browser, string profile, bool headless)
+    private static IWebDriver Start(WebDriverBrowser browser, string profile, bool headless, IReadOnlyList<string> negotiateHosts)
     {
         SeleniumManagerLocator.Prepare();
         switch (browser.Kind)
@@ -406,6 +406,11 @@ internal sealed class WebDriverSession
                     options.AddArgument("-headless");
                 }
 
+                if (negotiateHosts.Count > 0)
+                {
+                    options.SetPreference("network.negotiate-auth.trusted-uris", string.Join(',', negotiateHosts));
+                }
+
                 return new FirefoxDriver(service, options, CommandTimeout);
             }
 
@@ -413,14 +418,14 @@ internal sealed class WebDriverSession
             {
                 var service = EdgeDriverService.CreateDefaultService();
                 Quiet(service);
-                return new EdgeDriver(service, Chromium(new EdgeOptions(), browser, profile, headless), CommandTimeout);
+                return new EdgeDriver(service, Chromium(new EdgeOptions(), browser, profile, headless, negotiateHosts), CommandTimeout);
             }
 
             default:
             {
                 var service = ChromeDriverService.CreateDefaultService();
                 Quiet(service);
-                return new ChromeDriver(service, Chromium(new ChromeOptions(), browser, profile, headless), CommandTimeout);
+                return new ChromeDriver(service, Chromium(new ChromeOptions(), browser, profile, headless, negotiateHosts), CommandTimeout);
             }
         }
     }
@@ -439,7 +444,7 @@ internal sealed class WebDriverSession
     /// </summary>
     private static UnhandledPromptBehavior PromptBehavior(bool headless) => headless ? UnhandledPromptBehavior.AcceptAndNotify : UnhandledPromptBehavior.Ignore;
 
-    private static T Chromium<T>(T options, WebDriverBrowser browser, string profile, bool headless)
+    private static T Chromium<T>(T options, WebDriverBrowser browser, string profile, bool headless, IReadOnlyList<string> negotiateHosts)
         where T : ChromiumOptions
     {
         options.BinaryLocation = browser.Path;
@@ -449,6 +454,11 @@ internal sealed class WebDriverSession
         if (headless)
         {
             options.AddArgument("--headless=new");
+        }
+
+        if (negotiateHosts.Count > 0)
+        {
+            options.AddArgument("--auth-server-allowlist=" + string.Join(',', negotiateHosts));
         }
 
         return options;

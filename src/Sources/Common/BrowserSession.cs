@@ -307,6 +307,11 @@ public sealed class BrowserSession
             info.ArgumentList.Add("--headless=new");
         }
 
+        if (_target.NegotiateHosts.Count > 0)
+        {
+            info.ArgumentList.Add("--auth-server-allowlist=" + string.Join(',', _target.NegotiateHosts));
+        }
+
         info.ArgumentList.Add(Site.AbsoluteUri);
 
         // the browser's own log lines would otherwise land in AnyFS's terminal (anyfs serve); drained, not kept

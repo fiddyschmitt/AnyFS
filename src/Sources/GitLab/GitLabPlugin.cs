@@ -74,12 +74,17 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
 
         if (GitLabSettings.SignInFrom(s.SignInMethod) is null)
         {
-            yield return new ValidationMessage($"Sign in with: {GitLabSettings.AccessTokenChoice}.", nameof(GitLabSettings.SignInMethod));
+            yield return new ValidationMessage($"Sign in with one of: {GitLabSettings.AccessTokenChoice}, {GitLabSettings.WebSession}.", nameof(GitLabSettings.SignInMethod));
         }
 
         if (s.EffectiveSignIn == GitLabSignIn.AccessToken && s.Token is null)
         {
             yield return new ValidationMessage("Give an access token: a personal, project or group access token with the read_api and read_repository scopes.", nameof(GitLabSettings.AccessToken));
+        }
+
+        if (s.EffectiveSignIn == GitLabSignIn.WebSession && s.Browser is { } browser && !File.Exists(browser))
+        {
+            yield return new ValidationMessage("No browser at that path; leave it empty to find Edge or Chrome automatically.", nameof(GitLabSettings.BrowserPath), IsError: false);
         }
 
         if (s.PipelinesKept is < 1 or > 1000)
