@@ -14,7 +14,14 @@ public sealed class Login
 /// <summary>A SharePoint Server farm's test site, the account the rows use on it, its product (se, 2019) and its collection name in the matrix.</summary>
 public sealed record SharePointLab(string SiteUrl, string User, string Password, string MachineName, string Product, string Collection);
 
-/// <summary>A machine from settings.yml: `os` is linux, windows or macos; `role` is host (runs anyfs), upstream, dc or sharepoint.</summary>
+/// <summary>
+/// The GitLab server (provisioning/gitlab/README.md): its address by name (Kerberos needs the name; the domain's DNS has it) and by IP
+/// (from a machine outside the domain), the tester's token, and the tester's domain account for the Windows sign-ins
+/// (name@domain, which finds the domain's KDC from a machine outside it).
+/// </summary>
+public sealed record GitLabLab(string UrlByName, string UrlByIp, string Token, string User, string Password, string MachineName);
+
+/// <summary>A machine from settings.yml: `os` is linux, windows or macos; `role` is host (runs anyfs), upstream, dc, sharepoint, exchange or gitlab.</summary>
 public sealed class LabMachine
 {
     public string Name { get; set; } = "";
@@ -114,6 +121,22 @@ public static class Lab
         }).ToList();
     });
 
+    /// <summary>The GitLab server, or null when settings.yml has no machine with role gitlab.</summary>
+    public static GitLabLab? GitLab => gitLab.Value;
+
+    private static readonly Lazy<GitLabLab?> gitLab = new(() =>
+    {
+        var g = Settings.Gitlab;
+        var sp = Settings.Sharepoint;
+        var machine = Settings.Machines.FirstOrDefault(m => m.Role == "gitlab");
+        if (machine is null || string.IsNullOrWhiteSpace(g.Host) || string.IsNullOrWhiteSpace(g.TesterToken))
+        {
+            return null;
+        }
+
+        return new GitLabLab($"http://{g.Host}", $"http://{machine.Ip}", g.TesterToken, $"{sp.Accounts.Tester.User}@{sp.Domain}", sp.Accounts.Tester.Password, machine.Name);
+    });
+
     public static string SettingsDir => Path.GetDirectoryName(FindSettings() ?? throw NoSettings())!;
 
     /// <summary>The path of the lab's settings.yml, or null when there's none to be found.</summary>
@@ -172,11 +195,22 @@ public static class Lab
         public MacYml Mac { get; set; } = new();
 
         public SharepointYml Sharepoint { get; set; } = new();
+
+        public GitlabYml Gitlab { get; set; } = new();
+    }
+
+    private sealed class GitlabYml
+    {
+        public string Host { get; set; } = "";
+
+        public string TesterToken { get; set; } = "";
     }
 
     private sealed class SharepointYml
     {
         public string Netbios { get; set; } = "";
+
+        public string Domain { get; set; } = "";
 
         public string Site { get; set; } = "";
 

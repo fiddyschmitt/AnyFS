@@ -25,8 +25,8 @@ public sealed class Deployment : IDisposable
     /// <summary>Why the rows are Inconclusive: a machine that can't be reached.</summary>
     public string? Unavailable { get; set; }
 
-    /// <summary>Why a farm's rows are Inconclusive, by its collection name (sharepoint, sharepoint2019): the farm is not up.</summary>
-    public Dictionary<string, string> SharePointUnavailable { get; } = [];
+    /// <summary>Why a server's rows are Inconclusive, by its collection name (sharepoint, sharepoint2019, gitlab): the server is not up.</summary>
+    public Dictionary<string, string> ServerUnavailable { get; } = [];
 
     /// <summary>Why the rows fail: the deployment itself went wrong.</summary>
     public string? Failure { get; set; }
@@ -79,6 +79,12 @@ public abstract class HostRows
         {
             // the lab's SharePoint Server farms, as settings.yml describes them (a farm's rows are Inconclusive while it is down)
             list.AddRange([farm.Collection, farm.Collection + "-ro"]);
+        }
+
+        if (Lab.GitLab is not null)
+        {
+            // the lab's GitLab server; its source is read-only itself, so its -ro collection would only repeat these rows
+            list.Add(GitLabFixture.Collection);
         }
 
         return list;
@@ -187,7 +193,19 @@ public abstract class HostRows
                     }
                     else
                     {
-                        d.SharePointUnavailable[farm.Collection] = why!;
+                        d.ServerUnavailable[farm.Collection] = why!;
+                    }
+                }
+
+                if (Lab.GitLab is { } gitLab)
+                {
+                    if (GitLabFixture.TryPrepare(gitLab, os, out var why) is { } spec)
+                    {
+                        sharePoint.Add(spec);
+                    }
+                    else
+                    {
+                        d.ServerUnavailable[GitLabFixture.Collection] = why!;
                     }
                 }
 
@@ -270,14 +288,16 @@ public abstract class HostRows
         }
 
         var farmCollection = collection.EndsWith("-ro", StringComparison.Ordinal) ? collection[..^3] : collection;
-        if (d.SharePointUnavailable.TryGetValue(farmCollection, out var farmDown))
+        if (d.ServerUnavailable.TryGetValue(farmCollection, out var farmDown))
         {
             Assert.Inconclusive(farmDown);
             return;
         }
 
         var spec = anyfs.Sources.Single(s => s.Collection == collection || s.ReadOnlyCollection == collection);
-        var readOnly = collection.EndsWith("-ro", StringComparison.Ordinal);
+        // a GitLab source is read-only itself; git keeps no empty folder
+        var readOnly = collection.EndsWith("-ro", StringComparison.Ordinal) || spec.Type == "gitlab";
+        var noEmptyFolders = spec.Type == "gitlab";
         var prefix = spec.TreePrefix;
         string Rel(string p) => prefix.Length == 0 ? p : prefix + "/" + p;
 
@@ -293,7 +313,7 @@ public abstract class HostRows
             .Select(n => n.Normalize(System.Text.NormalizationForm.FormC))
             .ToList();
         var root = Names(prefix);
-        CollectionAssert.AreEquivalent(Fixture.RootNames.ToList(), root, $"root listing: {string.Join(", ", root)}");
+        CollectionAssert.AreEquivalent(Fixture.RootNames.Where(n => !noEmptyFolders || n != "emptydir").ToList(), root, $"root listing: {string.Join(", ", root)}");
         Assert.AreEqual(Fixture.ManyCount, Names(Rel("many")).Count, "many/ lists completely");
         var unicode = Names(Rel("unicode"));
         CollectionAssert.AreEquivalent(new[] { "ünïcödé ✓ 日本語.txt" }, unicode, $"unicode name; the client saw: {string.Join(", ", unicode.Select(n => n + " [" + string.Join(" ", n.Select(c => ((int)c).ToString("x4"))) + "]"))}");
@@ -302,7 +322,10 @@ public abstract class HostRows
         Assert.AreEqual(1, longNames.Count, "the long/ folder holds one name; the client saw: " + string.Join(" | ", longNames));
         Assert.AreEqual(new string('n', 200) + ".txt", longNames[0], "a 204-character name");
         Assert.AreEqual("deep.txt", Names(Rel("nested/a/b/c")).Single(), "nesting");
-        Assert.AreEqual(0, Names(Rel("emptydir")).Count, "an empty folder");
+        if (!noEmptyFolders)
+        {
+            Assert.AreEqual(0, Names(Rel("emptydir")).Count, "an empty folder");
+        }
 
         // whole files
         Assert.AreEqual(Fixture.Sha256Of("small.bin"), client.Sha256(access, Rel("small.bin")), "small.bin");
@@ -365,7 +388,10 @@ public abstract class HostRows
         {
             var snapshot = d.AnyFs!.Status()!;
             var sources = d.AnyFs.Sources.Select(s => snapshot.Collections.Single(c => c.Name == s.Collection).Sources.Single()).ToList();
-            if (sources.All(s => s.FilesComplete && s.Files >= Fixture.ManifestLines))
+
+            // a GitLab source counts each project's default branch alone, a lower bound ("+"), never complete
+            var lowerBound = d.AnyFs.Sources.Where(s => s.Type == "gitlab").Select(s => s.Collection).ToHashSet(StringComparer.Ordinal);
+            if (sources.Select((s, i) => (s, Collection: d.AnyFs.Sources[i].Collection)).All(x => (x.s.FilesComplete || lowerBound.Contains(x.Collection)) && x.s.Files >= Fixture.ManifestLines))
             {
                 Console.WriteLine(string.Join("\n", sources.Select(s => $"{s.Name}: {s.Files:N0} files, complete")));
                 return;

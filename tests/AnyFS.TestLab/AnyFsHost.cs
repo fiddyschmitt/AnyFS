@@ -47,7 +47,7 @@ public sealed class AnyFsHost : IDisposable
 
     private readonly List<string> _started = [];
 
-    /// <param name="sharePoint">The SharePoint Server sources (AnyFS.E2E's SharePointFixture.TryPrepare), one per farm that is up.</param>
+    /// <param name="sharePoint">The upstream servers' sources: AnyFS.E2E's SharePointFixture.TryPrepare, one per farm that is up, and its GitLabFixture's.</param>
     public AnyFsHost(Machine host, Machine upstream, IReadOnlyList<SourceSpec>? sharePoint = null)
     {
         Host = host;

@@ -98,6 +98,17 @@ fake does on demand (throttling, a lapsed session or token, a server that ignore
 SharePoint's); `ANYFS_TEST_SHAREPOINT_FAKES=0` turns the fakes off, and the suites are then inconclusive without
 the lab.
 
+The GitLab source's unit tests run against `tests/AnyFS.Sources.Tests/FakeGitLab*.cs`, a stand-in made from what the
+lab's GitLab answered (REST v4 and GraphQL, paging, Git LFS, wikis, issues, merge requests, pipelines with zipped
+artifacts and ranges, releases, browser sessions, and the sign-in page with its Kerberos, LDAP and password forms),
+in-process, or on 127.0.0.1 with Windows' own sign-in for the Negotiate page (Windows only). `GitLabLiveTests` read the
+lab's GitLab ([provisioning/gitlab](../provisioning/gitlab/README.md)) when `ANYFS_TEST_GITLAB_URL` (the server, by name
+or address) and `ANYFS_TEST_GITLAB_TOKEN` (the tester's token) are set; `ANYFS_TEST_GITLAB_USER` (`sp_user@anyfs.lab`) and
+`_PASSWORD` add the Windows account's sign-in (LDAP, where Kerberos cannot get through), and `ANYFS_TEST_GITLAB_BROWSER=1`
+the web session with Edge (a profile of its own, signed in through GitLab's LDAP form). AnyFS.E2E's `gitlab` rows serve
+the seeded project's `files/e2e` from each host (a token by address on Linux and macOS, the tester's domain account by name,
+through Kerberos, on Windows; `ANYFS_E2E_GITLAB_SIGNIN=token` uses the token everywhere).
+
 ## Publish
 
 ```
