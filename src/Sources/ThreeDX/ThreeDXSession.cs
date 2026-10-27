@@ -76,7 +76,7 @@ internal sealed class ThreeDXSession : IDisposable
         _secrets = secrets;
         Space = settings.Space ?? throw new SourceFailedException("The 3DSpace URL is not an http or https address.", permanent: true);
         Method = settings.EffectiveSignIn;
-        Cookies = NewCookieContainer();
+        Cookies = CookieJar.New();
         var credentials = settings.Credentials();
         _handler = new SocketsHttpHandler
         {
@@ -149,8 +149,6 @@ internal sealed class ThreeDXSession : IDisposable
 
     /// <summary>How the source signed in, for messages ("with Microsoft Edge", "single sign-on", "as CONTOSO\name").</summary>
     public string How { get; private set; } = "";
-
-    public static CookieContainer NewCookieContainer() => new(capacity: 3000, perDomainCapacity: 300, maxCookieSize: 64 * 1024);
 
     private static void Browserlike(HttpClient http)
     {
@@ -270,7 +268,7 @@ internal sealed class ThreeDXSession : IDisposable
 
         if (result.SignedIn)
         {
-            Replace(Cookies, jar);
+            CookieJar.Replace(Cookies, jar);
             NewSessions();
             if (!await AnswersAsync(Space, ct).ConfigureAwait(false) && await FlowAsync(Space, ct).ConfigureAwait(false) is { SignedIn: false } handOver)
             {
@@ -311,7 +309,7 @@ internal sealed class ThreeDXSession : IDisposable
         }
 
         var cookies = await browser.SignInAsync(interactive, progress, ct).ConfigureAwait(false);
-        Add(Cookies, cookies);
+        CookieJar.Add(Cookies, cookies);
         if (!await AnswersAsync(Space, ct).ConfigureAwait(false))
         {
             throw new SignInRequiredException($"{browser.BrowserName} signed in to {Space.Host}, but 3DSpace does not take its session from AnyFS (it sends AnyFS to the sign-in again)");
@@ -449,7 +447,7 @@ internal sealed class ThreeDXSession : IDisposable
             if (!result.SignedIn && Method == ThreeDXSignIn.WebSession && _allowBrowser && Browser().CanSignIn)
             {
                 _logger.LogInformation("3dx: {Path} could not be signed in to again without a browser ({Problem}); renewing the web session headless", service.AbsolutePath, result.Problem);
-                Add(Cookies, await Browser().SignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false));
+                CookieJar.Add(Cookies, await Browser().SignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false));
                 NewSessions();
                 result = await FlowAsync(service, ct).ConfigureAwait(false);
             }
@@ -521,7 +519,7 @@ internal sealed class ThreeDXSession : IDisposable
     /// <summary>Keeps the cookies: in the secret store for the next start, and for a source started from the dialog whose Test made them.</summary>
     public void Save()
     {
-        var json = Export(Cookies);
+        var json = CookieJar.Export(Cookies);
         Recent[Space.AbsoluteUri] = (json, DateTime.UtcNow);
         try
         {
@@ -533,112 +531,11 @@ internal sealed class ThreeDXSession : IDisposable
         }
     }
 
-    public static void Add(CookieContainer jar, IEnumerable<SessionCookie> cookies)
-    {
-        foreach (var c in cookies)
-        {
-            try
-            {
-                jar.Add(new Cookie(c.Name, c.Value, string.IsNullOrEmpty(c.Path) ? "/" : c.Path, c.Domain) { Secure = c.Secure, HttpOnly = c.HttpOnly });
-            }
-            catch (CookieException)
-            {
-                // a cookie .NET will not hold (a name or value it refuses): the session goes without it
-            }
-        }
-    }
-
-    /// <summary>The cookies of <paramref name="from"/> in place of all of <paramref name="into"/>'s: a new sign-in's, which those of before would only get in the way of.</summary>
-    internal static void Replace(CookieContainer into, CookieContainer from)
-    {
-        foreach (Cookie old in into.GetAllCookies())
-        {
-            old.Expired = true;
-        }
-
-        foreach (Cookie c in from.GetAllCookies())
-        {
-            try
-            {
-                into.Add(c);
-            }
-            catch (CookieException)
-            {
-                // a cookie the session's jar will not hold: the session goes without it
-            }
-        }
-    }
-
-    internal static string Export(CookieContainer jar)
-    {
-        using var buffer = new MemoryStream();
-        using (var json = new Utf8JsonWriter(buffer))
-        {
-            json.WriteStartArray();
-            foreach (Cookie c in jar.GetAllCookies())
-            {
-                if (c.Expired)
-                {
-                    continue;
-                }
-
-                json.WriteStartObject();
-                json.WriteString("name", c.Name);
-                json.WriteString("value", c.Value);
-                json.WriteString("domain", c.Domain);
-                json.WriteString("path", c.Path);
-                json.WriteBoolean("secure", c.Secure);
-                json.WriteBoolean("httpOnly", c.HttpOnly);
-                if (c.Expires != DateTime.MinValue)
-                {
-                    json.WriteString("expires", c.Expires.ToUniversalTime());
-                }
-
-                json.WriteEndObject();
-            }
-
-            json.WriteEndArray();
-        }
-
-        return Encoding.UTF8.GetString(buffer.ToArray());
-    }
-
-    /// <summary>The cookies <see cref="Export"/> wrote, into the session's jar (those since expired left out); how many.</summary>
+    /// <summary>The cookies kept from before, into the session's jar (those since expired left out); how many.</summary>
     private int Import(string text)
     {
-        var count = 0;
-        try
-        {
-            using var doc = JsonDocument.Parse(text);
-            foreach (var c in doc.RootElement.EnumerateArray())
-            {
-                var expires = c.TryGetProperty("expires", out var e) && e.TryGetDateTime(out var when) ? when : DateTime.MinValue;
-                if (expires != DateTime.MinValue && expires < DateTime.UtcNow)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    var cookie = new Cookie(c.GetProperty("name").GetString()!, c.GetProperty("value").GetString() ?? "", c.GetProperty("path").GetString() ?? "/", c.GetProperty("domain").GetString() ?? Space.Host)
-                    {
-                        Secure = c.GetProperty("secure").GetBoolean(),
-                        HttpOnly = c.GetProperty("httpOnly").GetBoolean(),
-                    };
-                    if (expires != DateTime.MinValue)
-                    {
-                        cookie.Expires = expires;
-                    }
-
-                    Cookies.Add(cookie);
-                    count++;
-                }
-                catch (CookieException)
-                {
-                }
-            }
-        }
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException or KeyNotFoundException)
+        var count = CookieJar.Import(Cookies, text, Space.Host);
+        if (count < 0)
         {
             _logger.LogInformation("3dx: the session kept from before could not be read; signing in afresh");
         }

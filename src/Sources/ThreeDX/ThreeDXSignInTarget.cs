@@ -86,8 +86,8 @@ internal sealed class ThreeDXSignInTarget(Uri space, bool trustAnyCertificate, s
     /// <summary>A client that sends the browser's cookies and follows no redirects (a redirect means not signed in).</summary>
     private HttpClient Client(IReadOnlyList<SessionCookie> cookies)
     {
-        var jar = ThreeDXSession.NewCookieContainer();
-        ThreeDXSession.Add(jar, cookies);
+        var jar = CookieJar.New();
+        CookieJar.Add(jar, cookies);
         var handler = new SocketsHttpHandler { CookieContainer = jar, UseCookies = true, AllowAutoRedirect = false, AutomaticDecompression = DecompressionMethods.All };
         if (trustAnyCertificate)
         {
