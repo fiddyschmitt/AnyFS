@@ -21,7 +21,10 @@ internal static class GitLabSeed
         fake.AddUser("other", "Someone Else", OtherToken);
         var anyfs = fake.AddGroup("anyfs", "AnyFS", null, tester);
         var tools = fake.AddGroup("tools", "Tools", anyfs);
-        fake.AddProject(anyfs, "docs", "Docs").Commit("main", new Dictionary<string, byte[]> { ["README.md"] = Bytes("# Docs\n") });
+        var docs = fake.AddProject(anyfs, "docs", "Docs");
+        docs.Commit("main", new Dictionary<string, byte[]> { ["README.md"] = Bytes("# Docs\n") });
+        Wiki(docs);
+        anyfs.WikiPages.Add(new FakeGitLab.WikiPage("handbook", "handbook", "markdown", "# Handbook\n\nThe group's own wiki.\n"));
         App(fake.AddProject(tools, "app", "App"));
         fake.AddProject(tools, "empty", "Empty");
 
@@ -63,6 +66,22 @@ internal static class GitLabSeed
         app.Commit("Feature", new Dictionary<string, byte[]> { ["capital.txt"] = Bytes("the branch named Feature\n") }, FirstCommit.AddDays(3));
         app.Tags["release/2.0"] = app.Branches["feature/x"];
         app.Branches["main"] = first;
+    }
+
+    public const string DiagramHash = "0123456789abcdef0123456789abcdef";
+    public const string ShotHash = "fedcba9876543210fedcba9876543210";
+    public static readonly byte[] Diagram = Enumerable.Range(0, 463).Select(i => (byte)i).ToArray();
+
+    /// <summary>The docs project's wiki, as the lab's seed makes it: nested pages, another markup, a title in another script, two attachments.</summary>
+    private static void Wiki(FakeGitLab.Project docs)
+    {
+        docs.WikiPages.Add(new FakeGitLab.WikiPage("home", "home", "markdown", $"# Welcome\n\nThe AnyFS lab's wiki. Start with [installing](guides/install).\n\n![A diagram](uploads/{DiagramHash}/diagram.png)\n"));
+        docs.WikiPages.Add(new FakeGitLab.WikiPage("guides/install", "install", "markdown", "Download the build for your system.\n"));
+        docs.WikiPages.Add(new FakeGitLab.WikiPage("guides/install/linux", "linux", "markdown", $"`chmod +x anyfs`, then run it.\n\n![The terminal](uploads/{ShotHash}/shot%201.png)\n"));
+        docs.WikiPages.Add(new FakeGitLab.WikiPage("notes", "notes", "asciidoc", "= Notes\n\nSome *bold* text, in AsciiDoc.\n"));
+        docs.WikiPages.Add(new FakeGitLab.WikiPage("Ünïcödé-résumé", "Ünïcödé résumé", "markdown", "A page whose title is not ASCII: 日本語.\n"));
+        docs.WikiUploads[$"{DiagramHash}/diagram.png"] = Diagram;
+        docs.WikiUploads[$"{ShotHash}/shot 1.png"] = Bytes("a screenshot");
     }
 
     public static byte[] Bytes(string text) => Encoding.UTF8.GetBytes(text);
@@ -418,6 +437,99 @@ public class GitLabSourceTests
         StringAssert.Contains(server.Message, "(5 projects)");
         var refused = await GitLabPlugin.TestAsync(GitLabSeed.Settings(App(fake), "glpat-wrong"), new Progress<string>(), fake.StandIn(), CancellationToken.None);
         Assert.IsFalse(refused.Success);
+    }
+}
+
+/// <summary>A project's and a group's wiki (spec 7.8), with an access token: GitLab serves the attachments to no token.</summary>
+[TestClass]
+public class GitLabWikiTests
+{
+    private static async Task<GitLabSource> StartAsync(FakeGitLab fake, string path, Action<GitLabSettings>? change = null)
+    {
+        var settings = GitLabSeed.Settings(fake.Server + path);
+        change?.Invoke(settings);
+        var source = new GitLabSource(settings, fake.StandIn());
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        return source;
+    }
+
+    private static async Task<string[]> NamesAsync(ISource source, string path)
+    {
+        var names = new List<string>();
+        await foreach (var e in source.ListAsync(path, CancellationToken.None))
+        {
+            names.Add(e.Name);
+        }
+
+        return names.ToArray();
+    }
+
+    private static async Task<string> TextAsync(ISource source, string path)
+    {
+        await using var file = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
+        var buffer = new byte[file.Length];
+        await file.ReadFullyAsync(0, buffer, CancellationToken.None);
+        return Encoding.UTF8.GetString(buffer);
+    }
+
+    [TestMethod]
+    public async Task PagesAreFilesOfTheirMarkupNestedByTheirSlugs()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake, "/anyfs/docs");
+        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "wiki" }, await NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "guides", "home.md", "notes.asciidoc", "Ünïcödé-résumé.md" }, await NamesAsync(source, "wiki"), "no attachments folder with a token");
+        CollectionAssert.AreEqual(new[] { "install.md", "install" }, await NamesAsync(source, "wiki/guides"), "a page beside the folder of the pages under it");
+        CollectionAssert.AreEqual(new[] { "linux.md" }, await NamesAsync(source, "wiki/guides/install"));
+    }
+
+    [TestMethod]
+    public async Task APageStartsWithItsAddressAndItsTitleUnlessItHasOne()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake, "/anyfs/docs");
+        Assert.AreEqual($"{fake.Server}/anyfs/docs/-/wikis/guides/install\n\n# install\n\nDownload the build for your system.\n", await TextAsync(source, "wiki/guides/install.md"));
+        var home = await TextAsync(source, "wiki/home.md");
+        Assert.IsTrue(home.StartsWith($"{fake.Server}/anyfs/docs/-/wikis/home\n\n# Welcome\n", StringComparison.Ordinal), home);
+        Assert.AreEqual($"// {fake.Server}/anyfs/docs/-/wikis/notes\n= Notes\n\nSome *bold* text, in AsciiDoc.\n", await TextAsync(source, "wiki/notes.asciidoc"));
+        StringAssert.Contains(await TextAsync(source, "wiki/Ünïcödé-résumé.md"), "# Ünïcödé résumé");
+    }
+
+    [TestMethod]
+    public async Task WithATokenTheEmbeddedFilesLinksPointAtGitLab()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake, "/anyfs/docs");
+        StringAssert.Contains(await TextAsync(source, "wiki/home.md"), $"![A diagram]({fake.Server}/anyfs/docs/-/wikis/uploads/{GitLabSeed.DiagramHash}/diagram.png)");
+        StringAssert.Contains(await TextAsync(source, "wiki/guides/install/linux.md"), $"({fake.Server}/anyfs/docs/-/wikis/uploads/{GitLabSeed.ShotHash}/shot%201.png)");
+    }
+
+    [TestMethod]
+    public async Task AGroupsWikiShowsWhereTheServerHasGroupWikis()
+    {
+        var fake = GitLabSeed.Lab();
+        await using (var free = await StartAsync(fake, "/anyfs"))
+        {
+            CollectionAssert.AreEqual(new[] { "tools", "docs" }, await NamesAsync(free, ""), "a Free server has no group wikis");
+        }
+
+        fake.Premium = true;
+        await using var premium = await StartAsync(fake, "/anyfs");
+        CollectionAssert.AreEqual(new[] { "wiki", "tools", "docs" }, await NamesAsync(premium, ""));
+        Assert.AreEqual($"{fake.Server}/groups/anyfs/-/wikis/handbook\n\n# Handbook\n\nThe group's own wiki.\n", await TextAsync(premium, "wiki/handbook.md"));
+    }
+
+    [TestMethod]
+    public async Task AProjectWithoutPagesOrWithTheSettingOffShowsNoWiki()
+    {
+        var fake = GitLabSeed.Lab();
+        await using (var app = await StartAsync(fake, "/anyfs/tools/app"))
+        {
+            CollectionAssert.AreEqual(new[] { "files", "branches", "tags" }, await NamesAsync(app, ""), "a wiki with no pages");
+        }
+
+        await using var off = await StartAsync(fake, "/anyfs/docs", s => s.Wiki = false);
+        CollectionAssert.AreEqual(new[] { "files", "branches", "tags" }, await NamesAsync(off, ""));
     }
 }
 

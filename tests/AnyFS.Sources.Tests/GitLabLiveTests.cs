@@ -111,6 +111,20 @@ public class GitLabLiveTests
         Assert.AreEqual(ScopeKind.Server, source.Scope);
     }
 
+    [TestMethod]
+    public async Task TheDocsWikiIsThereAsItsPagesMarkup()
+    {
+        var (url, token) = Server();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(url + "/anyfs/docs", token, context);
+        CollectionAssert.AreEqual(new[] { "guides", "home.md", "notes.asciidoc", "Ünïcödé-résumé.md" }, (await ListAsync(source, "wiki")).Select(e => e.Name).ToArray());
+        CollectionAssert.AreEqual(new[] { "install.md", "install" }, (await ListAsync(source, "wiki/guides")).Select(e => e.Name).ToArray());
+        var home = Encoding.UTF8.GetString(await ReadAsync(source, "wiki/home.md"));
+        StringAssert.StartsWith(home, $"{url}/anyfs/docs/-/wikis/home\n\n# Welcome\n");
+        StringAssert.Contains(home, $"{url}/anyfs/docs/-/wikis/uploads/", "with a token the attachment's link points at GitLab");
+        StringAssert.StartsWith(Encoding.UTF8.GetString(await ReadAsync(source, "wiki/notes.asciidoc")), $"// {url}/anyfs/docs/-/wikis/notes\n= Notes");
+    }
+
     private static async Task<byte[]> ReadAsync(ISource source, string path)
     {
         await using var file = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);

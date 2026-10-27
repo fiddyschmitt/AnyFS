@@ -98,6 +98,10 @@ internal sealed partial class FakeGitLab
         public string FullPath => Parent is null ? Path : Parent.FullPath + "/" + Path;
 
         public HashSet<long> Members { get; } = [];
+
+        public List<WikiPage> WikiPages { get; } = [];
+
+        public Dictionary<string, byte[]> WikiUploads { get; } = new(StringComparer.Ordinal);
     }
 
     public sealed class Project(FakeGitLab owner, long id, string path, string name, string namespacePath, Group? group)
@@ -131,6 +135,11 @@ internal sealed partial class FakeGitLab
         public bool Wiki { get; set; } = true;
 
         public bool Pipelines { get; set; } = true;
+
+        public List<WikiPage> WikiPages { get; } = [];
+
+        /// <summary>The wiki's attachments by "hash/name".</summary>
+        public Dictionary<string, byte[]> WikiUploads { get; } = new(StringComparer.Ordinal);
 
         public DateTimeOffset Created { get; } = new(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
 
@@ -367,6 +376,13 @@ internal sealed partial class FakeGitLab
                 return FindGroup(user, id) is { } parent
                     ? Paged(r, _groups.Where(g => g.Parent == parent).OrderBy(g => g.Path, StringComparer.Ordinal).Select(GroupJson))
                     : Response.NotFound("404 Group Not Found");
+            case ["groups", var id, "wikis"]:
+                if (FindGroup(user, id) is not { } wikiGroup)
+                {
+                    return Response.NotFound("404 Group Not Found");
+                }
+
+                return Premium ? Response.Json(WikiJson(wikiGroup.WikiPages, r)) : Response.NotFound("404 Not Found");
             case ["groups", var id, "projects"]:
                 if (FindGroup(user, id) is not { } owner)
                 {
@@ -596,12 +612,31 @@ internal sealed partial class FakeGitLab
         return new Uri($"{url.GetLeftPart(UriPartial.Path)}?{string.Join('&', query)}");
     }
 
-    /// <summary>The web pages (the sign-in): none yet.</summary>
-    private static Response? AnswerPages(Request r, string path)
+    /// <summary>
+    /// The web pages: a wiki's attachments (<c>/&lt;project&gt;/-/wikis/uploads/&lt;hash&gt;/&lt;file&gt;</c>, a group's under
+    /// <c>/groups/</c>), which GitLab serves to a browser session only and sends anything else to the sign-in page for.
+    /// </summary>
+    private Response? AnswerPages(Request r, string path)
     {
-        _ = r;
-        _ = path;
-        return null;
+        var marker = path.IndexOf("/-/wikis/uploads/", StringComparison.Ordinal);
+        if (marker < 0)
+        {
+            return null;
+        }
+
+        var owner = Uri.UnescapeDataString(path[1..marker]);
+        var file = Uri.UnescapeDataString(path[(marker + "/-/wikis/uploads/".Length)..]);
+        if (SessionUser(r) is not { } user)
+        {
+            return new Response(302, Encoding.UTF8.GetBytes("<html>sign in</html>"), "text/html", new() { ["Location"] = $"{Server}/users/sign_in" });
+        }
+
+        var uploads = owner.StartsWith("groups/", StringComparison.Ordinal)
+            ? _groups.FirstOrDefault(g => g.FullPath == owner["groups/".Length..] && Sees(user, g))?.WikiUploads
+            : _projects.FirstOrDefault(p => p.FullPath == owner && Sees(user, p))?.WikiUploads;
+        return uploads is not null && uploads.TryGetValue(file, out var bytes)
+            ? new Response(200, bytes, "application/octet-stream", new() { ["Content-Length"] = bytes.Length.ToString(CultureInfo.InvariantCulture) })
+            : new Response(404, Encoding.UTF8.GetBytes("<html>not found</html>"), "text/html");
     }
 
     /// <summary>The account a browser session's cookie signs in as: none yet.</summary>
@@ -611,12 +646,36 @@ internal sealed partial class FakeGitLab
         return null;
     }
 
-    /// <summary>A project's features beyond its repository: none yet.</summary>
+    /// <summary>A project's features beyond its repository: its wiki.</summary>
     private static Response ProjectFeatures(User user, Project project, Request r, string[] rest)
     {
-        _ = (user, project, r, rest);
-        return Response.NotFound("404 Not Found");
+        _ = user;
+        switch (rest)
+        {
+            case ["wikis"]:
+                return project.Wiki ? Response.Json(WikiJson(project.WikiPages, r)) : Response.Message(403, "403 Forbidden");
+            default:
+                return Response.NotFound("404 Not Found");
+        }
     }
+
+    private static JsonArray WikiJson(List<WikiPage> pages, Request r)
+        => new(pages.Select(p =>
+        {
+            var page = new JsonObject { ["slug"] = p.Slug, ["title"] = p.Title, ["format"] = p.Format, ["encoding"] = "UTF-8" };
+            if (r.Q("with_content") is "1" or "true")
+            {
+                page["content"] = p.Content;
+            }
+
+            return (JsonNode)page;
+        }).ToArray());
+
+    /// <summary>A wiki page as the fake keeps it.</summary>
+    public sealed record WikiPage(string Slug, string Title, string Format, string Content);
+
+    /// <summary>Whether group wikis answer (GitLab Premium); on Free they are 404.</summary>
+    public bool Premium { get; set; }
 
     private static JsonObject UserJson(User u) => new() { ["id"] = u.Id, ["username"] = u.Username, ["name"] = u.Name, ["state"] = "active" };
 

@@ -48,6 +48,10 @@ public sealed class GitLabSettings
         Hint = "In each project, a folder of every branch and one of every tag, each the repository as it stands there, beside files (the default branch).")]
     public bool BranchesAndTags { get; set; } = true;
 
+    [Setting("Wiki", Order = 6,
+        Hint = "In each project with a wiki (and each group with one, GitLab Premium), its pages as files of their own markup (Markdown, AsciiDoc...), the page's address on the first line, and the files they embed, where the sign-in is a browser session or a Windows account (GitLab serves those to no token).")]
+    public bool Wiki { get; set; } = true;
+
     [Setting("Browser", Advanced = true, Order = 10, Kind = SettingKind.FilePath,
         Hint = "The Edge, Chrome or Chromium to open for the web session's sign-in. Leave empty to find one automatically. AnyFS opens it with a profile of its own, never your everyday browser's; where a policy keeps AnyFS from driving it, the sign-in goes through Selenium WebDriver (your default browser, then Firefox and the others).")]
     public string? BrowserPath { get; set; }

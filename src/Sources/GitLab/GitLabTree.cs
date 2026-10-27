@@ -136,17 +136,26 @@ internal sealed class GroupFolder(GlGroup group, string name) : GlFolder(name, n
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
         var (subgroups, projects) = await source.GroupContentsAsync(Group, ct).ConfigureAwait(false);
-        var raw = subgroups.Select(g => g.Path).Concat(projects.Select(p => p.Path)).ToList();
+
+        // a group's own wiki (GitLab Premium) first, where it has one; a subgroup or project named wiki is numbered
+        var wiki = source.Settings.Wiki && await source.GroupHasWikiAsync(Group, ct).ConfigureAwait(false);
+        var raw = (wiki ? ["wiki"] : Array.Empty<string>()).Concat(subgroups.Select(g => g.Path)).Concat(projects.Select(p => p.Path)).ToList();
         var names = GitLabNames.Unique(raw);
         var children = new List<GlNode>(raw.Count);
-        for (var i = 0; i < subgroups.Count; i++)
+        var at = 0;
+        if (wiki)
         {
-            children.Add(new GroupFolder(subgroups[i], names[i]));
+            children.Add(new WikiFolder(WikiOwner.Of(Group), "", names[at++]));
         }
 
-        for (var i = 0; i < projects.Count; i++)
+        foreach (var subgroup in subgroups)
         {
-            children.Add(new ProjectFolder(projects[i], names[subgroups.Count + i]));
+            children.Add(new GroupFolder(subgroup, names[at++]));
+        }
+
+        foreach (var project in projects)
+        {
+            children.Add(new ProjectFolder(project, names[at++]));
         }
 
         return children;
@@ -164,11 +173,6 @@ internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(n
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
         var project = await source.ProjectAsync(Project.Id, ct).ConfigureAwait(false);
-        return Sections(source, project);
-    }
-
-    public static IReadOnlyList<GlNode> Sections(GitLabSource source, GlProject project)
-    {
         var settings = source.Settings;
         var sections = new List<GlNode>();
         if (project.Repository)
@@ -179,6 +183,12 @@ internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(n
                 sections.Add(new RefsFolder(project, RefKind.Branch, "", "branches", project.LastActivity));
                 sections.Add(new RefsFolder(project, RefKind.Tag, "", "tags", project.LastActivity));
             }
+        }
+
+        // GitLab turns every project's wiki on; only one with pages shows
+        if (project.Wiki && settings.Wiki && await source.HasWikiPagesAsync(WikiOwner.Of(project), ct).ConfigureAwait(false))
+        {
+            sections.Add(new WikiFolder(WikiOwner.Of(project), "", "wiki"));
         }
 
         return sections;

@@ -15,7 +15,7 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
 
     public string DisplayName => "GitLab";
 
-    public string Description => "A GitLab server, group or project (GitLab.com or your own): each project's repository on its default branch, on every branch and at every tag. Read-only.";
+    public string Description => "A GitLab server, group or project (GitLab.com or your own): each project's repository on its default branch, on every branch and at every tag; its wiki. Read-only.";
 
     public string TypeFolder => "gitlab";
 

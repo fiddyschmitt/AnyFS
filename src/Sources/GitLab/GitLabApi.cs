@@ -156,9 +156,12 @@ internal sealed class GitLabApi : IDisposable
     }
 
     /// <summary>A HEAD request's headers (relative to <c>/api/v4/</c>), by name in either case.</summary>
-    public async Task<Dictionary<string, string>> HeadAsync(string relative, CancellationToken ct)
+    public Task<Dictionary<string, string>> HeadAsync(string relative, CancellationToken ct) => HeadAsync(new Uri(Address.Api, relative), relative, ct);
+
+    /// <summary>A HEAD request's headers (any address of the server: a page's), by name in either case.</summary>
+    public async Task<Dictionary<string, string>> HeadAsync(Uri url, string what, CancellationToken ct)
     {
-        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Head, new Uri(Address.Api, relative)), relative, ct).ConfigureAwait(false);
+        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Head, url), what, ct).ConfigureAwait(false);
         return response.Headers.Concat(response.Content.Headers).ToDictionary(h => h.Key, h => string.Join(", ", h.Value), StringComparer.OrdinalIgnoreCase);
     }
 
