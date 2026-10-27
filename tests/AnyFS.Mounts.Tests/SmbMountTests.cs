@@ -1,23 +1,26 @@
-using System.Buffers.Binary;
 using System.Net;
-using System.Net.Http.Json;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 using System.Text;
-using System.Text.Json;
 using AnyFS.Mounts.Smb;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
+using LibSmb.Protocol;
+using LibSmb.Tests;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Mounts.Tests;
 
 /// <summary>
-/// Spec 8.2 and 16.1: the VFS endpoint against the portable-smb-server contract (with the token and per-file readOnly),
-/// and the real server started over it when its binary is around (tools/go-servers/&lt;rid&gt;/ or ANYFS_SMB_SERVER).
+/// Spec 8.2 and 16.1: the SMB mount, LibSmb serving collections in this process, signed in to and used over the wire with
+/// LibSmb's test client: shares sharing a port, reads and writes through the VFS, read-only collections and files, a
+/// failed read, the stats; and on Windows 11 24H2 the drive letter, through Windows' own client.
 /// </summary>
 [TestClass]
 public class SmbMountTests
 {
+    private const string User = "user";
+    private const string Password = "password";
     private readonly List<IAsyncDisposable> _cleanup = [];
 
     [TestCleanup]
@@ -29,225 +32,254 @@ public class SmbMountTests
         }
     }
 
-    private static MemorySource Tree() => new MemorySource()
+    private static MemorySource Tree(bool canWrite = true) => new MemorySource(canWrite)
         .AddFile("readme.txt", "hello readme")
         .AddFile("docs/a.txt", "aaa")
-        .AddFile("medium.bin", Enumerable.Range(0, 50_000).Select(i => (byte)(i * 31 % 253)).ToArray(), new DateTimeOffset(2026, 10, 1, 12, 0, 0, TimeSpan.Zero))
+        .AddFile("medium.bin", Medium, new DateTimeOffset(2026, 10, 1, 12, 0, 0, TimeSpan.Zero))
         .AddDirectory("emptydir");
+
+    private static byte[] Medium { get; } = [.. Enumerable.Range(0, 50_000).Select(i => (byte)(i * 31 % 253))];
 
     private sealed record Collection(string Name) : ICollectionInfo
     {
         public Guid Id { get; } = Guid.NewGuid();
     }
 
-    private async Task<(VfsEndpoint Endpoint, HttpClient Client, MemorySource Source)> EndpointAsync(bool readOnly = false, bool sourceCanWrite = true, string collection = "work")
+    /// <summary>A collection mounted over SMB on a free port with the test login; the mount, its context and the port.</summary>
+    private async Task<(IMount Mount, TestMountContext Context, int Port)> MountAsync(IVirtualFileSystem fs, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool guest = false)
     {
-        var source = new MemorySource(canWrite: sourceCanWrite)
-            .AddFile("readme.txt", "hello readme")
-            .AddFile("docs/a.txt", "aaa")
-            .AddDirectory("emptydir");
+        var provider = new SmbMountProvider();
+        var settings = (SmbMountSettings)provider.CreateDefaultSettings(new Collection(collection));
+        settings.Port = port ?? FreePort();
+        settings.Guest = guest;
+        settings.User = guest ? null : User;
+        settings.Password = guest ? null : Password;
+        var mount = provider.CreateMount(settings, new Collection(collection));
+        var context = new TestMountContext(collection, "smb", shareWith: shareWith);
+        await mount.StartAsync(fs, context, CancellationToken.None);
+        _cleanup.Add(mount);
+        return (mount, context, settings.Port);
+    }
+
+    private static async Task<SingleSourceVfs> VfsAsync(MemorySource source, string collection = "work", bool readOnly = false)
+    {
         await source.InitialiseAsync(new TestSourceContext(collection), CancellationToken.None);
-        var endpoint = await VfsEndpoint.StartAsync(NullLogger.Instance, CancellationToken.None);
-        _cleanup.Add(endpoint);
-        var context = new TestMountContext(collection, "smb");
-        endpoint.Register(collection, new SingleSourceVfs(source, collection, readOnly), context.Stats);
-        var client = new HttpClient { BaseAddress = new Uri(endpoint.BaseUrlFor(collection) + "/") };
-        client.DefaultRequestHeaders.Add(VfsEndpoint.TokenHeader, endpoint.Token);
-        _cleanup.Add(new ClientDisposer(client));
-        return (endpoint, client, source);
+        return new SingleSourceVfs(source, collection, readOnly);
     }
 
-    [TestMethod]
-    public async Task EndpointRequiresTheToken()
+    private async Task<(SmbTestClient Client, uint Tree)> ConnectAsync(int port, string share = "work", string? user = User, string? password = Password)
     {
-        var (endpoint, client, _) = await EndpointAsync();
-        using var bare = new HttpClient { BaseAddress = client.BaseAddress };
-        Assert.AreEqual(HttpStatusCode.Unauthorized, (await bare.GetAsync("capabilities")).StatusCode, "no token");
-        bare.DefaultRequestHeaders.Add(VfsEndpoint.TokenHeader, "wrong");
-        Assert.AreEqual(HttpStatusCode.Unauthorized, (await bare.GetAsync("stat?path=")).StatusCode, "wrong token");
-        Assert.AreEqual(HttpStatusCode.OK, (await client.GetAsync("capabilities")).StatusCode);
-        Assert.AreEqual(48, endpoint.Token.Length, "a per-launch random token");
+        var client = await SmbTestClient.SignInAsync(new IPEndPoint(IPAddress.Loopback, port), user, password);
+        _cleanup.Add(client);
+        return (client, await client.TreeConnectAsync(share));
     }
 
+    /// <summary>
+    /// The mount serves its collection in this process, signed in to with its login: listed and read over the wire. A second
+    /// collection on the port shares the server; a third with another login is refused; a collection unmounted is gone from
+    /// the server while the other carries on, and the last one takes the server with it.
+    /// </summary>
     [TestMethod]
-    public async Task EndpointSpeaksTheContract()
+    public async Task CollectionsOnAPortShareOneServerInThisProcess()
     {
-        var (_, client, source) = await EndpointAsync();
-        using var caps = JsonDocument.Parse(await client.GetStringAsync("capabilities"));
-        Assert.AreEqual("work", caps.RootElement.GetProperty("name").GetString());
-        Assert.IsFalse(caps.RootElement.GetProperty("readOnly").GetBoolean());
+        var (mount, context, port) = await MountAsync(await VfsAsync(Tree()));
+        Assert.IsNull(new SmbMountProvider().UnavailableReason, "always there: nothing to unpack or fetch");
+        Assert.IsGreaterThanOrEqualTo(2, mount.AccessPaths.Count, string.Join(" | ", mount.AccessPaths.Select(p => p.Value)));
+        StringAssert.Contains(mount.AccessPaths[0].Value, "localhost");
+        Assert.IsFalse(mount.AccessPaths.Any(p => p.Value.Contains(Password)), "the password never appears in an access path");
+        Assert.IsNotNull(mount.OpenAction);
+        if (OperatingSystem.IsWindows())
+        {
+            // no drive letter here, so Open is the device-less net use; it must drop a stale connection first so a
+            // changed password reconnects instead of failing with "incorrect password"
+            var command = mount.OpenAction as MountOpenAction.Command;
+            Assert.IsNotNull(command, mount.OpenAction!.GetType().Name);
+            CollectionAssert.AreEqual(new[] { "use", command.ThenOpen, "/delete" }, command.Reset!.ToList());
+        }
 
-        using var root = JsonDocument.Parse(await client.GetStringAsync("stat?path="));
-        Assert.IsTrue(root.RootElement.GetProperty("isDir").GetBoolean());
-        using var readme = JsonDocument.Parse(await client.GetStringAsync("stat?path=readme.txt"));
-        Assert.AreEqual("readme.txt", readme.RootElement.GetProperty("name").GetString());
-        Assert.AreEqual(12, readme.RootElement.GetProperty("size").GetInt64());
-        Assert.IsFalse(readme.RootElement.GetProperty("isDir").GetBoolean());
-        Assert.IsFalse(readme.RootElement.GetProperty("readOnly").GetBoolean());
-        Assert.AreEqual(HttpStatusCode.NotFound, (await client.GetAsync("stat?path=nope")).StatusCode);
+        var (client, tree) = await ConnectAsync(port);
+        CollectionAssert.AreEquivalent(new[] { "readme.txt", "docs", "medium.bin", "emptydir" }, await client.ListAsync(tree, ""));
+        CollectionAssert.AreEqual(Medium, await ReadAsync(client, tree, "medium.bin"));
+        Assert.IsTrue(client.Dialect is Dialect.Smb302, $"dialect 0x{client.Dialect:X4}");
 
-        using var list = JsonDocument.Parse(await client.GetStringAsync("list?path="));
-        var names = list.RootElement.GetProperty("entries").EnumerateArray().Select(e => e.GetProperty("name").GetString()).ToList();
-        CollectionAssert.AreEquivalent(new[] { "readme.txt", "docs", "emptydir" }, names);
+        var (second, _, _) = await MountAsync(await VfsAsync(new MemorySource().AddFile("b.txt", "b"), "other"), "other", port, context);
+        Assert.AreEqual(1, context.SharedCount, "one server for both");
+        var (otherClient, otherTree) = await ConnectAsync(port, "other");
+        Assert.AreEqual("b", Encoding.UTF8.GetString(await ReadAsync(otherClient, otherTree, "b.txt")));
 
-        Assert.AreEqual("lo re", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=3&length=5")));
-        Assert.AreEqual(0, (await client.GetByteArrayAsync("read?path=readme.txt&offset=100&length=5")).Length, "past the end: nothing");
-        Assert.AreEqual(HttpStatusCode.BadRequest, (await client.GetAsync("read?path=readme.txt&offset=-1&length=5")).StatusCode);
+        var provider = new SmbMountProvider();
+        var different = (SmbMountSettings)provider.CreateDefaultSettings(new Collection("third"));
+        different.Port = port;
+        different.User = "someone-else";
+        different.Password = "pw";
+        var third = provider.CreateMount(different, new Collection("third"));
+        var refused = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => third.StartAsync(new SingleSourceVfs(new MemorySource(), "third"), new TestMountContext("third", "smb", shareWith: context), CancellationToken.None));
+        StringAssert.Contains(refused.Message, "same login");
 
-        Assert.AreEqual(HttpStatusCode.OK, (await client.PostAsync("create?path=new.txt&exclusive=true", null)).StatusCode);
-        Assert.AreEqual(HttpStatusCode.Conflict, (await client.PostAsync("create?path=new.txt&exclusive=true", null)).StatusCode, "exclusive on an existing file");
-        var written = await client.PutAsync("write?path=new.txt&offset=0", new ByteArrayContent("hello"u8.ToArray()));
-        Assert.AreEqual(HttpStatusCode.OK, written.StatusCode);
-        Assert.AreEqual(5, (await written.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("written").GetInt32());
-        Assert.AreEqual("hello", Encoding.UTF8.GetString(source.GetFile("new.txt")!));
-        Assert.AreEqual(HttpStatusCode.OK, (await client.PostAsync("truncate?path=new.txt&size=2", null)).StatusCode);
-        Assert.AreEqual("he", Encoding.UTF8.GetString(source.GetFile("new.txt")!));
-        Assert.AreEqual(HttpStatusCode.OK, (await client.PostAsync("chtimes?path=new.txt&modTime=2024-01-02T03:04:05Z", null)).StatusCode);
-        using var stat = JsonDocument.Parse(await client.GetStringAsync("stat?path=new.txt"));
-        Assert.AreEqual(new DateTimeOffset(2024, 1, 2, 3, 4, 5, TimeSpan.Zero), stat.RootElement.GetProperty("modTime").GetDateTimeOffset());
+        await second.StopAsync(CancellationToken.None);
+        Assert.AreEqual(Status.BadNetworkName, (await client.SendAsync(Command.TreeConnect, TreeConnectBody("other"))).Status, "the unmounted collection is no share now");
+        Assert.AreEqual(Status.NetworkNameDeleted, (await otherClient.CreateAsync(otherTree, "b.txt")).Status);
+        Assert.AreEqual("hello readme", Encoding.UTF8.GetString(await ReadAsync(client, tree, "readme.txt")), "the other collection carries on");
 
-        Assert.AreEqual(HttpStatusCode.OK, (await client.PostAsync("mkdir?path=made", null)).StatusCode);
-        Assert.AreEqual(HttpStatusCode.Conflict, (await client.PostAsync("mkdir?path=made", null)).StatusCode);
-        var rename = await client.PostAsJsonAsync("rename", new { from = "new.txt", to = "made/moved.txt", replace = false });
-        Assert.AreEqual(HttpStatusCode.OK, rename.StatusCode, await rename.Content.ReadAsStringAsync());
-        Assert.IsTrue(source.Exists("made/moved.txt"));
-        Assert.AreEqual(HttpStatusCode.Conflict, (await client.PostAsJsonAsync("rename", new { from = "readme.txt", to = "made/moved.txt", replace = false })).StatusCode, "target exists, no replace");
-        Assert.AreEqual(HttpStatusCode.Conflict, (await client.DeleteAsync("remove?path=made")).StatusCode, "not empty");
-        Assert.AreEqual(HttpStatusCode.OK, (await client.DeleteAsync("remove?path=made/moved.txt")).StatusCode);
-        Assert.AreEqual(HttpStatusCode.OK, (await client.DeleteAsync("remove?path=made")).StatusCode);
-        Assert.AreEqual(HttpStatusCode.NotFound, (await client.DeleteAsync("remove?path=made")).StatusCode);
-        Assert.AreEqual(HttpStatusCode.NotFound, (await client.GetAsync("statfs")).StatusCode, "a memory source reports no volume: the server uses a synthetic one");
-        Assert.AreEqual(HttpStatusCode.NotFound, (await client.GetAsync("nosuch?path=")).StatusCode);
+        await mount.StopAsync(CancellationToken.None);
+        using var probe = new TcpClient();
+        await Assert.ThrowsAsync<SocketException>(() => probe.ConnectAsync(IPAddress.Loopback, port), "the last mount takes the server with it");
     }
 
-    /// <summary>The endpoint keeps a read handle between /read requests (ReadHandles); a write, truncate, rename or delete through it must not leave a stale one.</summary>
+    /// <summary>
+    /// Writes go through the VFS: a new file, a folder, a rename, a delete; an OPEN_IF of an existing file opens it rather
+    /// than truncating it (as the Go server's VFS client did, through the endpoint's create), and an overwrite truncates.
+    /// </summary>
     [TestMethod]
-    public async Task ReadHandlesOutliveRequestsButNotWrites()
+    public async Task WritesGoThroughTheVfs()
     {
-        var (_, client, source) = await EndpointAsync();
-        Assert.AreEqual("hello", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=0&length=5")));
-        Assert.AreEqual(" readme", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=5&length=7")), "a second piece through the same handle");
+        var source = Tree();
+        var (_, _, port) = await MountAsync(await VfsAsync(source));
+        var (client, tree) = await ConnectAsync(port);
 
-        Assert.AreEqual(HttpStatusCode.OK, (await client.PutAsync("write?path=readme.txt&offset=0", new ByteArrayContent("HELLO"u8.ToArray()))).StatusCode);
-        Assert.AreEqual("HELLO readme", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=0&length=12")), "a read after a write sees the write");
+        var created = await client.OpenAsync(tree, "new.txt", write: true, disposition: Disposition.Create);
+        (await client.WriteAsync(tree, created, 0, "written"u8.ToArray())).EnsureSuccess();
+        (await client.CloseAsync(tree, created)).EnsureSuccess();
+        Assert.AreEqual("written", Encoding.UTF8.GetString(source.GetFile("new.txt")!));
 
-        Assert.AreEqual(HttpStatusCode.OK, (await client.PostAsync("truncate?path=readme.txt&size=5", null)).StatusCode);
-        Assert.AreEqual("HELLO", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=0&length=12")), "a read after a truncate sees the new length");
+        var openIf = await client.OpenAsync(tree, "readme.txt", write: true, disposition: Disposition.OpenIf);
+        (await client.WriteAsync(tree, openIf, 0, "HELLO"u8.ToArray())).EnsureSuccess();
+        (await client.CloseAsync(tree, openIf)).EnsureSuccess();
+        Assert.AreEqual("HELLO readme", Encoding.UTF8.GetString(source.GetFile("readme.txt")!), "OPEN_IF keeps what is there");
 
-        var rename = await client.PostAsJsonAsync("rename", new { from = "docs/a.txt", to = "readme.txt", replace = true });
-        Assert.AreEqual(HttpStatusCode.OK, rename.StatusCode, await rename.Content.ReadAsStringAsync());
-        Assert.AreEqual("aaa", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=0&length=12")), "a read after a rename over the file sees the other file");
+        var overwrite = await client.OpenAsync(tree, "docs/a.txt", write: true, disposition: Disposition.OverwriteIf);
+        (await client.WriteAsync(tree, overwrite, 0, "b"u8.ToArray())).EnsureSuccess();
+        (await client.CloseAsync(tree, overwrite)).EnsureSuccess();
+        Assert.AreEqual("b", Encoding.UTF8.GetString(source.GetFile("docs/a.txt")!), "OVERWRITE_IF truncates");
 
-        Assert.AreEqual(HttpStatusCode.OK, (await client.DeleteAsync("remove?path=readme.txt")).StatusCode);
-        Assert.AreEqual(HttpStatusCode.NotFound, (await client.GetAsync("read?path=readme.txt&offset=0&length=5")).StatusCode, "a read after a delete finds nothing");
-        Assert.IsFalse(source.Exists("readme.txt"));
+        var folder = SmbTestClient.FileIdOf((await client.CreateAsync(tree, "made", 0x00100081, Disposition.Create, CreateOptions.DirectoryFile)).EnsureSuccess());
+        await client.CloseAsync(tree, folder);
+        Assert.IsTrue(source.Exists("made"));
+
+        var moving = SmbTestClient.FileIdOf((await client.CreateAsync(tree, "new.txt", Access.Delete | 0x00100080)).EnsureSuccess());
+        (await client.RenameAsync(tree, moving, @"made\moved.txt")).EnsureSuccess();
+        await client.CloseAsync(tree, moving);
+        Assert.AreEqual("written", Encoding.UTF8.GetString(source.GetFile("made/moved.txt")!));
+
+        var deleting = SmbTestClient.FileIdOf((await client.CreateAsync(tree, @"made\moved.txt", Access.Delete | 0x00100080)).EnsureSuccess());
+        (await client.DeleteOnCloseAsync(tree, deleting)).EnsureSuccess();
+        (await client.CloseAsync(tree, deleting)).EnsureSuccess();
+        Assert.IsFalse(source.Exists("made/moved.txt"));
     }
 
-    /// <summary>A handle that failed a read (a download that broke off) would fail every read after it while requests keep it in use.</summary>
+    /// <summary>A read-only collection is a read-only share: read-only access in TREE_CONNECT, writes refused, reads served.</summary>
     [TestMethod]
-    public async Task AReadThatFailsDropsTheKeptHandle()
+    public async Task AReadOnlyCollectionIsAReadOnlyShare()
     {
-        var source = new MemorySource().AddFile("readme.txt", "hello readme");
-        await source.InitialiseAsync(new TestSourceContext("work"), CancellationToken.None);
-        var endpoint = await VfsEndpoint.StartAsync(NullLogger.Instance, CancellationToken.None);
-        _cleanup.Add(endpoint);
-        var flaky = new FirstOpenFailsReads(new SingleSourceVfs(source, "work", false));
-        endpoint.Register("work", flaky, new TestMountContext("work", "smb").Stats);
-        using var client = new HttpClient { BaseAddress = new Uri(endpoint.BaseUrlFor("work") + "/") };
-        client.DefaultRequestHeaders.Add(VfsEndpoint.TokenHeader, endpoint.Token);
+        var source = Tree();
+        var (_, _, port) = await MountAsync(await VfsAsync(source, readOnly: true));
+        var client = await SmbTestClient.SignInAsync(new IPEndPoint(IPAddress.Loopback, port), User, Password);
+        _cleanup.Add(client);
+        var tree = await client.SendAsync(Command.TreeConnect, TreeConnectBody("work"));
+        Assert.AreEqual(Access.ReadExecute, Wire.U32(tree.Body, 12), "MaximalAccess");
+        Assert.AreEqual(Status.MediaWriteProtected, (await client.CreateAsync(tree.TreeId, "readme.txt", Access.FileWriteData, Disposition.OpenIf)).Status);
+        Assert.AreEqual(Status.MediaWriteProtected, (await client.CreateAsync(tree.TreeId, "new.txt", 0x00120089, Disposition.OpenIf)).Status);
+        Assert.AreEqual("hello readme", Encoding.UTF8.GetString(await ReadAsync(client, tree.TreeId, "readme.txt")));
+        Assert.IsFalse(source.Exists("new.txt"));
+    }
 
-        var failed = await client.GetAsync("read?path=readme.txt&offset=0&length=5");
-        Assert.AreEqual(HttpStatusCode.InternalServerError, failed.StatusCode);
-        StringAssert.Contains(await failed.Content.ReadAsStringAsync(), "the download broke off");
-        Assert.AreEqual("hello", Encoding.UTF8.GetString(await client.GetByteArrayAsync("read?path=readme.txt&offset=0&length=5")), "the next read opens the file again at once");
+    /// <summary>
+    /// A file read-only itself shows FILE_ATTRIBUTE_READONLY and refuses write opens; a file that is read-only only because
+    /// its source cannot write carries no flag (every copy of it would keep one), and its writes are refused when tried.
+    /// </summary>
+    [TestMethod]
+    public async Task ReadOnlyFilesAndReadOnlySources()
+    {
+        var source = Tree();
+        var (_, _, port) = await MountAsync(new ReadOnlyFile(await VfsAsync(source), "readme.txt"));
+        var (client, tree) = await ConnectAsync(port);
+        var readme = await client.OpenAsync(tree, "readme.txt");
+        var basic = await client.QueryInfoAsync(tree, readme, InfoType.File, FileInfoClass.Basic);
+        Assert.AreEqual(FileAttribute.ReadOnly, Wire.U32(basic.Body, 8 + 32));
+        Assert.AreEqual(Status.AccessDenied, (await client.CreateAsync(tree, "readme.txt", Access.FileWriteData)).Status);
+
+        var locked = Tree(canWrite: false);
+        var (_, _, lockedPort) = await MountAsync(await VfsAsync(locked, "locked"), "locked");
+        var (lockedClient, lockedTree) = await ConnectAsync(lockedPort, "locked");
+        var file = await lockedClient.OpenAsync(lockedTree, "readme.txt");
+        basic = await lockedClient.QueryInfoAsync(lockedTree, file, InfoType.File, FileInfoClass.Basic);
+        Assert.AreEqual(FileAttribute.Normal, Wire.U32(basic.Body, 8 + 32), "no flag for every copy to keep");
+        var write = await lockedClient.CreateAsync(lockedTree, "readme.txt", Access.FileWriteData);
+        Assert.IsTrue(Status.IsError(write.Status), $"0x{write.Status:X8}: the write open is refused");
+        Assert.AreEqual(Status.MediaWriteProtected, write.Status, "by the read-only source");
+    }
+
+    /// <summary>
+    /// A read that fails (a download that broke off) fails that request; the client opens the file again and reads afresh,
+    /// since an open's read-ahead goes with it.
+    /// </summary>
+    [TestMethod]
+    public async Task AFailedReadIsTriedAgainOnAFreshOpen()
+    {
+        var flaky = new FirstOpenFailsReads(await VfsAsync(new MemorySource().AddFile("readme.txt", "hello readme")));
+        var (_, _, port) = await MountAsync(flaky);
+        var (client, tree) = await ConnectAsync(port);
+        var first = await client.OpenAsync(tree, "readme.txt");
+        Assert.AreEqual(Status.Unsuccessful, (await client.ReadRawAsync(tree, first, 0, 5)).Status);
+        await client.CloseAsync(tree, first);
+        Assert.AreEqual("hello readme", Encoding.UTF8.GetString(await ReadAsync(client, tree, "readme.txt")));
         Assert.AreEqual(2, flaky.Opens);
     }
 
+    /// <summary>A sequential reader in 64 KiB pieces reaches the source in 1 MiB ones (the read-ahead WinFsp and FUSE have too).</summary>
     [TestMethod]
-    public async Task EndpointReportsReadOnlyThroughCapabilitiesAndPerFile()
+    public async Task SequentialReadsReachTheSourceInBigPieces()
     {
-        var (_, roClient, _) = await EndpointAsync(readOnly: true);
-        using var caps = JsonDocument.Parse(await roClient.GetStringAsync("capabilities"));
-        Assert.IsTrue(caps.RootElement.GetProperty("readOnly").GetBoolean(), "a read-only mount: the server never calls a write endpoint");
-        Assert.AreEqual(HttpStatusCode.Forbidden, (await roClient.PostAsync("create?path=x.txt", null)).StatusCode, "and if it did");
-
-        var (_, perFile, _) = await EndpointAsync(sourceCanWrite: false, collection: "ro");
-        using var caps2 = JsonDocument.Parse(await perFile.GetStringAsync("capabilities"));
-        Assert.IsFalse(caps2.RootElement.GetProperty("readOnly").GetBoolean(), "the mount is writable");
-        using var readme = JsonDocument.Parse(await perFile.GetStringAsync("stat?path=readme.txt"));
-        Assert.IsFalse(readme.RootElement.GetProperty("readOnly").GetBoolean(), "the source can't write, but the file is not read-only itself: no FILE_ATTRIBUTE_READONLY for every copy to keep");
-        using var list = JsonDocument.Parse(await perFile.GetStringAsync("list?path="));
-        Assert.IsFalse(list.RootElement.GetProperty("entries").EnumerateArray().Single(e => e.GetProperty("name").GetString() == "readme.txt").GetProperty("readOnly").GetBoolean());
-        Assert.AreEqual(HttpStatusCode.Forbidden, (await perFile.PutAsync("write?path=readme.txt&offset=0", new ByteArrayContent("x"u8.ToArray()))).StatusCode, "its writes are refused all the same");
-        Assert.AreEqual(HttpStatusCode.Forbidden, (await perFile.PostAsync("truncate?path=readme.txt&size=0", null)).StatusCode);
-        Assert.AreEqual(HttpStatusCode.Forbidden, (await perFile.PostAsync("create?path=new.txt", null)).StatusCode);
+        var big = new byte[3 << 20];
+        new Random(7).NextBytes(big);
+        var counting = new CountingReads(await VfsAsync(new MemorySource().AddFile("big.bin", big)));
+        var (_, _, port) = await MountAsync(counting);
+        var (client, tree) = await ConnectAsync(port);
+        CollectionAssert.AreEqual(big, await ReadAsync(client, tree, "big.bin"));
+        Assert.IsLessThanOrEqualTo(6, counting.Reads, $"{counting.Reads} reads of the source for 48 SMB READs");
     }
 
+    /// <summary>Every call into the VFS is a connection in the stats while it runs, and none is left counted after.</summary>
     [TestMethod]
-    public async Task TheRealServerStartsOverTheEndpointAndNegotiates()
+    public async Task CallsAreCountedAsConnections()
     {
-        var binary = FindServerBinary();
-        if (binary is null)
-        {
-            Assert.Inconclusive("portable-smb-server binary not found: run scripts/fetch-go-servers.ps1 or set ANYFS_SMB_SERVER");
-        }
+        var (_, context, port) = await MountAsync(await VfsAsync(Tree()));
+        var (client, tree) = await ConnectAsync(port);
+        await client.ListAsync(tree, "");
+        await ReadAsync(client, tree, "medium.bin");
+        Assert.AreEqual(0, context.ActiveConnections);
+    }
 
-        Environment.SetEnvironmentVariable(SmbServerBinary.EnvironmentVariable, binary);
-        try
-        {
-            var source = Tree();
-            await source.InitialiseAsync(new TestSourceContext("work"), CancellationToken.None);
-            var port = FreePort();
-            var provider = new SmbMountProvider();
-            Assert.IsNull(provider.UnavailableReason);
-            var settings = (SmbMountSettings)provider.CreateDefaultSettings(new Collection("work"));
-            settings.Port = port;
-            settings.User = "user";
-            settings.Password = "password";
-            var mount = provider.CreateMount(settings, new Collection("work"));
-            var context = new TestMountContext("work", "smb");
-            await mount.StartAsync(new SingleSourceVfs(source, "work"), context, CancellationToken.None);
-            _cleanup.Add(mount);
-            Assert.IsTrue(mount.AccessPaths.Count >= 2, string.Join(" | ", mount.AccessPaths.Select(p => p.Value)));
-            StringAssert.Contains(mount.AccessPaths[0].Value, "localhost");
-            Assert.IsFalse(mount.AccessPaths.Any(p => p.Value.Contains("password")), "the password never appears in an access path");
-            Assert.IsNotNull(mount.OpenAction);
+    /// <summary>The copies of portable-smb-server earlier builds unpacked into the provider's cache folder go at the next start.</summary>
+    [TestMethod]
+    public async Task OldServerCopiesAreRemoved()
+    {
+        var provider = new SmbMountProvider();
+        var settings = (SmbMountSettings)provider.CreateDefaultSettings(new Collection("work"));
+        settings.Port = FreePort();
+        settings.Password = Password;
+        var context = new TestMountContext("work", "smb");
+        Directory.CreateDirectory(context.ProviderCacheDirectory);
+        var old = Path.Combine(context.ProviderCacheDirectory, "portable-smb-server-0123abcd.exe");
+        var other = Path.Combine(context.ProviderCacheDirectory, "keep.txt");
+        await File.WriteAllTextAsync(old, "old");
+        await File.WriteAllTextAsync(other, "keep");
+        var mount = provider.CreateMount(settings, new Collection("work"));
+        await mount.StartAsync(await VfsAsync(Tree()), context, CancellationToken.None);
+        _cleanup.Add(mount);
+        Assert.IsFalse(File.Exists(old));
+        Assert.IsTrue(File.Exists(other));
+    }
 
-            if (OperatingSystem.IsWindows())
-            {
-                // no drive letter here, so Open is the device-less net use; it must drop a stale connection first so a
-                // changed password reconnects instead of failing with "incorrect password" (the reported bug)
-                var command = mount.OpenAction as MountOpenAction.Command;
-                Assert.IsNotNull(command, $"{mount.OpenAction!.GetType().Name}");
-                Assert.IsNotNull(command.Reset);
-                CollectionAssert.AreEqual(new[] { "use", command.ThenOpen, "/delete" }, command.Reset.ToList());
-                CollectionAssert.DoesNotContain(command.Reset.ToList(), "/y", "/delete without /y declines rather than forcing a user's open files shut");
-            }
-
-            var dialect = await NegotiateAsync(port);
-            Assert.IsTrue(dialect is 0x0202 or 0x0210 or 0x0300 or 0x0302, $"dialect 0x{dialect:X4}");
-
-            // a second collection on the same port shares the process and restarts it with both shares
-            var other = new MemorySource().AddFile("b.txt", "b");
-            await other.InitialiseAsync(new TestSourceContext("other"), CancellationToken.None);
-            var second = provider.CreateMount(settings, new Collection("other"));
-            await second.StartAsync(new SingleSourceVfs(other, "other"), new TestMountContext("other", "smb", shareWith: context), CancellationToken.None);
-            _cleanup.Add(second);
-            Assert.AreEqual(1, context.SharedCount, "one server process for both");
-            Assert.IsTrue((await NegotiateAsync(port)) is 0x0202 or 0x0210 or 0x0300 or 0x0302, "still up after the restart");
-
-            var different = (SmbMountSettings)provider.CreateDefaultSettings(new Collection("third"));
-            different.Port = port;
-            different.User = "someone-else";
-            different.Password = "pw";
-            var third = provider.CreateMount(different, new Collection("third"));
-            var ex = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => third.StartAsync(new SingleSourceVfs(other, "third"), new TestMountContext("third", "smb", shareWith: context), CancellationToken.None));
-            StringAssert.Contains(ex.Message, "same login");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(SmbServerBinary.EnvironmentVariable, null);
-        }
+    /// <summary>A port another program holds: the mount fails saying so.</summary>
+    [TestMethod]
+    public async Task APortInUseIsSaid()
+    {
+        using var holder = new TcpListener(IPAddress.Loopback, 0);
+        holder.Start();
+        var port = ((IPEndPoint)holder.LocalEndpoint).Port;
+        var ex = await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => MountAsync(new SingleSourceVfs(new MemorySource(), "work"), port: port));
+        StringAssert.Contains(ex.Message, $"cannot listen on 127.0.0.1:{port}");
     }
 
     [TestMethod]
@@ -279,7 +311,10 @@ public class SmbMountTests
         }
     }
 
-    /// <summary>Spec 8.2 with the opt-in letter: net use maps it to the running server and the stop removes it (needs Windows 11 24H2's /TCPPORT).</summary>
+    /// <summary>
+    /// Spec 8.2 with the opt-in letter, through Windows' own SMB client: net use maps it to the server, the share reads and
+    /// writes through it, and the stop removes it (Windows 11 24H2's /TCPPORT).
+    /// </summary>
     [TestMethod]
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public async Task ADriveLetterIsMappedWhileTheMountRunsOnWindows()
@@ -290,46 +325,42 @@ public class SmbMountTests
             return;
         }
 
-        var binary = FindServerBinary();
-        if (binary is null)
-        {
-            Assert.Inconclusive("portable-smb-server binary not found: run scripts/fetch-go-servers.ps1 or set ANYFS_SMB_SERVER");
-        }
-
         var letter = "ZYXWVUTSRQPONMLKJIHGFED".Select(c => c.ToString()).FirstOrDefault(l => !Directory.Exists(l + @":\") && WindowsDriveMapping.CurrentTarget(l + ":") is null);
         if (letter is null)
         {
             Assert.Inconclusive("no free drive letter");
         }
 
-        Environment.SetEnvironmentVariable(SmbServerBinary.EnvironmentVariable, binary);
-        try
-        {
-            var source = Tree();
-            await source.InitialiseAsync(new TestSourceContext("work"), CancellationToken.None);
-            var provider = new SmbMountProvider();
-            var settings = (SmbMountSettings)provider.CreateDefaultSettings(new Collection("work"));
-            settings.Port = FreePort();
-            settings.User = "user";
-            settings.Password = "password";
-            settings.DriveLetter = letter;
-            var mount = provider.CreateMount(settings, new Collection("work"));
-            var context = new TestMountContext("work", "smb");
-            await mount.StartAsync(new SingleSourceVfs(source, "work"), context, CancellationToken.None);
-            _cleanup.Add(mount);
-            Assert.AreEqual(0, context.HealthReports.Count, string.Join(" | ", context.HealthReports.Select(h => h.Detail)));
-            Assert.IsTrue(mount.AccessPaths.Any(p => p.Value == letter + @":\"), string.Join(" | ", mount.AccessPaths.Select(p => p.Value)));
-            Assert.IsInstanceOfType<MountOpenAction.FileManager>(mount.OpenAction);
-            Assert.AreEqual(letter + @":\", ((MountOpenAction.FileManager)mount.OpenAction!).Path);
-            Assert.AreEqual("hello readme", File.ReadAllText(Path.Combine(letter + @":\", "readme.txt")), "the share is readable through the letter");
+        var source = Tree();
+        var provider = new SmbMountProvider();
+        var settings = (SmbMountSettings)provider.CreateDefaultSettings(new Collection("work"));
+        settings.Port = FreePort();
+        settings.User = User;
+        settings.Password = Password;
+        settings.DriveLetter = letter;
+        var mount = provider.CreateMount(settings, new Collection("work"));
+        var context = new TestMountContext("work", "smb");
+        await mount.StartAsync(await VfsAsync(source), context, CancellationToken.None);
+        _cleanup.Add(mount);
+        Assert.AreEqual(0, context.HealthReports.Count, string.Join(" | ", context.HealthReports.Select(h => h.Detail)));
+        Assert.IsTrue(mount.AccessPaths.Any(p => p.Value == letter + @":\"), string.Join(" | ", mount.AccessPaths.Select(p => p.Value)));
+        Assert.IsInstanceOfType<MountOpenAction.FileManager>(mount.OpenAction);
+        Assert.AreEqual(letter + @":\", ((MountOpenAction.FileManager)mount.OpenAction!).Path);
 
-            await mount.StopAsync(CancellationToken.None);
-            Assert.IsNull(WindowsDriveMapping.CurrentTarget(letter + ":"), "the letter is gone once the mount stops");
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(SmbServerBinary.EnvironmentVariable, null);
-        }
+        var root = letter + @":\";
+        Assert.AreEqual("hello readme", File.ReadAllText(Path.Combine(root, "readme.txt")), "the share is readable through the letter");
+        CollectionAssert.AreEqual(Medium, File.ReadAllBytes(Path.Combine(root, "medium.bin")));
+        CollectionAssert.AreEquivalent(new[] { "readme.txt", "docs", "medium.bin", "emptydir" }, Directory.EnumerateFileSystemEntries(root).Select(Path.GetFileName).ToList());
+        File.WriteAllText(Path.Combine(root, "from-windows.txt"), "written by Windows");
+        Assert.AreEqual("written by Windows", Encoding.UTF8.GetString(source.GetFile("from-windows.txt")!));
+        File.Move(Path.Combine(root, "from-windows.txt"), Path.Combine(root, "docs", "moved.txt"));
+        Directory.CreateDirectory(Path.Combine(root, "made"));
+        File.Delete(Path.Combine(root, "docs", "moved.txt"));
+        Assert.IsFalse(source.Exists("docs/moved.txt"));
+        Assert.IsTrue(source.Exists("made"));
+
+        await mount.StopAsync(CancellationToken.None);
+        Assert.IsNull(WindowsDriveMapping.CurrentTarget(letter + ":"), "the letter is gone once the mount stops");
     }
 
     /// <summary>A guest share gets no letter where Windows blocks guest logons, and anyfs says so at once (net use would take twenty seconds to).</summary>
@@ -349,28 +380,6 @@ public class SmbMountTests
         StringAssert.Contains(outcome.Message, "user name and password");
     }
 
-    /// <summary>tools/go-servers/&lt;rid&gt;/ in the repo (walking up from the test binaries), or ANYFS_SMB_SERVER.</summary>
-    private static string? FindServerBinary()
-    {
-        var env = Environment.GetEnvironmentVariable(SmbServerBinary.EnvironmentVariable);
-        if (!string.IsNullOrEmpty(env) && File.Exists(env))
-        {
-            return env;
-        }
-
-        var rid = OperatingSystem.IsWindows() ? "win-x64" : OperatingSystem.IsMacOS() ? (System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.Arm64 ? "osx-arm64" : "osx-x64") : (System.Runtime.InteropServices.RuntimeInformation.OSArchitecture == System.Runtime.InteropServices.Architecture.Arm64 ? "linux-arm64" : "linux-x64");
-        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
-        {
-            if (File.Exists(Path.Combine(dir.FullName, "AnyFS.slnx")))
-            {
-                var candidate = Path.Combine(dir.FullName, "tools", "go-servers", rid, SmbServerBinary.FileName);
-                return File.Exists(candidate) ? candidate : null;
-            }
-        }
-
-        return null;
-    }
-
     private static int FreePort()
     {
         using var listener = new TcpListener(IPAddress.Loopback, 0);
@@ -378,65 +387,40 @@ public class SmbMountTests
         return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 
-    /// <summary>An SMB2 NEGOTIATE over a NetBIOS session: the dialect the server picked, which proves it is serving.</summary>
-    private static async Task<int> NegotiateAsync(int port)
+    private static byte[] TreeConnectBody(string share)
     {
-        using var client = new TcpClient();
-        await client.ConnectAsync(IPAddress.Loopback, port);
-        var stream = client.GetStream();
-        var body = new byte[64 + 40];
-        body[0] = 0xFE;
-        body[1] = (byte)'S';
-        body[2] = (byte)'M';
-        body[3] = (byte)'B';
-        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(4), 64); // StructureSize
-        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(12), 0); // Command: NEGOTIATE
-        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(14), 1); // CreditRequest
-        var n = 64;
-        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(n), 36); // StructureSize
-        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(n + 2), 2); // DialectCount
-        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(n + 4), 1); // SecurityMode: signing enabled
-        Guid.NewGuid().TryWriteBytes(body.AsSpan(n + 12)); // ClientGuid
-        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(n + 36), 0x0202);
-        BinaryPrimitives.WriteUInt16LittleEndian(body.AsSpan(n + 38), 0x0210);
-        var frame = new byte[4 + body.Length];
-        frame[1] = (byte)(body.Length >> 16);
-        frame[2] = (byte)(body.Length >> 8);
-        frame[3] = (byte)body.Length;
-        body.CopyTo(frame, 4);
-        await stream.WriteAsync(frame);
-
-        var header = new byte[4];
-        await ReadExactlyAsync(stream, header);
-        var length = (header[1] << 16) | (header[2] << 8) | header[3];
-        var response = new byte[length];
-        await ReadExactlyAsync(stream, response);
-        Assert.IsTrue(response.Length >= 70 && response[0] == 0xFE && response[1] == 'S' && response[2] == 'M' && response[3] == 'B', "an SMB2 response");
-        Assert.AreEqual(0u, BinaryPrimitives.ReadUInt32LittleEndian(response.AsSpan(8)), "STATUS_SUCCESS");
-        return BinaryPrimitives.ReadUInt16LittleEndian(response.AsSpan(64 + 4));
+        var path = Encoding.Unicode.GetBytes(@"\\localhost\" + share);
+        var body = new byte[8 + path.Length];
+        Wire.Put16(body, 0, 9);
+        Wire.Put16(body, 4, Smb2.HeaderSize + 8);
+        Wire.Put16(body, 6, (ushort)path.Length);
+        path.CopyTo(body, 8);
+        return body;
     }
 
-    private static async Task ReadExactlyAsync(Stream stream, byte[] buffer)
+    private static async Task<byte[]> ReadAsync(SmbTestClient client, uint tree, string name)
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        await stream.ReadExactlyAsync(buffer, timeout.Token);
-    }
-
-    private sealed class ClientDisposer(HttpClient client) : IAsyncDisposable
-    {
-        public ValueTask DisposeAsync()
+        var fileId = await client.OpenAsync(tree, name);
+        var data = new List<byte>();
+        while (true)
         {
-            client.Dispose();
-            return ValueTask.CompletedTask;
+            var piece = await client.ReadAsync(tree, fileId, data.Count, 65536);
+            if (piece.Length == 0)
+            {
+                break;
+            }
+
+            data.AddRange(piece);
         }
+
+        (await client.CloseAsync(tree, fileId)).EnsureSuccess();
+        return [.. data];
     }
 
-    /// <summary>A collection whose first opened file fails every read, as a source whose download broke off would; later opens are fine.</summary>
-    private sealed class FirstOpenFailsReads(IVirtualFileSystem inner) : IVirtualFileSystem
+    /// <summary>A collection passed through, changed by the subclass where it says.</summary>
+    private abstract class Passthrough(IVirtualFileSystem inner) : IVirtualFileSystem
     {
-        private int _opens;
-
-        public int Opens => _opens;
+        protected IVirtualFileSystem Inner => inner;
 
         public string CollectionName => inner.CollectionName;
 
@@ -444,15 +428,11 @@ public class SmbMountTests
 
         public bool CanWrite(string path) => inner.CanWrite(path);
 
-        public Task<VfsEntry?> StatAsync(string path, CancellationToken ct) => inner.StatAsync(path, ct);
+        public virtual Task<VfsEntry?> StatAsync(string path, CancellationToken ct) => inner.StatAsync(path, ct);
 
-        public IAsyncEnumerable<VfsEntry> ListAsync(string path, CancellationToken ct) => inner.ListAsync(path, ct);
+        public virtual IAsyncEnumerable<VfsEntry> ListAsync(string path, CancellationToken ct) => inner.ListAsync(path, ct);
 
-        public async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct)
-        {
-            var file = await inner.OpenAsync(path, mode, ct);
-            return Interlocked.Increment(ref _opens) == 1 ? new Broken(file) : file;
-        }
+        public virtual Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct) => inner.OpenAsync(path, mode, ct);
 
         public Task CreateDirectoryAsync(string path, CancellationToken ct) => inner.CreateDirectoryAsync(path, ct);
 
@@ -463,12 +443,71 @@ public class SmbMountTests
         public Task SetTimesAsync(string path, DateTimeOffset? created, DateTimeOffset? modified, CancellationToken ct) => inner.SetTimesAsync(path, created, modified, ct);
 
         public Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct) => inner.GetSpaceAsync(path, ct);
+    }
+
+    /// <summary>A collection where one file is read-only itself.</summary>
+    private sealed class ReadOnlyFile(IVirtualFileSystem inner, string path) : Passthrough(inner)
+    {
+        public override async Task<VfsEntry?> StatAsync(string p, CancellationToken ct) => Mark(p, await Inner.StatAsync(p, ct));
+
+        public override async IAsyncEnumerable<VfsEntry> ListAsync(string p, [EnumeratorCancellation] CancellationToken ct)
+        {
+            await foreach (var entry in Inner.ListAsync(p, ct))
+            {
+                yield return Mark(VfsPath.Join(p, entry.Name), entry)!;
+            }
+        }
+
+        private VfsEntry? Mark(string p, VfsEntry? entry) => entry is not null && p == path ? entry with { Attributes = entry.Attributes | VfsAttributes.ReadOnly } : entry;
+    }
+
+    /// <summary>A collection whose first opened file fails every read, as a source whose download broke off would; later opens are fine.</summary>
+    private sealed class FirstOpenFailsReads(IVirtualFileSystem inner) : Passthrough(inner)
+    {
+        private int _opens;
+
+        public int Opens => _opens;
+
+        public override async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct)
+        {
+            var file = await Inner.OpenAsync(path, mode, ct);
+            return Interlocked.Increment(ref _opens) == 1 ? new Broken(file) : file;
+        }
 
         private sealed class Broken(IVfsFile file) : IVfsFile
         {
             public long Length => file.Length;
 
             public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct) => throw new IOException("the download broke off");
+
+            public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct) => file.WriteAsync(offset, data, ct);
+
+            public ValueTask SetLengthAsync(long length, CancellationToken ct) => file.SetLengthAsync(length, ct);
+
+            public ValueTask FlushAsync(CancellationToken ct) => file.FlushAsync(ct);
+
+            public ValueTask DisposeAsync() => file.DisposeAsync();
+        }
+    }
+
+    /// <summary>A collection that counts the reads its files are asked for.</summary>
+    private sealed class CountingReads(IVirtualFileSystem inner) : Passthrough(inner)
+    {
+        private int _reads;
+
+        public int Reads => _reads;
+
+        public override async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct) => new Counted(await Inner.OpenAsync(path, mode, ct), this);
+
+        private sealed class Counted(IVfsFile file, CountingReads owner) : IVfsFile
+        {
+            public long Length => file.Length;
+
+            public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct)
+            {
+                Interlocked.Increment(ref owner._reads);
+                return file.ReadAsync(offset, buffer, ct);
+            }
 
             public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct) => file.WriteAsync(offset, data, ct);
 

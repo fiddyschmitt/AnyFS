@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- LibSmb end to end: the SMB conditions ported from portable-smb-server's rig (its TestMatrix, TestMultiClient and
+       TestStress), from the Windows, Linux and macOS clients of the lab against anyfs's SMB shares on each lab host. They
+       take hours, so they are a project of their own, for when LibSmb or the SMB mount changes; tests/LibSmb.Tests are
+       the quick tests, and tests/AnyFS.E2E reaches every collection over SMB with the other mounts. -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>LibSmb.E2E</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="MSTest" />
+    <PackageReference Include="SSH.NET" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="AnyFS.TestLab" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- the lab: its machines, SSH, anyfs on a host -->
+    <ProjectReference Include="..\AnyFS.TestLab\AnyFS.TestLab.csproj" />
+    <!-- the stress run's results: what the machines' SmbStress reports -->
+    <ProjectReference Include="..\fixtures\SmbStress\SmbStress.csproj" />
+  </ItemGroup>
+</Project>

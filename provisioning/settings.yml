@@ -6,7 +6,7 @@
 #   * ansible/playbook.yml   -> what runs inside the Linux VMs (`linux:`, `accounts:`)
 #   * windows/provision.ps1  -> what runs inside the Windows VM (the Vagrantfile passes it its part)
 #   * mac.ps1, macos/        -> `mac:` (the macOS VM, which runs on the Mac mini)
-#   * tests/AnyFS.E2E        -> every machine's role, address and login (Lab.cs)
+#   * tests/AnyFS.TestLab    -> every machine's role, address and login (Lab.cs, for the E2E tests)
 #
 # After changing a value:
 #   memory_mb / cpus / ip    ->  vagrant reload --provision <name>

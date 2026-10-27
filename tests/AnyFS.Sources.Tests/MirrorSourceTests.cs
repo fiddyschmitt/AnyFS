@@ -152,7 +152,10 @@ public class MirrorSourceTests
         ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.OpenAsync(chain, VfsOpenMode.Read, CancellationToken.None));
         Assert.AreEqual(VfsError.IsADirectory, ex.Error);
         var space = await source.GetSpaceAsync(chain, CancellationToken.None);
-        Assert.IsTrue(space is null || space.TotalBytes > 0);
+        Assert.IsNotNull(space);
+        Assert.IsTrue(space.TotalBytes > 0);
+        var top = await source.GetSpaceAsync("", CancellationToken.None);
+        Assert.AreEqual(space.TotalBytes, top?.TotalBytes, "the chain's top folder: the mirrored path's volume, so a share of the mirror shows its disk");
     }
 
     [TestMethod]

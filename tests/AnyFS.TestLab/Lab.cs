@@ -1,7 +1,7 @@
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
-namespace AnyFS.E2E;
+namespace AnyFS.TestLab;
 
 /// <summary>A login the tests use on the lab's machines.</summary>
 public sealed class Login

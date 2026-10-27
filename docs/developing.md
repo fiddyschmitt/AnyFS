@@ -8,17 +8,15 @@ users; this page is for anyone changing the code.
 - The .NET SDK named in [global.json](../global.json) (any later feature band of the same major
   also works).
 - PowerShell for the scripts: Windows PowerShell 5.1 or pwsh 7 both run them.
-- Two downloads the build embeds, fetched once into gitignored folders:
+- One download the Windows build embeds, fetched once into a gitignored folder:
 
 ```
-.\scripts\fetch-go-servers.ps1        # the pinned portable-smb-server binaries into tools/go-servers/<rid>/
-.\scripts\fetch-winfsp.ps1            # the pinned WinFsp installer into tools/winfsp/ (Windows builds embed it)
+.\scripts\fetch-winfsp.ps1            # the pinned WinFsp installer into tools/winfsp/
 ```
 
-Without them the solution still builds, but the SMB provider reports that its server is missing
-and the **Install WinFsp driver** button falls back to winget. Every build embeds the two tools for
-the runtime it targets: the publish RID, or the SDK's own RID for a plain `dotnet build`, so a
-Debug run has them too. On Linux and macOS the fetch script sets the execute bit on the server.
+Without it the solution still builds, but the **Install WinFsp driver** button falls back to
+winget. A build embeds the installer when the runtime it targets is Windows: the publish RID, or
+the SDK's own RID for a plain `dotnet build`, so a Debug run has it too.
 
 ## Build, test, run
 
@@ -71,8 +69,10 @@ One test project per assembly under `tests/`, MSTest throughout. The GUI tests r
 every dialog on headless Avalonia. A few tests need something from outside and mark themselves
 inconclusive or skipped without it: the live SSHFS tests want `ANYFS_TEST_SSH_HOST`, `_PORT`,
 `_USER`, `_KEY` and `_ROOT` (plus `_PASSWORD_USER` and `_PASSWORD` for the password paths), the
-real-server SMB test wants the fetched binary (or `ANYFS_SMB_SERVER` pointing at one), and the
-WinFsp tests want the driver installed. The 3DX source's tests run against a small fake 3DEXPERIENCE
+SMB mount's test through Windows' own client wants Windows 11 24H2 (for `net use /TCPPORT`), and
+the WinFsp tests want the driver installed. LibSmb's tests talk to the server over loopback TCP with
+an SMB2 client of their own (`tests/LibSmb.Tests/SmbTestClient.cs`: NTLMv2, signing, compounds),
+which the SMB mount's tests share. The 3DX source's tests run against a small fake 3DEXPERIENCE
 platform on 127.0.0.1 (`tests/AnyFS.Sources.Tests/Fake3DX.cs`: 3DPassport, 3DSpace, 3DSearch, a file
 server and an identity provider), so they need nothing outside; the Windows sign-ins among them run
 on Windows only. Four of them open more: `ANYFS_TEST_3DX_BROWSER=1` lets the web session's browser
@@ -113,9 +113,10 @@ executable against a generated tree and checks the HTTP, WebDAV, FTP and SMB mou
 where the driver is installed), the sample plugin in the trimmed host, `status` and the log; run
 it after any change to publishing or trimming.
 
-The SMB provider's server is a separate Go program, [portable-smb-server](https://github.com/fiddyschmitt/portable-smb-server).
-Its release tag and the SHA-256 of each binary are pinned in `scripts/go-servers.json`; bumping
-the server means a new tag there, new hashes, and a fetch. The WinFsp installer pinned in
+The SMB provider's server is [LibSmb](../src/LibSmb/README.md), AnyFS's own SMB 2 and 3 server,
+which runs in the anyfs process; its README lists what it implements and what it leaves out, and
+`tests/LibSmb.Tests` drives it over the wire with a client of its own, and `tests/LibSmb.E2E` with
+the lab's Windows, Linux and macOS clients (below). The WinFsp installer pinned in
 `scripts/winfsp.json` and the `winfsp.net` package must share a major.minor version, or the .NET
 layer refuses the driver it installs; the App project checks this at build time.
 
@@ -142,8 +143,13 @@ Debian upstream, the Debian host and the Windows host, `.\mac.ps1 up` for the ma
 every host and exercises every mount provider from the host itself and from each other machine
 against a generated fixture; a machine that is not reachable turns its rows inconclusive rather
 than red. `ANYFS_E2E_MOUNTS=Smb` (or `ANYFS_E2E_CLIENTS=local,macos`) before `dotnet test` runs
-only those rows. Note that `dotnet test AnyFS.slnx` includes this project: harmless while the lab
-is down (its rows go inconclusive in seconds), a two-hour run while it is up.
+only those rows. `dotnet test tests/LibSmb.E2E` is for after a change to LibSmb or the SMB mount: on
+every host, the SMB conditions ported from portable-smb-server's rig from every client, every client
+at once on one share, and a stress run with `SmbStress` (tests/fixtures/SmbStress), against an anyfs
+that serves the conditions' own shares; `ANYFS_E2E_SMB_CONDITIONS` picks among them (the lab's
+README lists them). The two share the lab's plumbing, `tests/AnyFS.TestLab`. Note that
+`dotnet test AnyFS.slnx` includes both: harmless while the lab is down (their rows go inconclusive
+in seconds), several hours each while it is up.
 
 ## Layout
 
@@ -153,6 +159,7 @@ src/AnyFS.Sdk.Testing    contract tests and fakes for plugin authors (and our ow
 src/AnyFS.Core           model, plugin host, router, read-only layers, status, settings, secrets, stats, logging
 src/AnyFS.App            anyfs: the window (Gui/) and the command line (Cli/)
 src/LibOutlook           a self-contained reader of Outlook's PST and OST files (no AnyFS reference; its own package)
+src/LibSmb               a self-contained SMB 2 and 3 server over a file system you supply (no AnyFS reference)
 src/Sources/Mirror       the Mirror source
 src/Sources/Sshfs        the SSHFS source over SSH.NET
 src/Sources/Common       what more than one source needs: the web session's sign-in in a browser of AnyFS's own over
@@ -166,16 +173,16 @@ src/Sources/ThreeDX      the 3DX source: a 3DEXPERIENCE platform's documents thr
 src/Sources/Outlook      the Outlook source: a mailbox as folders, from a PST or OST file (LibOutlook), Exchange Online
                          through Outlook on the web's session, or an Exchange server over EWS with a Windows account
 src/Mounts/WinFsp        the WinFsp mount (Windows)
-src/Mounts/Smb           the SMB mount: the VFS endpoint and the portable-smb-server process
+src/Mounts/Smb           the SMB mount: LibSmb serving each collection as a share, one server per address and port
 src/Mounts/Fuse          the FUSE mount (Linux)
 src/Mounts/WebDav        the WebDAV server and mount
 src/Mounts/Ftp           the FTP mount: AnyFS's own FTP server
 src/Mounts/Http          the HTTP mount
-tests/                   unit tests per assembly, GUI tests (headless Avalonia), AnyFS.E2E, fixtures/MakeTree, fixtures/SamplePlugin,
-                         fixtures/SharePointSignIn (the live SharePoint tests' sign-in)
-scripts/                 publish.ps1, smoke.ps1, pack.ps1, fetch-go-servers.ps1 (+ go-servers.json), fetch-winfsp.ps1 (+ winfsp.json)
+tests/                   unit tests per assembly, GUI tests (headless Avalonia), the lab's AnyFS.E2E and LibSmb.E2E
+                         (over AnyFS.TestLab), fixtures/MakeTree, fixtures/SamplePlugin, fixtures/SharePointSignIn (the
+                         live SharePoint tests' sign-in), fixtures/SmbStress (LibSmb.E2E's load)
+scripts/                 publish.ps1, smoke.ps1, pack.ps1, fetch-winfsp.ps1 (+ winfsp.json)
 provisioning/            the test lab: settings.yml, Vagrantfile, ansible/, windows/, macos/, mac.ps1, check.ps1, publish.ps1
-tools/go-servers/        the fetched Go server binaries per RID (not in git)
 tools/winfsp/            the fetched WinFsp installer (not in git)
 docs/                    settings-format.md, plugin-authoring.md, mounts.md, this page
 ```

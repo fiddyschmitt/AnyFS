@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>SmbStress</AssemblyName>
+    <RootNamespace>AnyFS.Fixtures.SmbStress</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTrimmable>false</IsTrimmable>
+    <RollForward>LatestMinor</RollForward>
+  </PropertyGroup>
+</Project>

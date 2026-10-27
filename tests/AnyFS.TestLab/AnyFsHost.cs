@@ -4,7 +4,7 @@ using System.Text.Json.Nodes;
 using AnyFS.Core.Settings;
 using AnyFS.Core.Status;
 
-namespace AnyFS.E2E;
+namespace AnyFS.TestLab;
 
 /// <summary>Which protocol a row reaches a collection through; one mount of each kind the host's OS has sits on every collection.</summary>
 public enum MountKind
@@ -28,9 +28,10 @@ public sealed record SourceSpec(string Name, string Type, string TreePrefix, Jso
 
 /// <summary>
 /// anyfs on one host machine of the lab (spec 16.2): the binaries copied out of the shared publish folder (or
-/// over SCP for the Mac), the fixture generated there and on the upstream, one settings folder with a
-/// collection per source (plus a read-only twin, an upstream-outage collection and a prompt-needing one), every
-/// mount provider the OS has on each, <c>anyfs serve</c> started and watched through state/status.json.
+/// over SCP for the Mac), then either AnyFS.E2E's settings (<see cref="Deploy"/>: the fixture generated there and on the
+/// upstream, a collection per source plus a read-only twin, an upstream-outage collection and a prompt-needing one, every
+/// mount provider the OS has on each) or LibSmb.E2E's (<see cref="DeploySmbShares"/>: the SMB conditions' shares
+/// alone), and <c>anyfs serve</c> started and watched through state/status.json.
 /// </summary>
 public sealed class AnyFsHost : IDisposable
 {
@@ -41,9 +42,12 @@ public sealed class AnyFsHost : IDisposable
     public const string SmbUser = "user";
     public const string SmbPassword = "anyfs-smb";
 
+    /// <summary>The port of the SMB conditions' guest server (smbguest): one server has one login, so guests get their own.</summary>
+    public const int SmbGuestPort = 1446;
+
     private readonly List<string> _started = [];
 
-    /// <param name="sharePoint">The SharePoint Server sources (<see cref="SharePointFixture.TryPrepare"/>), one per farm that is up.</param>
+    /// <param name="sharePoint">The SharePoint Server sources (AnyFS.E2E's SharePointFixture.TryPrepare), one per farm that is up.</param>
     public AnyFsHost(Machine host, Machine upstream, IReadOnlyList<SourceSpec>? sharePoint = null)
     {
         Host = host;
@@ -56,6 +60,9 @@ public sealed class AnyFsHost : IDisposable
     public Machine Upstream { get; }
 
     public IReadOnlyList<SourceSpec> Sources { get; }
+
+    /// <summary>The SMB conditions' collections (LibSmb.E2E), each with an SMB mount only.</summary>
+    public static readonly IReadOnlyList<string> SmbCollections = ["smbdata", "smbsecond", "smbro", "smbguest"];
 
     /// <summary>Collections with every mount: the sources' and their read-only twins.</summary>
     public IEnumerable<(string Collection, SourceSpec Source, bool ReadOnly)> FullCollections
@@ -88,6 +95,15 @@ public sealed class AnyFsHost : IDisposable
 
     public string OutageDir => Host.IsWindows ? @"C:\anyfs-lab\outage" : Parent(LabDir) + "/outage";
 
+    /// <summary>
+    /// The SMB conditions' folder (LibSmb.E2E), empty at each deployment: mirrored as the collections smbdata (writable),
+    /// smbro (read-only) and smbguest (to guests, on <see cref="SmbGuestPort"/>).
+    /// </summary>
+    public string SmbDataDir => Host.IsWindows ? @"C:\anyfs-lab\smbdata" : Parent(LabDir) + "/smbdata";
+
+    /// <summary>The folder of smbsecond, a second share of the same server, for the isolation condition.</summary>
+    public string SmbSecondDir => Host.IsWindows ? @"C:\anyfs-lab\smbsecond" : Parent(LabDir) + "/smbsecond";
+
     public string SshfsKeyFile => Join("sshfs_key");
 
     /// <summary>The FUSE mount point of a collection (Linux hosts).</summary>
@@ -102,6 +118,7 @@ public sealed class AnyFsHost : IDisposable
 
     // ---- deployment -----------------------------------------------------------------------------------------
 
+    /// <summary>AnyFS.E2E's anyfs: every source over the fixture, each with every mount.</summary>
     public void Deploy()
     {
         Stop();
@@ -112,6 +129,15 @@ public sealed class AnyFsHost : IDisposable
         InstallSshfsKey();
         StoreUpstreamShareCredential();
         WriteSettings();
+    }
+
+    /// <summary>LibSmb.E2E's anyfs: the SMB conditions' shares (<see cref="SmbCollections"/>) over their emptied folders, nothing else.</summary>
+    public void DeploySmbShares()
+    {
+        Stop();
+        CopyBinaries();
+        EnsureSmbFolders();
+        WriteSmbShareSettings();
     }
 
     /// <summary>
@@ -276,6 +302,19 @@ public sealed class AnyFsHost : IDisposable
         }
     }
 
+    /// <summary>The SMB conditions' folders, emptied: what an earlier run left (a failed condition's files) goes.</summary>
+    private void EnsureSmbFolders()
+    {
+        if (Host.IsWindows)
+        {
+            Host.Sh($"$ErrorActionPreference = 'Stop'; foreach ($d in '{SmbDataDir}', '{SmbSecondDir}') {{ if (Test-Path $d) {{ Remove-Item -Recurse -Force $d }}; New-Item -ItemType Directory -Force $d | Out-Null }}", 600);
+        }
+        else
+        {
+            Host.Sh($"set -e; rm -rf '{SmbDataDir}' '{SmbSecondDir}'; mkdir -p '{SmbDataDir}' '{SmbSecondDir}'", 600);
+        }
+    }
+
     /// <summary>The key the SSHFS source logs in to the upstream with, fetched from the upstream and put beside anyfs.</summary>
     private void InstallSshfsKey()
     {
@@ -345,7 +384,31 @@ public sealed class AnyFsHost : IDisposable
 
         collections.Add(CollectionJson("outage", IdOf("outage"), false, [MountJson(MountKind.Http, "outage")]));
         collections.Add(CollectionJson("prompt", IdOf("prompt"), false, [MountJson(MountKind.Http, "prompt")]));
+        UploadSettings(sources, collections);
+    }
 
+    /// <summary>The SMB conditions' shares: on the port of every collection's SMB mount, with its login; guests on their own.</summary>
+    private void WriteSmbShareSettings()
+    {
+        var smbdata = Guid.NewGuid();
+        var smbsecond = Guid.NewGuid();
+        var sources = new JsonArray
+        {
+            SourceJson(smbdata, "smbdata", "mirror", new JsonObject { ["paths"] = SmbDataDir }),
+            SourceJson(smbsecond, "smbsecond", "mirror", new JsonObject { ["paths"] = SmbSecondDir }),
+        };
+        var collections = new JsonArray
+        {
+            CollectionJson("smbdata", smbdata, false, [MountJson(MountKind.Smb, "smbdata")]),
+            CollectionJson("smbsecond", smbsecond, false, [MountJson(MountKind.Smb, "smbsecond")]),
+            CollectionJson("smbro", smbdata, true, [MountJson(MountKind.Smb, "smbro")]),
+            CollectionJson("smbguest", smbdata, false, [SmbGuestMountJson()]),
+        };
+        UploadSettings(sources, collections);
+    }
+
+    private void UploadSettings(JsonArray sources, JsonArray collections)
+    {
         var sourcesJson = new JsonObject { ["version"] = 1, ["sources"] = sources }.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
         var collectionsJson = new JsonObject { ["version"] = 1, ["collections"] = collections }.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
         var appJson = new JsonObject { ["version"] = 1, ["logLevel"] = "debug", ["bindAddress"] = "0.0.0.0", ["countFilesOnStart"] = true }.ToJsonString();
@@ -407,6 +470,16 @@ public sealed class AnyFsHost : IDisposable
             ["settings"] = settings,
         };
     }
+
+    private static JsonObject SmbGuestMountJson() => new()
+    {
+        ["id"] = Guid.NewGuid().ToString(),
+        ["name"] = "SmbGuest",
+        ["provider"] = "smb",
+        ["enabled"] = true,
+        ["readOnly"] = false,
+        ["settings"] = new JsonObject { ["bindAddress"] = "0.0.0.0", ["port"] = SmbGuestPort, ["guest"] = true },
+    };
 
     // ---- the process ------------------------------------------------------------------------------------------
 

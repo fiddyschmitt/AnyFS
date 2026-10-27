@@ -8,6 +8,9 @@
   <Folder Name="/src/LibOutlook/">
     <Project Path="src/LibOutlook/LibOutlook.csproj" />
   </Folder>
+  <Folder Name="/src/LibSmb/">
+    <Project Path="src/LibSmb/LibSmb.csproj" />
+  </Folder>
   <Folder Name="/src/Mounts/" />
   <Folder Name="/src/Mounts/Ftp/">
     <Project Path="src/Mounts/Ftp/AnyFS.Mounts.Ftp.csproj" />
@@ -53,14 +56,18 @@
     <Project Path="tests/AnyFS.App.Tests/AnyFS.App.Tests.csproj" />
     <Project Path="tests/AnyFS.Core.Tests/AnyFS.Core.Tests.csproj" />
     <Project Path="tests/AnyFS.E2E/AnyFS.E2E.csproj" />
+    <Project Path="tests/AnyFS.TestLab/AnyFS.TestLab.csproj" />
     <Project Path="tests/AnyFS.Mounts.Tests/AnyFS.Mounts.Tests.csproj" />
     <Project Path="tests/AnyFS.Sdk.Tests/AnyFS.Sdk.Tests.csproj" />
     <Project Path="tests/AnyFS.Sources.Tests/AnyFS.Sources.Tests.csproj" />
     <Project Path="tests/LibOutlook.Tests/LibOutlook.Tests.csproj" />
+    <Project Path="tests/LibSmb.E2E/LibSmb.E2E.csproj" />
+    <Project Path="tests/LibSmb.Tests/LibSmb.Tests.csproj" />
   </Folder>
   <Folder Name="/tests/fixtures/">
     <Project Path="tests/fixtures/MakeTree/MakeTree.csproj" />
     <Project Path="tests/fixtures/SamplePlugin/SamplePlugin.csproj" />
     <Project Path="tests/fixtures/SharePointSignIn/SharePointSignIn.csproj" />
+    <Project Path="tests/fixtures/SmbStress/SmbStress.csproj" />
   </Folder>
 </Solution>

@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The end-to-end lab as the E2E projects (tests/AnyFS.E2E, tests/LibSmb.E2E) reach it: the machines and logins of
+       provisioning/settings.yml (Lab), SSH to each (Machine), anyfs deployed, started and watched on a host (AnyFsHost),
+       and the expected fixture tree (Fixture). -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTrimmable>false</IsTrimmable>
+    <RootNamespace>AnyFS.TestLab</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="SSH.NET" />
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\AnyFS.Core\AnyFS.Core.csproj" />
+    <!-- the expected tree: the same generator the machines run -->
+    <ProjectReference Include="..\fixtures\MakeTree\MakeTree.csproj" />
+  </ItemGroup>
+</Project>

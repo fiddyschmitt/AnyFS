@@ -1,10 +1,10 @@
 # AnyFS test lab: the test machines, defined as code
 
-The machines the end-to-end tests in `tests/AnyFS.E2E` run anyfs on and reach its mounts from. One
-machine per OS runs anyfs with every mount provider that OS has; a second Linux machine is the
-upstream anyfs serves from (the SSHFS source's sshd, a Samba share for the Mirror UNC source). Every
-machine is also a client of every host: the host itself, the upstream, and the other two OSes'
-machines reach each host's mounts, so each OS is tested as a client of each other OS.
+The machines the end-to-end tests in `tests/AnyFS.E2E` and `tests/LibSmb.E2E` run anyfs on and reach
+its mounts from. One machine per OS runs anyfs with every mount provider that OS has; a second Linux
+machine is the upstream anyfs serves from (the SSHFS source's sshd, a Samba share for the Mirror UNC
+source). Every machine is also a client of every host: the host itself, the upstream, and the other
+two OSes' machines reach each host's mounts, so each OS is tested as a client of each other OS.
 
 | Machine | Role | OS | Address | Runs on | Configured by |
 |---|---|---|---|---|---|
@@ -25,28 +25,51 @@ Microsoft 365 side of the SharePoint tests.
 **Vagrant** builds and runs the VMs. **Ansible** (Linux), a PowerShell script (Windows) and a shell
 script (macOS) configure what's inside them. You edit one file, `settings.yml`, and can rebuild any
 machine identically at any time. The tests read the machines, their addresses and logins from that
-same file (`tests/AnyFS.E2E/Lab.cs`).
+same file (`tests/AnyFS.TestLab/Lab.cs`).
 
 ## Quick start
 
     cd C:\Users\Smith\Desktop\dev\cs\AnyFS\provisioning
-    ..\scripts\fetch-go-servers.ps1     # once: the pinned SMB server binaries anyfs embeds
     ..\scripts\fetch-winfsp.ps1         # once: the pinned WinFsp installer (the Windows VM installs it too)
     vagrant up                          # the three VirtualBox VMs
     .\mac.ps1 setup                     # once: lets the lab's key in to the Mac, installs tart and Vagrant there
     .\mac.ps1 up                        # the macOS VM
-    .\publish.ps1                       # anyfs for win-x64, linux-x64 and osx-arm64, MakeTree, the sample plugin -> publish\
+    .\publish.ps1                       # anyfs for win-x64, linux-x64 and osx-arm64, MakeTree, SmbStress, the sample plugin -> publish\
     .\check.ps1                         # is it all ready?
 
 then, from the repo:
 
-    dotnet test tests/AnyFS.E2E
+    dotnet test tests/AnyFS.E2E         # every source over every mount, from every client
+    dotnet test tests/LibSmb.E2E        # the SMB conditions, after a change to LibSmb or the SMB mount
 
-The whole matrix takes close to two hours. To retest one source, provider or client, set
-`ANYFS_E2E_COLLECTIONS`, `ANYFS_E2E_MOUNTS` or `ANYFS_E2E_CLIENTS` to a comma-separated list
+The first takes close to two hours, the second about three and a half (most of it the Windows
+client's rows: a PowerShell per command). To retest one source, provider or client of AnyFS.E2E,
+set `ANYFS_E2E_COLLECTIONS`, `ANYFS_E2E_MOUNTS` or `ANYFS_E2E_CLIENTS` to a
+comma-separated list
 (`sharepoint,sharepoint-ro`, `Smb,Ftp`, `local,macos`; case does not matter) before `dotnet test`:
 only those rows are generated. A test-name `--filter` cannot do this, because the rows are expanded
 when the run starts, not at discovery.
+
+`tests/LibSmb.E2E` runs the SMB conditions on every host from every client (`SmbConditions.cs`,
+ported from portable-smb-server's rig when AnyFS's own server, LibSmb, took its place): round trips,
+a 256 MiB file each way, ranges, edits in place, renames and deletes, special names, case, a deep
+tree, 1000 small files and a 5000-entry folder, timestamps, disk space, a 4.5 GiB sparse file,
+concurrent writers and readers, churn while listing, a copy killed half-way, 50 listings at once,
+isolation between shares, wrong logins, a read-only share, a guest share (not from Windows, which
+refuses unsigned guest sessions), and from Linux every dialect with and without signing, Samba's
+smbclient and 50 sessions at once. Then every client at once on one share, a stress run of every
+client together with `SmbStress` (120 s by default; every byte checked, the clients' own SMB logs
+read, the host's folder audited), and the host's anyfs log. Its anyfs serves only the conditions'
+own shares, over an empty folder on the host: `smbdata`, `smbsecond`, `smbro`, and `smbguest` on
+port 1446. `ANYFS_E2E_SMB_CONDITIONS` narrows the run (`timestamps,guest_roundtrip`,
+`several_clients_at_once`, `stress`) and `ANYFS_E2E_CLIENTS` its clients;
+`ANYFS_E2E_SMB_STRESS_SECONDS`, `_WORKERS`, `_LARGE_MB` and `_SEED` shape the stress run.
+
+From the Windows VM, AnyFS.E2E's SMB rows against the Linux and macOS hosts need `WinFsp.Np` after
+`LanmanWorkstation` in the network provider order
+(`HKLM\SYSTEM\CurrentControlSet\Control\NetworkProvider\Order`): with WinFsp 2026's provider first,
+`net use /TCPPORT` to another machine fails with error 67 before it reaches the server. LibSmb.E2E
+maps a drive letter, which gets through; a condition that still meets error 67 reports Inconclusive.
 
 With the SharePoint farms in `settings.yml`, every host also gets their collections (`sharepoint` for
 Subscription Edition and `sharepoint2019`, each with a `-ro` twin), served by the SharePoint Server
@@ -95,13 +118,13 @@ PASS/WARN/FAIL lines; a FAIL stops Vagrant there.
 | `mac.ps1` | Runs Vagrant for the macOS VM on the Mac, from this PC, over SSH |
 | `macos/Vagrantfile`, `macos/provision.sh` | The macOS VM (tart, pinned MAC address) and what runs inside it |
 | `macos/setup-host.sh`, `macos/shims/tart` | The Mac's one-time setup, and a wrapper that keeps the VM alive after Vagrant exits |
-| `publish.ps1` | Builds anyfs per runtime, MakeTree and the sample plugin into `publish\` (shared into the VMs; not in git) |
+| `publish.ps1` | Builds anyfs per runtime, MakeTree, SmbStress and the sample plugin into `publish\` (shared into the VMs; not in git) |
 | `check.ps1` | Is the lab ready? |
 
 ## How a test runs
 
-`publish.ps1` puts the trimmed `anyfs` for each runtime in `publish\<rid>\`, with `MakeTree`
-beside it; the Vagrantfile shares that folder into the VirtualBox VMs (`\\vboxsvr\publish` on
+`publish.ps1` puts the trimmed `anyfs` for each runtime in `publish\<rid>\`, with `MakeTree` and
+`SmbStress` beside it; the Vagrantfile shares that folder into the VirtualBox VMs (`\\vboxsvr\publish` on
 Windows, `/media/vboxsf/192.168.0.31/publish` on Linux) and the tests SCP it to the macOS VM. A
 test class deploys to its host machine: it copies the binaries out of the share, generates the
 fixture tree there with `MakeTree` (the same tree on every machine, from a seed, so no large files

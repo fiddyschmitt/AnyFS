@@ -13,14 +13,16 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="MSTest" />
     <PackageReference Include="SSH.NET" />
-    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="AnyFS.TestLab" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\AnyFS.Sdk\AnyFS.Sdk.csproj" />
     <ProjectReference Include="..\..\src\AnyFS.Core\AnyFS.Core.csproj" />
     <ProjectReference Include="..\..\src\AnyFS.Sdk.Testing\AnyFS.Sdk.Testing.csproj" />
     <ProjectReference Include="..\..\src\Sources\SharePoint\AnyFS.Sources.SharePoint.csproj" />
-    <!-- the expected tree: the same generator the machines run -->
-    <ProjectReference Include="..\fixtures\MakeTree\MakeTree.csproj" />
+    <!-- the lab: its machines, SSH, anyfs on a host, the expected tree -->
+    <ProjectReference Include="..\AnyFS.TestLab\AnyFS.TestLab.csproj" />
   </ItemGroup>
 </Project>

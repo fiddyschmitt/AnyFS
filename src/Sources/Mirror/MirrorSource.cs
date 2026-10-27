@@ -501,17 +501,22 @@ public sealed class MirrorSource : SourceBase, ICountable
         }
     }
 
+    /// <summary>
+    /// The space of the volume a path is on. A folder of the chain above the mirrored paths has none of its own, so the
+    /// first reachable path under it lends its own: a share of the mirror shows its disk's free space, not a made-up one.
+    /// </summary>
     public override Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct)
     {
         var resolved = Resolve(VfsPath.Normalize(path));
-        if (resolved.Real is null)
+        var real = resolved.Real ?? (resolved.Node is { } node ? RootsUnder(node).FirstOrDefault(r => Directory.Exists(r.FullPath))?.FullPath : null);
+        if (real is null)
         {
             return Task.FromResult<VfsSpace?>(null);
         }
 
         try
         {
-            var drive = new DriveInfo(resolved.Real);
+            var drive = new DriveInfo(real);
             return Task.FromResult<VfsSpace?>(new VfsSpace(drive.TotalSize, drive.AvailableFreeSpace));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
@@ -733,6 +738,23 @@ public sealed class MirrorSource : SourceBase, ICountable
         }
 
         Logger.LogInformation("mirror: {Reachable} of {Total} paths reachable", _roots.Count - _unreachable.Count, _roots.Count);
+    }
+
+    /// <summary>The mirrored paths at or under a folder of the chain, in name order.</summary>
+    private static IEnumerable<MirrorRoot> RootsUnder(Node node)
+    {
+        if (node.Root is not null)
+        {
+            yield return node.Root;
+        }
+
+        foreach (var child in node.Children.Values.OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var root in RootsUnder(child))
+            {
+                yield return root;
+            }
+        }
     }
 
     internal sealed record Resolution(Node? Node, MirrorRoot? Root, string? Real);

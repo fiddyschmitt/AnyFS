@@ -2,16 +2,12 @@
   <PropertyGroup>
     <AssemblyName>AnyFS.Mounts.Smb</AssemblyName>
     <RootNamespace>AnyFS.Mounts.Smb</RootNamespace>
-    <!-- the Windows job object that ties the server process to anyfs is declared with LibraryImport -->
+    <!-- WNetGetConnectionW (the drive letter mapping) takes a char buffer -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <!-- the portable-smb-server binary is embedded by src/AnyFS.App (the SDK builds library references without the
-         RuntimeIdentifier, so only the executable knows which one to take); SmbServerBinary looks there too -->
   </PropertyGroup>
   <ItemGroup>
-    <FrameworkReference Include="Microsoft.AspNetCore.App" />
-  </ItemGroup>
-  <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <ProjectReference Include="..\..\LibSmb\LibSmb.csproj" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="AnyFS.Mounts.Tests" />

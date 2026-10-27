@@ -220,7 +220,9 @@ public sealed class MemorySource : SourceBase
         {
             var node = Find(fromPath) ?? throw VfsException.NotFound(fromPath);
             var existing = Find(toPath);
-            if (existing is not null)
+
+            // the node itself under another case (a case-insensitive source) is a case-only rename, not a collision
+            if (existing is not null && !ReferenceEquals(existing, node))
             {
                 if (!replace || existing.IsDirectory)
                 {

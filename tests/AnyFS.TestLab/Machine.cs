@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using Renci.SshNet;
 
-namespace AnyFS.E2E;
+namespace AnyFS.TestLab;
 
 /// <summary>
 /// A lab machine over SSH with the lab key: commands with a hard wall-clock bound (SSH.NET's command timeout

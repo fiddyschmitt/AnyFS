@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using AnyFS.Fixtures;
 
-namespace AnyFS.E2E;
+namespace AnyFS.TestLab;
 
 /// <summary>
 /// The expected tree: tests/fixtures/MakeTree's output from the default seed, generated once here (so the

@@ -22,4 +22,8 @@
     <ProjectReference Include="..\..\src\Mounts\WinFsp\AnyFS.Mounts.WinFsp.csproj" />
     <ProjectReference Include="..\..\src\Mounts\Fuse\AnyFS.Mounts.Fuse.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- the SMB mount's tests sign in over the wire with LibSmb's own test client -->
+    <Compile Include="..\LibSmb.Tests\SmbTestClient.cs" Link="Smb\SmbTestClient.cs" />
+  </ItemGroup>
 </Project>

@@ -131,6 +131,42 @@ public class CollectionVfsTests
         Assert.IsNull(await vfs.StatAsync("files/Docs/Dup.txt", CancellationToken.None), "two case-insensitive candidates is not a match");
     }
 
+    /// <summary>
+    /// A rename onto the entry itself in another case (found by the fallback on a case-sensitive source, by the source on a
+    /// case-insensitive one) gives it that spelling. Refused as a collision, it cost data: PowerShell's Move-Item -Force
+    /// then deletes "the other file" to make room, which is the entry itself (the SMB conditions found it).
+    /// </summary>
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task ACaseOnlyRenameGivesTheEntryTheNewSpelling(bool caseInsensitive)
+    {
+        var src = new MemorySource(caseInsensitive: caseInsensitive).AddFile("Docs/Foo.txt", "foo").AddFile("Docs/Sub/x.txt", "x");
+        var a = await Handles.ReadyAsync("a", src);
+        var vfs = Handles.Vfs("work", new CollectionMember(a, "files", false));
+
+        await vfs.RenameAsync("files/Docs/Foo.txt", "files/Docs/foo.txt", false, CancellationToken.None);
+        CollectionAssert.AreEquivalent(new[] { "foo.txt", "Sub/" }, await Handles.NamesAsync(vfs, "files/Docs"));
+        Assert.AreEqual("foo", await Handles.ReadTextAsync(vfs, "files/Docs/foo.txt"));
+        await vfs.RenameAsync("files/docs/foo.txt", "files/Docs/FOO.TXT", true, CancellationToken.None);
+        CollectionAssert.AreEquivalent(new[] { "FOO.TXT", "Sub/" }, await Handles.NamesAsync(vfs, "files/Docs"), "the source named in another case, replacing");
+        await vfs.RenameAsync("files/Docs/Sub", "files/Docs/sub", false, CancellationToken.None);
+        CollectionAssert.AreEquivalent(new[] { "FOO.TXT", "sub/" }, await Handles.NamesAsync(vfs, "files/Docs"), "a folder");
+        Assert.AreEqual("x", await Handles.ReadTextAsync(vfs, "files/Docs/sub/x.txt"));
+    }
+
+    [TestMethod]
+    public async Task ARenameOntoAnotherEntryInAnotherCaseIsStillACollision()
+    {
+        var src = new MemorySource(caseInsensitive: false).AddFile("Docs/dup.txt", "lower").AddFile("Docs/DUP.txt", "upper");
+        var a = await Handles.ReadyAsync("a", src);
+        var vfs = Handles.Vfs("work", new CollectionMember(a, "files", false));
+
+        await Handles.ExpectAsync(VfsError.AlreadyExists, () => vfs.RenameAsync("files/Docs/dup.txt", "files/Docs/DUP.txt", false, CancellationToken.None));
+        Assert.AreEqual("lower", await Handles.ReadTextAsync(vfs, "files/Docs/dup.txt"));
+        Assert.AreEqual("upper", await Handles.ReadTextAsync(vfs, "files/Docs/DUP.txt"));
+    }
+
     [TestMethod]
     public async Task UnavailableSourceStillShowsItsFolderButFailsInside()
     {

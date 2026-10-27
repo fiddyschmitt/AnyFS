@@ -150,11 +150,36 @@ try {
             Check ($ftpList -match 'sample') "FTP anonymous LIST shows the collection"
         }
         catch { Check $false "FTP anonymous LIST shows the collection ($($_.Exception.Message))" }
-        $smbUp = $false
-        try { $tcp = New-Object System.Net.Sockets.TcpClient; $tcp.Connect('127.0.0.1', $Port + 3); $smbUp = $tcp.Connected; $tcp.Dispose() } catch { }
-        Check $smbUp "SMB server (bundled portable-smb-server) listening on port $($Port + 3)"
+        # an SMB2 NEGOTIATE offering 2.0.2 and 2.1, in its Direct TCP frame: LibSmb, in the process, must pick one
+        $smbDialect = $null
+        try {
+            $tcp = New-Object System.Net.Sockets.TcpClient
+            $tcp.Connect('127.0.0.1', $Port + 3)
+            $stream = $tcp.GetStream()
+            $stream.ReadTimeout = 10000
+            $request = New-Object byte[] 108
+            $request[3] = 104                                                       # the frame: the message's length
+            $request[4] = 0xFE; $request[5] = 0x53; $request[6] = 0x4D; $request[7] = 0x42   # 0xFE 'SMB'
+            $request[8] = 64                                                        # StructureSize
+            $request[18] = 1                                                        # CreditRequest
+            $request[68] = 36                                                       # NEGOTIATE StructureSize
+            $request[70] = 2                                                        # DialectCount
+            $request[72] = 1                                                        # SecurityMode: signing enabled
+            $request[104] = 0x02; $request[105] = 0x02                              # 2.0.2
+            $request[106] = 0x10; $request[107] = 0x02                              # 2.1
+            $stream.Write($request, 0, $request.Length)
+            $frame = New-Object byte[] 4
+            $read = 0; while ($read -lt 4) { $n = $stream.Read($frame, $read, 4 - $read); if ($n -le 0) { throw 'no reply' }; $read += $n }
+            $length = ($frame[1] * 65536) + ($frame[2] * 256) + $frame[3]
+            $reply = New-Object byte[] $length
+            $read = 0; while ($read -lt $length) { $n = $stream.Read($reply, $read, $length - $read); if ($n -le 0) { throw 'a short reply' }; $read += $n }
+            if ($reply[0] -eq 0xFE -and $reply[1] -eq 0x53 -and [BitConverter]::ToUInt32($reply, 8) -eq 0) { $smbDialect = '{0:X4}' -f [BitConverter]::ToUInt16($reply, 68) }
+            $tcp.Dispose()
+        }
+        catch { }
+        Check ($smbDialect -in @('0202', '0210')) "SMB server (LibSmb, in the process) answers a NEGOTIATE on port $($Port + 3) (dialect $smbDialect)"
         $serverCopies = @(Get-ChildItem ([System.IO.Path]::Combine($work, 'cache', 'mount-providers', 'smb')) -Filter 'portable-smb-server-*' -File -ErrorAction SilentlyContinue)
-        Check ($serverCopies.Count -eq 1) "one unpacked server copy under cache/mount-providers/smb ($($serverCopies.Count))"
+        Check ($serverCopies.Count -eq 0) "no server unpacked under cache/mount-providers/smb ($($serverCopies.Count))"
 
         if ($winfsp) {
             Write-Host "== WinFsp mount at \\anyfs\smoke (the first open waits for Windows to look the name up; docs/mounts.md)"

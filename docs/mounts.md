@@ -87,14 +87,12 @@ access as far as Windows is concerned, and the layers decide.
 
 ## SMB (all OSes)
 
-Served by the bundled [portable-smb-server](https://github.com/fiddyschmitt/portable-smb-server)
-(a single Go executable, SMB 2.0.2 to 3.0.2, NTLMv2 with signing or guest), unpacked into
-`cache/mount-providers/smb/` on first use: one copy per server version, shared by every SMB mount,
-and copies of other versions are deleted when a new one lands. One process runs per bind address
-and port for every collection
-mounted there, so every collection on a port shares one login (user and password, or guest); it
-talks to AnyFS over a loopback "bring your own VFS" endpoint that refuses anything without the
-per-launch token.
+Served by AnyFS's own SMB server, [LibSmb](../src/LibSmb/README.md) (SMB 2.0.2 to 3.0.2, NTLMv2
+with signing, or guest), inside the anyfs process. One server runs per bind address and port for
+every collection mounted there, so every collection on a port shares one login (user and password,
+or guest). Every request goes straight through the collection's tree, so the read-only layers and
+the stats apply. (Earlier releases ran a bundled portable-smb-server instead; the copies they
+unpacked into `cache/mount-providers/smb/` are deleted the first time an SMB mount starts.)
 
 - **Windows 11 24H2+**: a port other than 445 needs the device-less
   `net use \\<host>\<collection> /TCPPORT:1445 /USER:<user>` once per session (no drive

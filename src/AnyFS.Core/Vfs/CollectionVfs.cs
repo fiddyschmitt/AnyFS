@@ -258,7 +258,14 @@ public sealed class CollectionVfs : IVirtualFileSystem
         }
 
         var to = await ResolveAsync(toPath, ct).ConfigureAwait(false);
-        if (to is not null)
+        if (to?.Attachment is not null && SameEntry(from, to))
+        {
+            // the target is the entry itself under another case (on a case-insensitive source, or found by the fallback on
+            // a case-sensitive one): a case-only rename, to the name as asked for. Refused as a collision, a client that
+            // then deletes "the other file" to make room (PowerShell's Move-Item -Force) would delete the entry itself
+            to = await ResolveForCreateAsync(toPath, ct).ConfigureAwait(false);
+        }
+        else if (to is not null)
         {
             if (to.Attachment is null || !replace || to.Entry is { IsDirectory: true })
             {
@@ -348,6 +355,11 @@ public sealed class CollectionVfs : IVirtualFileSystem
 
     private static bool SameAttachment(SyntheticTree.Attachment a, SyntheticTree.Attachment b)
         => a.Source.Id == b.Source.Id && a.MountPath.Equals(b.MountPath, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Whether two resolved paths are one entry of one source: the same path, in any case where the source ignores case.</summary>
+    private static bool SameEntry(Target a, Target b)
+        => a.Attachment is not null && b.Attachment is not null && SameAttachment(a.Attachment, b.Attachment)
+            && string.Equals(a.Remaining, b.Remaining, a.Attachment.Source.Current?.Capabilities.CaseInsensitive == true ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
     private async Task<Target?> ResolveAsync(string path, CancellationToken ct)
     {

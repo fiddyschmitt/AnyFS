@@ -27,8 +27,8 @@ public sealed class SmbMountSettings
 }
 
 /// <summary>
-/// SMB (type <c>smb</c>, spec 8.2) through portable-smb-server: one Go process per bind address and port serving every
-/// collection mounted there, fed by a loopback VFS endpoint protected by a per-launch token. Reached with a device-less
+/// SMB (type <c>smb</c>, spec 8.2), served in this process by LibSmb: one server per bind address and port serving every
+/// collection mounted there as a share of its own name. Reached with a device-less
 /// <c>net use \\host\collection /TCPPORT:1445</c> on Windows 11 (or an opt-in drive letter mapped the same way while
 /// the mount runs), <c>mount -t cifs</c> on Linux and Finder's <c>smb://host:1445/collection</c> on macOS.
 /// </summary>
@@ -40,13 +40,13 @@ public sealed class SmbMountProvider : IMountProviderPlugin, IValidatable
 
     public string DisplayName => "SMB";
 
-    public string Description => "A Windows-style file share (SMB 2/3) for this machine and the LAN, through the bundled portable-smb-server. Explorer, Finder and Linux mount it.";
+    public string Description => "A Windows-style file share (SMB 2/3) for this machine and the LAN, served by AnyFS itself. Explorer, Finder and Linux mount it.";
 
     public Stream? OpenIcon() => null;
 
     public IReadOnlyList<OSPlatform> SupportedPlatforms { get; } = [OSPlatform.Windows, OSPlatform.Linux, OSPlatform.OSX];
 
-    public string? UnavailableReason => SmbServerBinary.IsAvailable(out var reason) ? null : reason;
+    public string? UnavailableReason => null;
 
     public PerformanceTier Tier => PerformanceTier.Network;
 
@@ -133,7 +133,7 @@ public sealed record SmbCredentialsView(string? User, string? Password, bool Gue
 
 internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collection) : IMount
 {
-    private ISharedLease<SmbServerProcess>? _lease;
+    private ISharedLease<SmbHost>? _lease;
     private string? _registeredName;
     private Action<string>? _onDied;
     private string? _mappedLetter;
@@ -162,9 +162,9 @@ internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collec
         }
 
         _logger = context.Logger;
-        var binary = SmbServerBinary.Locate(context.ProviderCacheDirectory);
+        RemoveOldServerCopies(context.ProviderCacheDirectory, context.Logger);
         var key = $"smb:{address}:{settings.Port}";
-        _lease = await context.AcquireSharedAsync(key, token => SmbServerProcess.StartAsync(address, settings.Port, binary, context.Logger, token), ct).ConfigureAwait(false);
+        _lease = await context.AcquireSharedAsync(key, token => SmbHost.StartAsync(address, settings.Port, context.Logger, token), ct).ConfigureAwait(false);
         try
         {
             await _lease.Value.RegisterAsync(collection.Name, fs, context.Stats, credentials, ct).ConfigureAwait(false);
@@ -260,4 +260,29 @@ internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collec
     }
 
     public ValueTask DisposeAsync() => new(StopAsync(CancellationToken.None));
+
+    /// <summary>
+    /// The copies of portable-smb-server that builds before LibSmb unpacked into the provider's cache folder
+    /// (<c>portable-smb-server-&lt;hash&gt;</c>, one per version): nothing runs them now, so they go. Best effort.
+    /// </summary>
+    internal static void RemoveOldServerCopies(string cacheDirectory, ILogger logger)
+    {
+        try
+        {
+            if (!Directory.Exists(cacheDirectory))
+            {
+                return;
+            }
+
+            foreach (var copy in Directory.EnumerateFiles(cacheDirectory, "portable-smb-server-*"))
+            {
+                File.Delete(copy);
+                logger.LogDebug("SMB: removed {File}, a server copy no longer used", copy);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            logger.LogDebug("SMB: old server copies in {Dir} left: {Error}", cacheDirectory, ex.Message);
+        }
+    }
 }

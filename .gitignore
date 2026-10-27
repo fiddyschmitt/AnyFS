@@ -494,7 +494,8 @@ $RECYCLE.BIN/
 anyfs.log
 anyfs.*.log
 /scratch/
-# the Go server binaries scripts/fetch-go-servers.ps1 downloads (embedded per RID at publish)
+# where scripts/fetch-go-servers.ps1 put portable-smb-server before LibSmb served SMB in-process: no longer used, and a
+# leftover folder may be deleted; kept ignored so one is never committed
 /tools/go-servers/
 # the WinFsp installer scripts/fetch-winfsp.ps1 downloads (embedded in Windows builds for the Install button)
 /tools/winfsp/
@@ -507,5 +508,6 @@ provisioning/publish/
 provisioning/.vagrant/
 provisioning/macos/tart-*.log
 
-# the Visual Studio template above ignores *.e2e, which would swallow the end-to-end test project
+# the Visual Studio template above ignores *.e2e, which would swallow the end-to-end test projects
 !tests/AnyFS.E2E/
+!tests/LibSmb.E2E/
