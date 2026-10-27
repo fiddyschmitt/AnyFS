@@ -125,6 +125,29 @@ public class GitLabLiveTests
         StringAssert.StartsWith(Encoding.UTF8.GetString(await ReadAsync(source, "wiki/notes.asciidoc")), $"// {url}/anyfs/docs/-/wikis/notes\n= Notes");
     }
 
+    [TestMethod]
+    public async Task TheDocsIssuesAndMergeRequestAreThereWithTheirFiles()
+    {
+        var (url, token) = Server();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(url + "/anyfs/docs", token, context);
+        CollectionAssert.AreEqual(new[] { "#1 Install fails on Debian", "#2 An old question", "#3 Ünïcödé — résumé ✓ 日本語", "#4 Paths_ a_b _ c _ _ _q_ _x_ _p_" },
+            (await ListAsync(source, "issues")).Select(e => e.Name).ToArray());
+        const string first = "issues/#1 Install fails on Debian";
+        var issue = Encoding.UTF8.GetString(await ReadAsync(source, first + "/issue.md"));
+        StringAssert.Contains(issue, "**Labels:** bug, install");
+        StringAssert.Contains(issue, "(attachments/steps.txt)");
+        var comments = Encoding.UTF8.GetString(await ReadAsync(source, first + "/comments.md"));
+        StringAssert.Contains(comments, "Fixed in the next build.");
+        Assert.IsFalse(comments.Contains("assigned to", StringComparison.Ordinal));
+        var attachments = await ListAsync(source, first + "/attachments");
+        CollectionAssert.AreEquivalent(new[] { "steps.txt", "diagram.png", "data.bin" }, attachments.Select(e => e.Name).ToArray());
+        Assert.AreEqual(102_400, attachments.Single(e => e.Name == "data.bin").Length);
+        Assert.AreEqual("Steps to reproduce, as text.\n", Encoding.UTF8.GetString(await ReadAsync(source, first + "/attachments/steps.txt")));
+        var patch = Encoding.UTF8.GetString(await ReadAsync(source, "merge requests/!1 Docs_ say more/changes.diff"));
+        StringAssert.StartsWith(patch, "diff --git a/docs/more.md b/docs/more.md\nnew file mode 100644\n");
+    }
+
     private static async Task<byte[]> ReadAsync(ISource source, string path)
     {
         await using var file = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);

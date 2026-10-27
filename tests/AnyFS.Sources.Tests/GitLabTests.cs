@@ -24,6 +24,7 @@ internal static class GitLabSeed
         var docs = fake.AddProject(anyfs, "docs", "Docs");
         docs.Commit("main", new Dictionary<string, byte[]> { ["README.md"] = Bytes("# Docs\n") });
         Wiki(docs);
+        Tickets(docs, tester);
         anyfs.WikiPages.Add(new FakeGitLab.WikiPage("handbook", "handbook", "markdown", "# Handbook\n\nThe group's own wiki.\n"));
         App(fake.AddProject(tools, "app", "App"));
         fake.AddProject(tools, "empty", "Empty");
@@ -82,6 +83,41 @@ internal static class GitLabSeed
         docs.WikiPages.Add(new FakeGitLab.WikiPage("Ünïcödé-résumé", "Ünïcödé résumé", "markdown", "A page whose title is not ASCII: 日本語.\n"));
         docs.WikiUploads[$"{DiagramHash}/diagram.png"] = Diagram;
         docs.WikiUploads[$"{ShotHash}/shot 1.png"] = Bytes("a screenshot");
+    }
+
+    public const string StepsSecret = "817b19e73071a0163e81cf960e6165fd";
+    public const string DataSecret = "b24c363dbae7306cb60579b3bd7f7bd5";
+    public static readonly byte[] Data = Enumerable.Range(0, 102_400).Select(i => (byte)(i * 13 % 256)).ToArray();
+    public static readonly DateTimeOffset Opened = new(2026, 10, 1, 9, 30, 0, TimeSpan.Zero);
+
+    /// <summary>The docs project's issues and merge request, as the lab's seed makes them.</summary>
+    private static void Tickets(FakeGitLab.Project docs, FakeGitLab.User tester)
+    {
+        var first = new FakeGitLab.Ticket(1, "Install fails on Debian",
+            $"The installer stops half way.\n\n[steps.txt](/uploads/{StepsSecret}/steps.txt)\n\n![diagram](/uploads/{DiagramHash}/diagram.png)\n\nThe log: [data.bin](/uploads/{DataSecret}/data.bin)", tester, Opened)
+        {
+            Milestone = "v1",
+            Updated = Opened.AddHours(2),
+        };
+        first.Labels.AddRange(["bug", "install"]);
+        first.Assignees.Add(tester);
+        first.Notes.Add(new FakeGitLab.Note("assigned to @tester", tester, Opened.AddMinutes(1), System: true));
+        first.Notes.Add(new FakeGitLab.Note("It works on Debian 12.", tester, Opened.AddHours(1)));
+        first.Notes.Add(new FakeGitLab.Note("Fixed in the next build.", tester, Opened.AddHours(2)));
+        docs.IssueList.Add(first);
+        docs.IssueList.Add(new FakeGitLab.Ticket(2, "An old question", "Answered long ago.", tester, Opened.AddHours(3)) { State = "closed", Closed = Opened.AddHours(4), Updated = Opened.AddHours(4) });
+        docs.IssueList.Add(new FakeGitLab.Ticket(3, "Ünïcödé — résumé ✓ 日本語", "A title that is not ASCII.", tester, Opened.AddHours(5)));
+        docs.IssueList.Add(new FakeGitLab.Ticket(4, "Paths: a/b \\ c * ? \"q\" <x> |p|", "A title with every character Windows refuses in a name.", tester, Opened.AddHours(6)));
+        docs.Uploads[$"{StepsSecret}/steps.txt"] = Bytes("Steps to reproduce, as text.\n");
+        docs.Uploads[$"{DiagramHash}/diagram.png"] = Diagram;
+        docs.Uploads[$"{DataSecret}/data.bin"] = Data;
+
+        var mr = new FakeGitLab.Ticket(1, "Docs: say more", "Adds a page and changes the README.", tester, Opened.AddDays(1)) { SourceBranch = "feature/docs", TargetBranch = "main" };
+        mr.Notes.Add(new FakeGitLab.Note("Looks good to me.", tester, Opened.AddDays(1).AddHours(1)));
+        mr.Diffs.Add(new FakeGitLab.Diff("docs/more.md", "docs/more.md", "@@ -0,0 +1,3 @@\n+# More\n+\n+A page the merge request adds.\n", NewFile: true));
+        mr.Diffs.Add(new FakeGitLab.Diff("README.md", "README.md", "@@ -1 +1,3 @@\n-# Docs\n+# Docs\n+\n+Changed on a branch.\n"));
+        mr.Diffs.Add(new FakeGitLab.Diff("logo.png", "logo.png", "", TooLarge: true));
+        docs.MergeRequestList.Add(mr);
     }
 
     public static byte[] Bytes(string text) => Encoding.UTF8.GetBytes(text);
@@ -214,7 +250,7 @@ public class GitLabSourceTests
         var (source, context) = await StartAsync(fake, GitLabSeed.Settings(App(fake)));
         await using var _ = source;
         Assert.AreEqual(ScopeKind.Project, source.Scope);
-        CollectionAssert.AreEqual(new[] { "files", "branches", "tags" }, (await ListAsync(source, "")).Select(e => e.Name).ToArray());
+        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "issues", "merge requests" }, (await ListAsync(source, "")).Select(e => e.Name).ToArray());
         Assert.IsTrue(context.Progress.Any(p => p.Message.Contains("anyfs/tools/app", StringComparison.Ordinal)));
     }
 
@@ -477,7 +513,7 @@ public class GitLabWikiTests
     {
         var fake = GitLabSeed.Lab();
         await using var source = await StartAsync(fake, "/anyfs/docs");
-        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "wiki" }, await NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "wiki", "issues", "merge requests" }, await NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "guides", "home.md", "notes.asciidoc", "Ünïcödé-résumé.md" }, await NamesAsync(source, "wiki"), "no attachments folder with a token");
         CollectionAssert.AreEqual(new[] { "install.md", "install" }, await NamesAsync(source, "wiki/guides"), "a page beside the folder of the pages under it");
         CollectionAssert.AreEqual(new[] { "linux.md" }, await NamesAsync(source, "wiki/guides/install"));
@@ -525,11 +561,144 @@ public class GitLabWikiTests
         var fake = GitLabSeed.Lab();
         await using (var app = await StartAsync(fake, "/anyfs/tools/app"))
         {
-            CollectionAssert.AreEqual(new[] { "files", "branches", "tags" }, await NamesAsync(app, ""), "a wiki with no pages");
+            CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "issues", "merge requests" }, await NamesAsync(app, ""), "a wiki with no pages");
         }
 
         await using var off = await StartAsync(fake, "/anyfs/docs", s => s.Wiki = false);
-        CollectionAssert.AreEqual(new[] { "files", "branches", "tags" }, await NamesAsync(off, ""));
+        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "issues", "merge requests" }, await NamesAsync(off, ""));
+    }
+}
+
+/// <summary>A project's issues and merge requests (spec 7.8): a folder each, Markdown, comments, a patch, the attached files.</summary>
+[TestClass]
+public class GitLabTicketTests
+{
+    private static async Task<GitLabSource> StartAsync(FakeGitLab fake, Action<GitLabSettings>? change = null)
+    {
+        var settings = GitLabSeed.Settings(fake.Server + "/anyfs/docs");
+        change?.Invoke(settings);
+        var source = new GitLabSource(settings, fake.StandIn());
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        return source;
+    }
+
+    private static async Task<List<VfsEntry>> ListAsync(ISource source, string path)
+    {
+        var entries = new List<VfsEntry>();
+        await foreach (var e in source.ListAsync(path, CancellationToken.None))
+        {
+            entries.Add(e);
+        }
+
+        return entries;
+    }
+
+    private static async Task<byte[]> ReadAsync(ISource source, string path)
+    {
+        await using var file = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
+        var buffer = new byte[file.Length];
+        await file.ReadFullyAsync(0, buffer, CancellationToken.None);
+        return buffer;
+    }
+
+    private const string First = "issues/#1 Install fails on Debian";
+
+    [TestMethod]
+    public async Task IssuesAndMergeRequestsAreFoldersByNumberAndTitle()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake);
+        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "wiki", "issues", "merge requests" }, (await ListAsync(source, "")).Select(e => e.Name).ToArray());
+        CollectionAssert.AreEqual(new[] { "#1 Install fails on Debian", "#2 An old question", "#3 Ünïcödé — résumé ✓ 日本語", "#4 Paths_ a_b _ c _ _ _q_ _x_ _p_" },
+            (await ListAsync(source, "issues")).Select(e => e.Name).ToArray());
+        CollectionAssert.AreEqual(new[] { "!1 Docs_ say more" }, (await ListAsync(source, "merge requests")).Select(e => e.Name).ToArray());
+        var issue = (await ListAsync(source, "issues")).First();
+        Assert.AreEqual(GitLabSeed.Opened.AddHours(2), issue.Modified);
+        Assert.AreEqual(GitLabSeed.Opened, issue.Created);
+    }
+
+    [TestMethod]
+    public async Task AnIssueIsItsMarkdownItsCommentsAndItsAttachments()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake);
+        CollectionAssert.AreEqual(new[] { "issue.md", "comments.md", "attachments" }, (await ListAsync(source, First)).Select(e => e.Name).ToArray());
+        var issue = Encoding.UTF8.GetString(await ReadAsync(source, First + "/issue.md"));
+        StringAssert.StartsWith(issue, "# #1 Install fails on Debian\n\n**State:** open  \n**Author:** Test Er (@tester)  \n**Assignees:** Test Er (@tester)  \n**Labels:** bug, install  \n**Milestone:** v1  \n");
+        StringAssert.Contains(issue, $"**Web:** {fake.Server}/anyfs/docs/-/issues/1");
+        StringAssert.Contains(issue, "[steps.txt](attachments/steps.txt)");
+        StringAssert.Contains(issue, "![diagram](attachments/diagram.png)");
+        var comments = Encoding.UTF8.GetString(await ReadAsync(source, First + "/comments.md"));
+        StringAssert.Contains(comments, "It works on Debian 12.");
+        StringAssert.Contains(comments, "Fixed in the next build.");
+        Assert.IsFalse(comments.Contains("assigned to", StringComparison.Ordinal), "GitLab's own notes are left out");
+        var attachments = await ListAsync(source, First + "/attachments");
+        CollectionAssert.AreEqual(new[] { "steps.txt", "diagram.png", "data.bin" }, attachments.Select(e => e.Name).ToArray());
+        Assert.AreEqual(GitLabSeed.Data.Length, attachments.Single(e => e.Name == "data.bin").Length);
+        CollectionAssert.AreEqual(GitLabSeed.Data, await ReadAsync(source, First + "/attachments/data.bin"));
+        Assert.AreEqual(0, fake.Count("GET /api/v4/projects/" + fake.ProjectAt("anyfs/docs").Id + "/uploads/" + GitLabSeed.StepsSecret), "sizes from HEAD requests");
+    }
+
+    [TestMethod]
+    public async Task AClosedIssueSaysSoAndAnIssueWithoutCommentsSaysThat()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake);
+        StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, "issues/#2 An old question/issue.md")), "**State:** closed ");
+        StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, "issues/#2 An old question/comments.md")), "No comments.");
+        CollectionAssert.AreEqual(new[] { "issue.md", "comments.md" }, (await ListAsync(source, "issues/#2 An old question")).Select(e => e.Name).ToArray(), "no attachments, no folder");
+    }
+
+    [TestMethod]
+    public async Task AMergeRequestHasItsChangesAsAPatch()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake);
+        const string mr = "merge requests/!1 Docs_ say more";
+        CollectionAssert.AreEqual(new[] { "merge_request.md", "comments.md", "changes.diff" }, (await ListAsync(source, mr)).Select(e => e.Name).ToArray());
+        StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, mr + "/merge_request.md")), "**Branches:** feature/docs into main");
+        var patch = Encoding.UTF8.GetString(await ReadAsync(source, mr + "/changes.diff"));
+        StringAssert.StartsWith(patch, "diff --git a/docs/more.md b/docs/more.md\nnew file mode 100644\n--- /dev/null\n+++ b/docs/more.md\n@@ -0,0 +1,3 @@\n+# More\n");
+        StringAssert.Contains(patch, "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n");
+        StringAssert.Contains(patch, "diff --git a/logo.png b/logo.png\n# GitLab does not show this file's changes");
+    }
+
+    [TestMethod]
+    public async Task OpenOnlyLeavesTheClosedOut()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake, s => s.OpenOnly = true);
+        CollectionAssert.AreEqual(new[] { "#1 Install fails on Debian", "#3 Ünïcödé — résumé ✓ 日本語", "#4 Paths_ a_b _ c _ _ _q_ _x_ _p_" },
+            (await ListAsync(source, "issues")).Select(e => e.Name).ToArray());
+    }
+
+    [TestMethod]
+    public async Task OnlyWhatChangedIsAskedForAgain()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake, s => s.RefreshSeconds = 0);
+        Assert.AreEqual(4, (await ListAsync(source, "issues")).Count);
+        var docs = fake.ProjectAt("anyfs/docs");
+        docs.IssueList.Add(new FakeGitLab.Ticket(5, "A new one", "Just made.", docs.IssueList[0].Author, DateTimeOffset.UtcNow));
+        docs.IssueList[2].Title = "Renamed";
+        docs.IssueList[2].Updated = DateTimeOffset.UtcNow;
+        var names = (await ListAsync(source, "issues")).Select(e => e.Name).ToArray();
+        CollectionAssert.AreEqual(new[] { "#1 Install fails on Debian", "#2 An old question", "#3 Renamed", "#4 Paths_ a_b _ c _ _ _q_ _x_ _p_", "#5 A new one" }, names);
+        Assert.IsTrue(fake.Requests.Count(r => r.Contains("/issues?", StringComparison.Ordinal) && r.Contains("updated_after=", StringComparison.Ordinal)) >= 1, "the second listing asked only for the changed");
+    }
+
+    [TestMethod]
+    public async Task TheSettingOrAFeatureTurnedOffHidesTheFolders()
+    {
+        var fake = GitLabSeed.Lab();
+        await using (var off = await StartAsync(fake, s => s.IssuesAndMergeRequests = false))
+        {
+            CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "wiki" }, (await ListAsync(off, "")).Select(e => e.Name).ToArray());
+        }
+
+        fake.ProjectAt("anyfs/docs").Issues = false;
+        await using var noIssues = await StartAsync(fake);
+        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "wiki", "merge requests" }, (await ListAsync(noIssues, "")).Select(e => e.Name).ToArray());
     }
 }
 

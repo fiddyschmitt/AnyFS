@@ -104,7 +104,7 @@ internal sealed partial class FakeGitLab
         public Dictionary<string, byte[]> WikiUploads { get; } = new(StringComparer.Ordinal);
     }
 
-    public sealed class Project(FakeGitLab owner, long id, string path, string name, string namespacePath, Group? group)
+    public sealed partial class Project(FakeGitLab owner, long id, string path, string name, string namespacePath, Group? group)
     {
         public long Id { get; } = id;
 
@@ -647,7 +647,7 @@ internal sealed partial class FakeGitLab
     }
 
     /// <summary>A project's features beyond its repository: its wiki.</summary>
-    private static Response ProjectFeatures(User user, Project project, Request r, string[] rest)
+    private Response ProjectFeatures(User user, Project project, Request r, string[] rest)
     {
         _ = user;
         switch (rest)
@@ -655,7 +655,7 @@ internal sealed partial class FakeGitLab
             case ["wikis"]:
                 return project.Wiki ? Response.Json(WikiJson(project.WikiPages, r)) : Response.Message(403, "403 Forbidden");
             default:
-                return Response.NotFound("404 Not Found");
+                return Tickets(project, r, rest) ?? Response.NotFound("404 Not Found");
         }
     }
 

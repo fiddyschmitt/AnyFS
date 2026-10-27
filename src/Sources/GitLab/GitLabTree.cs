@@ -191,6 +191,19 @@ internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(n
             sections.Add(new WikiFolder(WikiOwner.Of(project), "", "wiki"));
         }
 
+        if (settings.IssuesAndMergeRequests)
+        {
+            if (project.Issues)
+            {
+                sections.Add(new TicketsFolder(project, mergeRequests: false, "issues"));
+            }
+
+            if (project.MergeRequests && project.Repository)
+            {
+                sections.Add(new TicketsFolder(project, mergeRequests: true, "merge requests"));
+            }
+        }
+
         return sections;
     }
 }

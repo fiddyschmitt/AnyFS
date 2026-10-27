@@ -52,6 +52,10 @@ public sealed class GitLabSettings
         Hint = "In each project with a wiki (and each group with one, GitLab Premium), its pages as files of their own markup (Markdown, AsciiDoc...), the page's address on the first line, and the files they embed, where the sign-in is a browser session or a Windows account (GitLab serves those to no token).")]
     public bool Wiki { get; set; } = true;
 
+    [Setting("Issues and merge requests", Order = 7,
+        Hint = "In each project, a folder per issue and per merge request: its description and comments as Markdown, a merge request's changes as a patch, and the files attached to it.")]
+    public bool IssuesAndMergeRequests { get; set; } = true;
+
     [Setting("Browser", Advanced = true, Order = 10, Kind = SettingKind.FilePath,
         Hint = "The Edge, Chrome or Chromium to open for the web session's sign-in. Leave empty to find one automatically. AnyFS opens it with a profile of its own, never your everyday browser's; where a policy keeps AnyFS from driving it, the sign-in goes through Selenium WebDriver (your default browser, then Firefox and the others).")]
     public string? BrowserPath { get; set; }
@@ -59,6 +63,10 @@ public sealed class GitLabSettings
     [Setting("Trust any certificate", Advanced = true, Order = 11,
         Hint = "Accept the server's HTTPS certificate whatever it is (a server with a self-signed one). Off for a real server.")]
     public bool TrustAnyCertificate { get; set; }
+
+    [Setting("Open issues and merge requests only", Advanced = true, Order = 12,
+        Hint = "Leave closed issues and closed or merged merge requests out (a busy project has thousands).")]
+    public bool OpenOnly { get; set; }
 
     [Setting("Check for changes every (seconds)", Advanced = true, Order = 14,
         Hint = "How old a listing of something that changes (branches, issues, pipelines, the wiki) may be before it is asked for again. The repository as it stands at a commit never changes, and is kept.")]
