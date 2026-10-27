@@ -148,6 +148,24 @@ public class GitLabLiveTests
         StringAssert.StartsWith(patch, "diff --git a/docs/more.md b/docs/more.md\nnew file mode 100644\n");
     }
 
+    [TestMethod]
+    public async Task TheAppsPipelineJobsArtifactsAndReleaseAreThere()
+    {
+        var (url, token) = Server();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(url + "/anyfs/tools/app", token, context);
+        var main = (await ListAsync(source, "pipelines")).First(e => e.Name.EndsWith(" main", StringComparison.Ordinal)).Name;
+        var build = $"pipelines/{main}/build";
+        StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, build + "/job.log")), "seq 1 400000");
+        StringAssert.StartsWith(Encoding.UTF8.GetString(await ReadAsync(source, build + "/artifacts/out/hello.txt")), "built from ");
+        var numbers = (await ListAsync(source, build + "/artifacts/out/sub")).Single();
+        Assert.AreEqual(2_688_895, numbers.Length, "seq 1 400000, from the archive's own list");
+        var tail = await ReadAsync(source, build + "/artifacts/out/sub/numbers.txt");
+        StringAssert.EndsWith(Encoding.ASCII.GetString(tail[^7..]), "400000\n");
+        CollectionAssert.AreEquivalent(new[] { "release-notes.txt", "AnyFS on GitHub.url" }, (await ListAsync(source, "releases/v1.0/assets")).Select(e => e.Name).ToArray());
+        Assert.AreEqual("What is new in v1.0.\n", Encoding.UTF8.GetString(await ReadAsync(source, "releases/v1.0/assets/release-notes.txt")));
+    }
+
     private static async Task<byte[]> ReadAsync(ISource source, string path)
     {
         await using var file = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);

@@ -56,6 +56,12 @@ public sealed class GitLabSettings
         Hint = "In each project, a folder per issue and per merge request: its description and comments as Markdown, a merge request's changes as a patch, and the files attached to it.")]
     public bool IssuesAndMergeRequests { get; set; } = true;
 
+    [Setting("Pipelines", Order = 8, Hint = "In each project with pipelines, its newest: a folder per pipeline, with a folder per job holding its log and its artifacts.")]
+    public bool Pipelines { get; set; } = true;
+
+    [Setting("Releases", Order = 9, Hint = "In each project with releases, a folder per release with its notes and its files (a link elsewhere as a shortcut).")]
+    public bool Releases { get; set; } = true;
+
     [Setting("Browser", Advanced = true, Order = 10, Kind = SettingKind.FilePath,
         Hint = "The Edge, Chrome or Chromium to open for the web session's sign-in. Leave empty to find one automatically. AnyFS opens it with a profile of its own, never your everyday browser's; where a policy keeps AnyFS from driving it, the sign-in goes through Selenium WebDriver (your default browser, then Firefox and the others).")]
     public string? BrowserPath { get; set; }
@@ -67,6 +73,9 @@ public sealed class GitLabSettings
     [Setting("Open issues and merge requests only", Advanced = true, Order = 12,
         Hint = "Leave closed issues and closed or merged merge requests out (a busy project has thousands).")]
     public bool OpenOnly { get; set; }
+
+    [Setting("Pipelines kept", Advanced = true, Order = 13, Hint = "How many of a project's newest pipelines show.")]
+    public int PipelinesKept { get; set; } = 100;
 
     [Setting("Check for changes every (seconds)", Advanced = true, Order = 14,
         Hint = "How old a listing of something that changes (branches, issues, pipelines, the wiki) may be before it is asked for again. The repository as it stands at a commit never changes, and is kept.")]

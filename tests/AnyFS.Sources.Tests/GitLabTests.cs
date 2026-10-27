@@ -67,7 +67,24 @@ internal static class GitLabSeed
         app.Commit("Feature", new Dictionary<string, byte[]> { ["capital.txt"] = Bytes("the branch named Feature\n") }, FirstCommit.AddDays(3));
         app.Tags["release/2.0"] = app.Branches["feature/x"];
         app.Branches["main"] = first;
+
+        // a finished pipeline on main (build keeps artifacts, test none) and a running one on feature/x
+        app.PipelineList.Add(new FakeGitLab.Pipeline(2, "main", "success", FirstCommit.AddHours(1), FirstCommit.AddHours(2)));
+        app.PipelineList.Add(new FakeGitLab.Pipeline(3, "feature/x", "running", FirstCommit.AddDays(2), FirstCommit.AddDays(2)));
+        var build = new FakeGitLab.Job(31, "build", "success") { Log = "$ mkdir -p out/sub\n$ seq 1 400000 > out/sub/numbers.txt\nJob succeeded\n" };
+        build.Artifacts["out/hello.txt"] = Bytes("built from abc123\n");
+        build.Artifacts["out/sub/numbers.txt"] = Numbers;
+        app.JobsOf[2] = [build, new FakeGitLab.Job(32, "test", "success") { Log = "the tests passed\n" }];
+        app.JobsOf[3] = [new FakeGitLab.Job(41, "build", "running") { Log = "$ mkdir -p out/sub\n" }];
+        app.Uploads[$"{NotesSecret}/release-notes.txt"] = Bytes("What is new in v1.0.\n");
+        app.ReleaseList.Add(new FakeGitLab.Release("v1.0", "Version 1.0", "The first release: the fixture tree.", FirstCommit.AddDays(1),
+            [("release-notes.txt", $"https://gitlab.fake.test/-/project/{app.Id}/uploads/{NotesSecret}/release-notes.txt"), ("AnyFS on GitHub", "https://github.com/fiddyschmitt/AnyFS")]));
     }
+
+    public const string NotesSecret = "12d86697a1756f24b87861d45eee5cf6";
+
+    /// <summary>The build job's numbers.txt: seq 1 400000, as the lab's pipeline writes it.</summary>
+    public static readonly byte[] Numbers = Encoding.ASCII.GetBytes(string.Concat(Enumerable.Range(1, 400_000).Select(i => i + "\n")));
 
     public const string DiagramHash = "0123456789abcdef0123456789abcdef";
     public const string ShotHash = "fedcba9876543210fedcba9876543210";
@@ -250,7 +267,7 @@ public class GitLabSourceTests
         var (source, context) = await StartAsync(fake, GitLabSeed.Settings(App(fake)));
         await using var _ = source;
         Assert.AreEqual(ScopeKind.Project, source.Scope);
-        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "issues", "merge requests" }, (await ListAsync(source, "")).Select(e => e.Name).ToArray());
+        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "issues", "merge requests", "pipelines", "releases" }, (await ListAsync(source, "")).Select(e => e.Name).ToArray());
         Assert.IsTrue(context.Progress.Any(p => p.Message.Contains("anyfs/tools/app", StringComparison.Ordinal)));
     }
 
@@ -561,7 +578,7 @@ public class GitLabWikiTests
         var fake = GitLabSeed.Lab();
         await using (var app = await StartAsync(fake, "/anyfs/tools/app"))
         {
-            CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "issues", "merge requests" }, await NamesAsync(app, ""), "a wiki with no pages");
+            CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "issues", "merge requests", "pipelines", "releases" }, await NamesAsync(app, ""), "a wiki with no pages");
         }
 
         await using var off = await StartAsync(fake, "/anyfs/docs", s => s.Wiki = false);
@@ -699,6 +716,153 @@ public class GitLabTicketTests
         fake.ProjectAt("anyfs/docs").Issues = false;
         await using var noIssues = await StartAsync(fake);
         CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "wiki", "merge requests" }, (await ListAsync(noIssues, "")).Select(e => e.Name).ToArray());
+    }
+}
+
+/// <summary>A project's pipelines (jobs, logs, artifacts) and releases (spec 7.8).</summary>
+[TestClass]
+public class GitLabPipelineTests
+{
+    private static async Task<GitLabSource> StartAsync(FakeGitLab fake, string path = "/anyfs/tools/app", Action<GitLabSettings>? change = null)
+    {
+        var settings = GitLabSeed.Settings(fake.Server + path);
+        change?.Invoke(settings);
+        var source = new GitLabSource(settings, fake.StandIn());
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        return source;
+    }
+
+    private static async Task<List<VfsEntry>> ListAsync(ISource source, string path)
+    {
+        var entries = new List<VfsEntry>();
+        await foreach (var e in source.ListAsync(path, CancellationToken.None))
+        {
+            entries.Add(e);
+        }
+
+        return entries;
+    }
+
+    private static async Task<byte[]> ReadAsync(ISource source, string path)
+    {
+        await using var file = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
+        var buffer = new byte[file.Length];
+        await file.ReadFullyAsync(0, buffer, CancellationToken.None);
+        return buffer;
+    }
+
+    [TestMethod]
+    public async Task PipelinesAndReleasesShowWhereTheProjectHasThem()
+    {
+        var fake = GitLabSeed.Lab();
+        await using (var app = await StartAsync(fake))
+        {
+            CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "issues", "merge requests", "pipelines", "releases" }, (await ListAsync(app, "")).Select(e => e.Name).ToArray());
+        }
+
+        await using var docs = await StartAsync(fake, "/anyfs/docs");
+        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "wiki", "issues", "merge requests" }, (await ListAsync(docs, "")).Select(e => e.Name).ToArray());
+    }
+
+    [TestMethod]
+    public async Task APipelineHasItsDocumentAndAFolderPerJob()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake);
+        CollectionAssert.AreEqual(new[] { "3 feature_x", "2 main" }, (await ListAsync(source, "pipelines")).Select(e => e.Name).ToArray(), "newest first");
+        CollectionAssert.AreEqual(new[] { "pipeline.md", "build", "test" }, (await ListAsync(source, "pipelines/2 main")).Select(e => e.Name).ToArray());
+        var doc = Encoding.UTF8.GetString(await ReadAsync(source, "pipelines/2 main/pipeline.md"));
+        StringAssert.StartsWith(doc, "# Pipeline 2 on main\n\n**Status:** success  \n");
+        StringAssert.Contains(doc, "| build | test | success |");
+    }
+
+    [TestMethod]
+    public async Task AJobHasItsLogAndItsArtifactsListedFromTheArchivesEnd()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake);
+        const string build = "pipelines/2 main/build";
+        CollectionAssert.AreEqual(new[] { "job.log", "artifacts" }, (await ListAsync(source, build)).Select(e => e.Name).ToArray());
+        StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, build + "/job.log")), "Job succeeded");
+        CollectionAssert.AreEqual(new[] { "out" }, (await ListAsync(source, build + "/artifacts")).Select(e => e.Name).ToArray());
+        var files = await ListAsync(source, build + "/artifacts/out");
+        CollectionAssert.AreEqual(new[] { "hello.txt", "sub" }, files.Select(e => e.Name).ToArray());
+        Assert.AreEqual(GitLabSeed.Numbers.Length, (await ListAsync(source, build + "/artifacts/out/sub")).Single().Length);
+        CollectionAssert.AreEqual(GitLabSeed.Numbers, await ReadAsync(source, build + "/artifacts/out/sub/numbers.txt"));
+        Assert.IsTrue(fake.RangeRequests >= 1, "the archive's end, by range");
+        Assert.AreEqual(0, fake.Count("/jobs/31/artifacts?"), "never the archive whole");
+        CollectionAssert.AreEqual(new[] { "job.log" }, (await ListAsync(source, "pipelines/2 main/test")).Select(e => e.Name).ToArray(), "no artifacts, no folder");
+    }
+
+    [TestMethod]
+    public async Task AServerThatIgnoresRangesSendsTheArchiveOnce()
+    {
+        var fake = GitLabSeed.Lab();
+        fake.HonoursRanges = false;
+        await using var source = await StartAsync(fake);
+        var files = await ListAsync(source, "pipelines/2 main/build/artifacts/out");
+        CollectionAssert.AreEqual(new[] { "hello.txt", "sub" }, files.Select(e => e.Name).ToArray());
+        Assert.AreEqual(1, fake.RangeRequests, "the whole archive came with the first answer");
+    }
+
+    [TestMethod]
+    public async Task AReleaseHasItsNotesItsFilesAndItsLinks()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake);
+        CollectionAssert.AreEqual(new[] { "v1.0" }, (await ListAsync(source, "releases")).Select(e => e.Name).ToArray());
+        CollectionAssert.AreEqual(new[] { "release.md", "assets" }, (await ListAsync(source, "releases/v1.0")).Select(e => e.Name).ToArray());
+        var notes = Encoding.UTF8.GetString(await ReadAsync(source, "releases/v1.0/release.md"));
+        StringAssert.StartsWith(notes, "# Version 1.0\n\n**Tag:** v1.0  \n");
+        StringAssert.Contains(notes, "The first release: the fixture tree.");
+        CollectionAssert.AreEqual(new[] { "release-notes.txt", "AnyFS on GitHub.url" }, (await ListAsync(source, "releases/v1.0/assets")).Select(e => e.Name).ToArray());
+        Assert.AreEqual("What is new in v1.0.\n", Encoding.UTF8.GetString(await ReadAsync(source, "releases/v1.0/assets/release-notes.txt")));
+        Assert.AreEqual("[InternetShortcut]\r\nURL=https://github.com/fiddyschmitt/AnyFS\r\n", Encoding.UTF8.GetString(await ReadAsync(source, "releases/v1.0/assets/AnyFS on GitHub.url")));
+    }
+
+    [TestMethod]
+    public async Task OnlyTheNewestPipelinesAreKeptAndTheSettingsHideTheFolders()
+    {
+        var fake = GitLabSeed.Lab();
+        await using (var one = await StartAsync(fake, change: s => s.PipelinesKept = 1))
+        {
+            CollectionAssert.AreEqual(new[] { "3 feature_x" }, (await ListAsync(one, "pipelines")).Select(e => e.Name).ToArray());
+        }
+
+        await using var off = await StartAsync(fake, change: s => (s.Pipelines, s.Releases) = (false, false));
+        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "issues", "merge requests" }, (await ListAsync(off, "")).Select(e => e.Name).ToArray());
+    }
+}
+
+/// <summary>A zip archive's list read from its end (spec 7.8): the entries, their sizes and folders, Zip64 too.</summary>
+[TestClass]
+public class ZipDirectoryTests
+{
+    [TestMethod]
+    public async Task TheEntriesComeFromTheCentralDirectoryAlone()
+    {
+        var job = new FakeGitLab.Job(1, "build", "success");
+        job.Artifacts["a.txt"] = GitLabSeed.Bytes("aaa");
+        job.Artifacts["dir/ünï cödé.txt"] = GitLabSeed.Bytes("unicode");
+        job.Artifacts["dir/deep/big.bin"] = GitLabSeed.Numbers;
+        var archive = job.Archive;
+        var reads = new List<(long, int)>();
+        var entries = await ZipDirectory.ReadAsync(archive.Length, (offset, length, _) =>
+        {
+            reads.Add((offset, length));
+            return Task.FromResult(archive.AsSpan((int)offset, length).ToArray());
+        }, CancellationToken.None);
+        CollectionAssert.AreEquivalent(new[] { "dir", "dir/deep", "a.txt", "dir/ünï cödé.txt", "dir/deep/big.bin" }, entries.Select(e => e.Path).ToArray());
+        Assert.AreEqual(GitLabSeed.Numbers.Length, entries.Single(e => e.Path == "dir/deep/big.bin").Size);
+        Assert.IsTrue(entries.Single(e => e.Path == "dir").IsDirectory);
+        Assert.IsTrue(reads.Sum(r => r.Item2) < archive.Length, "less than the archive was read");
+    }
+
+    [TestMethod]
+    public async Task SomethingThatIsNoZipSaysSo()
+    {
+        var bytes = new byte[1000];
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(() => ZipDirectory.ReadAsync(bytes.Length, (o, l, _) => Task.FromResult(bytes.AsSpan((int)o, l).ToArray()), CancellationToken.None));
     }
 }
 

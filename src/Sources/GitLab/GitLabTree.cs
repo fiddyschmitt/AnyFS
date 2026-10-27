@@ -204,6 +204,19 @@ internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(n
             }
         }
 
+        // most projects have no pipelines or releases: those folders show only where there are some
+        if (settings.Pipelines && project.Pipelines && project.Repository
+            && await source.HasAnyAsync(async () => (await source.PipelinesAsync(project, ct).ConfigureAwait(false)).Count).ConfigureAwait(false))
+        {
+            sections.Add(new PipelinesFolder(project, "pipelines"));
+        }
+
+        if (settings.Releases && project.Releases && project.Repository
+            && await source.HasAnyAsync(async () => (await source.ReleasesAsync(project, ct).ConfigureAwait(false)).Count).ConfigureAwait(false))
+        {
+            sections.Add(new ReleasesFolder(project, "releases"));
+        }
+
         return sections;
     }
 }

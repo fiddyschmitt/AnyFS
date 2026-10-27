@@ -172,6 +172,21 @@ internal sealed class GitLabApi : IDisposable
     /// <summary>A download relative to <c>/api/v4/</c>.</summary>
     public Task<HttpResponseMessage> OpenAsync(string relative, CancellationToken ct) => OpenAsync(new Uri(Address.Api, relative), relative, ct);
 
+    /// <summary>
+    /// Bytes at an offset (relative to <c>/api/v4/</c>), asked for with a Range header: whether the server gave just them
+    /// (206), or ignored the range and sent everything (200), and what it sent.
+    /// </summary>
+    public async Task<(bool Partial, byte[] Bytes)> RangeAsync(string relative, long offset, int length, CancellationToken ct)
+    {
+        using var response = await SendAsync(() =>
+        {
+            var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Address.Api, relative));
+            request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(offset, offset + length - 1);
+            return request;
+        }, relative, ct).ConfigureAwait(false);
+        return (response.StatusCode == HttpStatusCode.PartialContent, await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false));
+    }
+
     /// <summary>A small download's bytes.</summary>
     public async Task<byte[]> BytesAsync(Uri url, string what, CancellationToken ct)
     {

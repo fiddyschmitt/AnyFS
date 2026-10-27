@@ -15,7 +15,7 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
 
     public string DisplayName => "GitLab";
 
-    public string Description => "A GitLab server, group or project (GitLab.com or your own): each project's repository on its default branch, on every branch and at every tag; its wiki, issues and merge requests. Read-only.";
+    public string Description => "A GitLab server, group or project (GitLab.com or your own): each project's repository on its default branch, on every branch and at every tag; its wiki, issues, merge requests, pipelines and releases. Read-only.";
 
     public string TypeFolder => "gitlab";
 
@@ -59,6 +59,7 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
             nameof(GitLabSettings.Username) or nameof(GitLabSettings.Password) => s.EffectiveSignIn == GitLabSignIn.Windows,
             nameof(GitLabSettings.BrowserPath) => s.EffectiveSignIn == GitLabSignIn.WebSession,
             nameof(GitLabSettings.OpenOnly) => s.IssuesAndMergeRequests,
+            nameof(GitLabSettings.PipelinesKept) => s.Pipelines,
             _ => true,
         };
     }
@@ -79,6 +80,11 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
         if (s.EffectiveSignIn == GitLabSignIn.AccessToken && s.Token is null)
         {
             yield return new ValidationMessage("Give an access token: a personal, project or group access token with the read_api and read_repository scopes.", nameof(GitLabSettings.AccessToken));
+        }
+
+        if (s.PipelinesKept is < 1 or > 1000)
+        {
+            yield return new ValidationMessage("Pipelines kept must be between 1 and 1000.", nameof(GitLabSettings.PipelinesKept));
         }
 
         if (s.RefreshSeconds is < 5 or > 86_400)

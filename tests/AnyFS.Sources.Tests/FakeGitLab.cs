@@ -655,7 +655,7 @@ internal sealed partial class FakeGitLab
             case ["wikis"]:
                 return project.Wiki ? Response.Json(WikiJson(project.WikiPages, r)) : Response.Message(403, "403 Forbidden");
             default:
-                return Tickets(project, r, rest) ?? Response.NotFound("404 Not Found");
+                return Tickets(project, r, rest) ?? PipelinesAndReleases(project, r, rest) ?? Response.NotFound("404 Not Found");
         }
     }
 
