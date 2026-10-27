@@ -74,12 +74,26 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
 
         if (GitLabSettings.SignInFrom(s.SignInMethod) is null)
         {
-            yield return new ValidationMessage($"Sign in with one of: {GitLabSettings.AccessTokenChoice}, {GitLabSettings.WebSession}.", nameof(GitLabSettings.SignInMethod));
+            yield return new ValidationMessage($"Sign in with one of: {GitLabSettings.AccessTokenChoice}, {GitLabSettings.WebSession}, {GitLabSettings.WindowsCurrent}, {GitLabSettings.Windows}.", nameof(GitLabSettings.SignInMethod));
         }
 
         if (s.EffectiveSignIn == GitLabSignIn.AccessToken && s.Token is null)
         {
             yield return new ValidationMessage("Give an access token: a personal, project or group access token with the read_api and read_repository scopes.", nameof(GitLabSettings.AccessToken));
+        }
+
+        if (s.EffectiveSignIn is GitLabSignIn.Windows or GitLabSignIn.WindowsCurrent)
+        {
+            var named = s.EffectiveSignIn == GitLabSignIn.Windows;
+            foreach (var problem in WindowsAccount.Problems(s.IsWindowsCurrent, named ? s.Username : null, named ? s.Password : null, nameof(GitLabSettings.SignInMethod), nameof(GitLabSettings.Username)))
+            {
+                yield return problem;
+            }
+
+            if (s.Url is { } url && System.Net.IPAddress.TryParse(url.Host, out _))
+            {
+                yield return new ValidationMessage("Kerberos needs the server's name, not its address: GitLab's Kerberos sign-in will not get through (an LDAP sign-in still can).", nameof(GitLabSettings.Address), IsError: false);
+            }
         }
 
         if (s.EffectiveSignIn == GitLabSignIn.WebSession && s.Browser is { } browser && !File.Exists(browser))

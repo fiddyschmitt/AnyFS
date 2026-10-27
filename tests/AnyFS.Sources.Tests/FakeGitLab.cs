@@ -281,7 +281,7 @@ internal sealed partial class FakeGitLab
     /// <summary>A stand-in for the source: its requests come here.</summary>
     public GitLabStandIn StandIn() => new(Handler);
 
-    internal sealed record Request(string Method, Uri Url, string[] Segments, Dictionary<string, string> Query, Dictionary<string, string> Headers, byte[] Body)
+    internal sealed record Request(string Method, Uri Url, string[] Segments, Dictionary<string, string> Query, Dictionary<string, string> Headers, byte[] Body, string? WindowsUser = null)
     {
         public string? Q(string name) => Query.TryGetValue(name, out var v) ? v : null;
     }
@@ -618,6 +618,11 @@ internal sealed partial class FakeGitLab
     /// </summary>
     private Response? AnswerPages(Request r, string path)
     {
+        if (SignInPages(r, path) is { } signIn)
+        {
+            return signIn;
+        }
+
         var marker = path.IndexOf("/-/wikis/uploads/", StringComparison.Ordinal);
         if (marker < 0)
         {

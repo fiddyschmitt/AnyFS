@@ -30,8 +30,8 @@ public sealed class GitLabSettings
         Hint = "A GitLab server, a group on it or a project: its address as the browser shows it. A server shows the groups and projects you are a member of; a group its subgroups and projects; a project only itself. A page's address pasted here is cut back to its project's.")]
     public string Address { get; set; } = "";
 
-    [Setting("Sign in with", Order = 1, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [AccessTokenChoice, WebSession],
-        Hint = "Access token: a personal, project or group access token with the read_api and read_repository scopes (GitLab: Preferences, Access tokens). Web session: AnyFS opens the server's own sign-in page in a browser of its own for you to sign in, single sign-on and all, and keeps that session; it renews it without a window while the server lets it (Remember me), and shows the window again only when it does not.")]
+    [Setting("Sign in with", Order = 1, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [AccessTokenChoice, WebSession, WindowsCurrent, Windows],
+        Hint = "Access token: a personal, project or group access token with the read_api and read_repository scopes (GitLab: Preferences, Access tokens). Web session: AnyFS opens the server's own sign-in page in a browser of its own for you to sign in, single sign-on and all, and keeps that session; it renews it without a window while the server lets it (Remember me), and shows the window again only when it does not. Windows account, as yourself: GitLab's Kerberos sign-in with your Windows sign-in, nothing to type (the server must offer Kerberos, and be addressed by its name). Windows account: a domain user name and password, through GitLab's Kerberos sign-in, else its LDAP sign-in, else its own.")]
     public string SignInMethod { get; set; } = AccessTokenChoice;
 
     [Setting("Access token", Secret = true, Order = 2, Group = "Sign-in", Kind = SettingKind.Password, Placeholder = "glpat-...")]

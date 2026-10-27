@@ -15,9 +15,11 @@ internal static class GitLabSeed
     /// <summary>1 MiB and a bit of bytes, the same every time: the file in Git LFS.</summary>
     public static readonly byte[] Large = Enumerable.Range(0, (1 << 20) + 123).Select(i => (byte)(i * 7 % 251)).ToArray();
 
-    public static FakeGitLab Lab(string origin = "https://gitlab.fake.test", string root = "")
+    public static FakeGitLab Lab(string origin = "https://gitlab.fake.test", string root = "") => Fill(new FakeGitLab(origin, root));
+
+    /// <summary>The lab's accounts, groups and projects, into a fake made elsewhere (one listening on a port).</summary>
+    public static FakeGitLab Fill(FakeGitLab fake)
     {
-        var fake = new FakeGitLab(origin, root);
         var tester = fake.AddUser("tester", "Test Er", Token);
         fake.AddUser("other", "Someone Else", OtherToken);
         var anyfs = fake.AddGroup("anyfs", "AnyFS", null, tester);
@@ -1007,6 +1009,126 @@ public class GitLabWebSessionTests
         using var context = new TestSourceContext();
         await using var source = await StartAsync(fake, browser, context);
         Assert.AreEqual(1, browser.Calls.Count, "the source took the Test's sign-in");
+    }
+}
+
+/// <summary>
+/// The Windows sign-ins (spec 7.8, spike B): GitLab's Kerberos sign-in, then a user name and password's LDAP form and GitLab's
+/// own. In-process the fake's Negotiate page has no ticket to take; listening on 127.0.0.1 it takes Windows' own sign-in
+/// (Windows only), which stands in for a Kerberos ticket at the HTTP level.
+/// </summary>
+[TestClass]
+public class GitLabWindowsTests
+{
+    private static async Task<GitLabSource> StartAsync(FakeGitLab fake, GitLabSettings settings, bool inProcess = true)
+    {
+        var source = new GitLabSource(settings, inProcess ? fake.StandIn() : null);
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        return source;
+    }
+
+    private static GitLabSettings Named(FakeGitLab fake, string password) => new()
+    {
+        Address = fake.Server + "/anyfs/docs",
+        SignInMethod = GitLabSettings.Windows,
+        Username = @"ANYFS\tester",
+        Password = password,
+    };
+
+    private static async Task<string[]> NamesAsync(ISource source, string path)
+    {
+        var names = new List<string>();
+        await foreach (var e in source.ListAsync(path, CancellationToken.None))
+        {
+            names.Add(e.Name);
+        }
+
+        return names.ToArray();
+    }
+
+    [TestMethod]
+    public async Task WithoutATicketANameAndPasswordGoesThroughLdap()
+    {
+        var fake = GitLabSeed.Lab(origin: "https://gitlab-win1.fake.test");
+        fake.SetPassword("tester", "right");
+        await using var source = await StartAsync(fake, Named(fake, "right"));
+        CollectionAssert.AreEqual(new[] { "kerberos", "ldap tester" }, fake.SignIns, "Kerberos first, then the LDAP form with the name alone");
+        StringAssert.Contains(source.Session.How, "(LDAP)");
+        CollectionAssert.Contains(await NamesAsync(source, ""), "issues");
+    }
+
+    [TestMethod]
+    public async Task WithoutLdapGitLabsOwnPasswordFormIsTried()
+    {
+        var fake = GitLabSeed.Lab(origin: "https://gitlab-win2.fake.test");
+        fake.SetPassword("tester", "right");
+        fake.KerberosSignIn = false;
+        fake.LdapSignIn = false;
+        await using var source = await StartAsync(fake, Named(fake, "right"));
+        CollectionAssert.AreEqual(new[] { "password tester" }, fake.SignIns);
+        StringAssert.Contains(source.Session.How, "(GitLab's own sign-in)");
+    }
+
+    [TestMethod]
+    public async Task ARefusedPasswordFailsTheStartForGood()
+    {
+        var fake = GitLabSeed.Lab(origin: "https://gitlab-win3.fake.test");
+        fake.SetPassword("tester", "right");
+        fake.KerberosSignIn = false;
+        var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => StartAsync(fake, Named(fake, "wrong")));
+        Assert.IsTrue(ex.Permanent, "a wrong password is not tried again by itself");
+        StringAssert.Contains(ex.Message, "refused the user name and password");
+        CollectionAssert.AreEqual(new[] { "ldap tester", "password tester" }, fake.SignIns);
+    }
+
+    [TestMethod]
+    public async Task AsYourselfNeedsAServerThatOffersKerberos()
+    {
+        var fake = GitLabSeed.Lab(origin: "https://gitlab-win4.fake.test");
+        fake.KerberosSignIn = false;
+        var settings = new GitLabSettings { Address = fake.Server + "/anyfs/docs", SignInMethod = GitLabSettings.WindowsCurrent };
+        var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => StartAsync(fake, settings));
+        StringAssert.Contains(ex.Message, OperatingSystem.IsWindows() ? "the server offers no Kerberos sign-in" : "works on Windows only");
+    }
+
+    [TestMethod]
+    public void TheSettingsSayWhatAWindowsSignInNeeds()
+    {
+        var plugin = new GitLabPlugin();
+        var named = new GitLabSettings { Address = "http://192.168.0.85", SignInMethod = GitLabSettings.Windows, Username = "a b", Password = "x" };
+        Assert.IsTrue(plugin.Validate(named).Any(m => m.Property == nameof(GitLabSettings.Username)), "a user name with a space");
+        Assert.IsTrue(plugin.Validate(named).Any(m => m.Property == nameof(GitLabSettings.Address) && !m.IsError), "Kerberos needs the name");
+        Assert.IsTrue(plugin.IsVisible(named, nameof(GitLabSettings.Password)));
+        Assert.IsFalse(plugin.IsVisible(new GitLabSettings { SignInMethod = GitLabSettings.WindowsCurrent }, nameof(GitLabSettings.Username)));
+    }
+
+    [TestMethod]
+    [Timeout(120_000)]
+    public async Task AsYourselfSignsInThroughTheNegotiatePageAndRenews()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("Windows' own sign-in over loopback is Windows-only");
+        }
+
+        var fake = GitLabSeed.Fill(FakeGitLab.Listen());
+        try
+        {
+            fake.WindowsUserAs = "tester";
+            var settings = new GitLabSettings { Address = fake.Server + "/anyfs/docs", SignInMethod = GitLabSettings.WindowsCurrent };
+            await using var source = await StartAsync(fake, settings, inProcess: false);
+            StringAssert.Contains(source.Session.How, "(Kerberos)");
+            Assert.AreEqual("tester", source.Session.User?.Username);
+            CollectionAssert.Contains(await NamesAsync(source, ""), "issues");
+            fake.EndSessions();
+            CollectionAssert.Contains(await NamesAsync(source, "issues"), "#1 Install fails on Debian");
+            Assert.AreEqual(1, source.Session.Generation, "signed in again by itself");
+            CollectionAssert.AreEqual(new[] { "kerberos", "kerberos" }, fake.SignIns);
+        }
+        finally
+        {
+            fake.Stop();
+        }
     }
 }
 

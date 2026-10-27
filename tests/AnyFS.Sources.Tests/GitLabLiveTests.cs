@@ -217,6 +217,30 @@ public class GitLabLiveTests
         }
     }
 
+    /// <summary>
+    /// A Windows account's name and password where Kerberos cannot get through (this PC is outside the lab's domain and
+    /// reaches GitLab by its address): the LDAP form signs in (<c>ANYFS_TEST_GITLAB_USER</c> and <c>_PASSWORD</c>).
+    /// </summary>
+    [TestMethod]
+    public async Task AWindowsAccountSignsInThroughLdapWhereKerberosCannot()
+    {
+        var (url, _) = Server();
+        var user = Environment.GetEnvironmentVariable("ANYFS_TEST_GITLAB_USER");
+        var password = Environment.GetEnvironmentVariable("ANYFS_TEST_GITLAB_PASSWORD");
+        if (string.IsNullOrEmpty(user) || string.IsNullOrEmpty(password))
+        {
+            Assert.Inconclusive("set ANYFS_TEST_GITLAB_USER and ANYFS_TEST_GITLAB_PASSWORD to sign in with the lab's domain account");
+        }
+
+        using var context = new TestSourceContext();
+        var settings = new GitLabSettings { Address = url + "/anyfs/docs", SignInMethod = GitLabSettings.Windows, Username = user, Password = password };
+        await using var source = new GitLabSource(settings);
+        await source.InitialiseAsync(context, CancellationToken.None);
+        StringAssert.Contains(source.Session.How, "(LDAP)");
+        CollectionAssert.Contains((await ListAsync(source, "issues")).Select(e => e.Name).ToList(), "#1 Install fails on Debian");
+        Assert.AreEqual(1, (await ListAsync(source, "wiki/attachments")).Count, "a session reads a wiki's attachments");
+    }
+
     /// <summary>What a person does in the web session's window: GitLab's LDAP form, Remember me ticked, in AnyFS's profile.</summary>
     private static void SignInProfile(string profile, string url, string user, string password)
     {

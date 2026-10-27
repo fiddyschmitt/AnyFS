@@ -41,6 +41,9 @@ internal sealed class GitLabSession : IDisposable
     private readonly SemaphoreSlim _renewGate = new(1, 1);
     private BrowserSession? _browser;
     private DateTime _renewedAt;
+
+    // why every way in refused the account's password, once it has: it is not given again (a lockout)
+    private string? _refused;
     private int _generation;
 
     public GitLabSession(GitLabSettings settings, ILogger logger, GitLabStandIn? standIn = null, ISecretStore? secrets = null)
@@ -70,6 +73,12 @@ internal sealed class GitLabSession : IDisposable
             if (settings.TrustAnyCertificate)
             {
                 sockets.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+            }
+
+            // the Windows sign-ins answer GitLab's Kerberos challenge (Negotiate) with these; nothing else asks for them
+            if (Method is GitLabSignIn.WindowsCurrent or GitLabSignIn.Windows)
+            {
+                sockets.Credentials = settings.Credentials();
             }
 
             inner = sockets;
@@ -180,7 +189,23 @@ internal sealed class GitLabSession : IDisposable
                 break;
 
             default:
-                throw new SourceFailedException($"Signing in with {Settings.SignInMethod} is not available yet: choose Access token or Web session.", permanent: true);
+                if (Method == GitLabSignIn.WindowsCurrent && !OperatingSystem.IsWindows())
+                {
+                    throw new SourceFailedException("Signing in as yourself works on Windows only: choose Windows account and give a user name and password, or another way.", permanent: true);
+                }
+
+                if (await KeptAsync(ct).ConfigureAwait(false))
+                {
+                    How = "with the session kept from before";
+                    break;
+                }
+
+                if (await WindowsSignInAsync(ct).ConfigureAwait(false) is { } problem)
+                {
+                    throw new SourceFailedException(problem, permanent: _refused is not null);
+                }
+
+                break;
         }
 
         _logger.LogInformation("gitlab: signed in to {Host} as {User} {How}", Url.Host, User!.Username, How);
@@ -250,6 +275,185 @@ internal sealed class GitLabSession : IDisposable
     private BrowserSession Browser()
         => _browser ??= new BrowserSession(BrowserLocator.Find(Settings.Browser, "ANYFS_GITLAB_BROWSER"), new GitLabSignInTarget(Address.Server, Settings.TrustAnyCertificate), _logger);
 
+    // --- the Windows sign-ins ----------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// The Windows sign-ins (spike B): GitLab's Kerberos sign-in, as its Kerberos button does it, the handler answering the
+    /// Negotiate challenge with the person's Windows sign-in or the account given; then, for a user name and password, an
+    /// LDAP form and GitLab's own password form, in that order, while the server offers them. Null when signed in (then
+    /// <see cref="User"/> and <see cref="How"/> say who and how), else what was tried and how each went. A password every
+    /// way refused is not given again until the source restarts: renewals every few seconds would lock the account.
+    /// </summary>
+    private async Task<string?> WindowsSignInAsync(CancellationToken ct)
+    {
+        if (_refused is { } why)
+        {
+            return $"{why} (not tried again until the source is restarted)";
+        }
+
+        CookieJar.Clear(Cookies);
+        GitLabSignInPage page;
+        try
+        {
+            page = await SignInPageAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested)
+        {
+            return $"GitLab ({Url.Host}) did not answer: {ex.Message}";
+        }
+
+        var tried = new List<string>();
+        var refusals = 0;
+        if (page.Kerberos)
+        {
+            if (await KerberosAsync(page, ct).ConfigureAwait(false) is not { } kerberos)
+            {
+                How = $"as {Settings.Who} (Kerberos)";
+                return null;
+            }
+
+            tried.Add("Kerberos: " + kerberos);
+            CookieJar.Clear(Cookies);
+            page = await SignInPageAsync(ct).ConfigureAwait(false);
+        }
+        else
+        {
+            tried.Add("the server offers no Kerberos sign-in");
+        }
+
+        if (Method == GitLabSignIn.Windows && Settings.FormCredentials() is { } account)
+        {
+            var forms = page.LdapForms.Select(f => (Name: "LDAP", Action: f, Fields: new[] { ("username", account.UserName), ("password", account.Password), ("remember_me", "1") })).ToList();
+            if (page.PasswordForm)
+            {
+                forms.Add(("GitLab's own sign-in", "/users/sign_in", [("user[login]", account.UserName), ("user[password]", account.Password), ("user[remember_me]", "1")]));
+            }
+
+            foreach (var (name, action, fields) in forms)
+            {
+                var result = await FormAsync(action, page.Csrf, fields, ct).ConfigureAwait(false);
+                if (result is null)
+                {
+                    How = $"as {Settings.Who} ({name})";
+                    return null;
+                }
+
+                refusals += result.StartsWith("refused", StringComparison.Ordinal) ? 1 : 0;
+                tried.Add($"{name}: {result}");
+                CookieJar.Clear(Cookies);
+                page = await SignInPageAsync(ct).ConfigureAwait(false);
+            }
+
+            if (forms.Count > 0 && refusals == forms.Count)
+            {
+                _refused = $"GitLab ({Url.Host}) refused the user name and password of {account.UserName}";
+            }
+        }
+
+        _logger.LogInformation("gitlab: the Windows sign-in to {Host} as {Who} did not get through (the server offers {Offers}): {Tried}", Url.Host, Settings.Who, page.Offers(), string.Join("; ", tried));
+        return $"Signing in to {Url.Host} as {Settings.Who} did not get through: {string.Join("; ", tried)}."
+            + (Method == GitLabSignIn.WindowsCurrent && !page.Kerberos ? " Choose Web session to sign in the way the server's own page offers." : "");
+    }
+
+    /// <summary>GitLab's sign-in page, with a fresh session for its CSRF token.</summary>
+    private async Task<GitLabSignInPage> SignInPageAsync(CancellationToken ct)
+    {
+        using var response = await Http.GetAsync(Address.Page("users/sign_in"), ct).ConfigureAwait(false);
+        return GitLabSignInPage.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// GitLab's Kerberos sign-in: the button's form posted, then its Negotiate page, which the handler answers with the
+    /// Windows credentials (a ticket for HTTP/&lt;the server's name&gt;), and its callback, which signs the session in. Null
+    /// when signed in, else why not.
+    /// </summary>
+    private async Task<string?> KerberosAsync(GitLabSignInPage page, CancellationToken ct)
+    {
+        var next = await PostFormAsync("/users/auth/kerberos", page.Csrf, [], ct).ConfigureAwait(false);
+        for (var hop = 0; next is not null && hop < 6; hop++)
+        {
+            using var response = await Http.GetAsync(next, ct).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                return IPAddress.TryParse(Url.Host, out _)
+                    ? "GitLab asked for a Kerberos ticket, which needs the server's name, not its address"
+                    : $"GitLab asked for a Kerberos ticket this computer could not give for {Url.Host} (is it in the domain, or can it reach the domain's KDC?)";
+            }
+
+            next = (int)response.StatusCode is >= 300 and < 400 && response.Headers.Location is { } location ? Rebase(next, location) : null;
+            if (next is not null && next.AbsolutePath.Contains("/users/sign_in", StringComparison.Ordinal))
+            {
+                return "GitLab refused the Kerberos sign-in (is the account linked to a GitLab user?)";
+            }
+
+            if (next is not null && !next.AbsolutePath.Contains("/users/auth/", StringComparison.Ordinal))
+            {
+                break;
+            }
+        }
+
+        if (await WhoAsync(ct).ConfigureAwait(false) is not { } user)
+        {
+            return "the Kerberos sign-in went through, but GitLab's API does not take its session";
+        }
+
+        User = user;
+        return null;
+    }
+
+    /// <summary>A sign-in form posted (an LDAP server's, GitLab's own): null when signed in, else why not ("refused ...").</summary>
+    private async Task<string?> FormAsync(string action, string? csrf, IEnumerable<(string Name, string Value)> fields, CancellationToken ct)
+    {
+        using var response = await PostAsync(action, csrf, fields, ct).ConfigureAwait(false);
+        var location = (int)response.StatusCode is >= 300 and < 400 ? response.Headers.Location : null;
+        if (location is null || location.OriginalString.Contains("/users/sign_in", StringComparison.Ordinal))
+        {
+            var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            return body.Contains("otp_attempt", StringComparison.Ordinal)
+                ? "the account has two-factor authentication, which only the web session can answer"
+                : "refused the user name and password";
+        }
+
+        if (await WhoAsync(ct).ConfigureAwait(false) is not { } user)
+        {
+            return "the sign-in went through, but GitLab's API does not take its session";
+        }
+
+        User = user;
+        return null;
+    }
+
+    /// <summary>A form posted with the page's CSRF token; the address it sends the browser on to (at the source's address), or null.</summary>
+    private async Task<Uri?> PostFormAsync(string action, string? csrf, IEnumerable<(string Name, string Value)> fields, CancellationToken ct)
+    {
+        using var response = await PostAsync(action, csrf, fields, ct).ConfigureAwait(false);
+        return (int)response.StatusCode is >= 300 and < 400 && response.Headers.Location is { } location ? Rebase(response.RequestMessage!.RequestUri!, location) : null;
+    }
+
+    private Task<HttpResponseMessage> PostAsync(string action, string? csrf, IEnumerable<(string Name, string Value)> fields, CancellationToken ct)
+    {
+        var form = fields.Select(f => new KeyValuePair<string, string>(f.Name, f.Value)).ToList();
+        if (csrf is not null)
+        {
+            form.Insert(0, new KeyValuePair<string, string>("authenticity_token", csrf));
+        }
+
+        // a page's action carries the installation's own path (/gitlab/users/...); AnyFS's own do not
+        var root = Address.Server.AbsolutePath.TrimEnd('/');
+        var path = root.Length > 0 && action.StartsWith(root + "/", StringComparison.Ordinal) ? action[root.Length..] : action;
+        return Http.PostAsync(Address.Page(path.TrimStart('/')), new FormUrlEncodedContent(form), ct);
+    }
+
+    /// <summary>
+    /// A redirect's address at the source's own: GitLab writes its configured address into them (its external URL), which
+    /// need not be the one the source reaches it by; the path and query are kept.
+    /// </summary>
+    private Uri Rebase(Uri from, Uri location)
+    {
+        var absolute = location.IsAbsoluteUri ? location : new Uri(from, location);
+        return new Uri($"{Address.Server.Scheme}://{Address.Server.Authority}{absolute.PathAndQuery}");
+    }
+
     /// <summary>The signed-in account, or null where GitLab refuses the sign-in (a 401, or a redirect to its sign-in page).</summary>
     private async Task<GlUser?> WhoAsync(CancellationToken ct)
     {
@@ -310,13 +514,20 @@ internal sealed class GitLabSession : IDisposable
 
             _renewedAt = DateTime.UtcNow;
             _logger.LogInformation("gitlab: the session for {Host} was refused; signing in again without a window", Url.Host);
-            try
+            if (Method == GitLabSignIn.WebSession)
             {
-                await BrowserSignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false);
+                try
+                {
+                    await BrowserSignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false);
+                }
+                catch (SignInRequiredException ex)
+                {
+                    throw new VfsException(VfsError.Unavailable, $"The GitLab sign-in has lapsed and AnyFS could not sign in again without you ({ex.Message}); Retry the source to sign in.", ex);
+                }
             }
-            catch (SignInRequiredException ex)
+            else if (await WindowsSignInAsync(ct).ConfigureAwait(false) is { } problem)
             {
-                throw new VfsException(VfsError.Unavailable, $"The GitLab sign-in has lapsed and AnyFS could not sign in again without you ({ex.Message}); Retry the source to sign in.", ex);
+                throw new VfsException(VfsError.Unavailable, $"The GitLab sign-in has lapsed and signing in again did not get through: {problem}");
             }
 
             Interlocked.Increment(ref _generation);
