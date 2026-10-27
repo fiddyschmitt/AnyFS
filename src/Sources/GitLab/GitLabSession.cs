@@ -308,7 +308,7 @@ internal sealed class GitLabSession : IDisposable
         {
             if (await KerberosAsync(page, ct).ConfigureAwait(false) is not { } kerberos)
             {
-                How = $"as {Settings.Who} (Kerberos)";
+                How = $"through Kerberos with {Settings.Who}";
                 return null;
             }
 
@@ -334,7 +334,7 @@ internal sealed class GitLabSession : IDisposable
                 var result = await FormAsync(action, page.Csrf, fields, ct).ConfigureAwait(false);
                 if (result is null)
                 {
-                    How = $"as {Settings.Who} ({name})";
+                    How = $"through {name} with {Settings.Who}";
                     return null;
                 }
 

@@ -1053,7 +1053,7 @@ public class GitLabWindowsTests
         fake.SetPassword("tester", "right");
         await using var source = await StartAsync(fake, Named(fake, "right"));
         CollectionAssert.AreEqual(new[] { "kerberos", "ldap tester" }, fake.SignIns, "Kerberos first, then the LDAP form with the name alone");
-        StringAssert.Contains(source.Session.How, "(LDAP)");
+        StringAssert.Contains(source.Session.How, "through LDAP");
         CollectionAssert.Contains(await NamesAsync(source, ""), "issues");
     }
 
@@ -1066,7 +1066,7 @@ public class GitLabWindowsTests
         fake.LdapSignIn = false;
         await using var source = await StartAsync(fake, Named(fake, "right"));
         CollectionAssert.AreEqual(new[] { "password tester" }, fake.SignIns);
-        StringAssert.Contains(source.Session.How, "(GitLab's own sign-in)");
+        StringAssert.Contains(source.Session.How, "through GitLab's own sign-in");
     }
 
     [TestMethod]
@@ -1117,7 +1117,7 @@ public class GitLabWindowsTests
             fake.WindowsUserAs = "tester";
             var settings = new GitLabSettings { Address = fake.Server + "/anyfs/docs", SignInMethod = GitLabSettings.WindowsCurrent };
             await using var source = await StartAsync(fake, settings, inProcess: false);
-            StringAssert.Contains(source.Session.How, "(Kerberos)");
+            StringAssert.Contains(source.Session.How, "through Kerberos");
             Assert.AreEqual("tester", source.Session.User?.Username);
             CollectionAssert.Contains(await NamesAsync(source, ""), "issues");
             fake.EndSessions();

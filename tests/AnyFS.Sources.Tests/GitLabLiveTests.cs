@@ -236,7 +236,7 @@ public class GitLabLiveTests
         var settings = new GitLabSettings { Address = url + "/anyfs/docs", SignInMethod = GitLabSettings.Windows, Username = user, Password = password };
         await using var source = new GitLabSource(settings);
         await source.InitialiseAsync(context, CancellationToken.None);
-        StringAssert.Contains(source.Session.How, "(LDAP)");
+        StringAssert.Contains(source.Session.How, "through LDAP");
         CollectionAssert.Contains((await ListAsync(source, "issues")).Select(e => e.Name).ToList(), "#1 Install fails on Debian");
         Assert.AreEqual(1, (await ListAsync(source, "wiki/attachments")).Count, "a session reads a wiki's attachments");
     }
