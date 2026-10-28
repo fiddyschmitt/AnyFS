@@ -110,13 +110,16 @@ internal sealed record GlProject(
 }
 
 /// <summary>An entry of a repository's tree: a blob (file), a tree (folder) or a commit (a submodule).</summary>
-internal sealed record GlTreeEntry(string Name, string Type, string Sha, string Mode)
+internal sealed record GlTreeEntry(string Name, string Type, string Sha, string Mode, string Path = "")
 {
     public bool IsTree => Type == "tree";
 
     public bool IsSubmodule => Type == "commit";
 
-    public static GlTreeEntry Parse(JsonElement e) => new(e.Str("name") ?? "", e.Str("type") ?? "blob", e.Str("id") ?? "", e.Str("mode") ?? "");
+    /// <summary>A file's bytes: a blob (a symbolic link too, whose bytes are where it points).</summary>
+    public bool IsBlob => !IsTree && !IsSubmodule;
+
+    public static GlTreeEntry Parse(JsonElement e) => new(e.Str("name") ?? "", e.Str("type") ?? "blob", e.Str("id") ?? "", e.Str("mode") ?? "", e.Str("path") ?? "");
 }
 
 /// <summary>A branch or tag: its name and the commit it points at.</summary>

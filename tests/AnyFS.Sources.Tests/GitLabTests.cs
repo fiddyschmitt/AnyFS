@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
@@ -469,16 +470,64 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
-    public async Task CountingCountsEveryProjectsDefaultBranch()
+    public async Task TheCountWalksTheTreeAndKeepsWhatItFoundSoFoldersOpenAtOnce()
     {
         var fake = GitLabSeed.Lab();
         var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"));
         await using var _s = source;
         await source.CountFilesAsync(CancellationToken.None);
-        // docs: README.md; app: 8 files + 250 + the submodule entry, folders src, src/util, e2e, many, vendor
-        Assert.AreEqual(1 + 8 + 250 + 1, source.Counters.FilesKnown);
-        Assert.AreEqual(5, source.Counters.DirectoriesKnown);
-        Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "branches, tags and the rest are not counted: a lower bound");
+
+        // each project's default branch whole, a hundred entries a request: the app's 264 in three, the docs' one in one;
+        // the sizes a hundred at a time: the app's 258 files in three, the docs' README in one
+        Assert.AreEqual(3 + 1, fake.Count("repository/tree"), "the default branches' trees, whole, and no branch's or tag's");
+        Assert.AreEqual(0, fake.Count("path=many"), "no repository folder listed alone");
+        Assert.AreEqual(3 + 1, fake.Count("POST /api/graphql"));
+        Assert.AreEqual(0, fake.Count("/notes"), "no issue's or merge request's notes: those folders are left out");
+        Assert.AreEqual(0, fake.Count("/jobs"), "no pipeline's jobs");
+
+        // docs: README.md and the wiki's five pages; app: 258 files (and its release's)
+        Assert.IsTrue(source.Counters.FilesKnown >= 1 + 5 + 258, $"{source.Counters.FilesKnown:N0} files");
+        Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "the folders left out make it a lower bound");
+
+        // every folder the walk went into answers from what it kept
+        var asked = fake.Requests.Count;
+        Assert.AreEqual(250, (await ListAsync(source, "tools/app/files/many")).Count);
+        Assert.AreEqual("strings.c", (await ListAsync(source, "tools/app/files/src/util")).Single().Name);
+        Assert.AreEqual(GitLabSeed.Large.Length, (await source.StatAsync("tools/app/files/e2e/large.bin", CancellationToken.None))!.Length, "the LFS object's size");
+        CollectionAssert.AreEquivalent(new[] { "home.md", "guides", "notes.asciidoc", "Ünïcödé-résumé.md" }, (await ListAsync(source, "docs/wiki")).Select(e => e.Name).ToArray());
+        Assert.AreEqual(4, (await ListAsync(source, "docs/issues")).Count);
+        Assert.AreEqual(asked, fake.Requests.Count, "nothing asked");
+
+        // a folder the walk left out is listed when opened
+        Assert.IsTrue((await ListAsync(source, "docs/issues/#1 Install fails on Debian")).Count > 0);
+        Assert.IsTrue(fake.Count("/notes") > 0);
+    }
+
+    [TestMethod]
+    public async Task AKeptListingAnswersAtOnceAndIsAskedForAgainBehindTheAnswerOnceOlderThanTheInterval()
+    {
+        var fake = GitLabSeed.Lab();
+        var settings = GitLabSeed.Settings(fake.Server + "/anyfs/docs");
+        settings.RefreshSeconds = 1;
+        var (source, _) = await StartAsync(fake, settings);
+        await using var _s = source;
+        async Task<string[]> FilesAsync() => (await ListAsync(source, "files")).Select(e => e.Name).Order(StringComparer.Ordinal).ToArray();
+        CollectionAssert.AreEqual(new[] { "README.md" }, await FilesAsync());
+        fake.ProjectAt("anyfs/docs").Commit("main", new Dictionary<string, byte[]> { ["README.md"] = GitLabSeed.Bytes("# Docs\n"), ["new.md"] = GitLabSeed.Bytes("new\n") });
+
+        var asked = fake.Requests.Count;
+        CollectionAssert.AreEqual(new[] { "README.md" }, await FilesAsync(), "within the interval: what was kept");
+        Assert.AreEqual(asked, fake.Requests.Count, "nothing asked");
+
+        // older than the interval: still answered at once from what was kept, while GitLab is asked behind the answer
+        await Task.Delay(TimeSpan.FromSeconds(1.2));
+        CollectionAssert.AreEqual(new[] { "README.md" }, await FilesAsync());
+        var shown = Stopwatch.StartNew();
+        while (!(await FilesAsync()).Contains("new.md"))
+        {
+            Assert.IsTrue(shown.Elapsed < TimeSpan.FromSeconds(10), "the change shows once the listing behind the answer lands");
+            await Task.Delay(50);
+        }
     }
 
     [TestMethod]

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using AnyFS.Fixtures;
@@ -84,6 +85,29 @@ public class GitLabLiveTests
         Assert.AreEqual("file 4999\n", Encoding.UTF8.GetString(await ReadAsync(source, "files/e2e/many/file4999.txt")));
         var large = (await ListAsync(source, "files/e2e")).Single(e => e.Name == "large.bin");
         Assert.AreEqual(TreeGenerator.DefaultLargeSize, large.Length, "the LFS object's size, not its pointer's");
+    }
+
+    [TestMethod]
+    [Timeout(600_000)]
+    public async Task TheCountKeepsTheDefaultBranchWholeSoItsFoldersOpenAtOnce()
+    {
+        var (url, token) = Server();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(url + "/anyfs/tools/app", token, context);
+        var counting = Stopwatch.StartNew();
+        await source.CountFilesAsync(CancellationToken.None);
+        counting.Stop();
+        Assert.IsTrue(source.Counters.FilesKnown >= 5_000 + 9, $"{source.Counters.FilesKnown:N0} files");
+        Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "branches, tags and pipelines are left out");
+
+        // the repository came whole, a hundred entries a request: its folders answer from what the count kept
+        var listing = Stopwatch.StartNew();
+        var many = await ListAsync(source, "files/e2e/many");
+        var large = await source.StatAsync("files/e2e/large.bin", CancellationToken.None);
+        listing.Stop();
+        Assert.AreEqual(5_000, many.Count);
+        Assert.AreEqual(TreeGenerator.DefaultLargeSize, large!.Length, "the LFS object's size");
+        Assert.IsTrue(listing.Elapsed < TimeSpan.FromSeconds(1), $"listed from what the count kept: {listing.ElapsedMilliseconds} ms (the count took {counting.Elapsed.TotalSeconds:F1} s)");
     }
 
     [TestMethod]

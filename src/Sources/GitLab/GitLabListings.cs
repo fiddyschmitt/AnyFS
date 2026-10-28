@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 
@@ -149,6 +150,25 @@ internal sealed class TreeStore
         return await task.WaitAsync(ct).ConfigureAwait(false);
     }
 
+    /// <summary>The folder's entries when they are kept.</summary>
+    public bool TryGet(string key, [MaybeNullWhen(false)] out List<TreeItem> items)
+    {
+        items = _folders.TryGetValue(key, out var kept) ? kept.Items : null;
+        return items is not null;
+    }
+
+    /// <summary>Keeps folders listed otherwise than one by one (a commit's whole tree at once), as a folder listed alone is kept.</summary>
+    public void Keep(IEnumerable<(string Key, List<TreeItem> Items)> folders)
+    {
+        foreach (var (key, items) in folders)
+        {
+            _folders[key] = (items, Interlocked.Increment(ref _order));
+        }
+
+        Interlocked.Exchange(ref _dirty, 1);
+        Trim();
+    }
+
     private async Task<List<TreeItem>> ListAsync(string key, Func<CancellationToken, Task<List<TreeItem>>> list)
     {
         try
@@ -157,19 +177,23 @@ internal sealed class TreeStore
             var items = await list(CancellationToken.None).ConfigureAwait(false);
             _folders[key] = (items, Interlocked.Increment(ref _order));
             Interlocked.Exchange(ref _dirty, 1);
-            if (_folders.Count > MaxFolders)
-            {
-                foreach (var old in _folders.OrderBy(f => f.Value.Order).Take(MaxFolders / 10).ToList())
-                {
-                    _folders.TryRemove(old);
-                }
-            }
-
+            Trim();
             return items;
         }
         finally
         {
             _listing.TryRemove(key, out _);
+        }
+    }
+
+    private void Trim()
+    {
+        if (_folders.Count > MaxFolders)
+        {
+            foreach (var old in _folders.OrderBy(f => f.Value.Order).Take(MaxFolders / 10).ToList())
+            {
+                _folders.TryRemove(old);
+            }
         }
     }
 

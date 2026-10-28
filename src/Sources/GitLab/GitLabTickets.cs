@@ -22,6 +22,9 @@ internal sealed class TicketFolder(GlProject project, GlTicket ticket, bool merg
 {
     public const string Attachments = "attachments";
 
+    // its notes (and a merge request's changes) are requests of its own, and a project has thousands
+    public override bool Walked => false;
+
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
         var notes = await source.NotesAsync(project, ticket, mergeRequest, ct).ConfigureAwait(false);

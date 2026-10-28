@@ -110,7 +110,9 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   `Complete` or not, so that it knows the option is on (return at once when nothing is left); what
   it says with `Context.ReportProgress` while it counts shows on its tile ("Counting files: 1,200
   of 20,000"). When `CountFilesAsync` returns the count is `Complete`, unless the source set
-  `Unknown` itself because some of it could not be counted.
+  `Unknown` itself because some of it could not be counted. A source that is slow to list should
+  keep what that walk finds, so its folders open at once afterwards: `KeptListings` (below) does the
+  walk and the keeping, and its `CountAsync` is the whole of such a source's `CountFilesAsync`.
 
 ## Settings
 
@@ -194,9 +196,22 @@ Caching is the source's business; the SDK makes the common strategies one-liners
 - `ListingCache`: memoises listings for a TTL, shares one upstream call between concurrent
   misses, invalidate on writes (`Update` changes one name in place, also in a listing still on
   its way). For a source that is slow to list, `ListingCache.Kept` keeps each listing until it is
-  listed afresh: call `RefreshAsync` from a walk of your tree now and then. A folder listed again
-  soon after is no sign that the person pressed refresh: programs list a folder over and over
-  (opening a file in Adobe Acrobat does). SharePoint keeps its listings so and walks every 30 minutes.
+  listed afresh: call `RefreshAsync` from a walk of your tree now and then, or set `RefreshAfter`
+  to answer a listing older than that at once and list the folder afresh behind the answer. A
+  folder listed again soon after is no sign that the person pressed refresh: programs list a folder
+  over and over (opening a file in Adobe Acrobat does).
+- `KeptListings`: a slow source's listings kept, and the walks of its tree that fill them. Give it
+  your listing, your `Counters` and `KeptListingsOptions`; answer `ListAsync` and stats from its
+  `Cache`, and make `CountFilesAsync` its `CountAsync`: "Count files on start" is then the first
+  walk, which lists every folder (eight at a time), counts as it goes and keeps what it saw, and a
+  walk comes again every `WalkEvery` (30 minutes) after the last ends. `StartWalks` starts them
+  without the count. The options shape the walk: `PartsBelow` walks the folders of a folder each on
+  its own (SharePoint's sites, four folders of each at a time, 64 listings in flight in all);
+  `LeftOut` names folders not worth a walk, listed when opened (GitLab's issues, a request or more
+  each), which makes the count a lower bound; `ListTree` hands it a whole subtree at once where you
+  have a quicker way than folder by folder (GitLab lists a repository a hundred entries a request).
+  SharePoint and GitLab keep their listings so; their settings `KeptListings.KeepSetting` and
+  `KeptListings.WalkSetting` give the same names to the same choices.
 - `SpoolCache`: for upstreams that only stream sequentially. The first open starts the download
   into `Context.CacheDirectory`; any sub-range is served as soon as the file has reached it;
   concurrent readers share one download; eviction by size and age. An upstream that sends

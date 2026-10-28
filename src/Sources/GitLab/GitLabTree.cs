@@ -22,6 +22,13 @@ internal abstract class GlFolder(string name, DateTimeOffset? modified = null, D
 
     public override VfsEntry Entry => VfsEntry.Directory(Name, Modified, Created);
 
+    /// <summary>
+    /// Whether a walk of the whole tree ("Count files on start") goes into it: not where listing it costs requests of its
+    /// own, and there are many such folders (an issue's notes, a pipeline's jobs, a whole repository at another branch or
+    /// tag); those are listed when opened.
+    /// </summary>
+    public virtual bool Walked => true;
+
     public abstract Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct);
 }
 
@@ -224,15 +231,20 @@ internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(n
 /// <summary>The repository as it stands on the default branch: its head is asked again once the refresh interval has passed.</summary>
 internal sealed class FilesFolder(GlProject project) : GlFolder("files", project.LastActivity, project.Created)
 {
+    public GlProject Project { get; } = project;
+
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
-        if (await source.HeadAsync(project, ct).ConfigureAwait(false) is not { } head)
+        if (await source.HeadAsync(Project, ct).ConfigureAwait(false) is not { } head)
         {
             return [];
         }
 
-        return await new TreeFolder(project, head.Commit, "", "files", head.Committed).ListAsync(source, ct).ConfigureAwait(false);
+        return await At(head).ListAsync(source, ct).ConfigureAwait(false);
     }
+
+    /// <summary>The repository at the head given: the folder's contents then.</summary>
+    public TreeFolder At(GlRef head) => new(Project, head.Commit, "", Name, head.Committed);
 }
 
 internal enum RefKind
@@ -272,18 +284,26 @@ internal sealed class RefsFolder(GlProject project, RefKind kind, string prefix,
 
         var raw = level.Keys.ToList();
         var names = GitLabNames.Unique(raw);
+        // a ref's folder is a whole repository: not walked, but listed when opened
         return raw.Select((segment, i) => level[segment] is { } r
-            ? (GlNode)new TreeFolder(project, r.Commit, "", names[i], r.Committed)
+            ? (GlNode)new TreeFolder(project, r.Commit, "", names[i], r.Committed, walked: false)
             : new RefsFolder(project, kind, prefix + segment + "/", names[i], Modified)).ToList();
     }
 }
 
-/// <summary>A folder of the repository at a commit: never changes, so kept for good (<see cref="TreeStore"/>).</summary>
-internal sealed class TreeFolder(GlProject project, string commit, string path, string name, DateTimeOffset? time) : GlFolder(name, time, time)
+/// <summary>
+/// A folder of the repository at a commit: never changes, so kept for good (<see cref="TreeStore"/>). Its folders first,
+/// then the rest, each in the order of their names, however GitLab sent them (a folder listed alone, or the whole tree at
+/// once), so twins in case are numbered the same either way.
+/// </summary>
+internal sealed class TreeFolder(GlProject project, string commit, string path, string name, DateTimeOffset? time, bool walked = true) : GlFolder(name, time, time)
 {
+    public override bool Walked => walked;
+
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
-        var items = await source.TreeAsync(project, commit, path, ct).ConfigureAwait(false);
+        var items = (await source.TreeAsync(project, commit, path, ct).ConfigureAwait(false))
+            .OrderBy(i => i.K == 't' ? 0 : 1).ThenBy(i => i.N, StringComparer.Ordinal).ToList();
         var names = GitLabNames.Unique(items.Select(i => i.N).ToList());
         var children = new List<GlNode>(items.Count);
         for (var i = 0; i < items.Count; i++)
