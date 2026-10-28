@@ -1,9 +1,4 @@
-using System.Collections.Concurrent;
-using System.Diagnostics;
-using System.Net.Sockets;
 using System.Net.WebSockets;
-using System.Text;
-using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 
@@ -19,13 +14,13 @@ namespace AnyFS.Sources.Common;
 /// to read the cookies, never while files are served. The profile keeps the sign-in session, so a later headless launch
 /// renews the cookies with nobody at the keyboard until that session itself lapses; only then is a window shown again.
 /// Where AnyFS cannot reach the DevTools port itself (a policy, or a browser that never opens it), the sign-in goes through
-/// Selenium WebDriver instead (<see cref="WebDriverSession"/>), for good.
+/// Selenium WebDriver instead (<see cref="WebDriverSession"/>), for good. The browser itself is the shared
+/// <see cref="DevToolsBrowser"/>.
 /// </summary>
 public sealed class BrowserSession
 {
     private static readonly TimeSpan SilentDeadline = TimeSpan.FromSeconds(25);
     private static readonly TimeSpan InteractiveDeadline = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan PortDeadline = TimeSpan.FromSeconds(30);
 
     private readonly string? _browserPath;
     private readonly WebSignInTarget _target;
@@ -83,9 +78,6 @@ public sealed class BrowserSession
         _webDriver ??= new WebDriverSession(_webDriverBrowsers, _target, _logger);
         return _webDriver.SignInAsync(interactive, progress, ct);
     }
-
-    /// <summary>Where a browser on the profile writes its DevTools port once it listens (<c>--remote-debugging-port=0</c>).</summary>
-    private string PortFile => Path.Combine(_profileDir, "DevToolsActivePort");
 
     /// <summary>
     /// The session's cookies: first a headless launch, which succeeds without a window while the profile's sign-in is still
@@ -162,21 +154,21 @@ public sealed class BrowserSession
     /// </summary>
     private async Task<Capture> CaptureAsync(bool headless, TimeSpan deadline, CancellationToken ct)
     {
-        Directory.CreateDirectory(_profileDir);
-        await CloseLeftoverAsync(ct).ConfigureAwait(false);
         var mode = headless ? "headless" : "with a window";
-        using var browser = LaunchBrowser(headless);
-        Cdp? cdp = null;
+        var browserPath = _browserPath ?? throw new InvalidOperationException("no Chromium browser to launch");
+        var negotiate = _target.NegotiateHosts.Count > 0 ? new[] { "--auth-server-allowlist=" + string.Join(',', _target.NegotiateHosts) } : [];
+        DevToolsBrowser? browser = null;
         try
         {
-            var endpoint = await DevToolsEndpointAsync(browser, ct).ConfigureAwait(false);
-            if (endpoint is null)
+            var launch = await DevToolsBrowser.LaunchAsync(browserPath, _profileDir, headless, Site.AbsoluteUri, negotiate, _logger, Prefix, ct).ConfigureAwait(false);
+            if (launch.Browser is null)
             {
-                return new Capture(null, NoDevTools(browser.HasExited), Final: true, DevToolsUnreachable: true);
+                return new Capture(null, launch.Failure, Final: true, DevToolsUnreachable: true);
             }
 
-            cdp = await Cdp.ConnectAsync(endpoint, ct).ConfigureAwait(false);
-            _logger.LogInformation("{Prefix}: opened {Browser} {Mode} for {Host} (DevTools on port {Port})", Prefix, BrowserName, mode, Site.Host, endpoint.Port);
+            browser = launch.Browser;
+            var cdp = browser.Client;
+            _logger.LogInformation("{Prefix}: opened {Browser} {Mode} for {Host} (DevTools on port {Port})", Prefix, BrowserName, mode, Site.Host, browser.Port);
             var until = DateTime.UtcNow + deadline;
             var sawPage = false;
             DateTime? noPagesSince = null;
@@ -232,153 +224,23 @@ public sealed class BrowserSession
         }
         finally
         {
-            await CloseAsync(browser, cdp).ConfigureAwait(false);
+            if (browser is not null)
+            {
+                await browser.DisposeAsync().ConfigureAwait(false);
+            }
         }
     }
 
     private string WindowClosed() => $"the {BrowserName} window was closed before the sign-in to {Site.Host} finished; Retry to sign in";
 
-    private string NoDevTools(bool handedOver) => handedOver
-        ? $"{BrowserName} handed the launch to another {BrowserName} that holds the profile and cannot be reached (a window left open, or a profile folder fixed by policy)"
-        : $"{BrowserName} started without opening its DevTools port (your organisation's RemoteDebuggingAllowed policy does this; edge://policy lists the policies in force)";
-
-    /// <summary>
-    /// Closes a browser still open on the profile from an earlier sign-in (AnyFS stopped while its window was up, or an
-    /// older AnyFS left it): a new launch would be handed to it and exit at once. A port file nothing answers on is stale.
-    /// </summary>
-    private async Task CloseLeftoverAsync(CancellationToken ct)
-    {
-        if (ReadPortFile() is { } endpoint && await AnswersAsync(endpoint, ct).ConfigureAwait(false))
-        {
-            _logger.LogInformation("{Prefix}: closing the {Browser} left open on the sign-in profile {Profile}", Prefix, BrowserName, _profileDir);
-            try
-            {
-                using var quick = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                quick.CancelAfter(TimeSpan.FromSeconds(5));
-                await using var cdp = await Cdp.ConnectAsync(endpoint, quick.Token).ConfigureAwait(false);
-                await cdp.SendAsync("Browser.close", ct: quick.Token).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is WebSocketException or IOException or TimeoutException || ex is OperationCanceledException && !ct.IsCancellationRequested)
-            {
-                // it may close the connection before it answers
-            }
-
-            for (var i = 0; i < 20 && await AnswersAsync(endpoint, ct).ConfigureAwait(false); i++)
-            {
-                await Task.Delay(500, ct).ConfigureAwait(false);
-            }
-        }
-
-        try
-        {
-            File.Delete(PortFile);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-        }
-    }
-
-    private static async Task<bool> AnswersAsync(Uri endpoint, CancellationToken ct)
-    {
-        using var probe = new TcpClient();
-        using var quick = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        quick.CancelAfter(TimeSpan.FromSeconds(2));
-        try
-        {
-            await probe.ConnectAsync("127.0.0.1", endpoint.Port, quick.Token).ConfigureAwait(false);
-            return true;
-        }
-        catch (Exception ex) when (ex is SocketException || ex is OperationCanceledException && !ct.IsCancellationRequested)
-        {
-            return false;
-        }
-    }
-
-    private Process LaunchBrowser(bool headless)
-    {
-        var info = new ProcessStartInfo(_browserPath ?? throw new InvalidOperationException("no Chromium browser to launch")) { UseShellExecute = false };
-        foreach (var arg in new[] { $"--user-data-dir={_profileDir}", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--new-window" })
-        {
-            info.ArgumentList.Add(arg);
-        }
-
-        if (headless)
-        {
-            info.ArgumentList.Add("--headless=new");
-        }
-
-        if (_target.NegotiateHosts.Count > 0)
-        {
-            info.ArgumentList.Add("--auth-server-allowlist=" + string.Join(',', _target.NegotiateHosts));
-        }
-
-        info.ArgumentList.Add(Site.AbsoluteUri);
-
-        // the browser's own log lines would otherwise land in AnyFS's terminal (anyfs serve); drained, not kept
-        info.RedirectStandardOutput = true;
-        info.RedirectStandardError = true;
-        var browser = Process.Start(info) ?? throw new SignInRequiredException($"{BrowserName} did not start", permanent: true);
-        browser.OutputDataReceived += (_, _) => { };
-        browser.ErrorDataReceived += (_, _) => { };
-        browser.BeginOutputReadLine();
-        browser.BeginErrorReadLine();
-        return browser;
-    }
-
-    /// <summary>
-    /// The DevTools address the browser writes to the profile once it listens: the port, then the browser endpoint's
-    /// path. Null when none appears in time: the browser runs without one (remote debugging turned off), or it exited
-    /// at once, having handed the launch to a browser already holding the profile.
-    /// </summary>
-    private async Task<Uri?> DevToolsEndpointAsync(Process browser, CancellationToken ct)
-    {
-        var started = DateTime.UtcNow;
-        while (DateTime.UtcNow - started < PortDeadline)
-        {
-            if (ReadPortFile() is { } endpoint)
-            {
-                return endpoint;
-            }
-
-            // a handed-over launch exits at once; a browser that relaunches itself gets a few seconds to write the file
-            if (browser.HasExited && DateTime.UtcNow - started > TimeSpan.FromSeconds(5))
-            {
-                return null;
-            }
-
-            await Task.Delay(250, ct).ConfigureAwait(false);
-        }
-
-        return null;
-    }
-
-    private Uri? ReadPortFile()
-    {
-        try
-        {
-            var lines = File.ReadAllLines(PortFile);
-            return lines.Length >= 2 && int.TryParse(lines[0], out var port) && port > 0 ? new Uri($"ws://127.0.0.1:{port}{lines[1]}") : null;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return null;
-        }
-    }
-
     /// <summary>The cookies the profile holds that the target keeps.</summary>
-    private async Task<IReadOnlyList<SessionCookie>> CookiesAsync(Cdp cdp, CancellationToken ct)
+    private async Task<IReadOnlyList<SessionCookie>> CookiesAsync(DevToolsClient cdp, CancellationToken ct)
     {
         var result = await cdp.SendAsync("Storage.getCookies", ct: ct).ConfigureAwait(false);
         var cookies = new List<SessionCookie>();
-        foreach (var c in result.GetProperty("cookies").EnumerateArray())
+        foreach (var c in Items(result, "cookies"))
         {
-            var cookie = new SessionCookie(
-                c.GetProperty("name").GetString()!,
-                c.GetProperty("value").GetString()!,
-                c.GetProperty("domain").GetString()!,
-                c.GetProperty("path").GetString()!,
-                c.GetProperty("secure").GetBoolean(),
-                c.GetProperty("httpOnly").GetBoolean());
+            var cookie = new SessionCookie(Text(c, "name"), Text(c, "value"), Text(c, "domain"), Text(c, "path"), Flag(c, "secure"), Flag(c, "httpOnly"));
             if (_target.Keeps(cookie))
             {
                 cookies.Add(cookie);
@@ -389,183 +251,20 @@ public sealed class BrowserSession
     }
 
     /// <summary>The addresses of the browser's open pages (tabs).</summary>
-    private static async Task<IReadOnlyList<Uri>> PagesAsync(Cdp cdp, CancellationToken ct)
+    private static async Task<IReadOnlyList<Uri>> PagesAsync(DevToolsClient cdp, CancellationToken ct)
     {
         var targets = await cdp.SendAsync("Target.getTargets", ct: ct).ConfigureAwait(false);
-        return targets.GetProperty("targetInfos").EnumerateArray()
-            .Where(t => t.GetProperty("type").GetString() == "page")
-            .Select(t => Uri.TryCreate(t.GetProperty("url").GetString(), UriKind.Absolute, out var u) ? u : null)
+        return Items(targets, "targetInfos")
+            .Where(t => Text(t, "type") == "page")
+            .Select(t => Uri.TryCreate(Text(t, "url"), UriKind.Absolute, out var u) ? u : null)
             .OfType<Uri>()
             .ToList();
     }
 
-    /// <summary>Closes the browser through DevTools, or kills the process the launch started when it cannot be reached.</summary>
-    private static async Task CloseAsync(Process browser, Cdp? cdp)
-    {
-        if (cdp is not null)
-        {
-            try
-            {
-                await cdp.SendAsync("Browser.close", ct: CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is WebSocketException or IOException or TimeoutException or InvalidOperationException or ObjectDisposedException)
-            {
-                // it may close the connection before it answers
-            }
+    // DevTools' answers read strictly: a missing member is an answer in a form this version does not know (KeyNotFound)
+    private static IEnumerable<JsonNode> Items(JsonNode? node, string name) => (node?[name] as JsonArray ?? throw new KeyNotFoundException(name)).OfType<JsonNode>();
 
-            await cdp.DisposeAsync().ConfigureAwait(false);
-        }
+    private static string Text(JsonNode? node, string name) => node?[name]?.GetValue<string>() ?? throw new KeyNotFoundException(name);
 
-        try
-        {
-            if (!browser.WaitForExit(8000))
-            {
-                browser.Kill(entireProcessTree: true);
-            }
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
-        {
-        }
-    }
-}
-
-/// <summary>
-/// One browser at a time on a profile. A second launch on a profile that is already open is handed to the browser holding
-/// it and exits at once, so two sources for one site starting together, or a renewal during a sign-in, would lose track
-/// of each other's browser.
-/// </summary>
-internal static class ProfileLocks
-{
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.OrdinalIgnoreCase);
-
-    public static SemaphoreSlim For(string profileDir) => Gates.GetOrAdd(Path.GetFullPath(profileDir), _ => new SemaphoreSlim(1, 1));
-}
-
-/// <summary>Just enough of the Chrome DevTools protocol: commands over one WebSocket, answers matched by id; events ignored (the caller polls).</summary>
-internal sealed class Cdp : IAsyncDisposable
-{
-    private readonly ClientWebSocket _socket = new();
-    private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonElement>> _pending = new();
-    private readonly CancellationTokenSource _stop = new();
-    private readonly SemaphoreSlim _sendGate = new(1, 1);
-    private Task _receive = Task.CompletedTask;
-    private int _nextId;
-
-    public static async Task<Cdp> ConnectAsync(Uri endpoint, CancellationToken ct)
-    {
-        var cdp = new Cdp();
-        try
-        {
-            await cdp._socket.ConnectAsync(endpoint, ct).ConfigureAwait(false);
-        }
-        catch
-        {
-            await cdp.DisposeAsync().ConfigureAwait(false);
-            throw;
-        }
-
-        cdp._receive = cdp.ReceiveAsync();
-        return cdp;
-    }
-
-    public async Task<JsonElement> SendAsync(string method, JsonObject? parameters = null, CancellationToken ct = default)
-    {
-        var id = Interlocked.Increment(ref _nextId);
-        var message = new JsonObject { ["id"] = id, ["method"] = method, ["params"] = parameters ?? new JsonObject() };
-        var answer = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _pending[id] = answer;
-        if (_receive.IsCompleted)
-        {
-            // the browser is gone: nothing will answer
-            _pending.TryRemove(id, out _);
-            throw new IOException("the DevTools connection closed");
-        }
-
-        await _sendGate.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            await _socket.SendAsync(Encoding.UTF8.GetBytes(message.ToJsonString()), WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            _sendGate.Release();
-        }
-
-        return await answer.Task.WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
-    }
-
-    private async Task ReceiveAsync()
-    {
-        var buffer = new byte[1 << 16];
-        using var message = new MemoryStream();
-        try
-        {
-            while (_socket.State == WebSocketState.Open)
-            {
-                var result = await _socket.ReceiveAsync(buffer, _stop.Token).ConfigureAwait(false);
-                if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    break;
-                }
-
-                message.Write(buffer, 0, result.Count);
-                if (!result.EndOfMessage)
-                {
-                    continue;
-                }
-
-                using var doc = JsonDocument.Parse(message.ToArray());
-                message.SetLength(0);
-                var root = doc.RootElement;
-                if (root.TryGetProperty("id", out var id) && _pending.TryRemove(id.GetInt32(), out var answer))
-                {
-                    if (root.TryGetProperty("error", out var error))
-                    {
-                        answer.TrySetException(new IOException($"DevTools error: {error.GetRawText()}"));
-                    }
-                    else
-                    {
-                        answer.TrySetResult(root.TryGetProperty("result", out var r) ? r.Clone() : default);
-                    }
-                }
-            }
-        }
-        catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or IOException)
-        {
-        }
-        finally
-        {
-            foreach (var answer in _pending.Values)
-            {
-                answer.TrySetException(new IOException("the DevTools connection closed"));
-            }
-        }
-    }
-
-    public async ValueTask DisposeAsync()
-    {
-        await _stop.CancelAsync().ConfigureAwait(false);
-        try
-        {
-            if (_socket.State == WebSocketState.Open)
-            {
-                await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "", CancellationToken.None).ConfigureAwait(false);
-            }
-        }
-        catch (Exception ex) when (ex is WebSocketException or OperationCanceledException or ObjectDisposedException)
-        {
-        }
-
-        try
-        {
-            await _receive.ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or IOException)
-        {
-        }
-
-        _socket.Dispose();
-        _sendGate.Dispose();
-        _stop.Dispose();
-    }
+    private static bool Flag(JsonNode? node, string name) => node?[name] is { } value ? value.GetValue<bool>() : throw new KeyNotFoundException(name);
 }

@@ -1,6 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
-using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -19,9 +17,7 @@ internal sealed class OwaTokenSession
 {
     private static readonly TimeSpan SilentDeadline = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan InteractiveDeadline = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan PortDeadline = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan Margin = TimeSpan.FromMinutes(10);
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly Uri _origin;
     private readonly string _browserPath;
@@ -57,7 +53,7 @@ internal sealed class OwaTokenSession
             return kept.Value;
         }
 
-        var gate = Gates.GetOrAdd(Path.GetFullPath(_profileDir), _ => new SemaphoreSlim(1, 1));
+        var gate = ProfileLocks.For(_profileDir);
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -115,23 +111,19 @@ internal sealed class OwaTokenSession
 
     private async Task<Capture> CaptureAsync(bool headless, TimeSpan deadline, CancellationToken ct)
     {
-        Directory.CreateDirectory(_profileDir);
-        await CloseLeftoverAsync(ct).ConfigureAwait(false);
         var mode = headless ? "headless" : "with a window";
-        using var browser = Launch(headless);
-        DevToolsClient? devTools = null;
+        DevToolsBrowser? browser = null;
         try
         {
-            var endpoint = await DevToolsEndpointAsync(browser, ct).ConfigureAwait(false);
-            if (endpoint is null)
+            var launch = await DevToolsBrowser.LaunchAsync(_browserPath, _profileDir, headless, "about:blank", [], _logger, "outlook", ct).ConfigureAwait(false);
+            if (launch.Browser is null)
             {
-                return new Capture(null, browser.HasExited
-                    ? $"{BrowserName} handed the launch to another {BrowserName} that holds the profile and cannot be reached (a window left open, or a profile folder fixed by policy)"
-                    : $"{BrowserName} started without opening its DevTools port (your organisation's RemoteDebuggingAllowed policy does this)", Final: true);
+                return new Capture(null, launch.Failure, Final: true);
             }
 
-            devTools = await DevToolsClient.ConnectAsync(endpoint, ct).ConfigureAwait(false);
-            _logger.LogInformation("outlook: opened {Browser} {Mode} for {Host} (DevTools on port {Port})", BrowserName, mode, _origin.Host, endpoint.Port);
+            browser = launch.Browser;
+            var devTools = browser.Client;
+            _logger.LogInformation("outlook: opened {Browser} {Mode} for {Host} (DevTools on port {Port})", BrowserName, mode, _origin.Host, browser.Port);
 
             var requests = new ConcurrentDictionary<string, (string? Url, string? Bearer)>();
             var pages = new ConcurrentDictionary<string, string>();
@@ -255,7 +247,10 @@ internal sealed class OwaTokenSession
         }
         finally
         {
-            await CloseAsync(browser, devTools).ConfigureAwait(false);
+            if (browser is not null)
+            {
+                await browser.DisposeAsync().ConfigureAwait(false);
+            }
         }
     }
 
@@ -281,139 +276,6 @@ internal sealed class OwaTokenSession
         catch (Exception ex) when (ex is FormatException or JsonException)
         {
             return (null, null);
-        }
-    }
-
-    private string PortFile => Path.Combine(_profileDir, "DevToolsActivePort");
-
-    private Process Launch(bool headless)
-    {
-        var info = new ProcessStartInfo(_browserPath) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (var arg in new[] { $"--user-data-dir={_profileDir}", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--new-window" })
-        {
-            info.ArgumentList.Add(arg);
-        }
-
-        if (headless)
-        {
-            info.ArgumentList.Add("--headless=new");
-        }
-
-        info.ArgumentList.Add("about:blank");
-        var browser = Process.Start(info) ?? throw new SignInRequiredException($"{BrowserName} did not start", permanent: true);
-        browser.OutputDataReceived += (_, _) => { };
-        browser.ErrorDataReceived += (_, _) => { };
-        browser.BeginOutputReadLine();
-        browser.BeginErrorReadLine();
-        return browser;
-    }
-
-    private async Task<Uri?> DevToolsEndpointAsync(Process browser, CancellationToken ct)
-    {
-        var started = DateTime.UtcNow;
-        while (DateTime.UtcNow - started < PortDeadline)
-        {
-            if (ReadPortFile() is { } endpoint)
-            {
-                return endpoint;
-            }
-
-            if (browser.HasExited && DateTime.UtcNow - started > TimeSpan.FromSeconds(5))
-            {
-                return null;
-            }
-
-            await Task.Delay(250, ct).ConfigureAwait(false);
-        }
-
-        return null;
-    }
-
-    private Uri? ReadPortFile()
-    {
-        try
-        {
-            var lines = File.ReadAllLines(PortFile);
-            return lines.Length >= 2 && int.TryParse(lines[0], out var port) && port > 0 ? new Uri($"ws://127.0.0.1:{port}{lines[1]}") : null;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return null;
-        }
-    }
-
-    /// <summary>Closes a browser left open on the profile (a new launch would be handed to it and exit at once); a stale port file is removed.</summary>
-    private async Task CloseLeftoverAsync(CancellationToken ct)
-    {
-        if (ReadPortFile() is { } endpoint && await AnswersAsync(endpoint, ct).ConfigureAwait(false))
-        {
-            _logger.LogInformation("outlook: closing the {Browser} left open on the sign-in profile {Profile}", BrowserName, _profileDir);
-            try
-            {
-                using var quick = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                quick.CancelAfter(TimeSpan.FromSeconds(5));
-                await using var devTools = await DevToolsClient.ConnectAsync(endpoint, quick.Token).ConfigureAwait(false);
-                await devTools.SendAsync("Browser.close", ct: quick.Token).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is WebSocketException or IOException or TimeoutException || ex is OperationCanceledException && !ct.IsCancellationRequested)
-            {
-            }
-
-            for (var i = 0; i < 20 && await AnswersAsync(endpoint, ct).ConfigureAwait(false); i++)
-            {
-                await Task.Delay(500, ct).ConfigureAwait(false);
-            }
-        }
-
-        try
-        {
-            File.Delete(PortFile);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-        }
-    }
-
-    private static async Task<bool> AnswersAsync(Uri endpoint, CancellationToken ct)
-    {
-        using var probe = new TcpClient();
-        using var quick = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        quick.CancelAfter(TimeSpan.FromSeconds(2));
-        try
-        {
-            await probe.ConnectAsync("127.0.0.1", endpoint.Port, quick.Token).ConfigureAwait(false);
-            return true;
-        }
-        catch (Exception ex) when (ex is SocketException || ex is OperationCanceledException && !ct.IsCancellationRequested)
-        {
-            return false;
-        }
-    }
-
-    private static async Task CloseAsync(Process browser, DevToolsClient? devTools)
-    {
-        if (devTools is not null)
-        {
-            try
-            {
-                await devTools.SendAsync("Browser.close", ct: CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is WebSocketException or IOException or TimeoutException or InvalidOperationException or ObjectDisposedException)
-            {
-            }
-
-            await devTools.DisposeAsync().ConfigureAwait(false);
-        }
-
-        try
-        {
-            if (!browser.WaitForExit(8000))
-            {
-                browser.Kill(entireProcessTree: true);
-            }
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
-        {
         }
     }
 }

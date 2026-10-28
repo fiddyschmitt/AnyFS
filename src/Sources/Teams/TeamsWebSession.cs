@@ -1,6 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
-using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -22,8 +20,6 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     private static readonly TimeSpan Margin = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan SilentDeadline = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan InteractiveDeadline = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan PortDeadline = TimeSpan.FromSeconds(30);
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.OrdinalIgnoreCase);
 
     // the service audiences the source needs a bearer for (spike 18)
     private static readonly string[] Wanted = ["https://ic3.teams.office.com", "https://chatsvcagg.teams.microsoft.com", "https://api.spaces.skype.com"];
@@ -46,7 +42,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             return kept;
         }
 
-        var gate = Gates.GetOrAdd(Path.GetFullPath(profileDir), _ => new SemaphoreSlim(1, 1));
+        var gate = ProfileLocks.For(profileDir);
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -116,23 +112,19 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
 
     private async Task<Capture> CaptureAsync(bool headless, TimeSpan deadline, CancellationToken ct)
     {
-        Directory.CreateDirectory(profileDir);
-        await CloseLeftoverAsync(ct).ConfigureAwait(false);
         var mode = headless ? "headless" : "with a window";
-        using var browser = Launch(headless);
-        TeamsCdp? cdp = null;
+        DevToolsBrowser? browser = null;
         try
         {
-            var endpoint = await DevToolsEndpointAsync(browser, ct).ConfigureAwait(false);
-            if (endpoint is null)
+            var launch = await DevToolsBrowser.LaunchAsync(browserPath, profileDir, headless, "about:blank", [], logger, "teams", ct).ConfigureAwait(false);
+            if (launch.Browser is null)
             {
-                return new Capture(false, browser.HasExited
-                    ? $"{BrowserName} handed the launch to another {BrowserName} that holds the profile"
-                    : $"{BrowserName} started without opening its DevTools port (your organisation's RemoteDebuggingAllowed policy does this)", Final: true);
+                return new Capture(false, launch.Failure, Final: true);
             }
 
-            cdp = await TeamsCdp.ConnectAsync(endpoint, ct).ConfigureAwait(false);
-            logger.LogInformation("teams: opened {Browser} {Mode} for {Host}", BrowserName, mode, teamsHost.Host);
+            browser = launch.Browser;
+            var cdp = browser.Client;
+            logger.LogInformation("teams: opened {Browser} {Mode} for {Host} (DevTools on port {Port})", BrowserName, mode, teamsHost.Host, browser.Port);
 
             var pages = new ConcurrentDictionary<string, string>();
             string? wrongAccount = null;
@@ -259,7 +251,10 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         }
         finally
         {
-            await CloseAsync(browser, cdp).ConfigureAwait(false);
+            if (browser is not null)
+            {
+                await browser.DisposeAsync().ConfigureAwait(false);
+            }
         }
     }
 
@@ -289,138 +284,6 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         catch (Exception ex) when (ex is FormatException or JsonException)
         {
             return (null, null, null, null);
-        }
-    }
-
-    private string PortFile => Path.Combine(profileDir, "DevToolsActivePort");
-
-    private Process Launch(bool headless)
-    {
-        var info = new ProcessStartInfo(browserPath) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (var arg in new[] { $"--user-data-dir={profileDir}", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--new-window" })
-        {
-            info.ArgumentList.Add(arg);
-        }
-
-        if (headless)
-        {
-            info.ArgumentList.Add("--headless=new");
-        }
-
-        info.ArgumentList.Add("about:blank");
-        var browser = Process.Start(info) ?? throw new SignInRequiredException($"{BrowserName} did not start", permanent: true);
-        browser.OutputDataReceived += (_, _) => { };
-        browser.ErrorDataReceived += (_, _) => { };
-        browser.BeginOutputReadLine();
-        browser.BeginErrorReadLine();
-        return browser;
-    }
-
-    private async Task<Uri?> DevToolsEndpointAsync(Process browser, CancellationToken ct)
-    {
-        var started = DateTime.UtcNow;
-        while (DateTime.UtcNow - started < PortDeadline)
-        {
-            if (ReadPortFile() is { } endpoint)
-            {
-                return endpoint;
-            }
-
-            if (browser.HasExited && DateTime.UtcNow - started > TimeSpan.FromSeconds(5))
-            {
-                return null;
-            }
-
-            await Task.Delay(250, ct).ConfigureAwait(false);
-        }
-
-        return null;
-    }
-
-    private Uri? ReadPortFile()
-    {
-        try
-        {
-            var lines = File.ReadAllLines(PortFile);
-            return lines.Length >= 2 && int.TryParse(lines[0], out var port) && port > 0 ? new Uri($"ws://127.0.0.1:{port}{lines[1]}") : null;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return null;
-        }
-    }
-
-    private async Task CloseLeftoverAsync(CancellationToken ct)
-    {
-        if (ReadPortFile() is { } endpoint && await AnswersAsync(endpoint, ct).ConfigureAwait(false))
-        {
-            logger.LogInformation("teams: closing the {Browser} left open on the sign-in profile", BrowserName);
-            try
-            {
-                using var quick = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                quick.CancelAfter(TimeSpan.FromSeconds(5));
-                await using var cdp = await TeamsCdp.ConnectAsync(endpoint, quick.Token).ConfigureAwait(false);
-                await cdp.SendAsync("Browser.close", ct: quick.Token).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is WebSocketException or IOException or TimeoutException || ex is OperationCanceledException && !ct.IsCancellationRequested)
-            {
-            }
-
-            for (var i = 0; i < 20 && await AnswersAsync(endpoint, ct).ConfigureAwait(false); i++)
-            {
-                await Task.Delay(500, ct).ConfigureAwait(false);
-            }
-        }
-
-        try
-        {
-            File.Delete(PortFile);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-        }
-    }
-
-    private static async Task<bool> AnswersAsync(Uri endpoint, CancellationToken ct)
-    {
-        using var probe = new TcpClient();
-        using var quick = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        quick.CancelAfter(TimeSpan.FromSeconds(2));
-        try
-        {
-            await probe.ConnectAsync("127.0.0.1", endpoint.Port, quick.Token).ConfigureAwait(false);
-            return true;
-        }
-        catch (Exception ex) when (ex is SocketException || ex is OperationCanceledException && !ct.IsCancellationRequested)
-        {
-            return false;
-        }
-    }
-
-    private static async Task CloseAsync(Process browser, TeamsCdp? cdp)
-    {
-        if (cdp is not null)
-        {
-            try
-            {
-                await cdp.SendAsync("Browser.close", ct: CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is WebSocketException or IOException or TimeoutException or InvalidOperationException or ObjectDisposedException)
-            {
-            }
-
-            await cdp.DisposeAsync().ConfigureAwait(false);
-        }
-
-        try
-        {
-            if (!browser.WaitForExit(8000))
-            {
-                browser.Kill(entireProcessTree: true);
-            }
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
-        {
         }
     }
 }
