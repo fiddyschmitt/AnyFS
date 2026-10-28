@@ -22,7 +22,18 @@ internal sealed class Listings
     /// <param name="stopping">The source's own: a request shared by several askers is not cancelled by one of them giving up.</param>
     public Listings(CancellationToken stopping) => _stopping = stopping;
 
-    private sealed record Entry(Task<object> Task, long At, TimeSpan? Ttl);
+    // an entry's fetch starts only once the entry is the one kept: two askers racing to replace a stale entry (or to add
+    // a missing one) do not both go to GitLab, and the loser's request is never left unobserved
+    private sealed class Entry(Func<Task<object>> start, long at, TimeSpan? ttl)
+    {
+        private readonly Lazy<Task<object>> _task = new(start, LazyThreadSafetyMode.ExecutionAndPublication);
+
+        public Task<object> Task => _task.Value;
+
+        public long At { get; } = at;
+
+        public TimeSpan? Ttl { get; } = ttl;
+    }
 
     /// <summary>The kept <typeparamref name="T"/> for <paramref name="key"/> while it is younger than <paramref name="ttl"/> (null: for good), else fetched.</summary>
     public async Task<T> GetAsync<T>(string key, TimeSpan? ttl, Func<CancellationToken, Task<T>> fetch, CancellationToken ct)
@@ -43,7 +54,7 @@ internal sealed class Listings
                 }
             }
 
-            var fresh = new Entry(Run(fetch), Stopwatch.GetTimestamp(), ttl);
+            var fresh = new Entry(() => Run(fetch), Stopwatch.GetTimestamp(), ttl);
             if (kept is null ? _entries.TryAdd(key, fresh) : _entries.TryUpdate(key, fresh, kept))
             {
                 Trim();
