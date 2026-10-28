@@ -2,8 +2,6 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Runtime.CompilerServices;
-using System.Runtime.ExceptionServices;
-using System.Threading.Channels;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 
@@ -19,8 +17,8 @@ namespace AnyFS.Sources.SharePoint;
 /// root site is the source's own and the others are in its Sites and Subsites folders. The site's pages (a library of
 /// <see cref="LibraryInfo.Pages"/>) are read-only Markdown files made by the store, as are the pages in a site's own
 /// folder (a classic site's default.aspx).
-/// Listings sit in a <see cref="ListingCache"/>, for two seconds or, with <see cref="KeepListings"/>, until listed afresh
-/// by the walk of the whole tree every <see cref="WalkEvery"/>, and stats are answered from it; a
+/// Listings sit in the SDK's <see cref="KeptListings"/>, for two seconds or, with <see cref="KeepListings"/>, until listed
+/// afresh by the walk of the whole tree every <see cref="WalkEvery"/>, and stats are answered from them; a
 /// listing also remembers each item's ids (and download URL, where the flavour has one), so an open needs no extra round trip. Files below the
 /// spool threshold are downloaded whole into the <see cref="SpoolCache"/> (and served again from it while
 /// their version is unchanged); larger ones are read in ranges through <see cref="RandomAccessOverStream"/>,
@@ -41,8 +39,6 @@ public abstract class SharePointSource : SourceBase, ICountable
 
     /// <summary>Listings in flight in a walk in all, whatever the number of sites: SharePoint throttles a client that asks too much at once.</summary>
     internal const int WalkInFlight = 64;
-
-    private static readonly TimeSpan ListingTtl = TimeSpan.FromSeconds(2);
 
     // search finds a new site only minutes after it is made, so asking more often than this gains nothing
     private static readonly TimeSpan OtherSitesTtl = TimeSpan.FromMinutes(5);
@@ -74,15 +70,11 @@ public abstract class SharePointSource : SourceBase, ICountable
     private DateTimeOffset _leftOutTried;
     private Task _retrying = Task.CompletedTask;
 
-    // with listings kept: the walks of the whole tree, one at the start and one every WalkEvery after the last
-    private readonly TaskCompletionSource _firstWalk = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private Task _walking = Task.CompletedTask;
-
     // files open for writing that SharePoint has not got yet (the upload comes when the handle closes): stats,
     // listings and times are answered here meanwhile, since the upstream knows nothing of them
     private readonly ConcurrentDictionary<string, PendingUploadFile> _pending = new(StringComparer.OrdinalIgnoreCase);
     private IDocumentStore? _store;
-    private ListingCache? _listings;
+    private KeptListings? _kept;
     private SpoolCache? _spool;
     private string _uploadDir = "";
     private bool _degraded;
@@ -165,15 +157,19 @@ public abstract class SharePointSource : SourceBase, ICountable
             throw new SourceFailedException($"{store.Description} has no {store.LibraryNoun} named {pinned}; it has: {string.Join(", ", site.Libraries.Values.Select(l => l.Name))}", permanent: true);
         }
 
-        _listings = KeepListings
-            ? new ListingCache(ListingCache.Kept, ListRemoteAsync, maxDirectories: 1_000_000)
-            : new ListingCache(ListingTtl, ListRemoteAsync);
-        _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
-        if (KeepListings)
+        _kept = new KeptListings(ListRemoteAsync, Counters, Logger, new KeptListingsOptions
         {
-            var stopping = _stopping.Token;
-            _walking = Task.Run(() => WalkLoopAsync(stopping), CancellationToken.None);
-        }
+            Keep = KeepListings,
+            WalkEvery = WalkEvery,
+            Parallelism = WalkPerSite,
+            MaxInFlight = WalkInFlight,
+            PartsBelow = HoldsSitesAsync,
+            Name = "sharepoint",
+        });
+        _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
+
+        // with listings kept the whole tree is walked from the start, "Count files on start" or not
+        _kept.StartWalks();
         _uploadDir = Directory.CreateDirectory(Path.Combine(Context.CacheDirectory, "uploads")).FullName;
         foreach (var stale in Directory.EnumerateFiles(_uploadDir))
         {
@@ -239,197 +235,19 @@ public abstract class SharePointSource : SourceBase, ICountable
     /// "Count files on start": the walk of the whole tree (<see cref="WalkAsync"/>). With listings kept, the walk the source
     /// starts with anyway, which counts as it goes; otherwise one now.
     /// </summary>
-    public async Task CountFilesAsync(CancellationToken ct)
-    {
-        if (KeepListings)
-        {
-            await _firstWalk.Task.WaitAsync(ct).ConfigureAwait(false);
-            return;
-        }
-
-        await WalkAsync(Counters, ct).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// With listings kept: the walk at the start, which counts in the open (the tile's number grows with it), then one every
-    /// <see cref="WalkEvery"/> after the last ended, which counts aside and shows its total when done. A walk that fails is
-    /// logged and the next one comes as usual.
-    /// </summary>
-    private async Task WalkLoopAsync(CancellationToken ct)
-    {
-        var first = true;
-        while (!ct.IsCancellationRequested)
-        {
-            var counters = first ? Counters : new SourceCounters();
-            var started = Stopwatch.GetTimestamp();
-            try
-            {
-                await WalkAsync(counters, ct).ConfigureAwait(false);
-                Counters.Set(counters.FilesKnown, counters.DirectoriesKnown, EnumerationState.Complete);
-                Logger.LogInformation("sharepoint: walked every folder in {Seconds:F0} s: {Files:N0} files in {Folders:N0} folders", Stopwatch.GetElapsedTime(started).TotalSeconds, counters.FilesKnown, counters.DirectoriesKnown);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                Logger.LogWarning(ex, "sharepoint: walking every folder failed");
-            }
-            finally
-            {
-                if (first)
-                {
-                    first = false;
-                    _firstWalk.TrySetResult();
-                }
-            }
-
-            if (WalkEvery <= TimeSpan.Zero)
-            {
-                break;
-            }
-
-            try
-            {
-                await Task.Delay(WalkEvery, ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-        }
-
-        _firstWalk.TrySetResult();
-    }
+    public Task CountFilesAsync(CancellationToken ct) => Kept.CountAsync(ct);
 
     /// <summary>
     /// Lists every folder of the tree afresh, counting files and folders into <paramref name="counters"/> as it goes: each
     /// site on its own (the source's own, or each of the sites it was given, and every site in a Subsites or Sites folder
     /// below them), <see cref="WalkPerSite"/> folders of it at a time, all sites at once, at most <see cref="WalkInFlight"/>
-    /// listings in flight in all. A folder that cannot be listed is left out, with what is below it.
+    /// listings in flight in all (<see cref="KeptListings.WalkAsync"/>). A folder that cannot be listed is left out, with
+    /// what is below it.
     /// </summary>
-    internal async Task WalkAsync(SourceCounters counters, CancellationToken ct)
-    {
-        using var inFlight = new SemaphoreSlim(WalkInFlight, WalkInFlight);
-        var gate = new object();
-        var sites = new List<Task>();
-        void StartSite(string path)
-        {
-            lock (gate)
-            {
-                sites.Add(Task.Run(() => WalkSiteAsync(path, StartSite, inFlight, counters, ct), CancellationToken.None));
-            }
-        }
+    internal Task WalkAsync(SourceCounters counters, CancellationToken ct) => Kept.WalkAsync(counters, ct);
 
-        StartSite("");
-        Exception? failure = null;
-        while (true)
-        {
-            // every site's walk ends before this does, those started while waiting too: none outlives the semaphore
-            Task[] started;
-            lock (gate)
-            {
-                started = [.. sites];
-            }
-
-            try
-            {
-                await Task.WhenAll(started).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                failure ??= ex;
-            }
-
-            lock (gate)
-            {
-                if (sites.Count == started.Length)
-                {
-                    break;
-                }
-            }
-        }
-
-        if (failure is not null)
-        {
-            ExceptionDispatchInfo.Throw(failure);
-        }
-    }
-
-    /// <summary>One site's part of a walk (<see cref="WalkAsync"/>): its folders, <see cref="WalkPerSite"/> at a time; the sites below it start walks of their own.</summary>
-    private async Task WalkSiteAsync(string site, Action<string> startSite, SemaphoreSlim inFlight, SourceCounters counters, CancellationToken ct)
-    {
-        var pending = Channel.CreateUnbounded<string>();
-        var outstanding = 1;
-        pending.Writer.TryWrite(site);
-
-        async Task WorkerAsync()
-        {
-            await foreach (var folder in pending.Reader.ReadAllAsync(ct).ConfigureAwait(false))
-            {
-                try
-                {
-                    IReadOnlyList<VfsEntry> entries;
-                    await inFlight.WaitAsync(ct).ConfigureAwait(false);
-                    try
-                    {
-                        entries = await Listings.RefreshAsync(folder, ct).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        inFlight.Release();
-                    }
-
-                    var holdsSites = await HoldsSitesAsync(folder, ct).ConfigureAwait(false);
-                    long files = 0;
-                    var folders = 0;
-                    foreach (var entry in entries)
-                    {
-                        if (!entry.IsDirectory)
-                        {
-                            files++;
-                            continue;
-                        }
-
-                        folders++;
-                        var child = VfsPath.Join(folder, entry.Name);
-                        if (holdsSites)
-                        {
-                            startSite(child);
-                        }
-                        else
-                        {
-                            Interlocked.Increment(ref outstanding);
-                            pending.Writer.TryWrite(child);
-                        }
-                    }
-
-                    counters.Add(files, folders);
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogDebug("sharepoint: the walk left out '{Folder}': {Error}", folder, ex.Message);
-                }
-                finally
-                {
-                    if (Interlocked.Decrement(ref outstanding) == 0)
-                    {
-                        pending.Writer.TryComplete();
-                    }
-                }
-            }
-        }
-
-        await Task.WhenAll(Enumerable.Range(0, WalkPerSite).Select(_ => Task.Run(WorkerAsync, CancellationToken.None))).ConfigureAwait(false);
-    }
-
-    /// <summary>Whether a folder's subfolders are sites: a Subsites or Sites folder, or the root of a source given several sites.</summary>
-    private async Task<bool> HoldsSitesAsync(string folder, CancellationToken ct)
+    /// <summary>Whether a folder's subfolders are sites, each walked on its own: a Subsites or Sites folder, or the root of a source given several sites.</summary>
+    private async ValueTask<bool> HoldsSitesAsync(string folder, CancellationToken ct)
         => await ResolveAsync(folder, ct).ConfigureAwait(false) is { Library: null } place && (place.Folder is not null || (place.Web == _root && _root.Contents?.Sites is not null));
 
     private async IAsyncEnumerable<VfsEntry> ListRemoteAsync(string path, [EnumeratorCancellation] CancellationToken ct)
@@ -936,7 +754,11 @@ public abstract class SharePointSource : SourceBase, ICountable
         }
 
         await retrying.ConfigureAwait(false);
-        await _walking.ConfigureAwait(false);
+        if (_kept is { } kept)
+        {
+            await kept.DisposeAsync().ConfigureAwait(false);
+        }
+
         if (_spool is { } spool)
         {
             _spool = null;
@@ -950,7 +772,9 @@ public abstract class SharePointSource : SourceBase, ICountable
 
     // --- helpers -------------------------------------------------------------------------------------------------
 
-    private ListingCache Listings => _listings ?? throw VfsException.Unavailable($"{Target} is not connected yet");
+    private KeptListings Kept => _kept ?? throw VfsException.Unavailable($"{Target} is not connected yet");
+
+    private ListingCache Listings => Kept.Cache;
 
     /// <summary>
     /// Where a source path leads: a site's own folder (the source's site at the root, a subsite's or another site's
@@ -1567,10 +1391,10 @@ public abstract class SharePointSource : SourceBase, ICountable
             Logger.LogInformation("sharepoint: {Url} opens now and shows as {Name}", site.Url, joined.Name);
 
             // none yet when the lookup ended as the source was starting
-            _listings?.Invalidate("");
+            _kept?.Cache.Invalidate("");
             foreach (var folder in _root.Contents?.Folders ?? [])
             {
-                _listings?.Invalidate(folder.Name);
+                _kept?.Cache.Invalidate(folder.Name);
             }
         }
     }

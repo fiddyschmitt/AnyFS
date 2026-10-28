@@ -95,11 +95,11 @@ public sealed class SharePointSettings
         Hint = "Files this small are downloaded whole when opened and kept in the cache; larger ones are read in ranges as the client asks.")]
     public int SpoolBelowMiB { get; set; } = 8;
 
-    [Setting("Keep folder listings", Advanced = true, Order = 22,
+    [Setting(KeptListings.KeepSetting, Advanced = true, Order = 22,
         Hint = "Answer from what AnyFS last saw of each folder instead of asking SharePoint every time, so folders open at once. Every site and folder is walked again in the background (below), so changes made outside AnyFS show then. Off: listings are kept for two seconds.")]
     public bool KeepListings { get; set; } = true;
 
-    [Setting("Walk every folder every (minutes)", Advanced = true, Order = 23,
+    [Setting(KeptListings.WalkSetting, Advanced = true, Order = 23,
         Hint = "With folder listings kept: how long after one walk of every site and folder the next begins (the first is at the start). 0 walks at the start only.")]
     public int WalkMinutes { get; set; } = 30;
 
