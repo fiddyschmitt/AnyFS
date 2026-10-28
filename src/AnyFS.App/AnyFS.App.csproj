@@ -128,6 +128,7 @@
     <ProjectReference Include="..\Sources\ThreeDX\AnyFS.Sources.ThreeDX.csproj" />
     <ProjectReference Include="..\Sources\Outlook\AnyFS.Sources.Outlook.csproj" />
     <ProjectReference Include="..\Sources\GitLab\AnyFS.Sources.GitLab.csproj" />
+    <ProjectReference Include="..\Sources\Teams\AnyFS.Sources.Teams.csproj" />
     <ProjectReference Include="..\Mounts\Http\AnyFS.Mounts.Http.csproj" />
     <ProjectReference Include="..\Mounts\WebDav\AnyFS.Mounts.WebDav.csproj" />
     <ProjectReference Include="..\Mounts\Ftp\AnyFS.Mounts.Ftp.csproj" />

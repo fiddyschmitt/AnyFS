@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sources.Teams</AssemblyName>
+    <RootNamespace>AnyFS.Sources.Teams</RootNamespace>
+  </PropertyGroup>
+  <!-- The Microsoft Teams source (spec 7.9): read-only over Microsoft's own Teams services (the chat service, the
+       aggregator and the middle tier), signed in by a web session that skims the tokens the Teams web client mints
+       (spike 18: Teams on the web mints no Graph token, so this is the path, as Outlook's web session calls service.svc).
+       REST over HttpClient and System.Text.Json directly, no SDK. Files come from the team's SharePoint/OneDrive. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <!-- the web session (BrowserSession, its CDP, the WebDriver fallback), RequestPace, StateFile, ResponseStream, MemoryFile -->
+    <ProjectReference Include="..\Common\AnyFS.Sources.Common.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- ReverseMarkdown (MIT) over AngleSharp (MIT): a Teams message's HTML as Markdown, as the SharePoint pages and Outlook bodies -->
+    <PackageReference Include="ReverseMarkdown" />
+    <PackageReference Include="AngleSharp" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="AnyFS.Sources.Common" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
+  </ItemGroup>
+</Project>

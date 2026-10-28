@@ -10,6 +10,7 @@ using AnyFS.Sources.Mirror;
 using AnyFS.Sources.Outlook;
 using AnyFS.Sources.SharePoint;
 using AnyFS.Sources.Sshfs;
+using AnyFS.Sources.Teams;
 using AnyFS.Sources.ThreeDX;
 
 namespace AnyFS.App;
@@ -26,6 +27,7 @@ public static class BuiltIns
         registry.AddBuiltIn(new ThreeDXPlugin());
         registry.AddBuiltIn(new OutlookPlugin());
         registry.AddBuiltIn(new GitLabPlugin());
+        registry.AddBuiltIn(new TeamsPlugin());
         registry.AddBuiltIn(new WinFspMountProvider());
         registry.AddBuiltIn(new FuseMountProvider());
         registry.AddBuiltIn(new SmbMountProvider());

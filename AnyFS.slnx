@@ -37,6 +37,9 @@
   <Folder Name="/src/Sources/GitLab/">
     <Project Path="src/Sources/GitLab/AnyFS.Sources.GitLab.csproj" />
   </Folder>
+  <Folder Name="/src/Sources/Teams/">
+    <Project Path="src/Sources/Teams/AnyFS.Sources.Teams.csproj" />
+  </Folder>
   <Folder Name="/src/Sources/Microsoft365/">
     <Project Path="src/Sources/Microsoft365/AnyFS.Sources.Microsoft365.csproj" />
   </Folder>
