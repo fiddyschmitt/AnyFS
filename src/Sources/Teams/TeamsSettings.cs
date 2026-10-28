@@ -9,18 +9,19 @@ internal enum TeamsSignIn
     WebSession,
 }
 
-/// <summary>A Microsoft cloud: which Teams web host and sign-in host to open. The services' regional URLs are discovered at runtime (the authz call), not set here.</summary>
-internal sealed record TeamsCloud(string Name, string TeamsHost, string Display)
+/// <summary>
+/// A Microsoft cloud: the Teams web host the browser opens, and the API host the <c>authz</c> discovery call goes to
+/// (spike 18). The services' regional URLs come back from <c>authz</c> at runtime, not set here.
+/// </summary>
+internal sealed record TeamsCloud(string Name, string TeamsHost, string ApiHost, string Display)
 {
-    public static readonly TeamsCloud Global = new("global", "https://teams.cloud.microsoft", "Microsoft 365 (global)");
+    public static readonly TeamsCloud Global = new("global", "https://teams.cloud.microsoft", "https://teams.microsoft.com", "Microsoft 365 (global)");
 
-    // the US government clouds (the user's work may be one): the Teams host differs; the sign-in follows the account
-    public static readonly TeamsCloud UsGov = new("gcc-high", "https://gov.teams.microsoft.us", "US Gov (GCC High)");
-    public static readonly TeamsCloud UsGovDod = new("dod", "https://dod.teams.microsoft.us", "US Gov (DoD)");
+    // the US government clouds (the user's work may be one): the hosts differ; the sign-in follows the account
+    public static readonly TeamsCloud UsGov = new("gcc-high", "https://gov.teams.microsoft.us", "https://gov.teams.microsoft.us", "US Gov (GCC High)");
+    public static readonly TeamsCloud UsGovDod = new("dod", "https://dod.teams.microsoft.us", "https://dod.teams.microsoft.us", "US Gov (DoD)");
 
     public static readonly IReadOnlyList<TeamsCloud> All = [Global, UsGov, UsGovDod];
-
-    public static TeamsCloud From(string? name) => All.FirstOrDefault(c => c.Name.Equals((name ?? "").Trim(), StringComparison.OrdinalIgnoreCase)) ?? Global;
 }
 
 public sealed class TeamsSettings

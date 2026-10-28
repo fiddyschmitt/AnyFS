@@ -66,9 +66,46 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         Logger.LogInformation("teams: serving {Account}", _api.Account);
     }
 
-    /// <summary>The live web session (spec 7.9): built in a later commit. Tests use the stand-in.</summary>
-    private Task<ITeamsApi> SignInAsync(CancellationToken ct)
-        => throw new SourceFailedException("The Teams web session is not built yet (spec 7.9, in progress).", permanent: true);
+    /// <summary>
+    /// The live web session (spec 7.9): a browser of AnyFS's own, on a profile per account, signs in to Teams; its tokens
+    /// for the chat service, the aggregator and the middle tier are read and used to call those services. One interactive
+    /// sign-in now, so a lapsed session shows a window at the start, as the other web sources do.
+    /// </summary>
+    private async Task<ITeamsApi> SignInAsync(CancellationToken ct)
+    {
+        var cloud = _settings.TheCloud;
+        var browser = _settings.Browser ?? BrowserLocator.Find(null, "ANYFS_TEAMS_BROWSER")
+            ?? throw new SourceFailedException("No Edge, Chrome or Chromium was found for the Teams web session; set one in the source's Browser setting.", permanent: true);
+        var profile = WebSignInTarget.ProfileFor("teams-browser", _settings.AccountHint, "ANYFS_TEAMS_PROFILES");
+        var session = new TeamsWebSession(new Uri(cloud.TeamsHost), browser, profile, _settings.AccountHint, Logger);
+        try
+        {
+            await session.TokenAsync("https://chatsvcagg.teams.microsoft.com", interactive: true, m => Context.ReportProgress(m), ct).ConfigureAwait(false);
+        }
+        catch (SignInRequiredException ex)
+        {
+            throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
+        }
+
+        return new TeamsRest(new Uri(cloud.ApiHost), (aud, c) => Renew(session, aud, c), _settings.Concurrency, Logger)
+        {
+            Account = session.Account ?? _settings.AccountHint,
+            Mri = session.Mri,
+        };
+    }
+
+    private async Task<string> Renew(TeamsWebSession session, string audience, CancellationToken ct)
+    {
+        try
+        {
+            return await session.TokenAsync(audience, interactive: false, _ => { }, ct).ConfigureAwait(false);
+        }
+        catch (SignInRequiredException ex)
+        {
+            MarkDegraded(ex.Message);
+            throw VfsException.Unavailable(ex.Message);
+        }
+    }
 
     // --- the VFS -------------------------------------------------------------------------------------------------------
 
