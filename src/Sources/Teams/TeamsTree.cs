@@ -36,7 +36,12 @@ internal abstract class TmFile(string name, long length, DateTimeOffset? modifie
 /// <summary>A file the source makes itself and holds in memory (a post or a chat as Markdown).</summary>
 internal sealed class MarkdownFile(string name, byte[] content, DateTimeOffset? modified) : TmFile(name, content.Length, modified)
 {
-    public override Task<IVfsFile> OpenAsync(TeamsSource source, CancellationToken ct) => Task.FromResult<IVfsFile>(new MemoryFile(content, "a Teams conversation as Markdown"));
+    /// <summary>The bytes the listing measured: what an open of this listing's file must serve (<see cref="TeamsSource"/> keeps them).</summary>
+    public byte[] Content { get; } = content;
+
+    public override Task<IVfsFile> OpenAsync(TeamsSource source, CancellationToken ct) => Task.FromResult<IVfsFile>(Open(Content));
+
+    public static IVfsFile Open(byte[] content) => new MemoryFile(content, "a Teams conversation as Markdown");
 }
 
 /// <summary>The source's root: a folder per team, then the Chats folder.</summary>
@@ -100,27 +105,17 @@ internal sealed class PostsFolder(ChannelInfo channel) : TmFolder("posts", null)
     {
         var threads = await source.ThreadsAsync(channel.Id, ct).ConfigureAwait(false);
         var names = TeamsNames.Unique(threads.Select(t => TeamsText.ThreadName(t[0], source.NameOf)).ToList());
-        return threads.Select((t, i) => (TmNode)new ThreadFolder(names[i], t, source)).ToList();
+        return threads.Select((t, i) => (TmNode)new ThreadFolder(names[i], t)).ToList();
     }
 }
 
-/// <summary>One channel post: <c>post.md</c>, the opening message and its replies.</summary>
-internal sealed class ThreadFolder : TmFolder
+/// <summary>One channel post: <c>post.md</c>, the opening message and its replies, built when the post itself is listed (not when its posts folder is).</summary>
+internal sealed class ThreadFolder(string name, IReadOnlyList<TeamsMessage> thread) : TmFolder(name, thread[0].Composed)
 {
-    private readonly IReadOnlyList<TeamsMessage> _thread;
-    private readonly byte[] _markdown;
-
-    public ThreadFolder(string name, IReadOnlyList<TeamsMessage> thread, TeamsSource source)
-        : base(name, thread[0].Composed)
-    {
-        _thread = thread;
-        _markdown = TeamsText.Post(thread, source.NameOf);
-    }
-
     public override bool Walked => false;
 
     public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<TmNode>>([new MarkdownFile("post.md", _markdown, _thread[0].Composed)]);
+        => Task.FromResult<IReadOnlyList<TmNode>>([new MarkdownFile("post.md", TeamsText.Post(thread, source.NameOf), thread[0].Composed)]);
 }
 
 /// <summary>The account's chats: a folder per chat.</summary>

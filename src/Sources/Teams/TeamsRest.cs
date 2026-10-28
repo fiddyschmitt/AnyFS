@@ -33,7 +33,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<string, CancellationToken
 
     public string? Mri { get; set; }
 
-    public async Task<IReadOnlyList<TeamInfo>> TeamsAsync(CancellationToken ct)
+    public async Task<TeamsStructure> StructureAsync(CancellationToken ct)
     {
         var services = await DiscoverAsync(ct).ConfigureAwait(false);
         using var doc = await GetAsync($"{services.Aggregator}/api/v3/teams/users/me?isPrefetch=false&enableMembershipSummary=true", AggregatorAud, ct).ConfigureAwait(false);
@@ -46,17 +46,10 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<string, CancellationToken
                 channels.Add(new ChannelInfo(Str(c, "id") ?? "", Str(c, "displayName") ?? "", Bool(c, "isGeneral"), Int(c, "channelType") != 0));
             }
 
-            var groupId = Str(Obj(t, "teamSiteInformation"), "groupId") ?? channels.Select(_ => (string?)null).FirstOrDefault();
+            var groupId = Str(Obj(t, "teamSiteInformation"), "groupId") ?? Str(t, "groupId");
             teams.Add(new TeamInfo(Str(t, "id") ?? "", Str(t, "displayName") ?? "(team)", groupId, channels));
         }
 
-        return teams;
-    }
-
-    public async Task<IReadOnlyList<ChatInfo>> ChatsAsync(CancellationToken ct)
-    {
-        var services = await DiscoverAsync(ct).ConfigureAwait(false);
-        using var doc = await GetAsync($"{services.Aggregator}/api/v3/teams/users/me?isPrefetch=false", AggregatorAud, ct).ConfigureAwait(false);
         var chats = new List<ChatInfo>();
         foreach (var c in Arr(doc.RootElement, "chats"))
         {
@@ -64,7 +57,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<string, CancellationToken
             chats.Add(new ChatInfo(Str(c, "id") ?? "", NullIfEmpty(Str(c, "title")), KindOf(c), members, Time(Str(c, "lastUpdatedTime") ?? Str(c, "version"))));
         }
 
-        return chats;
+        return new TeamsStructure(teams, chats);
     }
 
     public async Task<MessagePage> MessagesAsync(string threadId, int max, CancellationToken ct)

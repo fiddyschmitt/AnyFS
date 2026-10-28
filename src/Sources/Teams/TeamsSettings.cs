@@ -57,8 +57,8 @@ public sealed class TeamsSettings
         Hint = "The Edge, Chrome or Chromium to open for the web session's sign-in. Leave empty to find one automatically. AnyFS opens it with a profile of its own, never your everyday browser's.")]
     public string? BrowserPath { get; set; }
 
-    [Setting("Open chats and channels changed in the last (days)", Advanced = true, Order = 12,
-        Hint = "How far back to read. 0 reads everything; a positive number leaves older conversations out (a busy account has thousands).")]
+    [Setting("Conversations active in the last (days)", Advanced = true, Order = 12,
+        Hint = "Chats and channel posts whose last message is older than this are left out, and a conversation is read back no further than this (a busy account has thousands). 0 shows everything.")]
     public int WithinDays { get; set; }
 
     [Setting("Check for changes every (seconds)", Advanced = true, Order = 13,

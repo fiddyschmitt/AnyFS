@@ -132,6 +132,146 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task AnOpenServesTheBytesTheListingMeasured()
+    {
+        var fake = Seed();
+        await using var source = await StartAsync(fake, s => s.RefreshSeconds = 1);
+        var listed = (await ListEntriesAsync(source, "Chats/Jane Doe")).Single();
+
+        // the conversation moves on and the kept answers age past the interval: an open must still give the listed length
+        var chat = (await fake.StructureAsync(CancellationToken.None)).Chats.Single(c => c.Kind == ChatKind.OneOnOne);
+        fake.Post(chat.Id, Jane, "Jane Doe", "<p>A much longer reply that changes the file's length by a good many bytes</p>", When.AddMinutes(9));
+        await Task.Delay(TimeSpan.FromSeconds(1.2));
+        Assert.AreEqual(listed.Length, (await TextBytesAsync(source, "Chats/Jane Doe/chat.md")).Length, "the bytes of the length the listing gave");
+
+        // once the listing has caught up, the open gives the new bytes, their length the new stat's
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        VfsEntry? now;
+        while ((now = await source.StatAsync("Chats/Jane Doe/chat.md", CancellationToken.None))!.Length == listed.Length)
+        {
+            Assert.IsTrue(DateTime.UtcNow < deadline, "the listing behind the answer lands");
+            await Task.Delay(50);
+        }
+
+        var bytes = await TextBytesAsync(source, "Chats/Jane Doe/chat.md");
+        Assert.AreEqual(now.Length, bytes.Length);
+        StringAssert.Contains(Encoding.UTF8.GetString(bytes), "A much longer reply");
+    }
+
+    [TestMethod]
+    public async Task APeopleLookupThatFailsLeavesTheChatsListed()
+    {
+        var fake = Seed();
+        fake.PeopleFails = true;
+        await using var source = await StartAsync(fake);
+        var chats = await NamesAsync(source, "Chats");
+        Assert.AreEqual(2, chats.Count, "the chats list though their people's names could not be read");
+        CollectionAssert.Contains(chats, "Project Axle");
+    }
+
+    [TestMethod]
+    public async Task TheWindowLeavesOlderChatsAndPostsOut()
+    {
+        var recent = DateTimeOffset.UtcNow.AddDays(-1);
+        var old = DateTimeOffset.UtcNow.AddDays(-30);
+        var fake = new FakeTeams();
+        fake.AddPerson(Jane, "Jane Doe");
+        var general = FakeTeams.Channel("General", general: true);
+        fake.AddTeam("AnyFS Lab", general);
+        fake.Post(general.Id, Jane, "Jane Doe", "<p>Old news</p>", old);
+        fake.Post(general.Id, Jane, "Jane Doe", "<p>Fresh news</p>", recent);
+        fake.AddChat(ChatKind.Group, "Old chat", [Jane], old);
+        fake.AddChat(ChatKind.Group, "New chat", [Jane], recent);
+
+        await using var source = await StartAsync(fake, s => s.WithinDays = 7);
+        CollectionAssert.AreEqual(new[] { "New chat" }, await NamesAsync(source, "Chats"));
+        var posts = await NamesAsync(source, "AnyFS Lab/General/posts");
+        Assert.AreEqual(1, posts.Count, string.Join(" | ", posts));
+        StringAssert.Contains(posts[0], "Fresh news");
+    }
+
+    [TestMethod]
+    public async Task AnEmptyNewestPageWithAWindowReadsOnWithoutFailing()
+    {
+        var fake = Seed();
+        fake.EmptyNewestPage = true;
+        await using var source = await StartAsync(fake, s => s.WithinDays = 36_500);
+        var posts = await NamesAsync(source, "AnyFS Lab/General/posts");
+        Assert.AreEqual(2, posts.Count, "the threads came from the older page");
+    }
+
+    [TestMethod]
+    public async Task AChatKeepsTheNameItWasFirstGiven()
+    {
+        const string Stranger = "8:orgid:00000000-0000-0000-0000-00000stranger";
+        var fake = new FakeTeams();
+        var chat = fake.AddChat(ChatKind.OneOnOne, null, [Stranger], When);
+        fake.Post(chat.Id, Stranger, null, "<p>Hi</p>", When);
+        await using var source = await StartAsync(fake);
+        var first = (await NamesAsync(source, "Chats")).Single();
+
+        // the name becomes known later (a message carries it): the folder keeps the name it was listed under
+        fake.Post(chat.Id, Stranger, "Zed Stranger", "<p>It is Zed</p>", When.AddMinutes(1));
+        fake.Rename(Stranger, "Zed Stranger");
+        await TextBytesAsync(source, $"Chats/{first}/chat.md");
+        CollectionAssert.AreEqual(new[] { first }, await NamesAsync(source, "Chats"));
+    }
+
+    [TestMethod]
+    public async Task ABodilessPostIsNamedByItsTimeAndAuthorAlone()
+    {
+        var fake = new FakeTeams();
+        var general = FakeTeams.Channel("General", general: true);
+        fake.AddTeam("AnyFS Lab", general);
+        fake.Post(general.Id, Jane, "Jane Doe", "<p> </p>", When);
+        await using var source = await StartAsync(fake);
+        var stamp = When.ToLocalTime().ToString("yyyy-MM-dd HHmm", System.Globalization.CultureInfo.InvariantCulture);
+        CollectionAssert.AreEqual(new[] { $"{stamp} Jane Doe" }, await NamesAsync(source, "AnyFS Lab/General/posts"), "no subject, and the author once");
+    }
+
+    [TestMethod]
+    public async Task AskersAtOnceFetchAThingOnce()
+    {
+        var cache = new TeamsCache(CancellationToken.None);
+        var calls = 0;
+        async Task<string> FetchAsync(CancellationToken c)
+        {
+            Interlocked.Increment(ref calls);
+            await Task.Delay(100, c);
+            return "x";
+        }
+
+        using var go = new ManualResetEventSlim();
+        var askers = Enumerable.Range(0, 64).Select(_ => Task.Run(async () =>
+        {
+            go.Wait();
+            return await cache.GetAsync("k", TimeSpan.FromMinutes(1), FetchAsync, CancellationToken.None);
+        })).ToList();
+        go.Set();
+        await Task.WhenAll(askers);
+        Assert.AreEqual(1, calls, "one fetch however many asked at once");
+    }
+
+    private static async Task<List<VfsEntry>> ListEntriesAsync(ISource source, string path)
+    {
+        var entries = new List<VfsEntry>();
+        await foreach (var e in source.ListAsync(path, CancellationToken.None))
+        {
+            entries.Add(e);
+        }
+
+        return entries;
+    }
+
+    private static async Task<byte[]> TextBytesAsync(ISource source, string path)
+    {
+        await using var file = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
+        var buffer = new byte[file.Length];
+        await file.ReadFullyAsync(0, buffer, CancellationToken.None);
+        return buffer;
+    }
+
+    [TestMethod]
     public void ThePluginNamesTheSourceFromTheAccount()
     {
         var plugin = new TeamsPlugin();

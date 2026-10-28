@@ -1,3 +1,4 @@
+using AnyFS.Sdk;
 using AnyFS.Sources.Teams;
 
 namespace AnyFS.Sources.Tests;
@@ -27,6 +28,20 @@ internal sealed class FakeTeams : ITeamsApi
 
     /// <summary>How many conversation-message pages have been asked for: tests check a folder that is not re-read has not been fetched.</summary>
     public int MessageCalls { get; private set; }
+
+    /// <summary>How many times the aggregator's structure (teams and chats together) has been asked for.</summary>
+    public int StructureCalls => _structureCalls;
+
+    private int _structureCalls;
+
+    /// <summary>When set, the people lookup fails (the middle tier refusing a batch), as a 400 or 403 would.</summary>
+    public bool PeopleFails { get; set; }
+
+    /// <summary>When set, a conversation's newest page comes back empty with a link to older messages.</summary>
+    public bool EmptyNewestPage { get; set; }
+
+    /// <summary>A delay on each structure call, so concurrent askers overlap.</summary>
+    public TimeSpan StructureDelay { get; set; }
 
     public TeamInfo AddTeam(string displayName, params ChannelInfo[] channels)
     {
@@ -68,14 +83,26 @@ internal sealed class FakeTeams : ITeamsApi
 
     // --- ITeamsApi -----------------------------------------------------------------------------------------------------
 
-    public Task<IReadOnlyList<TeamInfo>> TeamsAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<TeamInfo>>(_teams);
+    public async Task<TeamsStructure> StructureAsync(CancellationToken ct)
+    {
+        Interlocked.Increment(ref _structureCalls);
+        if (StructureDelay > TimeSpan.Zero)
+        {
+            await Task.Delay(StructureDelay, ct);
+        }
 
-    public Task<IReadOnlyList<ChatInfo>> ChatsAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<ChatInfo>>(_chats);
+        return new TeamsStructure(_teams.ToList(), _chats.ToList());
+    }
 
     public Task<MessagePage> MessagesAsync(string threadId, int max, CancellationToken ct)
     {
         MessageCalls++;
         var all = Ordered(threadId);
+        if (EmptyNewestPage)
+        {
+            return Task.FromResult(new MessagePage([], all.Count > 0 ? $"{threadId}|{all.Count}" : null));
+        }
+
         var page = all.TakeLast(max).ToList();
         var older = all.Count > max ? $"{threadId}|{all.Count - max}" : null;
         return Task.FromResult(new MessagePage(page, older));
@@ -96,7 +123,12 @@ internal sealed class FakeTeams : ITeamsApi
     }
 
     public Task<IReadOnlyList<Person>> PeopleAsync(IReadOnlyList<string> mris, CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<Person>>(mris.Where(_people.ContainsKey).Select(m => new Person(m, _people[m])).ToList());
+        => PeopleFails
+            ? throw new VfsException(VfsError.IoError, "Teams (fake) answered 400: the people lookup refused")
+            : Task.FromResult<IReadOnlyList<Person>>(mris.Where(_people.ContainsKey).Select(m => new Person(m, _people[m])).ToList());
+
+    /// <summary>Renames a person (as when the source later learns a sender's name from a message).</summary>
+    public void Rename(string mri, string displayName) => _people[mri] = displayName;
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 

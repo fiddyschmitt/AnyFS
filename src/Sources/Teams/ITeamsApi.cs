@@ -14,11 +14,8 @@ internal interface ITeamsApi : IAsyncDisposable
     /// <summary>The account's own mri (<c>8:orgid:&lt;object id&gt;</c>), so its own messages and chat membership are known.</summary>
     string? Mri { get; }
 
-    /// <summary>The teams the account is in, each with its channels; ordered as the service returns them.</summary>
-    Task<IReadOnlyList<TeamInfo>> TeamsAsync(CancellationToken ct);
-
-    /// <summary>The account's chats (1:1, group and meeting).</summary>
-    Task<IReadOnlyList<ChatInfo>> ChatsAsync(CancellationToken ct);
+    /// <summary>The teams the account is in (each with its channels) and its chats (1:1, group and meeting), from one call: the aggregator answers both at once.</summary>
+    Task<TeamsStructure> StructureAsync(CancellationToken ct);
 
     /// <summary>A conversation's newest messages (a channel's or a chat's, by its thread id), up to <paramref name="max"/>, with a link to older ones.</summary>
     Task<MessagePage> MessagesAsync(string threadId, int max, CancellationToken ct);

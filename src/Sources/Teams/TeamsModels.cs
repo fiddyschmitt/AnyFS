@@ -44,6 +44,9 @@ internal sealed record TeamsMessage(
     public string ThreadId => string.IsNullOrEmpty(RootId) ? Id : RootId!;
 }
 
+/// <summary>The account's teams (each with its channels) and its chats: one answer of the aggregator holds both.</summary>
+internal sealed record TeamsStructure(IReadOnlyList<TeamInfo> Teams, IReadOnlyList<ChatInfo> Chats);
+
 /// <summary>A page of a conversation's messages and the link to the page before it (older messages), for paging.</summary>
 internal sealed record MessagePage(IReadOnlyList<TeamsMessage> Messages, string? OlderLink);
 

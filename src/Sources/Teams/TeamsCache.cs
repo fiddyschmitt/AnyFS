@@ -6,7 +6,8 @@ namespace AnyFS.Sources.Teams;
 /// <summary>
 /// What the source has asked the Teams services, kept for a while (spec 7.9): one request for a thing however many ask
 /// for it at once; a thing kept until it is older than the refresh interval (null: for the session). A failure is not
-/// kept, so the next asking tries again.
+/// kept, so the next asking tries again. An entry's fetch starts only once that entry is the one kept: two askers racing
+/// to replace a stale entry do not both go upstream.
 /// </summary>
 internal sealed class TeamsCache(CancellationToken stopping)
 {
@@ -14,7 +15,16 @@ internal sealed class TeamsCache(CancellationToken stopping)
 
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
 
-    private sealed record Entry(Task<object> Task, long At, TimeSpan? Ttl);
+    private sealed class Entry(Func<Task<object>> start, long at, TimeSpan? ttl)
+    {
+        private readonly Lazy<Task<object>> _task = new(start, LazyThreadSafetyMode.ExecutionAndPublication);
+
+        public Task<object> Task => _task.Value;
+
+        public long At { get; } = at;
+
+        public TimeSpan? Ttl { get; } = ttl;
+    }
 
     public async Task<T> GetAsync<T>(string key, TimeSpan? ttl, Func<CancellationToken, Task<T>> fetch, CancellationToken ct)
         where T : class
@@ -34,7 +44,8 @@ internal sealed class TeamsCache(CancellationToken stopping)
                 }
             }
 
-            var fresh = new Entry(Run(fetch), Stopwatch.GetTimestamp(), ttl);
+            // not started until it wins its place: a loser of the race never asks upstream
+            var fresh = new Entry(() => Run(fetch), Stopwatch.GetTimestamp(), ttl);
             if (kept is null ? _entries.TryAdd(key, fresh) : _entries.TryUpdate(key, fresh, kept))
             {
                 Trim();

@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using ReverseMarkdown;
 
@@ -8,6 +9,7 @@ namespace AnyFS.Sources.Teams;
 /// A conversation as Markdown (spec 7.9): a channel post (the opening message and its replies) or a whole chat, oldest
 /// first, each message headed by who sent it and when, its HTML body converted as the SharePoint pages and Outlook bodies
 /// are (ReverseMarkdown). System activities (a member added, a call, a rename) are left out. UTF-8, no byte-order mark.
+/// A message is converted once however often its thread is named or built (<see cref="Converted"/>).
 /// </summary>
 internal static class TeamsText
 {
@@ -19,12 +21,17 @@ internal static class TeamsText
         Formatting = { RemoveComments = true, ListBulletChar = '-', OutputLineEnding = "\n" },
     });
 
-    /// <summary>A channel post: the thread's messages (the root first, then its replies in time order), with a heading.</summary>
+    // a message's Markdown body, by the message itself: a fetched page's messages are reused for every naming and build
+    // until the page is fetched again, so each is converted once (a posts folder named and built its roots three times)
+    private static readonly ConditionalWeakTable<TeamsMessage, string> Converted = new();
+
+    /// <summary>A channel post: the thread's messages (the root first, then its replies in time order), under a heading.</summary>
     public static byte[] Post(IReadOnlyList<TeamsMessage> thread, Func<string?, string> nameOf)
     {
         var text = new StringBuilder();
         var root = thread[0];
-        text.Append("# ").Append(Clean(Subject(root, nameOf))).Append("\n\n");
+        var heading = Subject(root) ?? $"{Who(root, nameOf)} · {Stamp(root.Composed, "d MMM yyyy HH:mm")}";
+        text.Append("# ").Append(Clean(heading)).Append("\n\n");
         Conversation(text, thread, nameOf);
         return Encoding.UTF8.GetBytes(text.ToString());
     }
@@ -38,17 +45,23 @@ internal static class TeamsText
         return Encoding.UTF8.GetBytes(text.ToString());
     }
 
+    /// <summary>The thread-folder name: the time, the author and, where the opening message has text, its first line; safe for Windows.</summary>
+    public static string ThreadName(TeamsMessage root, Func<string?, string> nameOf)
+    {
+        var parts = new[] { Stamp(root.Composed, "yyyy-MM-dd HHmm"), Who(root, nameOf), Subject(root) }.Where(p => !string.IsNullOrWhiteSpace(p));
+        return TeamsNames.Safe(string.Join(" ", parts));
+    }
+
     private static void Conversation(StringBuilder text, IReadOnlyList<TeamsMessage> messages, Func<string?, string> nameOf)
     {
         var any = false;
         foreach (var message in messages.Where(m => m.IsContent).OrderBy(m => m.Composed ?? DateTimeOffset.MinValue).ThenBy(m => m.Id, StringComparer.Ordinal))
         {
             any = true;
-            var who = message.FromDisplayName is { Length: > 0 } ? message.FromDisplayName : nameOf(message.FromMri);
-            text.Append("**").Append(Clean(who)).Append("**");
-            if (message.Composed is { } when)
+            text.Append("**").Append(Clean(Who(message, nameOf))).Append("**");
+            if (message.Composed is not null)
             {
-                text.Append("  ·  ").Append(when.ToLocalTime().ToString("ddd d MMM yyyy HH:mm", CultureInfo.InvariantCulture));
+                text.Append("  ·  ").Append(Stamp(message.Composed, "ddd d MMM yyyy HH:mm"));
             }
 
             text.Append("\n\n").Append(Body(message)).Append("\n\n");
@@ -60,8 +73,16 @@ internal static class TeamsText
         }
     }
 
-    /// <summary>A message's body as Markdown: the HTML converted, or the plain text; "" when empty.</summary>
-    private static string Body(TeamsMessage message)
+    private static string Who(TeamsMessage message, Func<string?, string> nameOf)
+        => message.FromDisplayName is { Length: > 0 } name ? name : nameOf(message.FromMri);
+
+    /// <summary>A local time in a fixed, culture-free form, so a folder name is the same on every machine.</summary>
+    private static string? Stamp(DateTimeOffset? when, string format) => when?.ToLocalTime().ToString(format, CultureInfo.InvariantCulture);
+
+    /// <summary>A message's body as Markdown: the HTML converted, or the plain text; "" when empty. Converted once per message.</summary>
+    private static string Body(TeamsMessage message) => Converted.GetValue(message, Convert);
+
+    private static string Convert(TeamsMessage message)
     {
         if (string.IsNullOrWhiteSpace(message.Html))
         {
@@ -73,36 +94,18 @@ internal static class TeamsText
             return message.Html.Trim();
         }
 
-        string markdown;
         lock (ConverterGate)
         {
-            markdown = Markdown.Convert(message.Html);
+            return Markdown.Convert(message.Html).Trim();
         }
-
-        return markdown.Trim();
     }
 
-    /// <summary>A post's heading: the first line of the opening message, else who opened it and when.</summary>
-    private static string Subject(TeamsMessage root, Func<string?, string> nameOf)
+    /// <summary>The first line of the opening message's text, cut at 80; null when it has none (an image-only post).</summary>
+    private static string? Subject(TeamsMessage root)
     {
-        var body = Body(root).Replace("\r", "", StringComparison.Ordinal);
-        var firstLine = body.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim().TrimStart('#', '*', '>', ' ');
-        if (!string.IsNullOrWhiteSpace(firstLine))
-        {
-            return firstLine.Length <= 80 ? firstLine : firstLine[..80].TrimEnd() + "…";
-        }
-
-        var who = root.FromDisplayName is { Length: > 0 } ? root.FromDisplayName : nameOf(root.FromMri);
-        return root.Composed is { } when ? $"{who} · {when.ToLocalTime():d MMM yyyy HH:mm}" : who;
-    }
-
-    /// <summary>The thread-folder name: the time, the author and the subject, safe for Windows.</summary>
-    public static string ThreadName(TeamsMessage root, Func<string?, string> nameOf)
-    {
-        var who = root.FromDisplayName is { Length: > 0 } ? root.FromDisplayName : nameOf(root.FromMri);
-        var when = root.Composed?.ToLocalTime().ToString("yyyy-MM-dd HHmm", CultureInfo.InvariantCulture);
-        var parts = new[] { when, who, Subject(root, nameOf) }.Where(p => !string.IsNullOrWhiteSpace(p));
-        return TeamsNames.Safe(string.Join(" ", parts));
+        var firstLine = Body(root).Replace("\r", "", StringComparison.Ordinal)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.Trim().TrimStart('#', '*', '>', ' ')).FirstOrDefault(l => l.Length > 0);
+        return firstLine is null ? null : firstLine.Length <= 80 ? firstLine : firstLine[..80].TrimEnd() + "…";
     }
 
     private static string Clean(string text) => string.Join(' ', text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));

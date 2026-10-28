@@ -17,6 +17,15 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     private readonly TeamsStandIn? _standIn;
     private readonly CancellationTokenSource _stopping = new();
     private readonly ConcurrentDictionary<string, string> _names = new(StringComparer.OrdinalIgnoreCase);
+
+    // a chat's folder name, fixed when first given: the names learned later (a sender's, from the chat's messages) would
+    // otherwise rename a chat a kept listing still shows under its first name
+    private readonly ConcurrentDictionary<string, string> _chatNames = new(StringComparer.Ordinal);
+
+    // the Markdown a listing measured, by its path: an open serves the bytes of the length the listing reported, not a
+    // rebuild from a conversation that has moved on since (the last two builds, so a refresh landing between a stat and an
+    // open still finds the one the stat saw)
+    private readonly ConcurrentDictionary<string, (byte[] Latest, byte[]? Previous)> _served = new(StringComparer.OrdinalIgnoreCase);
     private ITeamsApi? _api;
     private TeamsCache? _cache;
     private KeptListings? _kept;
@@ -74,8 +83,12 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     private async Task<ITeamsApi> SignInAsync(CancellationToken ct)
     {
         var cloud = _settings.TheCloud;
-        var browser = _settings.Browser ?? BrowserLocator.Find(null, "ANYFS_TEAMS_BROWSER")
-            ?? throw new SourceFailedException("No Edge, Chrome or Chromium was found for the Teams web session; set one in the source's Browser setting.", permanent: true);
+
+        // as the other web sessions: the test variable wins, then the setting (which must exist), then whatever is installed
+        var browser = BrowserLocator.Find(_settings.Browser, "ANYFS_TEAMS_BROWSER")
+            ?? throw new SourceFailedException(_settings.Browser is { } set
+                ? $"The browser in the source's Browser setting was not found: {set}."
+                : "No Edge, Chrome or Chromium was found for the Teams web session; set one in the source's Browser setting.", permanent: true);
         var profile = WebSignInTarget.ProfileFor("teams-browser", _settings.AccountHint, "ANYFS_TEAMS_PROFILES");
         var session = new TeamsWebSession(new Uri(cloud.TeamsHost), browser, profile, _settings.AccountHint, Logger);
         try
@@ -135,10 +148,20 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             throw VfsException.NotSupported("writing to Teams");
         }
 
+        // a conversation's Markdown as the listing measured it: the bytes of the length the client was told
+        var normalized = VfsPath.Normalize(path);
+        if (_served.TryGetValue(normalized, out var served))
+        {
+            var length = (await Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false))?.Length;
+            var bytes = served.Previous is { } previous && length == previous.Length && length != served.Latest.Length ? previous : served.Latest;
+            return MarkdownFile.Open(bytes);
+        }
+
         var node = await ResolveAsync(path, ct).ConfigureAwait(false);
         return node is TmFile file ? await Guard(() => file.OpenAsync(this, ct)).ConfigureAwait(false) : throw VfsException.IsADirectory(path);
     }
 
+    /// <summary>A folder's listing (what <see cref="KeptListings"/> keeps); the Markdown files' bytes are kept beside it, for the opens.</summary>
     private async IAsyncEnumerable<VfsEntry> ListFolderAsync(string path, [EnumeratorCancellation] CancellationToken ct)
     {
         var node = await ResolveAsync(path, ct).ConfigureAwait(false);
@@ -149,8 +172,23 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
         foreach (var child in await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false))
         {
+            if (child is MarkdownFile markdown)
+            {
+                Serve(VfsPath.Join(VfsPath.Normalize(path), child.Name), markdown.Content);
+            }
+
             yield return child.Entry;
         }
+    }
+
+    private void Serve(string path, byte[] content)
+    {
+        if (_served.Count > 50_000)
+        {
+            _served.Clear();
+        }
+
+        _served.AddOrUpdate(path, _ => (content, null), (_, kept) => kept.Latest.AsSpan().SequenceEqual(content) ? kept : (content, kept.Latest));
     }
 
     private async Task<TmNode> ResolveAsync(string path, CancellationToken ct)
@@ -193,40 +231,54 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     // --- what the folders ask for --------------------------------------------------------------------------------------
 
-    internal Task<IReadOnlyList<TeamInfo>> TeamsAsync(CancellationToken ct)
-        => Cache.GetAsync("teams", _settings.Refresh, async c =>
-        {
-            var teams = await Api.TeamsAsync(c).ConfigureAwait(false);
-            Remember(teams.SelectMany(t => t.Channels).Select(ch => (ch.Id, ch.DisplayName)));
-            return teams;
-        }, ct);
+    internal async Task<IReadOnlyList<TeamInfo>> TeamsAsync(CancellationToken ct) => (await StructureAsync(ct).ConfigureAwait(false)).Teams;
 
-    internal Task<IReadOnlyList<ChatInfo>> ChatsAsync(CancellationToken ct)
-        => Cache.GetAsync("chats", _settings.Refresh, async c =>
+    internal async Task<IReadOnlyList<ChatInfo>> ChatsAsync(CancellationToken ct) => (await StructureAsync(ct).ConfigureAwait(false)).Chats;
+
+    /// <summary>
+    /// The teams and the chats, from one aggregator answer kept for the refresh interval; the chats changed within the
+    /// "within" window only, and their members' names learned (a hundred a call; a call that fails leaves those as mris).
+    /// </summary>
+    private Task<TeamsStructure> StructureAsync(CancellationToken ct)
+        => Cache.GetAsync("structure", _settings.Refresh, async c =>
         {
-            var chats = await Api.ChatsAsync(c).ConfigureAwait(false);
+            var structure = await Api.StructureAsync(c).ConfigureAwait(false);
+            Remember(structure.Teams.SelectMany(t => t.Channels).Select(ch => (ch.Id, ch.DisplayName)));
+            var cutoff = Cutoff;
+            var chats = cutoff is { } since ? structure.Chats.Where(ch => ch.LastUpdated is null || ch.LastUpdated >= since).ToList() : structure.Chats;
 
             // the people a chat is named for: learn their names once, so a 1:1 or untitled group is named, not an mri
             var mris = chats.SelectMany(ch => ch.MemberMris).Where(m => m != Api.Mri && !_names.ContainsKey(m)).Distinct().ToList();
-            if (mris.Count > 0)
+            foreach (var batch in mris.Chunk(100))
             {
-                var people = await Api.PeopleAsync(mris, c).ConfigureAwait(false);
-                Remember(people.Select(p => (p.Mri, p.DisplayName)));
+                try
+                {
+                    var people = await Api.PeopleAsync(batch, c).ConfigureAwait(false);
+                    Remember(people.Select(p => (p.Mri, p.DisplayName)));
+                }
+                catch (VfsException ex)
+                {
+                    Logger.LogInformation("teams: {Count} people's names could not be read ({Error}); their chats are named by id", batch.Length, ex.Message);
+                }
             }
 
-            return chats;
+            return structure with { Chats = chats };
         }, ct);
 
-    /// <summary>A channel's posts: its content messages grouped into threads (the root first, then its replies in time order), newest thread first.</summary>
+    /// <summary>The oldest a conversation's last message may be to show ("within" days), or null for all.</summary>
+    private DateTimeOffset? Cutoff => _settings.Within is { } within ? DateTimeOffset.UtcNow - within : null;
+
+    /// <summary>A channel's posts: its content messages grouped into threads (the root first, then its replies in time order), newest thread first; within the "within" window.</summary>
     internal Task<IReadOnlyList<IReadOnlyList<TeamsMessage>>> ThreadsAsync(string channelId, CancellationToken ct)
         => Cache.GetAsync($"threads:{channelId}", _settings.Refresh, async c =>
         {
             var messages = await ConversationAsync(channelId, c).ConfigureAwait(false);
             LearnNames(messages);
+            var cutoff = Cutoff;
             var threads = messages.Where(m => m.IsContent)
                 .GroupBy(m => m.ThreadId)
                 .Select(g => (IReadOnlyList<TeamsMessage>)g.OrderBy(m => m.Composed ?? DateTimeOffset.MinValue).ThenBy(m => m.Id, StringComparer.Ordinal).ToList())
-                .Where(t => t.Count > 0)
+                .Where(t => t.Count > 0 && (cutoff is null || t[^1].Composed is null || t[^1].Composed >= cutoff))
                 .OrderByDescending(t => t[^1].Composed ?? DateTimeOffset.MinValue)
                 .ToList();
             return (IReadOnlyList<IReadOnlyList<TeamsMessage>>)threads;
@@ -243,15 +295,21 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         return TeamsText.Chat(messages, ChatName(chat), NameOf);
     }
 
-    /// <summary>A conversation's content messages, newest page and as far back as the "within" window asks (or one page).</summary>
+    /// <summary>A conversation's messages, newest page first and back as far as the "within" window (or 2,000 messages) reaches.</summary>
     private async Task<IReadOnlyList<TeamsMessage>> ConversationAsync(string threadId, CancellationToken ct)
     {
         var messages = new List<TeamsMessage>();
         var page = await Api.MessagesAsync(threadId, 50, ct).ConfigureAwait(false);
         messages.AddRange(page.Messages);
-        var oldest = _settings.Within is { } within ? DateTimeOffset.UtcNow - within : (DateTimeOffset?)null;
-        while (page.OlderLink is { } link && messages.Count < 2000 && (oldest is null || messages.Min(m => m.Composed ?? DateTimeOffset.MaxValue) > oldest))
+        var cutoff = Cutoff;
+        while (page.OlderLink is { } link && messages.Count < 2000)
         {
+            // past the window once the oldest message read is older than it (an empty newest page reads on)
+            if (cutoff is { } since && messages.Count > 0 && messages.Min(m => m.Composed ?? DateTimeOffset.MaxValue) < since)
+            {
+                break;
+            }
+
             page = await Api.OlderAsync(link, ct).ConfigureAwait(false);
             if (page.Messages.Count == 0)
             {
@@ -269,7 +327,10 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     /// <summary>A person's display name for the Markdown: what is known, else a short form of the mri.</summary>
     internal string NameOf(string? mri) => mri is null ? "Unknown" : _names.TryGetValue(mri, out var name) ? name : ShortMri(mri);
 
-    internal string ChatName(ChatInfo chat)
+    /// <summary>A chat's folder name, fixed for the source's life once given (the topic, else the other people's names as known then).</summary>
+    internal string ChatName(ChatInfo chat) => _chatNames.GetOrAdd(chat.Id, _ => NameChat(chat));
+
+    private string NameChat(ChatInfo chat)
     {
         if (!string.IsNullOrWhiteSpace(chat.Title))
         {
