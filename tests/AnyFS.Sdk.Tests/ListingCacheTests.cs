@@ -187,6 +187,76 @@ public class ListingCacheTests
     }
 
     [TestMethod]
+    public async Task AListingOlderThanRefreshAfterIsAnsweredAndListedAfreshBehindTheAnswer()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { RefreshAfter = TimeSpan.FromSeconds(10) };
+        await cache.GetAsync("docs", CancellationToken.None);
+        _time.Advance(TimeSpan.FromSeconds(5));
+        await cache.GetAsync("docs", CancellationToken.None);
+        Assert.AreEqual(1, _calls, "young enough");
+
+        _tree["docs"].Add(VfsEntry.File("new.txt", 4));
+        _time.Advance(TimeSpan.FromSeconds(6));
+        _gate = new TaskCompletionSource();
+        Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count, "answered at once from what was held");
+        await cache.GetAsync("docs", CancellationToken.None);
+        await WaitForAsync(() => _calls == 2);
+        _gate.SetResult();
+        await WaitForAsync(async () => (await cache.GetAsync("docs", CancellationToken.None)).Count == 3);
+        Assert.AreEqual(2, _calls, "one listing behind, however many asked meanwhile");
+
+        _time.Advance(TimeSpan.FromSeconds(9));
+        await cache.GetAsync("docs", CancellationToken.None);
+        Assert.AreEqual(2, _calls, "the fresh listing is young again");
+        _tree["docs"].RemoveAt(2);
+    }
+
+    [TestMethod]
+    public async Task AListingBehindTheAnswerThatFailsLeavesWhatWasHeldAndTheNextWaitsAsLongAgain()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { RefreshAfter = TimeSpan.FromSeconds(10) };
+        await cache.GetAsync("docs", CancellationToken.None);
+        var held = _tree["docs"];
+        _tree.Remove("docs");
+        _time.Advance(TimeSpan.FromSeconds(11));
+        Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count);
+        await WaitForAsync(() => _calls == 2);
+        Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count, "what was held still answers");
+        Assert.AreEqual(2, _calls, "not asked again at once");
+
+        // as long again: asked behind the next answer, once the failed listing has ended
+        _tree["docs"] = held;
+        _time.Advance(TimeSpan.FromSeconds(11));
+        await WaitForAsync(async () =>
+        {
+            await cache.GetAsync("docs", CancellationToken.None);
+            return _calls == 3;
+        });
+    }
+
+    [TestMethod]
+    public async Task AListingKeptFromElsewhereAnswersWithoutTheLister()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
+        cache.Keep("docs/sub", [VfsEntry.File("c.txt", 3), VfsEntry.File("d.txt", 4)]);
+        Assert.AreEqual(2, (await cache.GetAsync("docs/sub", CancellationToken.None)).Count);
+        Assert.AreEqual(4, (await cache.StatAsync("docs/sub/d.txt", CancellationToken.None))!.Length);
+        Assert.AreEqual(0, _calls);
+    }
+
+    private static async Task WaitForAsync(Func<bool> done) => await WaitForAsync(() => Task.FromResult(done()));
+
+    private static async Task WaitForAsync(Func<Task<bool>> done)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!await done())
+        {
+            Assert.IsTrue(DateTime.UtcNow < deadline, "timed out waiting");
+            await Task.Delay(10);
+        }
+    }
+
+    [TestMethod]
     public async Task AFailedRefreshKeepsWhatWasHeld()
     {
         var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);

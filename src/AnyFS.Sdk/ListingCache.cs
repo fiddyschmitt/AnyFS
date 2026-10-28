@@ -6,9 +6,11 @@ namespace AnyFS.Sdk;
 /// Memoises directory listings, because clients stat every file they list. Concurrent misses for the same directory
 /// share one upstream call. A listing is kept for a time (a couple of seconds, so it is near enough current), or, for a
 /// source that is slow to list, until it is listed afresh (<see cref="Kept"/>): the source then answers from what it
-/// knows and walks its tree again now and then (<see cref="RefreshAsync"/>). Writes through the same source keep the
-/// listings right (<see cref="Update"/>, <see cref="Invalidate"/>), also a listing still on its way: what changed while it
-/// was being fetched is applied to it when it lands, so it never brings back what a write replaced.
+/// knows and walks its tree again now and then (<see cref="RefreshAsync"/>, or <see cref="KeptListings"/>, which does the
+/// walking), or lists a folder afresh behind the answer once its listing is older than <see cref="RefreshAfter"/>. Writes
+/// through the same source keep the listings right (<see cref="Update"/>, <see cref="Invalidate"/>), also a listing still
+/// on its way: what changed while it was being fetched is applied to it when it lands, so it never brings back what a
+/// write replaced.
 /// </summary>
 public sealed class ListingCache
 {
@@ -45,15 +47,42 @@ public sealed class ListingCache
     /// <summary>How many listings are held.</summary>
     public int Count => _entries.Count;
 
+    /// <summary>
+    /// The age past which a listing held is answered and listed afresh behind the answer, one listing of a folder at a
+    /// time, so a folder opens at once and a change upstream shows the next time it is listed; null (the default) never
+    /// lists one afresh on its own. A listing afresh that fails leaves what was held, and the next waits as long again.
+    /// </summary>
+    public TimeSpan? RefreshAfter { get; init; }
+
     /// <summary>The listing of <paramref name="path"/> (a normalised directory path), from the cache when fresh.</summary>
     public ValueTask<IReadOnlyList<VfsEntry>> GetAsync(string path, CancellationToken ct)
     {
         if (_entries.TryGetValue(path, out var held) && !IsExpired(held))
         {
+            if (RefreshAfter is { } after && _time.GetElapsedTime(held.Checked) > after)
+            {
+                RefreshBehind(path, held);
+            }
+
             return ValueTask.FromResult(held.List);
         }
 
         return FetchAsync(path, ct);
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="listing"/> as the listing of <paramref name="path"/>, as if it had just come from the upstream:
+    /// for a source that learnt it otherwise than folder by folder (a walk that lists a whole subtree at once). A listing of
+    /// the folder on its way still lands after it.
+    /// </summary>
+    public void Keep(string path, IReadOnlyList<VfsEntry> listing)
+    {
+        ArgumentNullException.ThrowIfNull(listing);
+        lock (_gate)
+        {
+            _entries[path] = new Entry(_time.GetTimestamp(), listing);
+            TrimIfNeededLocked();
+        }
     }
 
     /// <summary>The same as <see cref="GetAsync"/> (kept for plugins built against SDK 0.2).</summary>
@@ -172,6 +201,30 @@ public sealed class ListingCache
 
     private bool IsExpired(Entry entry) => _ttl != Kept && _time.GetElapsedTime(entry.Fetched) > _ttl;
 
+    /// <summary>Lists <paramref name="path"/> afresh in the background unless a listing of it is on its way; meanwhile the held listing counts as checked now.</summary>
+    private void RefreshBehind(string path, Entry held)
+    {
+        Fetch fetch;
+        lock (_gate)
+        {
+            if (_fetches.ContainsKey(path))
+            {
+                return;
+            }
+
+            if (_entries.TryGetValue(path, out var current) && ReferenceEquals(current, held))
+            {
+                _entries[path] = held with { Checked = _time.GetTimestamp() };
+            }
+
+            fetch = new Fetch();
+            _fetches[path] = fetch;
+        }
+
+        // on the pool, so the answer is not held up by the lister's first steps; RunAsync observes a failure itself
+        _ = Task.Run(() => RunAsync(path, fetch));
+    }
+
     /// <summary>The listing from the upstream: the one on its way when there is one, else a new one, shared by every caller until it lands.</summary>
     private ValueTask<IReadOnlyList<VfsEntry>> FetchAsync(string path, CancellationToken ct)
     {
@@ -285,8 +338,14 @@ public sealed class ListingCache
         }
     }
 
-    /// <summary>A listing held: when it arrived from the upstream (it expires from then) and what it said, with the writes since applied.</summary>
-    private sealed record Entry(long Fetched, IReadOnlyList<VfsEntry> List);
+    /// <summary>
+    /// A listing held: when it arrived from the upstream (it expires from then) and what it said, with the writes since
+    /// applied; and when it was last listed afresh or tried to be (<see cref="RefreshAfter"/> counts from then).
+    /// </summary>
+    private sealed record Entry(long Fetched, IReadOnlyList<VfsEntry> List)
+    {
+        public long Checked { get; init; } = Fetched;
+    }
 
     /// <summary>A write's change to one name in a listing.</summary>
     private sealed record Change(string Name, VfsEntry? Entry, StringComparison Comparison);
