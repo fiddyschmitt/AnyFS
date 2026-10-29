@@ -70,10 +70,15 @@ internal static class TeamsText
             text.Append(CultureInfo.InvariantCulture, $"Every group in the organisation, as {directory.From} lists them for {account}: {groups.Count:N0} ({string.Join(", ", kinds)}; {teams:N0} with a team). ")
                 .Append(CultureInfo.InvariantCulture, $"{account} is in {mine:N0} of them.\n\n");
         }
+        else if (directory.JoinedOnly)
+        {
+            text.Append(CultureInfo.InvariantCulture, $"The groups of {account}'s own teams, from {directory.From}: {groups.Count:N0}. ")
+                .Append("Teams on the web has not handed out the token that shows the others yet (SharePoint's, or Microsoft Graph's where it gives one); AnyFS asks for it in the background, and lists them here once it comes.\n\n");
+        }
         else
         {
             text.Append(CultureInfo.InvariantCulture, $"The groups {account} can see, from {directory.From}: {groups.Count:N0}, being every public group and the private ones it is in. It is in {mine:N0} of them. ")
-                .Append("Private groups it is not in are not listed, and whether a group it is not in has a team is not known: Teams on the web gives no token here that can list every group (GCC High's gives one).\n\n");
+                .Append("Private groups it is not in are not listed, and whether a group it is not in has a team is not known: Teams on the web has handed out no token that can list every group (Microsoft 365's never does; GCC High's does as it gets round to it, and every group is listed here then).\n\n");
         }
 
         text.Append("| Group | Kind | Visibility | Team | You | Email |\n|---|---|---|---|---|---|\n");
@@ -117,6 +122,9 @@ internal static class TeamsText
 
     /// <summary><c>groups.md</c> when the groups could not be read: why, rather than a root that fails to list.</summary>
     public static byte[] GroupsUnread(string why) => Encoding.UTF8.GetBytes($"# Groups\n\nThe groups could not be read: {Clean(why)}\n");
+
+    /// <summary><c>groups.md</c> until its first reading lands (it is read behind the listings, which never wait on it).</summary>
+    public static byte[] GroupsBeingRead() => Encoding.UTF8.GetBytes("# Groups\n\nThe groups are being read; this file fills in shortly.\n");
 
     private static string Plural(string kind, int count) => count == 1 ? kind : kind.EndsWith("list", StringComparison.Ordinal) ? kind + "s" : kind.Replace("group", "groups", StringComparison.Ordinal);
 

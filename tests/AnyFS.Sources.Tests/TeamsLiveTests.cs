@@ -43,12 +43,27 @@ public class TeamsLiveTests
         return entries;
     }
 
+    /// <summary>
+    /// Waits, up to two minutes, until what SharePoint's token opens is served: the page mints that token as it gets round to
+    /// it and nothing waits on it (it is asked for behind the listings); Other groups at the root shows it is in hand.
+    /// </summary>
+    private static async Task SharePointServedAsync(ISource source)
+    {
+        var deadline = DateTime.UtcNow.AddMinutes(2);
+        while (!(await ListAsync(source, "")).Any(e => e.Name == "Other groups"))
+        {
+            Assert.IsTrue(DateTime.UtcNow < deadline, "Teams on the web handed out no SharePoint token in two minutes");
+            await Task.Delay(1000);
+        }
+    }
+
     [TestMethod]
     [Timeout(300_000)]
     public async Task TheAccountsTeamsChannelsAndChatsAreServed()
     {
         var (account, _) = Env();
         await using var source = await StartAsync(account);
+        await SharePointServedAsync(source);
 
         var root = await ListAsync(source, "");
         Assert.IsTrue(root.Any(e => e.Name == "Chats"), "the root has a Chats folder");
@@ -122,13 +137,20 @@ public class TeamsLiveTests
     {
         var (account, _) = Env();
         await using var source = await StartAsync(account);
+        await SharePointServedAsync(source);
 
         var others = (await ListAsync(source, "Other groups")).Select(e => e.Name).ToList();
         CollectionAssert.Contains(others, "Mark 8 Project Team", "a public sample group the tester has not joined");
         CollectionAssert.DoesNotContain(others, "AnyFS Lab", "its team is at the root");
         Assert.IsTrue((await ListAsync(source, "Other groups/Mark 8 Project Team")).Count > 0, "its library, readable without joining");
 
+        // groups.md is read behind the listings: the file says so until its reading with SharePoint's token lands
         var md = await TextAsync(source, "groups.md");
+        for (var deadline = DateTime.UtcNow.AddMinutes(1); !md.Contains("from SharePoint", StringComparison.Ordinal) && DateTime.UtcNow < deadline; md = await TextAsync(source, "groups.md"))
+        {
+            await Task.Delay(500);
+        }
+
         StringAssert.Contains(md, $"The groups {account} can see, from SharePoint");
         StringAssert.Contains(md, "| Mark 8 Project Team | Microsoft 365 group | Public |");
         StringAssert.Contains(md, "| AnyFS Lab | Microsoft 365 group | Private | yes | owner |");
@@ -142,6 +164,7 @@ public class TeamsLiveTests
     {
         var (account, _) = Env();
         await using var source = await StartAsync(account);
+        await SharePointServedAsync(source);
 
         // the channel's files: its folder of the team's library, a subfolder too
         var files = (await ListAsync(source, "AnyFS Lab/General/files")).Select(e => e.Name).ToList();

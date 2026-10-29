@@ -189,11 +189,60 @@ internal sealed class FakeTeams : ITeamsApi
     /// <summary>An inline image in Teams' media service, by its address.</summary>
     public void AddImage(string src, byte[] bytes) => _images[src] = bytes;
 
+    // --- the tokens the page mints as it gets round to it ---------------------------------------------------------------
+
+    /// <summary>Whether SharePoint's token is in hand (the live page's often is, not always): without it every SharePoint call is refused at once, as the live seam refuses.</summary>
+    public bool SharePointReady { get; set; } = true;
+
+    public bool GraphReady { get; set; }
+
+    /// <summary>When set, a background ask for the tokens brings SharePoint's (once <see cref="SeekHold"/> lets it).</summary>
+    public bool SharePointComesWhenAsked { get; set; }
+
+    /// <summary>What a background ask waits on before it brings the token: a test's say-so (the live page takes its time).</summary>
+    public Task SeekHold { get; set; } = Task.CompletedTask;
+
+    /// <summary>How many times the tokens have been asked for behind the listings.</summary>
+    public int SeekCalls => _seekCalls;
+
+    private int _seekCalls;
+
+    /// <summary>How many SharePoint calls were made (one without its token is refused at once).</summary>
+    public int SharePointCalls => _sharePointCalls;
+
+    private int _sharePointCalls;
+
+    public async Task<bool> SeekTokensAsync(CancellationToken ct)
+    {
+        Interlocked.Increment(ref _seekCalls);
+        if (SharePointReady || !SharePointComesWhenAsked)
+        {
+            return false;
+        }
+
+        await SeekHold.WaitAsync(ct);
+        SharePointReady = true;
+        return true;
+    }
+
+    private void SharePoint()
+    {
+        Interlocked.Increment(ref _sharePointCalls);
+        if (!SharePointReady)
+        {
+            throw TokenNotHandedOutException.Refusal(TeamsService.SharePoint);
+        }
+    }
+
     public Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, CancellationToken ct)
-        => Task.FromResult(team.GroupId is { } group && _sites.TryGetValue(group, out var site) ? ((string, string)?)(site, channel.DisplayName) : null);
+    {
+        SharePoint();
+        return Task.FromResult(team.GroupId is { } group && _sites.TryGetValue(group, out var site) ? ((string, string)?)(site, channel.DisplayName) : null);
+    }
 
     public Task<IReadOnlyList<DriveEntry>> FolderAsync(string siteUrl, string path, CancellationToken ct)
     {
+        SharePoint();
         var prefix = path.Length == 0 ? "" : path + "/";
         var entries = new Dictionary<string, DriveEntry>(StringComparer.OrdinalIgnoreCase);
         foreach (var (site, file, bytes, modified) in _library.Values)
@@ -219,7 +268,10 @@ internal sealed class FakeTeams : ITeamsApi
     }
 
     public Task<DriveEntry?> FileAsync(string siteUrl, string path, CancellationToken ct)
-        => Task.FromResult(_library.TryGetValue($"{siteUrl}|{path}", out var f) ? new DriveEntry(Path.GetFileName(path), false, f.Bytes.Length, f.Modified, Download(siteUrl, path)) : null);
+    {
+        SharePoint();
+        return Task.FromResult(_library.TryGetValue($"{siteUrl}|{path}", out var f) ? new DriveEntry(Path.GetFileName(path), false, f.Bytes.Length, f.Modified, Download(siteUrl, path)) : null);
+    }
 
     public Task<HttpResponseMessage> ContentAsync(string downloadUrl, long offset, CancellationToken ct)
     {
@@ -247,17 +299,22 @@ internal sealed class FakeTeams : ITeamsApi
 
     private readonly List<GroupSite> _groupSites = [];
 
-    /// <summary>What GroupsAsync answers, as Graph lists every group; null answers the group sites, as SharePoint shows them.</summary>
+    /// <summary>What GroupsAsync answers with a Graph token in hand (<see cref="GraphReady"/>), as Graph lists every group.</summary>
     public GroupsDirectory? Directory { get; set; }
 
     /// <summary>A group site the account can open (its library's files added with <see cref="AddLibraryFile"/>).</summary>
     public void AddGroupSite(GroupSite site) => _groupSites.Add(site);
 
-    public Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<GroupSite>>(_groupSites.ToList());
+    public Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct)
+    {
+        SharePoint();
+        return Task.FromResult<IReadOnlyList<GroupSite>>(_groupSites.ToList());
+    }
 
-    public Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, CancellationToken ct)
-        => Task.FromResult(Directory ?? new GroupsDirectory(
-            _groupSites.Select(s => new GroupInfo(s.GroupId, s.Name) { Kind = "Microsoft 365 group", SiteUrl = s.SiteUrl, Description = s.Description, Created = s.Created }).ToList(),
+    /// <summary>As the live seam: Graph's every group with its token in hand, else the group sites given, else the teams' own.</summary>
+    public Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct)
+        => Task.FromResult(GraphReady && Directory is { } graph ? graph : sites is null ? GroupsDirectory.OfTeams(joined) : new GroupsDirectory(
+            sites.Select(s => new GroupInfo(s.GroupId, s.Name) { Kind = "Microsoft 365 group", SiteUrl = s.SiteUrl, Description = s.Description, Created = s.Created }).ToList(),
             joined.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
             joined.Where(t => t.Owner).Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
             Complete: false,

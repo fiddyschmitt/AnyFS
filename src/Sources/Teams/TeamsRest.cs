@@ -19,10 +19,11 @@ namespace AnyFS.Sources.Teams;
 /// <param name="tokenFor">The bearer for a service; the second argument is a token the service just refused, else null.</param>
 /// <param name="handler">The handler requests go through: a test's fake; null for the network.</param>
 /// <param name="sharePointHost">The host the page used the SharePoint token on (the tenant's OneDrive or SharePoint), once that token is read.</param>
-/// <param name="optionalToken">A token for a service the page mints only sometimes (Graph), or null when there is none; never a failure.</param>
+/// <param name="inHand">The token for a service the page mints only as it gets round to it (SharePoint's, Graph's) if one is in hand, else null: never a wait.</param>
+/// <param name="seek">Asks the page for those tokens in the background; true when one came.</param>
 /// <param name="graphHost">Microsoft Graph's address in the cloud, where a Graph token's audience does not name it.</param>
 internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, CancellationToken, Task<string>> tokenFor, int concurrency, ILogger logger, HttpMessageHandler? handler = null, Func<string?>? sharePointHost = null,
-    Func<TeamsService, CancellationToken, Task<string?>>? optionalToken = null, string graphHost = "https://graph.microsoft.com") : ITeamsApi
+    Func<TeamsService, string?>? inHand = null, Func<CancellationToken, Task<bool>>? seek = null, string graphHost = "https://graph.microsoft.com") : ITeamsApi
 {
     // the client version Teams' media service takes its "platform id" from (49: Teams for work), as purple-teams sends it
     private const string ClientVersion = "49/25113001312";
@@ -253,6 +254,12 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         return new DriveEntry(name!, folder, folder ? 0 : size, Time(Str(item, "lastModifiedDateTime")), folder ? null : Str(item, "@content.downloadUrl"));
     }
 
+    public bool SharePointReady => inHand?.Invoke(TeamsService.SharePoint) is not null && sharePointHost?.Invoke() is not null;
+
+    public bool GraphReady => inHand?.Invoke(TeamsService.Graph) is not null;
+
+    public Task<bool> SeekTokensAsync(CancellationToken ct) => seek?.Invoke(ct) ?? Task.FromResult(false);
+
     // --- groups: SharePoint search, Graph -------------------------------------------------------------------------------
 
     public async Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct)
@@ -282,22 +289,22 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
     }
 
-    public async Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, CancellationToken ct)
+    public async Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct)
     {
-        var sites = (await GroupSitesAsync(ct).ConfigureAwait(false)).ToDictionary(s => s.GroupId, StringComparer.OrdinalIgnoreCase);
-        if (optionalToken is not null && await optionalToken(TeamsService.Graph, ct).ConfigureAwait(false) is { } graph)
+        var bySite = (sites ?? []).ToDictionary(s => s.GroupId, StringComparer.OrdinalIgnoreCase);
+        if (inHand?.Invoke(TeamsService.Graph) is { } graph)
         {
             try
             {
-                return await GraphGroupsAsync(graph, sites, joined, ct).ConfigureAwait(false);
+                return await GraphGroupsAsync(graph, bySite, joined, ct).ConfigureAwait(false);
             }
             catch (VfsException ex)
             {
-                logger.LogInformation("teams: Microsoft Graph did not list the groups ({Error}); listing those SharePoint shows", ex.Message);
+                logger.LogInformation("teams: Microsoft Graph did not list the groups ({Error}); listing {Instead}", ex.Message, sites is null ? "the teams' own" : "those SharePoint shows");
             }
         }
 
-        return await SharePointGroupsAsync(sites, joined, ct).ConfigureAwait(false);
+        return sites is null ? GroupsDirectory.OfTeams(joined) : await SharePointGroupsAsync(bySite, joined, ct).ConfigureAwait(false);
     }
 
     // the group fields Graph lists them with: all a group's own, none that costs a request per group
@@ -437,16 +444,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
 
         // a team with no site SharePoint shows (a sample team never given one) is still a group the account is in
-        foreach (var team in joined.Where(t => t.GroupId is not null && !sites.ContainsKey(t.GroupId!)))
-        {
-            groups.Add(new GroupInfo(team.GroupId!, team.DisplayName)
-            {
-                Kind = "Microsoft 365 group",
-                Visibility = team.AccessType switch { 1 => "Private", 2 => "Public", 3 => "Org-wide", _ => null },
-                Team = true,
-                Members = team.Members,
-            });
-        }
+        groups.AddRange(joined.Where(t => t.GroupId is not null && !sites.ContainsKey(t.GroupId!)).Select(GroupInfo.OfTeam));
 
         var member = joined.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
         var owner = joined.Where(t => t.Owner).Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);

@@ -1,3 +1,5 @@
+using AnyFS.Sdk;
+
 namespace AnyFS.Sources.Teams;
 
 /// <summary>
@@ -18,18 +20,38 @@ internal enum TeamsService
     MiddleTier,
 
     /// <summary>
-    /// SharePoint and OneDrive: a team's files and the files shared in chats. Its audience is SharePoint's app id in both
-    /// clouds (00000003-0000-0ff1-ce00-000000000000), or a tenant's SharePoint host. The page mints it as it loads, but a
-    /// sign-in does not wait for it: the source asks for it only to read files.
+    /// SharePoint and OneDrive: a team's files, the files shared in chats, the group sites. Its audience is SharePoint's app
+    /// id in both clouds (00000003-0000-0ff1-ce00-000000000000), or a tenant's SharePoint host. The page mints it as it gets
+    /// round to it (within seconds in Microsoft 365, not always in a headless load in GCC High): kept when the page sends
+    /// it, never waited for by a listing, asked for in the background when not in hand.
     /// </summary>
     SharePoint,
 
     /// <summary>
     /// Microsoft Graph (graph.microsoft.com, graph.microsoft.us, dod-graph.microsoft.us): GCC High's web client mints one
-    /// (Group.Read.All among its scopes), Microsoft 365's none (spike 18). Kept when the page sends it, never waited for at
-    /// a sign-in; <c>groups.md</c> lists every group of the organisation through it where there is one.
+    /// (Group.Read.All among its scopes), Microsoft 365's none (spike 18). Kept when the page sends it, never waited for by a
+    /// listing, asked for in the background in the US Gov clouds; <c>groups.md</c> lists every group of the organisation
+    /// through it where there is one.
     /// </summary>
     Graph,
+}
+
+/// <summary>
+/// Why a request was not made: the page has not handed out the token for its service (SharePoint's, Graph's), which no
+/// request waits for. It is a refusal's inner exception, so that refusal does not count against the source's health.
+/// </summary>
+internal sealed class TokenNotHandedOutException(TeamsService service)
+    : Exception($"Teams on the web has not handed out its {service} token yet; AnyFS asks for it in the background")
+{
+    /// <summary>The refusal a request gets for want of the token: unavailable for now.</summary>
+    public static VfsException Refusal(TeamsService service)
+    {
+        var why = new TokenNotHandedOutException(service);
+        return new VfsException(VfsError.Unavailable, why.Message, why);
+    }
+
+    /// <summary>Whether a refusal was for want of such a token, not the source's health.</summary>
+    public static bool IsCause(VfsException ex) => ex.InnerException is TokenNotHandedOutException;
 }
 
 internal static class TeamsServices

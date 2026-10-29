@@ -25,10 +25,11 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     private static readonly TimeSpan SilentDeadline = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan InteractiveDeadline = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan SharePointGrace = TimeSpan.FromSeconds(5);
-    private static readonly TimeSpan OptionalDeadline = TimeSpan.FromSeconds(30);
+    // a background load waiting for a token the page mints only as it gets round to it: long, as nothing waits on it
+    private static readonly TimeSpan OptionalDeadline = TimeSpan.FromSeconds(90);
 
     // the services every sign-in reads, one bearer each (spike 18): matched by audience host, so any cloud's; SharePoint's
-    // is kept when the page sends it and waited for only when asked for
+    // and Graph's are kept when the page sends them, and asked for only in the background (SeekAsync)
     private static readonly TeamsService[] Wanted = TeamsServices.Core;
 
     private readonly ConcurrentDictionary<TeamsService, (string Token, DateTimeOffset Expires)> _tokens = new();
@@ -80,7 +81,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
                 UseFirefox(blocked);
             }
 
-            var silent = await CaptureAsync(headless: true, SilentDeadline, service, ct).ConfigureAwait(false);
+            var silent = await CaptureAsync(headless: true, SilentDeadline, [service], ct).ConfigureAwait(false);
             if (silent.Final && silent.Failure is { } fatal)
             {
                 throw new SignInRequiredException(fatal, permanent: true);
@@ -104,7 +105,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
 
             logger.LogInformation("teams: no sign-in to read for {Host} without a window ({Why}); opening {Browser} for the person to sign in", teamsHost.Host, silent.Failure, BrowserName);
             progress($"Sign in to Teams in the {BrowserName} window that opened");
-            var shown = await CaptureAsync(headless: false, InteractiveDeadline, service, ct).ConfigureAwait(false);
+            var shown = await CaptureAsync(headless: false, InteractiveDeadline, [service], ct).ConfigureAwait(false);
             return Fresh(service) ?? throw new SignInRequiredException(shown.Failure ?? $"no sign-in to {teamsHost.Host} was read", permanent: shown.Final);
         }
         finally
@@ -113,52 +114,61 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         }
     }
 
-    // the services a launch waited for in vain (Graph, where the client mints none), and until when none is waited for again
-    private readonly ConcurrentDictionary<TeamsService, DateTimeOffset> _absent = new();
+    // the services a load waited for in vain (SharePoint's where a headless load did not use it, Graph's where the client
+    // mints it only as it gets round to it), until when none is waited for again, and the wait after the next in vain
+    // (doubling, to eight hours); forgotten once the service's token is read
+    private readonly ConcurrentDictionary<TeamsService, (DateTimeOffset Until, TimeSpan Next)> _absent = new();
+
+    /// <summary>A bearer for <paramref name="service"/> good for at least ten more minutes, if one is in hand; null, never a wait, if not.</summary>
+    public string? InHand(TeamsService service) => Fresh(service);
 
     /// <summary>
-    /// A bearer for a service the page mints only sometimes (Graph: GCC High's client, not Microsoft 365's): the one kept if
-    /// it is fresh; else, where <paramref name="wait"/>, one headless launch waiting for it a short while; null when none came
-    /// — and then none is waited for again for two hours. Never a sign-in, never a failure.
+    /// For the background alone (nothing waits on it): one headless load of the page, waiting a while for the tokens of
+    /// <paramref name="services"/> it mints only as it gets round to them (SharePoint's; Graph's in the US Gov clouds) and
+    /// that are not in hand; true when one came. One that does not come is not waited for again for half an hour, then an
+    /// hour, two... up to eight. No load while the core tokens near their renewal (the load holds the profile, which their
+    /// renewal would wait on); never a sign-in window, never a failure.
     /// </summary>
-    public async Task<string?> OptionalTokenAsync(TeamsService service, bool wait, CancellationToken ct)
+    public async Task<bool> SeekAsync(IReadOnlyCollection<TeamsService> services, CancellationToken ct)
     {
-        if (Fresh(service) is { } kept)
+        List<TeamsService> Missing()
         {
-            return kept;
+            var now = DateTimeOffset.UtcNow;
+            return services.Where(s => Fresh(s) is null && !(_absent.TryGetValue(s, out var absent) && absent.Until > now)).ToList();
         }
 
-        if (!wait || (_absent.TryGetValue(service, out var until) && until > DateTimeOffset.UtcNow))
+        var lacking = services.Where(s => Fresh(s) is null).ToList();
+        if (Missing().Count == 0 || Wanted.Any(w => Fresh(w, Margin + OptionalDeadline + Margin) is null))
         {
-            return null;
+            return false;
         }
 
         var gate = ProfileLocks.For(profileDir);
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (Fresh(service) is { } again)
+            var missing = Missing();
+            if (missing.Count > 0)
             {
-                return again;
+                try
+                {
+                    await CaptureAsync(headless: true, OptionalDeadline, missing, ct).ConfigureAwait(false);
+                }
+                catch (SignInRequiredException ex)
+                {
+                    logger.LogInformation("teams: no {Services} token without a sign-in ({Error})", string.Join(" or ", missing), ex.Message);
+                }
             }
 
-            try
+            foreach (var service in missing.Where(s => Fresh(s) is null))
             {
-                await CaptureAsync(headless: true, OptionalDeadline, service, ct).ConfigureAwait(false);
-            }
-            catch (SignInRequiredException ex)
-            {
-                logger.LogInformation("teams: no {Service} token without a sign-in ({Error})", service, ex.Message);
+                var next = _absent.TryGetValue(service, out var before) ? before.Next : TimeSpan.FromMinutes(30);
+                logger.LogInformation("teams: Teams on the web gave no {Service} token in a {Seconds:F0} s load; asked again in {Minutes:F0} min", service, OptionalDeadline.TotalSeconds, next.TotalMinutes);
+                _absent[service] = (DateTimeOffset.UtcNow + next, TimeSpan.FromTicks(Math.Min(next.Ticks * 2, TimeSpan.FromHours(8).Ticks)));
             }
 
-            if (Fresh(service) is { } got)
-            {
-                return got;
-            }
-
-            logger.LogInformation("teams: Teams on the web gave no {Service} token; not waited for again for two hours", service);
-            _absent[service] = DateTimeOffset.UtcNow.AddHours(2);
-            return null;
+            // this load's, or another's that came meanwhile
+            return lacking.Any(s => Fresh(s) is not null);
         }
         finally
         {
@@ -185,7 +195,9 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         }
     }
 
-    private string? Fresh(TeamsService service) => _tokens.TryGetValue(service, out var t) && t.Expires - DateTimeOffset.UtcNow > Margin ? t.Token : null;
+    private string? Fresh(TeamsService service) => Fresh(service, Margin);
+
+    private string? Fresh(TeamsService service, TimeSpan margin) => _tokens.TryGetValue(service, out var t) && t.Expires - DateTimeOffset.UtcNow > margin ? t.Token : null;
 
     private void Keep(string token)
     {
@@ -208,6 +220,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         Account ??= account;
         Mri ??= mri;
         _tokens[service] = (token, expires.Value);
+        _absent.TryRemove(service, out _);
     }
 
     /// <summary>
@@ -267,7 +280,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     private sealed record Capture(bool Got, string? Failure = null, bool Final = false);
 
     /// <summary>One capture: done once the core services' tokens and <paramref name="want"/>'s are in hand.</summary>
-    private async Task<Capture> CaptureAsync(bool headless, TimeSpan deadline, TeamsService want, CancellationToken ct)
+    private async Task<Capture> CaptureAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, CancellationToken ct)
     {
         if (!_viaFirefox)
         {
@@ -284,7 +297,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     }
 
     /// <summary>One capture in the Chromium browser over DevTools; with why there was no DevTools when the launch gave none.</summary>
-    private async Task<(Capture Capture, string? NoDevTools)> CaptureInChromiumAsync(bool headless, TimeSpan deadline, TeamsService want, CancellationToken ct)
+    private async Task<(Capture Capture, string? NoDevTools)> CaptureInChromiumAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, CancellationToken ct)
     {
         var mode = headless ? "headless" : "with a window";
         DevToolsBrowser? browser = null;
@@ -384,7 +397,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     }
 
     /// <summary>One capture in Firefox through WebDriver: the page's requests come from its WebDriver BiDi events.</summary>
-    private async Task<Capture> CaptureInFirefoxAsync(bool headless, TimeSpan deadline, TeamsService want, CancellationToken ct)
+    private async Task<Capture> CaptureInFirefoxAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, CancellationToken ct)
     {
         var mode = headless ? "headless" : "with a window";
         string? wrongAccount = null;
@@ -421,7 +434,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     /// the wait came to — another account's tokens, a headless launch held on the sign-in page (no saved sign-in), the
     /// window closed, or the deadline (with a window, some tokens are enough to go on with).
     /// </summary>
-    private async Task<Capture> WaitAsync(bool headless, TimeSpan deadline, TeamsService want, Func<string?> wrongAccount, Func<string> where, Func<bool> closed, CancellationToken ct)
+    private async Task<Capture> WaitAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, Func<string?> wrongAccount, Func<string> where, Func<bool> closed, CancellationToken ct)
     {
         var mode = headless ? "headless" : "with a window";
         var until = DateTime.UtcNow + deadline;
@@ -435,7 +448,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
                 return new Capture(false, $"the {BrowserName} profile is signed in as {other}, not {expectedAccount}; sign in as {expectedAccount}", Final: true);
             }
 
-            if (Wanted.All(w => Fresh(w) is not null) && Fresh(want) is not null)
+            if (Wanted.All(w => Fresh(w) is not null) && want.All(w => Fresh(w) is not null))
             {
                 // SharePoint's token (the files) usually follows the others within seconds: a few more, so the first file
                 // read needs no second launch

@@ -147,9 +147,10 @@ public class TeamsRestTests
     {
         var directory = new Directory();
         await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, directory,
-            sharePointHost: () => "t-my.sharepoint.com", optionalToken: (s, _) => Task.FromResult<string?>(s == TeamsService.Graph ? GraphToken() : null));
+            sharePointHost: () => "t-my.sharepoint.com", inHand: s => s == TeamsService.Graph ? GraphToken() : "token");
+        Assert.IsTrue(rest.GraphReady && rest.SharePointReady);
 
-        var groups = await rest.GroupsAsync(Joined, CancellationToken.None);
+        var groups = await rest.GroupsAsync(Joined, await rest.GroupSitesAsync(CancellationToken.None), CancellationToken.None);
 
         Assert.IsTrue(groups.Complete);
         Assert.AreEqual("Microsoft Graph", groups.From);
@@ -175,11 +176,13 @@ public class TeamsRestTests
     {
         var directory = new Directory();
         await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, directory,
-            sharePointHost: () => "t-my.sharepoint.com", optionalToken: (_, _) => Task.FromResult<string?>(null));
+            sharePointHost: () => "t-my.sharepoint.com", inHand: s => s == TeamsService.SharePoint ? "token" : null);
+        Assert.IsFalse(rest.GraphReady);
 
-        var groups = await rest.GroupsAsync(Joined, CancellationToken.None);
+        var groups = await rest.GroupsAsync(Joined, await rest.GroupSitesAsync(CancellationToken.None), CancellationToken.None);
 
         Assert.IsFalse(groups.Complete);
+        Assert.IsFalse(groups.JoinedOnly);
         Assert.AreEqual("SharePoint", groups.From);
         var byId = groups.Groups.ToDictionary(g => g.Id);
         Assert.AreEqual(("Public", (bool?)null, "Mark8ProjectTeam@t.com"), (byId["g-mark8"].Visibility, byId["g-mark8"].Team, byId["g-mark8"].Mail), "SharePoint's directory: public; whether it has a team, unknown");
@@ -188,6 +191,23 @@ public class TeamsRestTests
         CollectionAssert.AreEquivalent(new[] { "g-lab", "g-msft" }, groups.Member.ToArray());
         CollectionAssert.AreEquivalent(new[] { "g-lab" }, groups.Owner.ToArray());
         Assert.IsFalse(directory.Asked.Any(u => u.AbsolutePath.StartsWith("/v1.0/", StringComparison.Ordinal)), "no Graph without its token");
+    }
+
+    [TestMethod]
+    public async Task WithNeitherTokenTheTeamsOwnGroupsAreListedAndNothingIsAsked()
+    {
+        var directory = new Directory();
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, directory,
+            sharePointHost: () => null, inHand: _ => null);
+        Assert.IsFalse(rest.SharePointReady || rest.GraphReady);
+
+        var groups = await rest.GroupsAsync(Joined, sites: null, CancellationToken.None);
+
+        Assert.IsTrue(groups.JoinedOnly);
+        Assert.AreEqual(("Private", (bool?)true, 4), (groups.Groups.Single(g => g.Id == "g-lab").Visibility, groups.Groups.Single(g => g.Id == "g-lab").Team, groups.Groups.Single(g => g.Id == "g-lab").Members));
+        Assert.AreEqual("Org-wide", groups.Groups.Single(g => g.Id == "g-msft").Visibility);
+        CollectionAssert.AreEquivalent(new[] { "g-lab" }, groups.Owner.ToArray());
+        Assert.AreEqual(0, directory.Asked.Count, "no SharePoint and no Graph: nothing to ask");
     }
 
     [TestMethod]

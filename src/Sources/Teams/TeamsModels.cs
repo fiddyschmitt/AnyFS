@@ -55,13 +55,38 @@ internal sealed record GroupInfo(string Id, string Name)
     public bool? RoleAssignable { get; init; }
 
     public int? Members { get; init; }
+
+    /// <summary>A team's group as the aggregator tells of it: a Microsoft 365 group with a team, its visibility from who may join, its member count.</summary>
+    public static GroupInfo OfTeam(TeamInfo team) => new(team.GroupId ?? team.Id, team.DisplayName)
+    {
+        Kind = "Microsoft 365 group",
+        Visibility = team.AccessType switch { 1 => "Private", 2 => "Public", 3 => "Org-wide", _ => null },
+        Team = true,
+        Members = team.Members,
+    };
 }
 
 /// <summary>
 /// The groups for <c>groups.md</c>: every one in the organisation (<see cref="Complete"/>, from Microsoft Graph), else those
-/// the account can see; with the ones it belongs to and owns, and where they came from.
+/// the account can see, else (<see cref="JoinedOnly"/>) those of its own teams; with the ones it belongs to and owns, and
+/// where they came from.
 /// </summary>
-internal sealed record GroupsDirectory(IReadOnlyList<GroupInfo> Groups, IReadOnlySet<string> Member, IReadOnlySet<string> Owner, bool Complete, string From);
+internal sealed record GroupsDirectory(IReadOnlyList<GroupInfo> Groups, IReadOnlySet<string> Member, IReadOnlySet<string> Owner, bool Complete, string From)
+{
+    /// <summary>Only the account's own teams' groups: Teams on the web had handed out no token that shows others (SharePoint's, Graph's).</summary>
+    public bool JoinedOnly { get; init; }
+
+    /// <summary>The groups of the account's own teams, as the aggregator tells of them: all there is to go on without SharePoint's token or Graph's.</summary>
+    public static GroupsDirectory OfTeams(IReadOnlyList<TeamInfo> joined) => new(
+        joined.Where(t => t.GroupId is not null).Select(GroupInfo.OfTeam).ToList(),
+        joined.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
+        joined.Where(t => t.Owner).Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
+        Complete: false,
+        "Teams")
+    {
+        JoinedOnly = true,
+    };
+}
 
 /// <summary>A channel of a team: its own conversation thread.</summary>
 /// <param name="Id">The channel's thread id, which is also the conversation id its messages are read by.</param>

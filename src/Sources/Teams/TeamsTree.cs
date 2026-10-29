@@ -44,7 +44,7 @@ internal sealed class MarkdownFile(string name, byte[] content, DateTimeOffset? 
     public static IVfsFile Open(byte[] content) => new MemoryFile(content, "a Teams conversation as Markdown");
 }
 
-/// <summary>The source's root: a folder per team, then the Chats folder.</summary>
+/// <summary>The source's root: a folder per team, then the Chats folder, Other groups (while SharePoint's token is in hand) and groups.md.</summary>
 internal sealed class RootFolder : TmFolder
 {
     public RootFolder() : base("")
@@ -63,15 +63,23 @@ internal sealed class RootFolder : TmFolder
 
         if (source.Settings.Groups)
         {
-            children.Add(new OtherGroupsFolder());
-            children.Add(new MarkdownFile("groups.md", await source.GroupsMarkdownAsync(ct).ConfigureAwait(false), null));
+            // Other groups only while what opens it is in hand: nothing waits for SharePoint's token
+            if (source.SharePointReady())
+            {
+                children.Add(new OtherGroupsFolder());
+            }
+
+            children.Add(new MarkdownFile("groups.md", source.GroupsMarkdown(), null));
         }
 
         return children;
     }
 }
 
-/// <summary>Every group site the account can open beyond its teams above (public groups it has not joined among them): a folder each, of the group's library. Walked as the others are.</summary>
+/// <summary>
+/// Every group site the account can open beyond its teams above (public groups it has not joined among them): a folder
+/// each, of the group's library. Listed while SharePoint's token is in hand; walked as the others are.
+/// </summary>
 internal sealed class OtherGroupsFolder() : TmFolder("Other groups")
 {
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
@@ -100,7 +108,7 @@ internal sealed class TeamFolder(TeamInfo team, string name) : TmFolder(name)
     }
 }
 
-/// <summary>A channel: its posts, and its files (the channel's folder of its team's SharePoint library).</summary>
+/// <summary>A channel: its posts, and its files (the channel's folder of its team's SharePoint library) while SharePoint's token is in hand.</summary>
 internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string name) : TmFolder(name)
 {
     public TeamInfo Team { get; } = team;
@@ -115,7 +123,8 @@ internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string n
             children.Add(new PostsFolder(Channel));
         }
 
-        if (source.Settings.Files)
+        // the files only while what reads them is in hand: nothing waits for SharePoint's token
+        if (source.Settings.Files && source.SharePointReady())
         {
             children.Add(new ChannelFilesFolder(Team, Channel));
         }

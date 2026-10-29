@@ -46,13 +46,30 @@ internal interface ITeamsApi : IAsyncDisposable
     /// <summary>An inline image's bytes, from Teams' media service; null when it cannot be read (a host other than Teams' own is never asked).</summary>
     Task<TeamsImage?> ImageAsync(string src, CancellationToken ct);
 
+    /// <summary>
+    /// Whether SharePoint's token (and the tenant's host) is in hand now: what the files, the attachments and Other groups
+    /// are read with. Never a wait: the page mints that token only as it gets round to it, and no listing waits on it.
+    /// </summary>
+    bool SharePointReady { get; }
+
+    /// <summary>Whether a Microsoft Graph token is in hand now (GCC High's client mints one, Microsoft 365's never): every group of the organisation is listed with it.</summary>
+    bool GraphReady { get; }
+
+    /// <summary>
+    /// For the background alone (nothing waits on it): asks the page for the tokens it has not handed out — SharePoint's,
+    /// and Graph's where the cloud's client mints one — in one headless load at most, backed off when none comes; true
+    /// when one came.
+    /// </summary>
+    Task<bool> SeekTokensAsync(CancellationToken ct);
+
     /// <summary>Every Microsoft 365 group site the account can open (SharePoint search, which leaves out what it may not see).</summary>
     Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct);
 
     /// <summary>
-    /// Every group there is, with its details: every group of the organisation from Microsoft Graph where the web client
-    /// gives a Graph token; else the group sites the account can open, with SharePoint's details of each and what the
-    /// aggregator says of <paramref name="joined"/>.
+    /// Every group there is, with its details, from the tokens in hand (never waiting for one): every group of the
+    /// organisation from Microsoft Graph where there is a Graph token; else <paramref name="sites"/>, the group sites the
+    /// account can open, with SharePoint's details of each; else (no sites: SharePoint's token not in hand) the account's
+    /// own teams; with what the aggregator says of <paramref name="joined"/>.
     /// </summary>
-    Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, CancellationToken ct);
+    Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct);
 }

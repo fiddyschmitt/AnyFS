@@ -56,11 +56,11 @@ public sealed class TeamsSettings
     public bool Chats { get; set; } = true;
 
     [Setting("Files", Order = 7,
-        Hint = "In each channel, a files folder: the channel's folder of its team's document library. In each post and chat, an attachments folder: the files its messages share and their inline images. Read from the team's SharePoint site, the sender's OneDrive and Teams' own media service.")]
+        Hint = "In each channel, a files folder: the channel's folder of its team's document library. In each post and chat, an attachments folder: the files its messages share and their inline images. Read from the team's SharePoint site, the sender's OneDrive and Teams' own media service. The files folders and shared files show once Teams on the web has handed out its SharePoint token, which some organisations' Teams does only now and then; AnyFS asks for it in the background.")]
     public bool Files { get; set; } = true;
 
     [Setting("Groups", Order = 8,
-        Hint = "An Other groups folder: every group site you can open beyond your teams above (public groups you have not joined among them), each with its files. And groups.md: every group there is, with its details — every group in the organisation where the Teams client gives a token that can list them (GCC High's does), else every group you can see.")]
+        Hint = "An Other groups folder: every group site you can open beyond your teams above (public groups you have not joined among them), each with its files, shown once Teams on the web has handed out its SharePoint token. And groups.md: every group there is, with its details — every group in the organisation where the Teams client gives a token that can list them (GCC High's does), else every group you can see, else your teams' own until a token comes.")]
     public bool Groups { get; set; } = true;
 
     [Setting("Cloud", Advanced = true, Order = 10, Kind = SettingKind.Choice,

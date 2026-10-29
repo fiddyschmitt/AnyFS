@@ -112,8 +112,10 @@ through Kerberos, on Windows; `ANYFS_E2E_GITLAB_SIGNIN=token` uses the token eve
 The Teams source's unit tests run against `tests/AnyFS.Sources.Tests/FakeTeams.cs`, a stand-in for Microsoft's Teams
 services made from what the Microsoft 365 developer sandbox answered (the aggregator's teams, channels and chats; the chat
 service's messages with their reactions, edits, deletions, shared files and inline images; a team's SharePoint library and
-the media service), in-process; `TeamsRestTests` read the services' answers through a fake handler, and `TeamsFilesTests`
-check where its tokens may go. `TeamsLiveTests` read the sandbox when `ANYFS_TEST_TEAMS_ACCOUNT` (the tester,
+the media service), in-process. It can hold back SharePoint's token as the page at work often does (`SharePointReady`,
+and `SharePointComesWhenAsked` with `SeekHold` for one that comes when asked for behind the listings), and refuses its
+SharePoint calls without it as the live seam does. `TeamsRestTests` read the services' answers through a fake handler, and
+`TeamsFilesTests` check where its tokens may go. `TeamsLiveTests` read the sandbox when `ANYFS_TEST_TEAMS_ACCOUNT` (the tester,
 `anyfs-tester@<tenant>.onmicrosoft.com`) and `ANYFS_TEAMS_PROFILES` (the root of the browser profiles signed in as it, such as
 `%LOCALAPPDATA%\AnyFS\tests\outlook-browser`: Teams signs in from the same Microsoft 365 session) are set;
 `ANYFS_TEAMS_BROWSER` names the browser (a Firefox takes the WebDriver route that a work machine's Edge policy can make the

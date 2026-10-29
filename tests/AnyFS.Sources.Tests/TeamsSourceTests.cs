@@ -164,9 +164,10 @@ public class TeamsSourceTests
             new HashSet<string>([team.GroupId!]),
             Complete: true,
             "Microsoft Graph");
+        fake.GraphReady = true;
         await using var source = await StartAsync(fake);
 
-        var md = await TextAsync(source, "groups.md");
+        var md = await UntilAsync(() => TextAsync(source, "groups.md"), m => !m.Contains("being read", StringComparison.Ordinal));
         StringAssert.Contains(md, "Every group in the organisation, as Microsoft Graph lists them for tester@contoso.com: 4 (");
         StringAssert.Contains(md, "| AnyFS Lab | Microsoft 365 group | Private | yes | owner | anyfslab@contoso.com |");
         StringAssert.Contains(md, "| Board \\| Exec | Microsoft 365 group | Hidden membership | no |  |  |", "a pipe in a name escaped; not joined");
@@ -175,6 +176,78 @@ public class TeamsSourceTests
         StringAssert.Contains(md, "- Membership: dynamic, by the rule (user.department -eq \"Sales\")");
         StringAssert.Contains(md, "- Synced from on-premises: yes");
         StringAssert.Contains(md, "- Kind: Microsoft 365 group, with a team\n- Visibility: Private\n- You: owner\n- Members: 4");
+    }
+
+    /// <summary>What <paramref name="read"/> gives once <paramref name="done"/> holds (work behind the listings lands), or after five seconds.</summary>
+    private static async Task<T> UntilAsync<T>(Func<Task<T>> read, Func<T, bool> done)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (true)
+        {
+            var value = await read();
+            if (done(value) || DateTime.UtcNow > deadline)
+            {
+                return value;
+            }
+
+            await Task.Delay(25);
+        }
+    }
+
+    [TestMethod]
+    public async Task WithoutSharePointsTokenNothingWaitsAndOnlyWhatOpensIsServed()
+    {
+        // the page has not handed out SharePoint's token (as at work, often): Other groups and the files folders are not
+        // served, a shared file is left out of the attachments and groups.md holds the teams' own groups; nothing waits for
+        // the token, nothing asks SharePoint without it, and the source stays healthy while the token is asked for behind
+        var fake = new FakeTeams { SharePointReady = false };
+        var general = FakeTeams.Channel("General", general: true);
+        var team = fake.AddTeam("AnyFS Lab", general);
+        fake.AddSite(team, Site);
+        fake.AddLibraryFile(Site, "General/report.docx", Encoding.UTF8.GetBytes("a report"), When);
+        fake.AddGroupSite(new GroupSite("g-retail", "Retail", "https://contoso.sharepoint.com/sites/Retail", null, When));
+        fake.Post(general.Id, Jane, "Jane Doe", "<p>The report</p>", When, files: [new SharedFile("report.docx", $"{Site}/Shared Documents/General/report.docx", $"{Site}/")]);
+        using var context = new TestSourceContext();
+        await using var source = new TeamsSource(new TeamsSettings { Account = fake.Account }, fake.StandIn());
+        await source.InitialiseAsync(context, CancellationToken.None);
+
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "groups.md" }, await NamesAsync(source, ""));
+        Assert.AreEqual(VfsError.NotFound, (await Assert.ThrowsExactlyAsync<VfsException>(() => NamesAsync(source, "Other groups"))).Error);
+        CollectionAssert.AreEqual(new[] { "posts" }, await NamesAsync(source, "AnyFS Lab/General"));
+        var thread = (await NamesAsync(source, "AnyFS Lab/General/posts")).Single();
+        CollectionAssert.AreEqual(new[] { "post.md" }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}"), "the shared file is left out, not waited for");
+        StringAssert.Contains(await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/post.md"), "- 📎 report.docx");
+        var md = await UntilAsync(() => TextAsync(source, "groups.md"), m => !m.Contains("being read", StringComparison.Ordinal));
+        StringAssert.Contains(md, "The groups of tester@contoso.com's own teams, from Teams: 1.");
+
+        Assert.AreEqual(0, fake.SharePointCalls, "nothing asks SharePoint without its token");
+        Assert.IsTrue(await UntilAsync(() => Task.FromResult(fake.SeekCalls), n => n > 0) > 0, "the token is asked for behind the listings");
+        Assert.IsFalse(context.HealthReports.Any(h => h.Health == ComponentHealth.Degraded), "a token not handed out is not the source's health");
+    }
+
+    [TestMethod]
+    public async Task WhenSharePointsTokenComesOtherGroupsTheFilesAndGroupsMdFollow()
+    {
+        var hold = new TaskCompletionSource();
+        var fake = new FakeTeams { SharePointReady = false, SharePointComesWhenAsked = true, SeekHold = hold.Task };
+        var general = FakeTeams.Channel("General", general: true);
+        var team = fake.AddTeam("AnyFS Lab", general);
+        fake.AddSite(team, Site);
+        fake.AddLibraryFile(Site, "General/plan.txt", Encoding.UTF8.GetBytes("the plan"), When);
+        fake.AddGroupSite(new GroupSite("g-retail", "Retail", "https://contoso.sharepoint.com/sites/Retail", null, When));
+        await using var source = await StartAsync(fake);
+
+        // answered at once without the token, which is asked for behind the listings
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "groups.md" }, await NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "posts" }, await NamesAsync(source, "AnyFS Lab/General"));
+
+        // it comes: the kept listings of the root and the channel are listed afresh, groups.md read again
+        hold.SetResult();
+        CollectionAssert.AreEqual(new[] { "posts", "files" }, await UntilAsync(() => NamesAsync(source, "AnyFS Lab/General"), n => n.Contains("files")));
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "groups.md" }, await NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "plan.txt" }, await NamesAsync(source, "AnyFS Lab/General/files"));
+        CollectionAssert.AreEqual(new[] { "Retail" }, await NamesAsync(source, "Other groups"));
+        StringAssert.Contains(await UntilAsync(() => TextAsync(source, "groups.md"), m => m.Contains("from SharePoint", StringComparison.Ordinal)), "The groups tester@contoso.com can see, from SharePoint: 1,");
     }
 
     [TestMethod]
