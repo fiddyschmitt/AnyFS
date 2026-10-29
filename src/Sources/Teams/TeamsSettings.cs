@@ -17,7 +17,10 @@ internal sealed record TeamsCloud(string Name, string TeamsHost, string ApiHost,
 {
     public static readonly TeamsCloud Global = new("global", "https://teams.cloud.microsoft", "https://teams.microsoft.com", "Microsoft 365 (global)");
 
-    // the US government clouds (the user's work may be one): the hosts differ; the sign-in follows the account
+    // the US government clouds: GCC High's verified at a GCC High tenant (its authz answers at gov.teams.microsoft.us);
+    // DoD's as Microsoft's endpoint list names them (dod.teams.microsoft.us, *.dod.teams.microsoft.us, *.sharepoint-mil.us,
+    // login.microsoftonline.us, 29-Oct-2026), its services taken to follow GCC High's with dod for gov: unverified, for want
+    // of a DoD tenant
     public static readonly TeamsCloud UsGov = new("gcc-high", "https://gov.teams.microsoft.us", "https://gov.teams.microsoft.us", "US Gov (GCC High)");
     public static readonly TeamsCloud UsGovDod = new("dod", "https://dod.teams.microsoft.us", "https://dod.teams.microsoft.us", "US Gov (DoD)");
 

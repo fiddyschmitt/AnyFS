@@ -443,6 +443,12 @@ public class TeamsSourceTests
         Assert.AreEqual(TeamsService.MiddleTier, TeamsServices.Of("https://api.spaces.skype.com"));
         Assert.AreEqual(TeamsService.MiddleTier, TeamsServices.Of("https://api.spaces.skype.com/"));
 
+        // DoD: Microsoft's endpoint list names *.dod.teams.microsoft.us as GCC High's names *.gov.teams.microsoft.us; its
+        // services' audiences are taken to follow GCC High's with dod for gov (no DoD tenant to see them in)
+        Assert.AreEqual(TeamsService.ChatService, TeamsServices.Of("https://ic3.dod.teams.microsoft.us"));
+        Assert.AreEqual(TeamsService.Aggregator, TeamsServices.Of("https://chatsvcagg.dod.teams.microsoft.us"));
+        Assert.AreEqual(TeamsService.SharePoint, TeamsServices.Of("https://agency.sharepoint-mil.us"));
+
         // SharePoint's, for the files: its app id in both clouds, or a tenant's host
         Assert.AreEqual(TeamsService.SharePoint, TeamsServices.Of("00000003-0000-0ff1-ce00-000000000000"));
         Assert.AreEqual(TeamsService.SharePoint, TeamsServices.Of("https://contoso.sharepoint.us"));

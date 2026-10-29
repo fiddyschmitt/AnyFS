@@ -15,6 +15,8 @@ public class TeamsFilesTests
             TeamsFiles.Locate("https://t-my.sharepoint.com/personal/jane_t_com/Documents/Microsoft%20Teams%20Chat%20Files/x.txt", null));
         Assert.AreEqual(("https://t.sharepoint.us/teams/ops", "Ops/plan.docx"),
             TeamsFiles.Locate("https://t.sharepoint.us/teams/ops/Shared Documents/Ops/plan.docx", null), "GCC High's hosts, and the /teams/ path");
+        Assert.AreEqual(("https://a.sharepoint-mil.us/sites/x", "General/m.txt"),
+            TeamsFiles.Locate("https://a.sharepoint-mil.us/sites/x/Shared Documents/General/m.txt", null), "DoD's");
 
         // a site the message names that does not hold the address is not believed
         Assert.AreEqual(("https://t.sharepoint.com/sites/lab", "General/a.txt"),
@@ -36,6 +38,7 @@ public class TeamsFilesTests
         Assert.IsTrue(TeamsFiles.IsMediaService("https://as-prod.asyncgw.teams.microsoft.com/v1/objects/0-x/views/imgo", null));
         Assert.IsTrue(TeamsFiles.IsMediaService("https://us-api.asm.skype.com/v1/objects/0-x/views/imgo", null));
         Assert.IsTrue(TeamsFiles.IsMediaService("https://api.ams.gov.teams.microsoft.us/v1/objects/0-x/views/imgo", null));
+        Assert.IsTrue(TeamsFiles.IsMediaService("https://api.ams.dod.teams.microsoft.us/v1/objects/0-x/views/imgo", null), "DoD's, by GCC High's shape");
         Assert.IsTrue(TeamsFiles.IsMediaService("https://media.example/v1/objects/0-x", "https://media.example"), "the host the authz call named");
         Assert.IsFalse(TeamsFiles.IsMediaService("https://evil.example/v1/objects/0-x/views/imgo", "https://as-prod.asyncgw.teams.microsoft.com"));
         Assert.IsFalse(TeamsFiles.IsMediaService("https://asyncgw.teams.microsoft.com.evil.example/x", null));
