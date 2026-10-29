@@ -102,15 +102,21 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
         }
 
-        return new TeamsRest(new Uri(cloud.ApiHost), (service, c) => Renew(session, service, c), _settings.Concurrency, Logger)
+        return new TeamsRest(new Uri(cloud.ApiHost), (service, refused, c) => Renew(session, service, refused, c), _settings.Concurrency, Logger)
         {
             Account = session.Account ?? _settings.AccountHint,
             Mri = session.Mri,
         };
     }
 
-    private async Task<string> Renew(TeamsWebSession session, TeamsService service, CancellationToken ct)
+    /// <summary>A service's bearer, from the session; after a refusal, a fresh one (the page renews it) rather than the one refused.</summary>
+    private async Task<string> Renew(TeamsWebSession session, TeamsService service, string? refused, CancellationToken ct)
     {
+        if (refused is not null)
+        {
+            session.Refused(service, refused);
+        }
+
         try
         {
             return await session.TokenAsync(service, interactive: false, _ => { }, ct).ConfigureAwait(false);

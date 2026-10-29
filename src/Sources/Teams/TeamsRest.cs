@@ -11,11 +11,14 @@ namespace AnyFS.Sources.Teams;
 /// Reads Microsoft's Teams services over HTTP (spec 7.9, spike 18): the middle tier discovers the regional service URLs
 /// (the <c>authz</c> call), the aggregator gives the teams, channels and chats, and the chat service gives a
 /// conversation's messages. Each call carries the bearer for that service's audience, which <paramref name="tokenFor"/>
-/// supplies (the live web session, or a test's). Requests are paced per host and a 429's Retry-After is honoured.
+/// supplies (the live web session, or a test's); a 401 hands it back the token refused and tries once more with the one it
+/// gives then. Requests are paced per host and a 429's Retry-After is honoured.
 /// </summary>
-internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, CancellationToken, Task<string>> tokenFor, int concurrency, ILogger logger) : ITeamsApi
+/// <param name="tokenFor">The bearer for a service; the second argument is a token the service just refused, else null.</param>
+/// <param name="handler">The handler requests go through: a test's fake; null for the network.</param>
+internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, CancellationToken, Task<string>> tokenFor, int concurrency, ILogger logger, HttpMessageHandler? handler = null) : ITeamsApi
 {
-    private readonly HttpClient _http = new(new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, PooledConnectionLifetime = TimeSpan.FromMinutes(2) })
+    private readonly HttpClient _http = new(handler ?? new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, PooledConnectionLifetime = TimeSpan.FromMinutes(2) })
     {
         Timeout = TimeSpan.FromSeconds(100),
     };
@@ -154,10 +157,13 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, Cancellatio
         await _inFlight.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            string? refused = null;
+            var renewed = false;
             for (var attempt = 0; ; attempt++)
             {
                 await _pace.WaitAsync(ct).ConfigureAwait(false);
-                var token = await tokenFor(service, ct).ConfigureAwait(false);
+                var token = await tokenFor(service, refused, ct).ConfigureAwait(false);
+                refused = null;
                 using var request = new HttpRequestMessage(method, url);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 request.Headers.Accept.ParseAdd("application/json");
@@ -184,6 +190,16 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, Cancellatio
                         var after = response.Headers.RetryAfter?.Delta ?? response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow ?? TimeSpan.FromSeconds(Math.Min(30, 1 << attempt));
                         logger.LogInformation("teams: {Host} is throttling; holding {Seconds:F0}s", new Uri(url).Host, Math.Max(0, after.TotalSeconds));
                         await Task.Delay(after > TimeSpan.Zero ? after : TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    // a token the service no longer takes before its expiry (revoked, or a claims challenge): once more, with
+                    // a fresh one; a 403 is the account's permission, not the token, so it is not asked again
+                    if (response.StatusCode == HttpStatusCode.Unauthorized && !renewed)
+                    {
+                        renewed = true;
+                        refused = token;
+                        logger.LogInformation("teams: {Host} refused the web session's token; asking for a fresh one", new Uri(url).Host);
                         continue;
                     }
 

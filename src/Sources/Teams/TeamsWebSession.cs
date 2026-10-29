@@ -29,6 +29,9 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
 
     private readonly ConcurrentDictionary<TeamsService, (string Token, DateTimeOffset Expires)> _tokens = new();
 
+    // tokens a service refused, never kept again (Refused)
+    private readonly ConcurrentDictionary<string, byte> _refused = new(StringComparer.Ordinal);
+
     // Firefox, for opening the page through WebDriver: the configured browser when it is Firefox, else the installed one
     private readonly string? _firefox = BrowserLocator.KindOf(browserPath) == BrowserKind.Firefox ? browserPath : BrowserLocator.FindKind(BrowserKind.Firefox);
 
@@ -95,13 +98,34 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         }
     }
 
-    /// <summary>Forgets a token the service refused: the next ask reads a fresh one.</summary>
-    public void Invalidate(TeamsService service) => _tokens.TryRemove(service, out _);
+    /// <summary>
+    /// A token a service refused before its expiry (revoked, or a claims challenge): forgotten if it is still the one kept —
+    /// a fresh one read meanwhile stays — and not taken from the page again, which can go on sending it until it renews it
+    /// itself, so the next ask waits for the renewed one.
+    /// </summary>
+    public void Refused(TeamsService service, string token)
+    {
+        if (_refused.Count > 64)
+        {
+            _refused.Clear();
+        }
+
+        _refused[token] = 0;
+        if (_tokens.TryGetValue(service, out var kept) && kept.Token == token)
+        {
+            _tokens.TryRemove(new KeyValuePair<TeamsService, (string Token, DateTimeOffset Expires)>(service, kept));
+        }
+    }
 
     private string? Fresh(TeamsService service) => _tokens.TryGetValue(service, out var t) && t.Expires - DateTimeOffset.UtcNow > Margin ? t.Token : null;
 
     private void Keep(string token)
     {
+        if (_refused.ContainsKey(token))
+        {
+            return;
+        }
+
         var (aud, account, mri, expires) = Claims(token);
         if (aud is null || expires is null)
         {
