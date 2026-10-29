@@ -72,4 +72,46 @@ public class TeamsLiveTests
         await chat.ReadFullyAsync(0, buffer, CancellationToken.None);
         StringAssert.StartsWith(Encoding.UTF8.GetString(buffer), "# ", "chat.md opens with a heading");
     }
+
+    private static async Task<string> TextAsync(ISource source, string path)
+    {
+        await using var file = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
+        var buffer = new byte[file.Length];
+        await file.ReadFullyAsync(0, buffer, CancellationToken.None);
+        return Encoding.UTF8.GetString(buffer);
+    }
+
+    /// <summary>The seeded sandbox (TeamsSandboxSeed): its thread's and chat's reactions, edit and deletion, as Markdown.</summary>
+    [TestMethod]
+    [Timeout(300_000)]
+    public async Task TheSeededReactionsEditsAndDeletionsShow()
+    {
+        var (account, _) = Env();
+        await using var source = await StartAsync(account);
+        var posts = await ListAsync(source, "AnyFS Lab/General/posts");
+        var thread = posts.FirstOrDefault(p => p.Name.Contains("A thread with replies", StringComparison.Ordinal))
+            ?? throw new AssertInconclusiveException("the sandbox is not seeded (run TeamsSandboxSeed with ANYFS_SEED_TEAMS=1)");
+        var md = await TextAsync(source, $"AnyFS Lab/General/posts/{thread.Name}/post.md");
+        StringAssert.Contains(md, "👍 ");
+        StringAssert.Contains(md, "❤️ ");
+        StringAssert.Contains(md, "edited\n\nA reply, edited");
+        StringAssert.Contains(md, "*This message was deleted.*");
+        Assert.IsFalse(md.Contains("will be deleted", StringComparison.Ordinal));
+
+        string? chatMd = null;
+        foreach (var chat in await ListAsync(source, "Chats"))
+        {
+            var text = await TextAsync(source, $"Chats/{chat.Name}/chat.md");
+            if (text.Contains("A chat message with a reaction", StringComparison.Ordinal))
+            {
+                chatMd = text;
+                break;
+            }
+        }
+
+        Assert.IsNotNull(chatMd, "the seeded chat");
+        StringAssert.Contains(chatMd, "😆 ");
+        StringAssert.Contains(chatMd, "edited\n\nA chat message, edited");
+        StringAssert.Contains(chatMd, "*This message was deleted.*");
+    }
 }

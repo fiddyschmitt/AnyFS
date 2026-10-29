@@ -37,12 +37,24 @@ internal sealed record TeamsMessage(
     string? Html,
     string? FromDisplayName)
 {
+    /// <summary>When it was last edited (<c>properties.edittime</c>); null if never.</summary>
+    public DateTimeOffset? Edited { get; init; }
+
+    /// <summary>When it was deleted (<c>properties.deletetime</c>): its content is gone, its place in the conversation stays.</summary>
+    public DateTimeOffset? Deleted { get; init; }
+
+    /// <summary>Its reactions (<c>properties.emotions</c>), each with who reacted; empty when none.</summary>
+    public IReadOnlyList<Reaction> Reactions { get; init; } = [];
+
     /// <summary>A real message people wrote, not a system activity (member added, call ended, channel renamed).</summary>
     public bool IsContent => MessageType.StartsWith("RichText", StringComparison.OrdinalIgnoreCase) || MessageType.Equals("Text", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Its place in its thread: a reply points at its root, a root at itself (or carries none).</summary>
     public string ThreadId => string.IsNullOrEmpty(RootId) ? Id : RootId!;
 }
+
+/// <summary>A reaction on a message: its key (like, heart, laugh, surprised, sad, angry, or an emoji named by its code point, <c>1f600_grinningface</c>) and who reacted.</summary>
+internal sealed record Reaction(string Key, IReadOnlyList<string> Mris);
 
 /// <summary>The account's teams (each with its channels) and its chats: one answer of the aggregator holds both.</summary>
 internal sealed record TeamsStructure(IReadOnlyList<TeamInfo> Teams, IReadOnlyList<ChatInfo> Chats);

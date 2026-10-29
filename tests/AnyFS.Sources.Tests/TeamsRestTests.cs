@@ -49,6 +49,42 @@ public class TeamsRestTests
     }
 
     [TestMethod]
+    public async Task AMessagesReactionsEditAndDeletionAreRead()
+    {
+        // the shapes the seeded sandbox stores (emotions an array; edittime, deletetime in ms), and emotions as a string
+        const string Page = """
+            {"messages":[
+              {"id":"3","messagetype":"RichText/Html","content":"","from":"https://x/v1/users/ME/contacts/8:orgid:jane","composetime":"2026-10-29T10:03:00.000Z","properties":{"deletetime":"1793273722345"}},
+              {"id":"2","messagetype":"RichText/Html","content":"<p>edited</p>","from":"https://x/v1/users/ME/contacts/8:orgid:john","composetime":"2026-10-29T10:02:00.000Z","properties":{"edittime":1793273720290,"emotions":"[{\"key\":\"laugh\",\"users\":[{\"mri\":\"8:orgid:jane\",\"time\":1}]}]"}},
+              {"id":"1","messagetype":"RichText/Html","content":"<p>root</p>","from":"https://x/v1/users/ME/contacts/8:orgid:jane","composetime":"2026-10-29T10:01:00.000Z","properties":{"emotions":[{"key":"like","users":[{"mri":"8:orgid:john","time":1,"value":"1"},{"mri":"8:orgid:ann","time":2,"value":"2"}]},{"key":"heart","users":[]}]}}
+            ],"_metadata":{}}
+            """;
+        var service = new PageService(Page);
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, service);
+
+        var page = await rest.MessagesAsync("19:chat", 50, CancellationToken.None);
+        var byId = page.Messages.ToDictionary(m => m.Id);
+
+        Assert.AreEqual(DateTimeOffset.FromUnixTimeMilliseconds(1793273722345), byId["3"].Deleted);
+        Assert.IsNull(byId["3"].Html);
+        Assert.AreEqual(DateTimeOffset.FromUnixTimeMilliseconds(1793273720290), byId["2"].Edited);
+        Assert.AreEqual("laugh", byId["2"].Reactions.Single().Key, "emotions given as a JSON string");
+        var like = byId["1"].Reactions.Single();
+        Assert.AreEqual("like", like.Key, "a reaction nobody holds any more (heart, no users) is left out");
+        CollectionAssert.AreEqual(new[] { "8:orgid:john", "8:orgid:ann" }, like.Mris.ToArray());
+        Assert.IsNull(byId["1"].Edited);
+    }
+
+    private sealed class PageService(string page) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var body = request.RequestUri!.AbsolutePath == "/api/authsvc/v1.0/authz" ? Authz : page;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") });
+        }
+    }
+
+    [TestMethod]
     public async Task ARefusalIsNotAskedAgainTwiceNorAfterA403()
     {
         // a service that refuses every token: one fresh one is asked for, then the refusal stands

@@ -64,13 +64,49 @@ internal static class TeamsText
                 text.Append("  ·  ").Append(Stamp(message.Composed, "ddd d MMM yyyy HH:mm"));
             }
 
-            text.Append("\n\n").Append(Body(message)).Append("\n\n");
+            if (message.Edited is not null && message.Deleted is null)
+            {
+                text.Append("  ·  edited");
+            }
+
+            // a deleted message keeps its place in the conversation, as Teams shows it
+            text.Append("\n\n").Append(message.Deleted is null ? Body(message) : "*This message was deleted.*").Append("\n\n");
+            if (message.Deleted is null && message.Reactions.Count > 0)
+            {
+                text.Append(string.Join("  ·  ", message.Reactions.Select(r => $"{EmojiOf(r.Key)} {string.Join(", ", r.Mris.Select(nameOf).Distinct())}"))).Append("\n\n");
+            }
         }
 
         if (!any)
         {
             text.Append("*No messages.*\n");
         }
+    }
+
+    // Teams' six classic reactions; the rest name their emoji by its code point (1f600_grinningface)
+    private static readonly Dictionary<string, string> Emoji = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["like"] = "👍",
+        ["heart"] = "❤️",
+        ["laugh"] = "😆",
+        ["surprised"] = "😮",
+        ["sad"] = "😢",
+        ["angry"] = "😠",
+    };
+
+    /// <summary>A reaction's emoji: the classic six by name, another by the code point its key starts with, else <c>:key:</c>.</summary>
+    internal static string EmojiOf(string key)
+    {
+        if (Emoji.TryGetValue(key, out var emoji))
+        {
+            return emoji;
+        }
+
+        var hex = key.Split('_', 2)[0];
+        return hex.Length is >= 4 and <= 6 && int.TryParse(hex, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var codePoint)
+            && codePoint is >= 0x2000 and <= 0x10FFFF and not (>= 0xD800 and <= 0xDFFF)
+            ? char.ConvertFromUtf32(codePoint)
+            : $":{key}:";
     }
 
     private static string Who(TeamsMessage message, Func<string?, string> nameOf)

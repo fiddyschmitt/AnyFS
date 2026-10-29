@@ -62,11 +62,20 @@ internal sealed class FakeTeams : ITeamsApi
 
     public void AddPerson(string mri, string displayName) => _people[mri] = displayName;
 
-    /// <summary>Adds a message to a conversation; a reply points at <paramref name="rootId"/> (a channel post's thread).</summary>
-    public TeamsMessage Post(string threadId, string fromMri, string? fromName, string html, DateTimeOffset when, string? rootId = null, string messageType = "RichText/Html")
+    /// <summary>
+    /// Adds a message to a conversation; a reply points at <paramref name="rootId"/> (a channel post's thread). An edited one
+    /// carries its edit time, a deleted one its deletion time and no content (as the chat service gives them).
+    /// </summary>
+    public TeamsMessage Post(string threadId, string fromMri, string? fromName, string html, DateTimeOffset when, string? rootId = null, string messageType = "RichText/Html",
+        DateTimeOffset? edited = null, DateTimeOffset? deleted = null, IReadOnlyList<Reaction>? reactions = null)
     {
         var id = (when.ToUnixTimeMilliseconds()).ToString();
-        var message = new TeamsMessage(id, rootId, rootId, fromMri, when, messageType, html, fromName);
+        var message = new TeamsMessage(id, rootId, rootId, fromMri, when, messageType, deleted is null ? html : null, fromName)
+        {
+            Edited = edited,
+            Deleted = deleted,
+            Reactions = reactions ?? [],
+        };
         if (!_messages.TryGetValue(threadId, out var list))
         {
             _messages[threadId] = list = [];

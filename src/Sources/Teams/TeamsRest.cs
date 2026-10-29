@@ -111,6 +111,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             var type = Str(m, "messagetype") ?? Str(m, "messageType") ?? "";
             var root = Str(m, "rootMessageId") ?? Str(m, "rootmessageid");
             var parent = Str(m, "parentMessageId") ?? Str(m, "parentmessageid");
+            var properties = Obj(m, "properties");
             messages.Add(new TeamsMessage(
                 Str(m, "id") ?? "",
                 NullIfEmpty(root),
@@ -119,7 +120,12 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
                 Time(Str(m, "composetime") ?? Str(m, "originalarrivaltime")),
                 type,
                 NullIfEmpty(Str(m, "content")),
-                NullIfEmpty(Str(m, "imdisplayname"))));
+                NullIfEmpty(Str(m, "imdisplayname")))
+            {
+                Edited = Millis(Str(properties, "edittime")),
+                Deleted = Millis(Str(properties, "deletetime")),
+                Reactions = ReactionsOf(properties),
+            });
         }
 
         var older = Str(Obj(doc.RootElement, "_metadata"), "backwardLink");
@@ -271,6 +277,59 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
     private static int Int(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.TryGetInt32(out var n) ? n : 0;
 
     private static string? NullIfEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
+
+    /// <summary>A time the chat service gives in milliseconds since 1970 (edittime, deletetime); null when absent or zero.</summary>
+    internal static DateTimeOffset? Millis(string? value)
+        => long.TryParse(value, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var ms) && ms > 0
+            ? DateTimeOffset.FromUnixTimeMilliseconds(ms)
+            : null;
+
+    /// <summary>
+    /// A message's reactions: <c>properties.emotions</c>, an array of <c>{key, users[{mri, time, value}]}</c> (as the seeded
+    /// sandbox stores it; purple-teams reads the same), or that array as a JSON string; a key nobody holds any more is left out.
+    /// </summary>
+    internal static IReadOnlyList<Reaction> ReactionsOf(JsonElement properties)
+    {
+        if (properties.ValueKind != JsonValueKind.Object || !properties.TryGetProperty("emotions", out var emotions))
+        {
+            return [];
+        }
+
+        if (emotions.ValueKind == JsonValueKind.String)
+        {
+            try
+            {
+                using var parsed = JsonDocument.Parse(emotions.GetString() ?? "[]");
+                return Reactions(parsed.RootElement);
+            }
+            catch (JsonException)
+            {
+                return [];
+            }
+        }
+
+        return Reactions(emotions);
+
+        static IReadOnlyList<Reaction> Reactions(JsonElement array)
+        {
+            if (array.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            var reactions = new List<Reaction>();
+            foreach (var emotion in array.EnumerateArray())
+            {
+                var mris = Arr(emotion, "users").Select(u => Str(u, "mri")).OfType<string>().Where(m => m.Length > 0).Distinct().ToList();
+                if (Str(emotion, "key") is { Length: > 0 } key && mris.Count > 0)
+                {
+                    reactions.Add(new Reaction(key, mris));
+                }
+            }
+
+            return reactions;
+        }
+    }
 
     private static ChatKind KindOf(JsonElement chat)
     {

@@ -280,6 +280,37 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task ReactionsEditsAndDeletionsShowInTheMarkdown()
+    {
+        const string Ann = "8:orgid:00000000-0000-0000-0000-00000000ann";
+        var fake = new FakeTeams();
+        fake.AddPerson(Ann, "Ann Lee"); // reacts, never posts: her name comes from the people lookup
+        var general = FakeTeams.Channel("General", general: true);
+        fake.AddTeam("AnyFS Lab", general);
+        var root = fake.Post(general.Id, Jane, "Jane Doe", "<p>Release is out</p>", When,
+            reactions: [new Reaction("like", [John, Ann]), new Reaction("heart", [Jane]), new Reaction("1f680_rocket", [John])]);
+        fake.Post(general.Id, John, "John Roe", "<p>Notes are updated</p>", When.AddMinutes(1), rootId: root.Id, edited: When.AddMinutes(2));
+        fake.Post(general.Id, Jane, "Jane Doe", "<p>gone</p>", When.AddMinutes(3), rootId: root.Id, deleted: When.AddMinutes(4));
+        await using var source = await StartAsync(fake);
+
+        var thread = (await NamesAsync(source, "AnyFS Lab/General/posts")).Single();
+        var md = await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/post.md");
+        StringAssert.Contains(md, "👍 John Roe, Ann Lee  ·  ❤️ Jane Doe  ·  🚀 John Roe");
+        StringAssert.Contains(md, "edited\n\nNotes are updated");
+        StringAssert.Contains(md, "*This message was deleted.*");
+        Assert.IsFalse(md.Contains("gone", StringComparison.Ordinal), "a deleted message's content is not shown");
+    }
+
+    [TestMethod]
+    public void AReactionsEmojiIsNamedOrByItsCodePoint()
+    {
+        Assert.AreEqual("👍", TeamsText.EmojiOf("like"));
+        Assert.AreEqual("😆", TeamsText.EmojiOf("LAUGH"));
+        Assert.AreEqual("😀", TeamsText.EmojiOf("1f600_grinningface"));
+        Assert.AreEqual(":yes:", TeamsText.EmojiOf("yes"));
+    }
+
+    [TestMethod]
     public void TokensAreMatchedToTheirServiceInEveryCloud()
     {
         // Microsoft 365 (spike 18) and GCC High (the sign-in audit at a GCC High tenant)

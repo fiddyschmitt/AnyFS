@@ -256,22 +256,33 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             var chats = cutoff is { } since ? structure.Chats.Where(ch => ch.LastUpdated is null || ch.LastUpdated >= since).ToList() : structure.Chats;
 
             // the people a chat is named for: learn their names once, so a 1:1 or untitled group is named, not an mri
-            var mris = chats.SelectMany(ch => ch.MemberMris).Where(m => !IsMe(m) && !_names.ContainsKey(m)).Distinct().ToList();
-            foreach (var batch in mris.Chunk(100))
-            {
-                try
-                {
-                    var people = await Api.PeopleAsync(batch, c).ConfigureAwait(false);
-                    Remember(people.Select(p => (p.Mri, p.DisplayName)));
-                }
-                catch (VfsException ex)
-                {
-                    Logger.LogInformation("teams: {Count} people's names could not be read ({Error}); their chats are named by id", batch.Length, ex.Message);
-                }
-            }
-
+            await LearnPeopleAsync(chats.SelectMany(ch => ch.MemberMris).Where(m => !IsMe(m)), "their chats are named by id", c).ConfigureAwait(false);
             return structure with { Chats = chats };
         }, ct);
+
+    /// <summary>The names of people not yet known, a hundred a call; a call that fails leaves those as mris.</summary>
+    private async Task LearnPeopleAsync(IEnumerable<string> mris, string otherwise, CancellationToken ct)
+    {
+        foreach (var batch in mris.Where(m => !_names.ContainsKey(m)).Distinct().Chunk(100))
+        {
+            try
+            {
+                var people = await Api.PeopleAsync(batch, ct).ConfigureAwait(false);
+                Remember(people.Select(p => (p.Mri, p.DisplayName)));
+            }
+            catch (VfsException ex)
+            {
+                Logger.LogInformation("teams: {Count} people's names could not be read ({Error}); {Otherwise}", batch.Length, ex.Message, otherwise);
+            }
+        }
+    }
+
+    /// <summary>The names of a conversation's senders, from its messages, and of the people who reacted, looked up.</summary>
+    private Task LearnNamesAsync(IReadOnlyList<TeamsMessage> messages, CancellationToken ct)
+    {
+        LearnNames(messages);
+        return LearnPeopleAsync(messages.SelectMany(m => m.Reactions).SelectMany(r => r.Mris), "their reactions show ids", ct);
+    }
 
     /// <summary>The oldest a conversation's last message may be to show ("within" days), or null for all.</summary>
     private DateTimeOffset? Cutoff => _settings.Within is { } within ? DateTimeOffset.UtcNow - within : null;
@@ -281,7 +292,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         => Cache.GetAsync($"threads:{channelId}", _settings.Refresh, async c =>
         {
             var messages = await ConversationAsync(channelId, c).ConfigureAwait(false);
-            LearnNames(messages);
+            await LearnNamesAsync(messages, c).ConfigureAwait(false);
             var cutoff = Cutoff;
             var threads = messages.Where(m => m.IsContent)
                 .GroupBy(m => m.ThreadId)
@@ -297,7 +308,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         var messages = await Cache.GetAsync($"chat:{chat.Id}", _settings.Refresh, async c =>
         {
             var all = await ConversationAsync(chat.Id, c).ConfigureAwait(false);
-            LearnNames(all);
+            await LearnNamesAsync(all, c).ConfigureAwait(false);
             return all;
         }, ct).ConfigureAwait(false);
         return TeamsText.Chat(messages, ChatName(chat), NameOf);
