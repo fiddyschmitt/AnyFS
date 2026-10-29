@@ -20,7 +20,7 @@ public sealed class TeamsPlugin : ISourcePlugin, ISettingVisibility
     public string TypeFolder => "teams";
 
     /// <summary>The default letter icon for now; an own mark is drawn in a later commit (the order of work, spec 7.9).</summary>
-    public Stream? OpenIcon() => null;
+    public Stream? OpenIcon() => typeof(TeamsPlugin).Assembly.GetManifestResourceStream("teams.png");
 
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public Type SettingsType => typeof(TeamsSettings);

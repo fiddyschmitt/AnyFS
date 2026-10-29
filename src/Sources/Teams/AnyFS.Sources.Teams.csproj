@@ -21,6 +21,11 @@
     <Using Include="AnyFS.Sources.Common" />
   </ItemGroup>
   <ItemGroup>
+    <!-- the type's icon (OpenIcon): a mark of AnyFS's own, two chat bubbles (not Microsoft's Teams logo), drawn by
+         "AnyFS local\tools\icons\teams-icon.ps1" at 256 px and scaled to 64 -->
+    <EmbeddedResource Include="Assets\teams.png" LogicalName="teams.png" />
+  </ItemGroup>
+  <ItemGroup>
     <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
   </ItemGroup>
 </Project>
