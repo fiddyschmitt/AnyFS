@@ -4,7 +4,8 @@ namespace AnyFS.Sources.Teams;
 /// What a Teams source reads, from Microsoft's own Teams services (spec 7.9): the account's teams and channels and chats
 /// (the aggregator), a conversation's messages (the chat service), and a person's name (the middle tier). The live
 /// implementation signs in with the web session and calls those services with the tokens the Teams web client mints; the
-/// fake stands in for them in tests. Files are read through <see cref="ITeamsFiles"/>, added with the files feature.
+/// fake stands in for them in tests. Files are read from SharePoint and OneDrive, and inline images from Teams' media
+/// service, with the tokens the same client mints for them.
 /// </summary>
 internal interface ITeamsApi : IAsyncDisposable
 {
@@ -25,4 +26,23 @@ internal interface ITeamsApi : IAsyncDisposable
 
     /// <summary>The people's display names by mri, as many as are known in one call (the middle tier); an mri with no name is left out.</summary>
     Task<IReadOnlyList<Person>> PeopleAsync(IReadOnlyList<string> mris, CancellationToken ct);
+
+    /// <summary>
+    /// Where a channel's files are: its site and the folder's path within the site's default library (the channel's
+    /// <see cref="ChannelInfo.FilesPath"/> where Teams gives one, else the channel's name in its team's site, found from the
+    /// team's Microsoft 365 group); null when the team has no site (yet).
+    /// </summary>
+    Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, CancellationToken ct);
+
+    /// <summary>A folder of a site's default library, by its path within the library (<c>General/Specs</c>): its folders and files; empty when it does not exist.</summary>
+    Task<IReadOnlyList<DriveEntry>> FolderAsync(string siteUrl, string path, CancellationToken ct);
+
+    /// <summary>A file of a site's default library, by its path within the library, with a fresh download address; null when it is gone.</summary>
+    Task<DriveEntry?> FileAsync(string siteUrl, string path, CancellationToken ct);
+
+    /// <summary>A file's content from an offset, by its download address (a range where SharePoint takes one).</summary>
+    Task<HttpResponseMessage> ContentAsync(string downloadUrl, long offset, CancellationToken ct);
+
+    /// <summary>An inline image's bytes, from Teams' media service; null when it cannot be read (a host other than Teams' own is never asked).</summary>
+    Task<TeamsImage?> ImageAsync(string src, CancellationToken ct);
 }

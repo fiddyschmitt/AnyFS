@@ -11,6 +11,12 @@ namespace AnyFS.Sources.Teams;
 /// are (ReverseMarkdown). System activities (a member added, a call, a rename) are left out. UTF-8, no byte-order mark.
 /// A message is converted once however often its thread is named or built (<see cref="Converted"/>).
 /// </summary>
+/// <summary>A conversation's attachments' names in its attachments folder: an inline image's by its address, a shared file's by its.</summary>
+internal sealed record AttachmentNames(IReadOnlyDictionary<string, string> Images, IReadOnlyDictionary<string, string> Files)
+{
+    public static readonly AttachmentNames None = new(new Dictionary<string, string>(), new Dictionary<string, string>());
+}
+
 internal static class TeamsText
 {
     private static readonly Lock ConverterGate = new();
@@ -26,22 +32,22 @@ internal static class TeamsText
     private static readonly ConditionalWeakTable<TeamsMessage, string> Converted = new();
 
     /// <summary>A channel post: the thread's messages (the root first, then its replies in time order), under a heading.</summary>
-    public static byte[] Post(IReadOnlyList<TeamsMessage> thread, Func<string?, string> nameOf)
+    public static byte[] Post(IReadOnlyList<TeamsMessage> thread, Func<string?, string> nameOf, AttachmentNames? attachments = null)
     {
         var text = new StringBuilder();
         var root = thread[0];
         var heading = Subject(root) ?? $"{Who(root, nameOf)} · {Stamp(root.Composed, "d MMM yyyy HH:mm")}";
         text.Append("# ").Append(Clean(heading)).Append("\n\n");
-        Conversation(text, thread, nameOf);
+        Conversation(text, thread, nameOf, attachments ?? AttachmentNames.None);
         return Encoding.UTF8.GetBytes(text.ToString());
     }
 
     /// <summary>A chat: all of its messages, oldest first.</summary>
-    public static byte[] Chat(IReadOnlyList<TeamsMessage> messages, string title, Func<string?, string> nameOf)
+    public static byte[] Chat(IReadOnlyList<TeamsMessage> messages, string title, Func<string?, string> nameOf, AttachmentNames? attachments = null)
     {
         var text = new StringBuilder();
         text.Append("# ").Append(Clean(title)).Append("\n\n");
-        Conversation(text, messages, nameOf);
+        Conversation(text, messages, nameOf, attachments ?? AttachmentNames.None);
         return Encoding.UTF8.GetBytes(text.ToString());
     }
 
@@ -52,7 +58,7 @@ internal static class TeamsText
         return TeamsNames.Safe(string.Join(" ", parts));
     }
 
-    private static void Conversation(StringBuilder text, IReadOnlyList<TeamsMessage> messages, Func<string?, string> nameOf)
+    private static void Conversation(StringBuilder text, IReadOnlyList<TeamsMessage> messages, Func<string?, string> nameOf, AttachmentNames attachments)
     {
         var any = false;
         foreach (var message in messages.Where(m => m.IsContent).OrderBy(m => m.Composed ?? DateTimeOffset.MinValue).ThenBy(m => m.Id, StringComparer.Ordinal))
@@ -70,7 +76,18 @@ internal static class TeamsText
             }
 
             // a deleted message keeps its place in the conversation, as Teams shows it
-            text.Append("\n\n").Append(message.Deleted is null ? Body(message) : "*This message was deleted.*").Append("\n\n");
+            text.Append("\n\n").Append(message.Deleted is null ? Linked(message, attachments) : "*This message was deleted.*").Append("\n\n");
+            if (message.Deleted is null && message.Files.Count > 0)
+            {
+                // a shared file, linked to its copy in the attachments folder where it is there
+                foreach (var file in message.Files)
+                {
+                    text.Append("- 📎 ").Append(attachments.Files.TryGetValue(file.Url, out var name) ? $"[{Escape(file.Name)}](<attachments/{name}>)" : Escape(file.Name)).Append('\n');
+                }
+
+                text.Append('\n');
+            }
+
             if (message.Deleted is null && message.Reactions.Count > 0)
             {
                 text.Append(string.Join("  ·  ", message.Reactions.Select(r => $"{EmojiOf(r.Key)} {string.Join(", ", r.Mris.Select(nameOf).Distinct())}"))).Append("\n\n");
@@ -117,6 +134,25 @@ internal static class TeamsText
 
     /// <summary>A message's body as Markdown: the HTML converted, or the plain text; "" when empty. Converted once per message.</summary>
     private static string Body(TeamsMessage message) => Converted.GetValue(message, Convert);
+
+    /// <summary>The body with each inline image read into the attachments folder pointing at its copy there.</summary>
+    private static string Linked(TeamsMessage message, AttachmentNames attachments)
+    {
+        var body = Body(message);
+        foreach (var src in message.Images)
+        {
+            if (attachments.Images.TryGetValue(src, out var name))
+            {
+                // a twin's name ("… (2).png") has a space: such a link is written in angle brackets
+                body = body.Replace(src, name.Contains(' ', StringComparison.Ordinal) ? $"<attachments/{name}>" : $"attachments/{name}", StringComparison.Ordinal);
+            }
+        }
+
+        return body;
+    }
+
+    /// <summary>A file name as link text: the Markdown characters that would end or break it escaped.</summary>
+    private static string Escape(string name) => name.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("[", "\\[", StringComparison.Ordinal).Replace("]", "\\]", StringComparison.Ordinal);
 
     private static string Convert(TeamsMessage message)
     {

@@ -59,13 +59,13 @@ public class TeamsLiveTests
         var channels = await ListAsync(source, teams[0].Name);
         Assert.IsTrue(channels.Count > 0, $"{teams[0].Name} has channels");
         var posts = await ListAsync(source, $"{teams[0].Name}/{channels[0].Name}");
-        CollectionAssert.AreEqual(new[] { "posts" }, posts.Select(p => p.Name).ToArray());
+        CollectionAssert.AreEqual(new[] { "posts", "files" }, posts.Select(p => p.Name).ToArray());
 
         // the chats, each a chat.md
         var chats = await ListAsync(source, "Chats");
         Assert.IsTrue(chats.Count > 0, "the account has chats");
         var files = await ListAsync(source, $"Chats/{chats[0].Name}");
-        CollectionAssert.AreEqual(new[] { "chat.md" }, files.Select(f => f.Name).ToArray());
+        CollectionAssert.Contains(files.Select(f => f.Name).ToArray(), "chat.md", "and its attachments where it has any");
 
         await using var chat = await source.OpenAsync($"Chats/{chats[0].Name}/chat.md", VfsOpenMode.Read, CancellationToken.None);
         var buffer = new byte[chat.Length];
@@ -113,5 +113,60 @@ public class TeamsLiveTests
         StringAssert.Contains(chatMd, "😆 ");
         StringAssert.Contains(chatMd, "edited\n\nA chat message, edited");
         StringAssert.Contains(chatMd, "*This message was deleted.*");
+    }
+
+    /// <summary>The seeded sandbox's files: the channel's folder of its team's library, a thread's and a chat's attachments.</summary>
+    [TestMethod]
+    [Timeout(300_000)]
+    public async Task TheSeededFilesAndImagesAreServed()
+    {
+        var (account, _) = Env();
+        await using var source = await StartAsync(account);
+
+        // the channel's files: its folder of the team's library, a subfolder too
+        var files = (await ListAsync(source, "AnyFS Lab/General/files")).Select(e => e.Name).ToList();
+        if (!files.Contains("anyfs-seed.txt"))
+        {
+            Assert.Inconclusive("the sandbox is not seeded (run TeamsSandboxSeed with ANYFS_SEED_TEAMS=1)");
+        }
+
+        CollectionAssert.Contains(files, "Specs");
+        StringAssert.StartsWith(await TextAsync(source, "AnyFS Lab/General/files/anyfs-seed.txt"), "Seeded by AnyFS");
+        StringAssert.StartsWith(await TextAsync(source, "AnyFS Lab/General/files/Specs/design.md"), "# Design");
+
+        // the thread's attachments: the file a reply shares and the inline image, which its post.md links
+        var thread = (await ListAsync(source, "AnyFS Lab/General/posts")).First(p => p.Name.Contains("A thread with replies", StringComparison.Ordinal)).Name;
+        var attachments = (await ListAsync(source, $"AnyFS Lab/General/posts/{thread}/attachments")).Select(e => e.Name).ToList();
+        CollectionAssert.Contains(attachments, "anyfs-seed.txt");
+
+        // the media service serves its imgo view as JPEG, whatever was pasted
+        var image = attachments.Single(a => a.Contains("_image-1.", StringComparison.Ordinal));
+        StringAssert.EndsWith(image, ".jpg");
+        await using (var jpeg = await source.OpenAsync($"AnyFS Lab/General/posts/{thread}/attachments/{image}", VfsOpenMode.Read, CancellationToken.None))
+        {
+            var head = new byte[3];
+            await jpeg.ReadFullyAsync(0, head, CancellationToken.None);
+            CollectionAssert.AreEqual(new byte[] { 0xFF, 0xD8, 0xFF }, head, "the image's bytes, from Teams' media service");
+        }
+
+        var md = await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/post.md");
+        StringAssert.Contains(md, "[anyfs-seed.txt](<attachments/anyfs-seed.txt>)");
+        StringAssert.Contains(md, $"attachments/{image}");
+
+        // the chat's: the file from the tester's OneDrive, and its image
+        foreach (var chat in await ListAsync(source, "Chats"))
+        {
+            var names = (await ListAsync(source, $"Chats/{chat.Name}")).Select(e => e.Name).ToList();
+            if (names.Contains("attachments"))
+            {
+                var chatFiles = (await ListAsync(source, $"Chats/{chat.Name}/attachments")).Select(e => e.Name).ToList();
+                CollectionAssert.Contains(chatFiles, "anyfs-chat-seed.txt");
+                Assert.IsTrue(chatFiles.Any(f => f.Contains("_image-1.", StringComparison.Ordinal)));
+                StringAssert.StartsWith(await TextAsync(source, $"Chats/{chat.Name}/attachments/anyfs-chat-seed.txt"), "Shared in a chat");
+                return;
+            }
+        }
+
+        Assert.Fail("no chat has the seeded attachments");
     }
 }

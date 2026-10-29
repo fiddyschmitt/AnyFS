@@ -12,12 +12,19 @@ namespace AnyFS.Sources.Teams;
 /// (the <c>authz</c> call), the aggregator gives the teams, channels and chats, and the chat service gives a
 /// conversation's messages. Each call carries the bearer for that service's audience, which <paramref name="tokenFor"/>
 /// supplies (the live web session, or a test's); a 401 hands it back the token refused and tries once more with the one it
-/// gives then. Requests are paced per host and a 429's Retry-After is honoured.
+/// gives then. Requests are paced per host and a 429's Retry-After is honoured. Files are read from SharePoint and OneDrive
+/// (their v2.0 drive API, with the SharePoint token, only ever on a SharePoint host) and inline images from Teams' media
+/// service (with the authz call's skype token, only ever on the media service's hosts).
 /// </summary>
 /// <param name="tokenFor">The bearer for a service; the second argument is a token the service just refused, else null.</param>
 /// <param name="handler">The handler requests go through: a test's fake; null for the network.</param>
-internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, CancellationToken, Task<string>> tokenFor, int concurrency, ILogger logger, HttpMessageHandler? handler = null) : ITeamsApi
+/// <param name="sharePointHost">The host the page used the SharePoint token on (the tenant's OneDrive or SharePoint), once that token is read.</param>
+internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, CancellationToken, Task<string>> tokenFor, int concurrency, ILogger logger, HttpMessageHandler? handler = null, Func<string?>? sharePointHost = null) : ITeamsApi
 {
+    // the client version Teams' media service takes its "platform id" from (49: Teams for work), as purple-teams sends it
+    private const string ClientVersion = "49/25113001312";
+    private const int MaxImageBytes = 50 << 20;
+
     private readonly HttpClient _http = new(handler ?? new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, PooledConnectionLifetime = TimeSpan.FromMinutes(2) })
     {
         Timeout = TimeSpan.FromSeconds(100),
@@ -41,7 +48,10 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             var channels = new List<ChannelInfo>();
             foreach (var c in Arr(t, "channels"))
             {
-                channels.Add(new ChannelInfo(Str(c, "id") ?? "", Str(c, "displayName") ?? "", Bool(c, "isGeneral"), Int(c, "channelType") != 0));
+                channels.Add(new ChannelInfo(Str(c, "id") ?? "", Str(c, "displayName") ?? "", Bool(c, "isGeneral"), Int(c, "channelType") != 0)
+                {
+                    FilesPath = NullIfEmpty(Str(Obj(c, "defaultFileSettings"), "filesRelativePath")),
+                });
             }
 
             var groupId = Str(Obj(t, "teamSiteInformation"), "groupId") ?? Str(t, "groupId");
@@ -100,6 +110,170 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         return ValueTask.CompletedTask;
     }
 
+    // --- files: SharePoint and OneDrive ----------------------------------------------------------------------------------
+
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task<TeamSite?>> _sites = new(StringComparer.OrdinalIgnoreCase);
+
+    public async Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, CancellationToken ct)
+    {
+        // the SharePoint token first: the host it was used on is the tenant's
+        await tokenFor(TeamsService.SharePoint, null, ct).ConfigureAwait(false);
+        var host = sharePointHost?.Invoke() is { } seen ? TeamsFiles.RootHost(seen) : null;
+        if (channel.FilesPath is { } files && host is not null && TeamsFiles.Locate($"https://{host}{(files.StartsWith('/') ? "" : "/")}{files}", null) is { } given)
+        {
+            return given;
+        }
+
+        if (team.GroupId is null || host is null)
+        {
+            return null;
+        }
+
+        var site = await _sites.GetOrAdd(team.GroupId, id => SiteAsync($"https://{host}", id, CancellationToken.None)).ConfigureAwait(false);
+        if (site is null)
+        {
+            _sites.TryRemove(team.GroupId, out _);
+            return null;
+        }
+
+        return (site.Url, channel.DisplayName);
+    }
+
+    /// <summary>A group's site and its default library (GroupSiteManager.GetSiteStatus, status 2 when ready); null while it has none.</summary>
+    private async Task<TeamSite?> SiteAsync(string root, string groupId, CancellationToken ct)
+    {
+        using var doc = await SendAsync(HttpMethod.Post, $"{root}/_api/GroupSiteManager/GetSiteStatus", TeamsService.SharePoint, new System.Text.Json.Nodes.JsonObject { ["groupId"] = groupId }.ToJsonString(), ct).ConfigureAwait(false);
+        var site = Str(doc.RootElement, "SiteUrl");
+        var documents = Str(doc.RootElement, "DocumentsUrl");
+        if (Int(doc.RootElement, "SiteStatus") != 2 || string.IsNullOrEmpty(site) || string.IsNullOrEmpty(documents) || !Uri.TryCreate(documents, UriKind.Absolute, out var library))
+        {
+            logger.LogInformation("teams: the group {Group} has no SharePoint site yet (status {Status})", groupId, Int(doc.RootElement, "SiteStatus"));
+            return null;
+        }
+
+        return new TeamSite(site.TrimEnd('/'), Uri.UnescapeDataString(library.AbsolutePath));
+    }
+
+    public async Task<IReadOnlyList<DriveEntry>> FolderAsync(string siteUrl, string path, CancellationToken ct)
+    {
+        var entries = new List<DriveEntry>();
+        string? next = path.Length == 0 ? $"{SharePointSite(siteUrl)}/_api/v2.0/drive/root/children?$top=999" : $"{SharePointSite(siteUrl)}/_api/v2.0/drive/root:/{EscapePath(path)}:/children?$top=999";
+        try
+        {
+            while (next is not null)
+            {
+                using var doc = await GetAsync(next, TeamsService.SharePoint, ct).ConfigureAwait(false);
+                entries.AddRange(Arr(doc.RootElement, "value").Select(DriveEntryOf).OfType<DriveEntry>());
+                next = Str(doc.RootElement, "@odata.nextLink") is { } link && Uri.TryCreate(link, UriKind.Absolute, out var uri) && TeamsServices.IsSharePointHost(uri.Host) ? link : null;
+            }
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.NotFound)
+        {
+            // a channel nobody has shared a file in has no folder yet
+        }
+
+        return entries;
+    }
+
+    public async Task<DriveEntry?> FileAsync(string siteUrl, string path, CancellationToken ct)
+    {
+        try
+        {
+            using var doc = await GetAsync($"{SharePointSite(siteUrl)}/_api/v2.0/drive/root:/{EscapePath(path)}", TeamsService.SharePoint, ct).ConfigureAwait(false);
+            return DriveEntryOf(doc.RootElement);
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.NotFound)
+        {
+            return null;
+        }
+    }
+
+    public async Task<HttpResponseMessage> ContentAsync(string downloadUrl, long offset, CancellationToken ct)
+    {
+        // pre-authenticated: no token goes with it
+        await _pace.WaitAsync(ct).ConfigureAwait(false);
+        using var request = new HttpRequestMessage(HttpMethod.Get, downloadUrl);
+        if (offset > 0)
+        {
+            request.Headers.Range = new RangeHeaderValue(offset, null);
+        }
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw VfsException.Unavailable($"SharePoint ({new Uri(downloadUrl).Host}) could not be reached: {ex.Message}");
+        }
+
+        if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+        {
+            return response;
+        }
+
+        using (response)
+        {
+            throw Error(response.StatusCode, downloadUrl, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+        }
+    }
+
+    /// <summary>A site address on a SharePoint host, or a refusal: the SharePoint token is never sent elsewhere.</summary>
+    private static string SharePointSite(string siteUrl)
+        => Uri.TryCreate(siteUrl, UriKind.Absolute, out var site) && site.Scheme == Uri.UriSchemeHttps && TeamsServices.IsSharePointHost(site.Host)
+            ? siteUrl.TrimEnd('/')
+            : throw VfsException.AccessDenied(siteUrl);
+
+    private static string EscapePath(string path) => string.Join('/', path.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.EscapeDataString));
+
+    private static DriveEntry? DriveEntryOf(JsonElement item)
+    {
+        var name = Str(item, "name");
+        if (string.IsNullOrEmpty(name))
+        {
+            return null;
+        }
+
+        var folder = item.ValueKind == JsonValueKind.Object && item.TryGetProperty("folder", out _);
+        var size = item.ValueKind == JsonValueKind.Object && item.TryGetProperty("size", out var s) && s.TryGetInt64(out var bytes) ? bytes : 0;
+        return new DriveEntry(name!, folder, folder ? 0 : size, Time(Str(item, "lastModifiedDateTime")), folder ? null : Str(item, "@content.downloadUrl"));
+    }
+
+    // --- inline images: Teams' media service -----------------------------------------------------------------------------
+
+    public async Task<TeamsImage?> ImageAsync(string src, CancellationToken ct)
+    {
+        var services = await DiscoverAsync(ct).ConfigureAwait(false);
+        if (services.SkypeToken is not { } skype || !TeamsFiles.IsMediaService(src, services.Ams))
+        {
+            return null;
+        }
+
+        await _pace.WaitAsync(ct).ConfigureAwait(false);
+        using var request = new HttpRequestMessage(HttpMethod.Get, src);
+        request.Headers.TryAddWithoutValidation("Authorization", $"skype_token {skype}");
+        request.Headers.TryAddWithoutValidation("x-ms-client-version", ClientVersion);
+        request.Headers.Accept.ParseAdd("image/*");
+        try
+        {
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > MaxImageBytes)
+            {
+                logger.LogInformation("teams: an inline image could not be read ({Status}, {Length} bytes)", (int)response.StatusCode, response.Content.Headers.ContentLength);
+                return null;
+            }
+
+            var bytes = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+            return new TeamsImage(bytes, TeamsFiles.ExtensionOf(bytes, response.Content.Headers.ContentType?.MediaType));
+        }
+        catch (HttpRequestException ex)
+        {
+            logger.LogInformation("teams: an inline image could not be read ({Error})", ex.Message);
+            return null;
+        }
+    }
+
     // --- the messages page ---------------------------------------------------------------------------------------------
 
     private async Task<MessagePage> PageAsync(string url, CancellationToken ct)
@@ -125,6 +299,8 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
                 Edited = Millis(Str(properties, "edittime")),
                 Deleted = Millis(Str(properties, "deletetime")),
                 Reactions = ReactionsOf(properties),
+                Files = FilesOf(properties),
+                Images = TeamsFiles.ImagesIn(Str(m, "content")),
             });
         }
 
@@ -277,6 +453,56 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
     private static int Int(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.TryGetInt32(out var n) ? n : 0;
 
     private static string? NullIfEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
+
+    /// <summary>
+    /// A message's shared files: <c>properties.files</c>, a JSON string holding an array (or the array itself) whose entries
+    /// name the file (<c>fileName</c>, else <c>title</c>), its address (<c>objectUrl</c>, else <c>fileInfo.fileUrl</c>) and its
+    /// site (<c>fileInfo.siteUrl</c>, else <c>baseUrl</c>).
+    /// </summary>
+    internal static IReadOnlyList<SharedFile> FilesOf(JsonElement properties)
+    {
+        if (properties.ValueKind != JsonValueKind.Object || !properties.TryGetProperty("files", out var files))
+        {
+            return [];
+        }
+
+        if (files.ValueKind == JsonValueKind.String)
+        {
+            try
+            {
+                using var parsed = JsonDocument.Parse(files.GetString() ?? "[]");
+                return Shared(parsed.RootElement);
+            }
+            catch (JsonException)
+            {
+                return [];
+            }
+        }
+
+        return Shared(files);
+
+        static IReadOnlyList<SharedFile> Shared(JsonElement array)
+        {
+            if (array.ValueKind != JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            var shared = new List<SharedFile>();
+            foreach (var file in array.EnumerateArray())
+            {
+                var info = Obj(file, "fileInfo");
+                var name = Str(file, "fileName") ?? Str(file, "title");
+                var url = Str(file, "objectUrl") ?? Str(info, "fileUrl");
+                if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(url))
+                {
+                    shared.Add(new SharedFile(name!, url!, NullIfEmpty(Str(info, "siteUrl")) ?? NullIfEmpty(Str(file, "baseUrl"))));
+                }
+            }
+
+            return shared;
+        }
+    }
 
     /// <summary>A time the chat service gives in milliseconds since 1970 (edittime, deletetime); null when absent or zero.</summary>
     internal static DateTimeOffset? Millis(string? value)

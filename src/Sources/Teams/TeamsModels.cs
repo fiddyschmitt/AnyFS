@@ -8,7 +8,28 @@ internal sealed record TeamInfo(string Id, string DisplayName, string? GroupId, 
 /// <summary>A channel of a team: its own conversation thread.</summary>
 /// <param name="Id">The channel's thread id, which is also the conversation id its messages are read by.</param>
 /// <param name="IsPrivate">A private (or shared) channel, whose files live in a site of its own.</param>
-internal sealed record ChannelInfo(string Id, string DisplayName, bool IsGeneral, bool IsPrivate);
+internal sealed record ChannelInfo(string Id, string DisplayName, bool IsGeneral, bool IsPrivate)
+{
+    /// <summary>
+    /// The server-relative path of the channel's folder (<c>defaultFileSettings.filesRelativePath</c>), where Teams gives it
+    /// (a private channel's points into its own site); often null, when the folder is the channel's name in the team's library.
+    /// </summary>
+    public string? FilesPath { get; init; }
+}
+
+/// <summary>A team's SharePoint site and the server-relative path of its default library (<c>/sites/x/Shared Documents</c>).</summary>
+internal sealed record TeamSite(string Url, string LibraryPath);
+
+/// <summary>A file a message shares (<c>properties.files</c>): its name and address in SharePoint or OneDrive.</summary>
+/// <param name="SiteUrl">The site it is in, where the message says (<c>fileInfo.siteUrl</c>, <c>baseUrl</c>); else taken from its address.</param>
+internal sealed record SharedFile(string Name, string Url, string? SiteUrl);
+
+/// <summary>A folder or file of a site's library, as SharePoint's v2.0 drive API lists it.</summary>
+/// <param name="DownloadUrl">A file's pre-authenticated download address (about an hour's life), which takes ranges; null for a folder.</param>
+internal sealed record DriveEntry(string Name, bool IsFolder, long Length, DateTimeOffset? Modified, string? DownloadUrl);
+
+/// <summary>An inline image's bytes and its file extension (from its content), as Teams' media service serves it.</summary>
+internal sealed record TeamsImage(byte[] Bytes, string Extension);
 
 internal enum ChatKind
 {
@@ -45,6 +66,12 @@ internal sealed record TeamsMessage(
 
     /// <summary>Its reactions (<c>properties.emotions</c>), each with who reacted; empty when none.</summary>
     public IReadOnlyList<Reaction> Reactions { get; init; } = [];
+
+    /// <summary>The files it shares (<c>properties.files</c>); empty when none.</summary>
+    public IReadOnlyList<SharedFile> Files { get; init; } = [];
+
+    /// <summary>The addresses of its inline images (its HTML's AMSImage <c>img</c> elements), in order; empty when none.</summary>
+    public IReadOnlyList<string> Images { get; init; } = [];
 
     /// <summary>A real message people wrote, not a system activity (member added, call ended, channel renamed).</summary>
     public bool IsContent => MessageType.StartsWith("RichText", StringComparison.OrdinalIgnoreCase) || MessageType.Equals("Text", StringComparison.OrdinalIgnoreCase);

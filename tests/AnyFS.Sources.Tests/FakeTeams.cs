@@ -67,7 +67,7 @@ internal sealed class FakeTeams : ITeamsApi
     /// carries its edit time, a deleted one its deletion time and no content (as the chat service gives them).
     /// </summary>
     public TeamsMessage Post(string threadId, string fromMri, string? fromName, string html, DateTimeOffset when, string? rootId = null, string messageType = "RichText/Html",
-        DateTimeOffset? edited = null, DateTimeOffset? deleted = null, IReadOnlyList<Reaction>? reactions = null)
+        DateTimeOffset? edited = null, DateTimeOffset? deleted = null, IReadOnlyList<Reaction>? reactions = null, IReadOnlyList<SharedFile>? files = null)
     {
         var id = (when.ToUnixTimeMilliseconds()).ToString();
         var message = new TeamsMessage(id, rootId, rootId, fromMri, when, messageType, deleted is null ? html : null, fromName)
@@ -75,6 +75,8 @@ internal sealed class FakeTeams : ITeamsApi
             Edited = edited,
             Deleted = deleted,
             Reactions = reactions ?? [],
+            Files = files ?? [],
+            Images = deleted is null ? TeamsFiles.ImagesIn(html) : [],
         };
         if (!_messages.TryGetValue(threadId, out var list))
         {
@@ -138,6 +140,80 @@ internal sealed class FakeTeams : ITeamsApi
 
     /// <summary>Renames a person (as when the source later learns a sender's name from a message).</summary>
     public void Rename(string mri, string displayName) => _people[mri] = displayName;
+
+    // --- files ---------------------------------------------------------------------------------------------------------
+
+    private readonly Dictionary<string, string> _sites = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, (string Site, string Path, byte[] Bytes, DateTimeOffset? Modified)> _library = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, byte[]> _images = new(StringComparer.Ordinal);
+
+    /// <summary>How many inline images and file contents have been asked for.</summary>
+    public int ImageCalls { get; private set; }
+
+    public int ContentCalls { get; private set; }
+
+    /// <summary>Gives a team a SharePoint site: its channels' files are folders named for them in its library.</summary>
+    public void AddSite(TeamInfo team, string siteUrl) => _sites[team.GroupId!] = siteUrl;
+
+    /// <summary>A file in a site's library, by its path within the library (<c>General/plan.txt</c>).</summary>
+    public void AddLibraryFile(string siteUrl, string path, byte[] content, DateTimeOffset? modified = null) => _library[$"{siteUrl}|{path}"] = (siteUrl, path, content, modified);
+
+    /// <summary>An inline image in Teams' media service, by its address.</summary>
+    public void AddImage(string src, byte[] bytes) => _images[src] = bytes;
+
+    public Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, CancellationToken ct)
+        => Task.FromResult(team.GroupId is { } group && _sites.TryGetValue(group, out var site) ? ((string, string)?)(site, channel.DisplayName) : null);
+
+    public Task<IReadOnlyList<DriveEntry>> FolderAsync(string siteUrl, string path, CancellationToken ct)
+    {
+        var prefix = path.Length == 0 ? "" : path + "/";
+        var entries = new Dictionary<string, DriveEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (site, file, bytes, modified) in _library.Values)
+        {
+            if (!site.Equals(siteUrl, StringComparison.OrdinalIgnoreCase) || !file.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var rest = file[prefix.Length..];
+            var slash = rest.IndexOf('/', StringComparison.Ordinal);
+            if (slash < 0)
+            {
+                entries[rest] = new DriveEntry(rest, false, bytes.Length, modified, Download(site, file));
+            }
+            else
+            {
+                entries.TryAdd(rest[..slash], new DriveEntry(rest[..slash], true, 0, modified, null));
+            }
+        }
+
+        return Task.FromResult<IReadOnlyList<DriveEntry>>(entries.Values.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList());
+    }
+
+    public Task<DriveEntry?> FileAsync(string siteUrl, string path, CancellationToken ct)
+        => Task.FromResult(_library.TryGetValue($"{siteUrl}|{path}", out var f) ? new DriveEntry(Path.GetFileName(path), false, f.Bytes.Length, f.Modified, Download(siteUrl, path)) : null);
+
+    public Task<HttpResponseMessage> ContentAsync(string downloadUrl, long offset, CancellationToken ct)
+    {
+        ContentCalls++;
+        var key = Uri.UnescapeDataString(downloadUrl["https://download.test/".Length..]);
+        var bytes = _library[key].Bytes;
+        var response = new HttpResponseMessage(offset > 0 ? System.Net.HttpStatusCode.PartialContent : System.Net.HttpStatusCode.OK) { Content = new ByteArrayContent(bytes[(int)offset..]) };
+        if (offset > 0)
+        {
+            response.Content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(offset, bytes.Length - 1, bytes.Length);
+        }
+
+        return Task.FromResult(response);
+    }
+
+    public Task<TeamsImage?> ImageAsync(string src, CancellationToken ct)
+    {
+        ImageCalls++;
+        return Task.FromResult(_images.TryGetValue(src, out var bytes) ? new TeamsImage(bytes, TeamsFiles.ExtensionOf(bytes, null)) : null);
+    }
+
+    private static string Download(string site, string path) => "https://download.test/" + Uri.EscapeDataString($"{site}|{path}");
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 

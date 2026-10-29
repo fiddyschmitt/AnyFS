@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Globalization;
+using System.Net;
 using System.Runtime.CompilerServices;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
@@ -102,7 +104,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
         }
 
-        return new TeamsRest(new Uri(cloud.ApiHost), (service, refused, c) => Renew(session, service, refused, c), _settings.Concurrency, Logger)
+        return new TeamsRest(new Uri(cloud.ApiHost), (service, refused, c) => Renew(session, service, refused, c), _settings.Concurrency, Logger, sharePointHost: () => session.SharePointHost)
         {
             Account = session.Account ?? _settings.AccountHint,
             Mri = session.Mri,
@@ -303,7 +305,8 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             return (IReadOnlyList<IReadOnlyList<TeamsMessage>>)threads;
         }, ct);
 
-    internal async Task<byte[]> ChatMarkdownAsync(ChatInfo chat, CancellationToken ct)
+    /// <summary>A chat as Markdown, with its attachments (the files it shares, its inline images).</summary>
+    internal async Task<(byte[] Markdown, IReadOnlyList<TmNode> Attachments)> ChatAsync(ChatInfo chat, CancellationToken ct)
     {
         var messages = await Cache.GetAsync($"chat:{chat.Id}", _settings.Refresh, async c =>
         {
@@ -311,7 +314,134 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             await LearnNamesAsync(all, c).ConfigureAwait(false);
             return all;
         }, ct).ConfigureAwait(false);
-        return TeamsText.Chat(messages, ChatName(chat), NameOf);
+        var (attachments, names) = await AttachmentsAsync(messages, ct).ConfigureAwait(false);
+        return (TeamsText.Chat(messages, ChatName(chat), NameOf, names), attachments);
+    }
+
+    // --- files ---------------------------------------------------------------------------------------------------------
+
+    // inline images by address: an image's bytes never change; kept to 64 MiB in all, then begun again
+    private const long ImagesKept = 64L << 20;
+    private readonly ConcurrentDictionary<string, TeamsImage> _images = new(StringComparer.Ordinal);
+    private long _imageBytes;
+
+    /// <summary>
+    /// A conversation's attachments (spec 7.9): the files its messages share, each once, as SharePoint or OneDrive has them now
+    /// (one gone or out of reach is left out), and its inline images, read from Teams' media service and held in memory,
+    /// named by their message's time (<c>2026-10-29_1003_image-1.png</c>); with the names its Markdown links them by.
+    /// </summary>
+    internal async Task<(IReadOnlyList<TmNode> Nodes, AttachmentNames Names)> AttachmentsAsync(IReadOnlyList<TeamsMessage> messages, CancellationToken ct)
+    {
+        if (!_settings.Files)
+        {
+            return ([], AttachmentNames.None);
+        }
+
+        var found = new List<(string Name, Func<string, TmNode> Make, string? Image, string? File)>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var message in messages.Where(m => m.IsContent && m.Deleted is null).OrderBy(m => m.Composed ?? DateTimeOffset.MinValue).ThenBy(m => m.Id, StringComparer.Ordinal))
+        {
+            foreach (var file in message.Files)
+            {
+                if (!seen.Add(file.Url) || TeamsFiles.Locate(file.Url, file.SiteUrl) is not { } where || await SharedAsync(where, ct).ConfigureAwait(false) is not { } entry)
+                {
+                    continue;
+                }
+
+                found.Add((file.Name, name => new LibraryFile(name, where.SiteUrl, where.Path, entry.Length, entry.Modified), null, file.Url));
+            }
+
+            var number = 0;
+            foreach (var src in message.Images)
+            {
+                if (!seen.Add(src) || await ImageAsync(src, ct).ConfigureAwait(false) is not { } image)
+                {
+                    continue;
+                }
+
+                var stamp = message.Composed?.ToLocalTime().ToString("yyyy-MM-dd_HHmm", CultureInfo.InvariantCulture) ?? "image";
+                var when = message.Composed;
+                found.Add(($"{stamp}_image-{++number}{image.Extension}", name => new ImageFile(name, image, when), src, null));
+            }
+        }
+
+        var names = TeamsFiles.Unique(found.Select(f => f.Name).ToList());
+        var images = new Dictionary<string, string>(StringComparer.Ordinal);
+        var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < found.Count; i++)
+        {
+            if (found[i].Image is { } src)
+            {
+                images[src] = names[i];
+            }
+            else if (found[i].File is { } url)
+            {
+                files[url] = names[i];
+            }
+        }
+
+        return (found.Select((f, i) => f.Make(names[i])).ToList(), new AttachmentNames(images, files));
+    }
+
+    /// <summary>A shared file as SharePoint or OneDrive has it now; null when it is gone or out of reach (it is left out, not failed on).</summary>
+    private async Task<DriveEntry?> SharedAsync((string SiteUrl, string Path) where, CancellationToken ct)
+    {
+        try
+        {
+            return await Cache.GetAsync($"shared:{where.SiteUrl}/{where.Path}", _settings.Refresh, async c => new[] { await Api.FileAsync(where.SiteUrl, where.Path, c).ConfigureAwait(false) }, ct).ConfigureAwait(false) is [var entry] ? entry : null;
+        }
+        catch (VfsException ex) when (ex.Error is VfsError.AccessDenied or VfsError.Unavailable or VfsError.IoError)
+        {
+            Logger.LogInformation("teams: a shared file could not be read and is left out ({Error})", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>An inline image, read once while kept; null when it cannot be read (an address on no Teams media host is never asked).</summary>
+    private async Task<TeamsImage?> ImageAsync(string src, CancellationToken ct)
+    {
+        if (_images.TryGetValue(src, out var kept))
+        {
+            return kept;
+        }
+
+        var image = await Api.ImageAsync(src, ct).ConfigureAwait(false);
+        if (image is not null && _images.TryAdd(src, image) && Interlocked.Add(ref _imageBytes, image.Bytes.Length) > ImagesKept)
+        {
+            _images.Clear();
+            Interlocked.Exchange(ref _imageBytes, 0);
+        }
+
+        return image;
+    }
+
+    /// <summary>A SharePoint or OneDrive file, read in ranges through a download address fetched now; one that lapses mid-read (about an hour) is fetched again.</summary>
+    internal async Task<IVfsFile> OpenLibraryFileAsync(string siteUrl, string path, long length, CancellationToken ct)
+    {
+        var entry = await Api.FileAsync(siteUrl, path, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
+        var address = entry.DownloadUrl ?? throw VfsException.Unavailable($"SharePoint gave no download address for '{path}'");
+        return new RandomAccessOverStream(length, async (offset, openCt) =>
+        {
+            HttpResponseMessage response;
+            try
+            {
+                response = await Api.ContentAsync(address, offset, openCt).ConfigureAwait(false);
+            }
+            catch (VfsException ex) when (ex.Error == VfsError.AccessDenied)
+            {
+                var again = await Api.FileAsync(siteUrl, path, openCt).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
+                address = again.DownloadUrl ?? throw VfsException.Unavailable($"SharePoint gave no download address for '{path}'");
+                response = await Api.ContentAsync(address, offset, openCt).ConfigureAwait(false);
+            }
+
+            if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+            {
+                response.Dispose();
+                return Stream.Null;
+            }
+
+            return await ResponseStream.FromOffsetAsync(response, offset, path, null, openCt).ConfigureAwait(false);
+        }, maxStreams: Math.Clamp(_settings.Concurrency, 1, 8), maxSkipBytes: 1 << 20);
     }
 
     /// <summary>A conversation's messages, newest page first and back as far as the "within" window (or 2,000 messages) reaches.</summary>

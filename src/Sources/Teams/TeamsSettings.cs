@@ -45,7 +45,7 @@ public sealed class TeamsSettings
     public bool Chats { get; set; } = true;
 
     [Setting("Files", Order = 7,
-        Hint = "In each channel, its Files folder (the team's document library); and the files shared in chats. From the team's SharePoint site and the sender's OneDrive.")]
+        Hint = "In each channel, a files folder: the channel's folder of its team's document library. In each post and chat, an attachments folder: the files its messages share and their inline images. Read from the team's SharePoint site, the sender's OneDrive and Teams' own media service.")]
     public bool Files { get; set; } = true;
 
     [Setting("Cloud", Advanced = true, Order = 10, Kind = SettingKind.Choice,

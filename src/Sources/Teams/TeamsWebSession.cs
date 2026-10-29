@@ -24,6 +24,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     private static readonly TimeSpan Margin = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan SilentDeadline = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan InteractiveDeadline = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan SharePointGrace = TimeSpan.FromSeconds(5);
 
     // the services every sign-in reads, one bearer each (spike 18): matched by audience host, so any cloud's; SharePoint's
     // is kept when the page sends it and waited for only when asked for
@@ -160,9 +161,9 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     /// read, which are never read: who it is for then, else null. A sign-in name other than the account given is read — a
     /// work account's is often not its email — and logged once.
     /// </summary>
-    internal string? Take(string bearer)
+    internal string? Take(string bearer, string? url = null)
     {
-        var (_, account, _, tenant, _) = Claims(bearer);
+        var (aud, account, _, tenant, _) = Claims(bearer);
         if (tenant is not null)
         {
             if (tenant.Equals(PersonalTenant, StringComparison.OrdinalIgnoreCase))
@@ -183,8 +184,18 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         }
 
         Keep(bearer);
+
+        // where the page used SharePoint's token is the tenant's SharePoint (its OneDrive host, as it loads)
+        if (SharePointHost is null && TeamsServices.Of(aud) == TeamsService.SharePoint && Uri.TryCreate(url, UriKind.Absolute, out var used) && TeamsServices.IsSharePointHost(used.Host))
+        {
+            SharePointHost = used.Host;
+        }
+
         return null;
     }
+
+    /// <summary>The host the page used SharePoint's token on (the tenant's OneDrive or SharePoint), once seen; the files are found from it.</summary>
+    public string? SharePointHost { get; private set; }
 
     /// <summary>Opens the page in Firefox through WebDriver from now on, the Chromium browser's DevTools being out of reach; fails when there is no Firefox.</summary>
     private void UseFirefox(string why)
@@ -272,7 +283,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
                         {
                             var headers = (p["request"]?["headers"] ?? p["headers"]) as JsonObject;
                             var auth = headers?.FirstOrDefault(h => h.Key.Equals("Authorization", StringComparison.OrdinalIgnoreCase)).Value?.GetValue<string>();
-                            if (auth is not null && auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) && Take(auth[7..]) is { } other)
+                            if (auth is not null && auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) && Take(auth[7..], p["request"]?["url"]?.GetValue<string>()) is { } other)
                             {
                                 wrongAccount = other;
                             }
@@ -323,9 +334,9 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     {
         var mode = headless ? "headless" : "with a window";
         string? wrongAccount = null;
-        var launch = await FirefoxBiDiBrowser.LaunchAsync(_firefox!, $"{profileDir}-firefox", headless, (_, authorization) =>
+        var launch = await FirefoxBiDiBrowser.LaunchAsync(_firefox!, $"{profileDir}-firefox", headless, (url, authorization) =>
         {
-            if (authorization is not null && authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) && Take(authorization[7..]) is { } other)
+            if (authorization is not null && authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) && Take(authorization[7..], url) is { } other)
             {
                 wrongAccount = other;
             }
@@ -361,6 +372,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         var mode = headless ? "headless" : "with a window";
         var until = DateTime.UtcNow + deadline;
         var onSignInSince = (DateTime?)null;
+        var graceSince = (DateTime?)null;
         while (true)
         {
             ct.ThrowIfCancellationRequested();
@@ -371,7 +383,13 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
 
             if (Wanted.All(w => Fresh(w) is not null) && Fresh(want) is not null)
             {
-                return new Capture(true);
+                // SharePoint's token (the files) usually follows the others within seconds: a few more, so the first file
+                // read needs no second launch
+                graceSince ??= DateTime.UtcNow;
+                if (Fresh(TeamsService.SharePoint) is not null || DateTime.UtcNow - graceSince > SharePointGrace)
+                {
+                    return new Capture(true);
+                }
             }
 
             var page = where();

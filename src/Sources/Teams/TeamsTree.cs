@@ -77,7 +77,7 @@ internal sealed class TeamFolder(TeamInfo team, string name) : TmFolder(name)
     }
 }
 
-/// <summary>A channel: its posts (and, with the files feature, its Files folder — added with that feature).</summary>
+/// <summary>A channel: its posts, and its files (the channel's folder of its team's SharePoint library).</summary>
 internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string name) : TmFolder(name)
 {
     public TeamInfo Team { get; } = team;
@@ -92,8 +92,63 @@ internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string n
             children.Add(new PostsFolder(Channel));
         }
 
+        if (source.Settings.Files)
+        {
+            children.Add(new ChannelFilesFolder(Team, Channel));
+        }
+
         return Task.FromResult<IReadOnlyList<TmNode>>(children);
     }
+}
+
+/// <summary>A channel's files: its folder of its team's SharePoint library (or of a private channel's own site); empty while the team has no site.</summary>
+internal sealed class ChannelFilesFolder(TeamInfo team, ChannelInfo channel) : TmFolder("files")
+{
+    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
+    {
+        if (await source.Api.ChannelFilesAsync(team, channel, ct).ConfigureAwait(false) is not { } where)
+        {
+            return [];
+        }
+
+        return await LibraryFolder.ChildrenAsync(source, where.SiteUrl, where.Path, ct).ConfigureAwait(false);
+    }
+}
+
+/// <summary>A folder of a SharePoint library (in a channel's files): its folders and files, as the library has them.</summary>
+internal sealed class LibraryFolder(string siteUrl, string path, string name, DateTimeOffset? modified) : TmFolder(name, modified)
+{
+    public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct) => ChildrenAsync(source, siteUrl, path, ct);
+
+    public static async Task<IReadOnlyList<TmNode>> ChildrenAsync(TeamsSource source, string siteUrl, string path, CancellationToken ct)
+    {
+        var entries = await source.Api.FolderAsync(siteUrl, path, ct).ConfigureAwait(false);
+        return entries.Select(e =>
+        {
+            var child = path.Length == 0 ? e.Name : $"{path}/{e.Name}";
+            return e.IsFolder ? (TmNode)new LibraryFolder(siteUrl, child, e.Name, e.Modified) : new LibraryFile(e.Name, siteUrl, child, e.Length, e.Modified);
+        }).ToList();
+    }
+}
+
+/// <summary>A file in SharePoint or OneDrive (a channel's file, or one a message shares), read in ranges through a fresh download address.</summary>
+internal sealed class LibraryFile(string name, string siteUrl, string path, long length, DateTimeOffset? modified) : TmFile(name, length, modified)
+{
+    public override Task<IVfsFile> OpenAsync(TeamsSource source, CancellationToken ct) => source.OpenLibraryFileAsync(siteUrl, path, Entry.Length, ct);
+}
+
+/// <summary>An inline image, read from Teams' media service when its conversation was, held in memory.</summary>
+internal sealed class ImageFile(string name, TeamsImage image, DateTimeOffset? modified) : TmFile(name, image.Bytes.Length, modified)
+{
+    public override Task<IVfsFile> OpenAsync(TeamsSource source, CancellationToken ct) => Task.FromResult<IVfsFile>(new MemoryFile(image.Bytes, "an inline image from Teams"));
+}
+
+/// <summary>A conversation's attachments: the files its messages share and its inline images. Not walked: read with the conversation.</summary>
+internal sealed class AttachmentsFolder(IReadOnlyList<TmNode> attachments, DateTimeOffset? modified) : TmFolder("attachments", modified)
+{
+    public override bool Walked => false;
+
+    public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct) => Task.FromResult(attachments);
 }
 
 /// <summary>A channel's posts: a folder per thread (the opening message and its replies). Not walked: the messages are a call.</summary>
@@ -109,13 +164,25 @@ internal sealed class PostsFolder(ChannelInfo channel) : TmFolder("posts", null)
     }
 }
 
-/// <summary>One channel post: <c>post.md</c>, the opening message and its replies, built when the post itself is listed (not when its posts folder is).</summary>
+/// <summary>
+/// One channel post: <c>post.md</c>, the opening message and its replies, and its <c>attachments</c> (the files they share,
+/// their inline images) where it has any; built when the post itself is listed (not when its posts folder is).
+/// </summary>
 internal sealed class ThreadFolder(string name, IReadOnlyList<TeamsMessage> thread) : TmFolder(name, thread[0].Composed)
 {
     public override bool Walked => false;
 
-    public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<TmNode>>([new MarkdownFile("post.md", TeamsText.Post(thread, source.NameOf), thread[0].Composed)]);
+    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
+    {
+        var (attachments, names) = await source.AttachmentsAsync(thread, ct).ConfigureAwait(false);
+        var children = new List<TmNode> { new MarkdownFile("post.md", TeamsText.Post(thread, source.NameOf, names), thread[0].Composed) };
+        if (attachments.Count > 0)
+        {
+            children.Add(new AttachmentsFolder(attachments, thread[^1].Composed));
+        }
+
+        return children;
+    }
 }
 
 /// <summary>The account's chats: a folder per chat.</summary>
@@ -129,7 +196,7 @@ internal sealed class ChatsFolder() : TmFolder("Chats")
     }
 }
 
-/// <summary>One chat: <c>chat.md</c>, the whole conversation. Not walked: the messages are a call.</summary>
+/// <summary>One chat: <c>chat.md</c>, the whole conversation, and its <c>attachments</c> where it has any. Not walked: the messages are a call.</summary>
 internal sealed class ChatFolder(ChatInfo chat, string name) : TmFolder(name, chat.LastUpdated)
 {
     public ChatInfo Chat { get; } = chat;
@@ -138,7 +205,13 @@ internal sealed class ChatFolder(ChatInfo chat, string name) : TmFolder(name, ch
 
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
-        var markdown = await source.ChatMarkdownAsync(Chat, ct).ConfigureAwait(false);
-        return [new MarkdownFile("chat.md", markdown, Chat.LastUpdated)];
+        var (markdown, attachments) = await source.ChatAsync(Chat, ct).ConfigureAwait(false);
+        var children = new List<TmNode> { new MarkdownFile("chat.md", markdown, Chat.LastUpdated) };
+        if (attachments.Count > 0)
+        {
+            children.Add(new AttachmentsFolder(attachments, Chat.LastUpdated));
+        }
+
+        return children;
     }
 }

@@ -70,7 +70,80 @@ public class TeamsSourceTests
         await using var source = await StartAsync(Seed());
         CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats" }, await NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "General", "Random" }, await NamesAsync(source, "AnyFS Lab"));
+        CollectionAssert.AreEqual(new[] { "posts", "files" }, await NamesAsync(source, "AnyFS Lab/General"));
+    }
+
+    private const string Site = "https://contoso.sharepoint.com/sites/lab";
+
+    [TestMethod]
+    public async Task AChannelsFilesAreItsFolderOfTheTeamsLibrary()
+    {
+        var fake = new FakeTeams();
+        var general = FakeTeams.Channel("General", general: true);
+        var team = fake.AddTeam("AnyFS Lab", general);
+        fake.AddSite(team, Site);
+        var plan = Encoding.UTF8.GetBytes("The plan, in full: " + new string('x', 5000));
+        fake.AddLibraryFile(Site, "General/plan.txt", plan, When);
+        fake.AddLibraryFile(Site, "General/Specs/design.md", Encoding.UTF8.GetBytes("# Design"), When);
+        fake.AddLibraryFile(Site, "Random/elsewhere.txt", [1, 2, 3], When);
+        await using var source = await StartAsync(fake);
+
+        CollectionAssert.AreEqual(new[] { "plan.txt", "Specs" }, await NamesAsync(source, "AnyFS Lab/General/files"));
+        CollectionAssert.AreEqual(new[] { "design.md" }, await NamesAsync(source, "AnyFS Lab/General/files/Specs"));
+        Assert.AreEqual(plan.Length, (await source.StatAsync("AnyFS Lab/General/files/plan.txt", CancellationToken.None))!.Length);
+
+        // read whole, and from an offset (a range)
+        Assert.AreEqual(Encoding.UTF8.GetString(plan), await TextAsync(source, "AnyFS Lab/General/files/plan.txt"));
+        await using var file = await source.OpenAsync("AnyFS Lab/General/files/plan.txt", VfsOpenMode.Read, CancellationToken.None);
+        var tail = new byte[10];
+        await file.ReadFullyAsync(plan.Length - 10, tail, CancellationToken.None);
+        CollectionAssert.AreEqual(plan[^10..], tail);
+    }
+
+    [TestMethod]
+    public async Task AThreadsSharedFilesAndImagesAreItsAttachmentsAndTheMarkdownLinksThem()
+    {
+        const string ImageSrc = "https://as-prod.asyncgw.teams.microsoft.com/v1/objects/0-sa-d1-abc/views/imgo";
+        var png = new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 13, 10, 26, 10, 0, 0 };
+        var fake = new FakeTeams();
+        var general = FakeTeams.Channel("General", general: true);
+        var team = fake.AddTeam("AnyFS Lab", general);
+        fake.AddSite(team, Site);
+        fake.AddLibraryFile(Site, "General/report.docx", Encoding.UTF8.GetBytes("a report"), When);
+        fake.AddImage(ImageSrc, png);
+        var root = fake.Post(general.Id, Jane, "Jane Doe", "<p>The report</p>", When,
+            files: [new SharedFile("report.docx", $"{Site}/Shared Documents/General/report.docx", $"{Site}/")]);
+        fake.Post(general.Id, John, "John Roe", $"<p>A picture:</p><p><img itemscope=\"\" itemtype=\"http://schema.skype.com/AMSImage\" src=\"{ImageSrc}\" alt=\"image\"></p>", When.AddMinutes(1), rootId: root.Id);
+        await using var source = await StartAsync(fake);
+
+        var thread = (await NamesAsync(source, "AnyFS Lab/General/posts")).Single();
+        CollectionAssert.AreEqual(new[] { "post.md", "attachments" }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}"));
+        var image = $"{When.AddMinutes(1).ToLocalTime():yyyy-MM-dd_HHmm}_image-1.png";
+        CollectionAssert.AreEqual(new[] { "report.docx", image }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}/attachments"));
+        Assert.AreEqual("a report", await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/attachments/report.docx"));
+
+        var md = await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/post.md");
+        StringAssert.Contains(md, "- 📎 [report.docx](<attachments/report.docx>)");
+        StringAssert.Contains(md, $"(attachments/{image})");
+        Assert.IsFalse(md.Contains("asyncgw", StringComparison.Ordinal), "the image points at its copy, not the media service");
+        Assert.AreEqual(1, fake.ImageCalls, "an image is read once, however often its thread is listed or opened");
+    }
+
+    [TestMethod]
+    public async Task WithFilesOffThereAreNoFilesFoldersOrAttachments()
+    {
+        var fake = new FakeTeams();
+        var general = FakeTeams.Channel("General", general: true);
+        var team = fake.AddTeam("AnyFS Lab", general);
+        fake.AddSite(team, Site);
+        fake.AddLibraryFile(Site, "General/report.docx", [1], When);
+        fake.Post(general.Id, Jane, "Jane Doe", "<p>The report</p>", When, files: [new SharedFile("report.docx", $"{Site}/Shared Documents/General/report.docx", null)]);
+        await using var source = await StartAsync(fake, s => s.Files = false);
+
         CollectionAssert.AreEqual(new[] { "posts" }, await NamesAsync(source, "AnyFS Lab/General"));
+        var thread = (await NamesAsync(source, "AnyFS Lab/General/posts")).Single();
+        CollectionAssert.AreEqual(new[] { "post.md" }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}"));
+        StringAssert.Contains(await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/post.md"), "- 📎 report.docx");
     }
 
     [TestMethod]
