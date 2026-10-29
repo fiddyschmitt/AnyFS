@@ -109,6 +109,19 @@ the web session with Edge (a profile of its own, signed in through GitLab's LDAP
 the seeded project's `files/e2e` from each host (a token by address on Linux and macOS, the tester's domain account by name,
 through Kerberos, on Windows; `ANYFS_E2E_GITLAB_SIGNIN=token` uses the token everywhere).
 
+The Teams source's unit tests run against `tests/AnyFS.Sources.Tests/FakeTeams.cs`, a stand-in for Microsoft's Teams
+services made from what the Microsoft 365 developer sandbox answered (the aggregator's teams, channels and chats; the chat
+service's messages with their reactions, edits, deletions, shared files and inline images; a team's SharePoint library and
+the media service), in-process; `TeamsRestTests` read the services' answers through a fake handler, and `TeamsFilesTests`
+check where its tokens may go. `TeamsLiveTests` read the sandbox when `ANYFS_TEST_TEAMS_ACCOUNT` (the tester,
+`anyfs-tester@<tenant>.onmicrosoft.com`) and `ANYFS_TEAMS_PROFILES` (the root of the browser profiles signed in as it, such as
+`%LOCALAPPDATA%\AnyFS\tests\outlook-browser`: Teams signs in from the same Microsoft 365 session) are set;
+`ANYFS_TEAMS_BROWSER` names the browser (a Firefox takes the WebDriver route that a work machine's Edge policy can make the
+only one). `TeamsSandboxSeed` seeds the sandbox for them, once, with `ANYFS_SEED_TEAMS=1` beside those two: the team "AnyFS
+Lab" with its SharePoint site, a thread in General with replies, reactions, an edit, a deletion, a shared file and an inline
+image, files in the channel's folder, and the same in the tester's first chat; a run skips what it finds seeded. Teams is
+cloud only, so there is no lab machine or E2E row for it.
+
 ## Publish
 
 ```
@@ -183,6 +196,8 @@ src/Sources/ThreeDX      the 3DX source: a 3DEXPERIENCE platform's documents thr
                          signed in through 3DPassport (single sign-on, a browser, or a Windows account)
 src/Sources/Outlook      the Outlook source: a mailbox as folders, from a PST or OST file (LibOutlook), Exchange Online
                          through Outlook on the web's session, or an Exchange server over EWS with a Windows account
+src/Sources/Teams        the Teams source: an account's teams, channels, chats and their files, read-only, over Microsoft's
+                         own Teams services with the tokens the Teams web client mints in a browser of AnyFS's own
 src/Mounts/WinFsp        the WinFsp mount (Windows)
 src/Mounts/Smb           the SMB mount: LibSmb serving each collection as a share, one server per address and port
 src/Mounts/Fuse          the FUSE mount (Linux)
