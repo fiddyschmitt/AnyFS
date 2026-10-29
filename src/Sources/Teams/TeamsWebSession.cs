@@ -15,8 +15,9 @@ namespace AnyFS.Sources.Teams;
 /// profile folder or turns remote debugging off, as on a work machine), or the Browser setting names Firefox, the page is
 /// opened in Firefox through Selenium WebDriver instead, whose WebDriver BiDi events give the same requests
 /// (<see cref="FirefoxBiDiBrowser"/>). A headless launch gets them without a window while the profile's sign-in holds; a
-/// window is opened for the person only when it has lapsed and the caller allows. The account each token is for is
-/// checked against the account the source was given, so one profile's session is never read as another's.
+/// window is opened for the person only when it has lapsed and the caller allows. A token for a personal Microsoft account,
+/// or for another organisation than the first token read, is never read; a sign-in name other than the account the source
+/// was given is read (a work account's is often not its email) and logged.
 /// </summary>
 internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string profileDir, string expectedAccount, ILogger logger)
 {
@@ -31,6 +32,11 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
 
     // tokens a service refused, never kept again (Refused)
     private readonly ConcurrentDictionary<string, byte> _refused = new(StringComparer.Ordinal);
+
+    // the organisation of the first token read: another's is never read (Take); personal Microsoft accounts' tenant
+    private const string PersonalTenant = "9188040d-6c67-4c5b-b112-36a304b66dad";
+    private string? _tenant;
+    private int _warned;
 
     // Firefox, for opening the page through WebDriver: the configured browser when it is Firefox, else the installed one
     private readonly string? _firefox = BrowserLocator.KindOf(browserPath) == BrowserKind.Firefox ? browserPath : BrowserLocator.FindKind(BrowserKind.Firefox);
@@ -126,7 +132,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             return;
         }
 
-        var (aud, account, mri, expires) = Claims(token);
+        var (aud, account, mri, _, expires) = Claims(token);
         if (aud is null || expires is null)
         {
             return;
@@ -142,14 +148,31 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         _tokens[service] = (token, expires.Value);
     }
 
-    /// <summary>Keeps a bearer the page sent when it is the expected account's; the other account it is for, else null.</summary>
-    private string? Take(string bearer)
+    /// <summary>
+    /// Keeps a bearer the page sent, unless it is a personal Microsoft account's or another organisation's than the first one
+    /// read, which are never read: who it is for then, else null. A sign-in name other than the account given is read — a
+    /// work account's is often not its email — and logged once.
+    /// </summary>
+    internal string? Take(string bearer)
     {
-        var (_, account, _, _) = Claims(bearer);
-        if (account is not null && !account.Equals(expectedAccount, StringComparison.OrdinalIgnoreCase))
+        var (_, account, _, tenant, _) = Claims(bearer);
+        if (tenant is not null)
         {
-            // another account is signed in on this profile: do not read it
-            return account;
+            if (tenant.Equals(PersonalTenant, StringComparison.OrdinalIgnoreCase))
+            {
+                return $"{account ?? "an account"}, a personal Microsoft account";
+            }
+
+            var first = Interlocked.CompareExchange(ref _tenant, tenant, null) ?? tenant;
+            if (!tenant.Equals(first, StringComparison.OrdinalIgnoreCase))
+            {
+                return $"{account ?? "an account"}, of another organisation";
+            }
+        }
+
+        if (account is not null && !account.Equals(expectedAccount, StringComparison.OrdinalIgnoreCase) && Interlocked.Exchange(ref _warned, 1) == 0)
+        {
+            logger.LogWarning("teams: the {Browser} profile for {Expected} is signed in as {Account}; reading it, as a work account's sign-in name is often not its email", BrowserName, expectedAccount, account);
         }
 
         Keep(bearer);
@@ -370,15 +393,15 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         }
     }
 
-    /// <summary>A JWT's audience, the account (upn/preferred_username), the account's mri (<c>8:orgid:&lt;oid&gt;</c>) and expiry; nulls for anything else.</summary>
-    internal static (string? Aud, string? Account, string? Mri, DateTimeOffset? Expires) Claims(string token)
+    /// <summary>A JWT's audience, the account (upn/preferred_username), the account's mri (<c>8:orgid:&lt;oid&gt;</c>), its tenant and expiry; nulls for anything else.</summary>
+    internal static (string? Aud, string? Account, string? Mri, string? Tenant, DateTimeOffset? Expires) Claims(string token)
     {
         try
         {
             var parts = token.Split('.');
             if (parts.Length < 2)
             {
-                return (null, null, null, null);
+                return (null, null, null, null, null);
             }
 
             var payload = parts[1].Replace('-', '+').Replace('_', '/');
@@ -391,11 +414,11 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             var oid = S("oid");
             var mri = oid is null ? null : $"8:orgid:{oid}";
             var expires = root.TryGetProperty("exp", out var e) && e.TryGetInt64(out var seconds) ? DateTimeOffset.FromUnixTimeSeconds(seconds) : (DateTimeOffset?)null;
-            return (aud, account, mri, expires);
+            return (aud, account, mri, S("tid"), expires);
         }
         catch (Exception ex) when (ex is FormatException or JsonException)
         {
-            return (null, null, null, null);
+            return (null, null, null, null, null);
         }
     }
 }
