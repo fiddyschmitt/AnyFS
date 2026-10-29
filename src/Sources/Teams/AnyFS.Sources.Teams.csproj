@@ -21,8 +21,9 @@
     <Using Include="AnyFS.Sources.Common" />
   </ItemGroup>
   <ItemGroup>
-    <!-- the type's icon (OpenIcon): a mark of AnyFS's own, two chat bubbles (not Microsoft's Teams logo), drawn by
-         "AnyFS local\tools\icons\teams-icon.ps1" at 256 px and scaled to 64 -->
+    <!-- the type's icon (OpenIcon): Teams' logo from the user's microsoft-teams.png (29-Oct-2026, 513 x 513 with real
+         transparency, the logo 513 x 490 at its foot), cropped to the logo, centred on a square transparent canvas and
+         scaled to 64 px -->
     <EmbeddedResource Include="Assets\teams.png" LogicalName="teams.png" />
   </ItemGroup>
   <ItemGroup>
