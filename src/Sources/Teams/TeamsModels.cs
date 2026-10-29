@@ -15,6 +15,9 @@ internal sealed record ChannelInfo(string Id, string DisplayName, bool IsGeneral
     /// (a private channel's points into its own site); often null, when the folder is the channel's name in the team's library.
     /// </summary>
     public string? FilesPath { get; init; }
+
+    /// <summary>The aggregator's version of the channel's conversation, which moves on as it changes: an unchanged one is not read again.</summary>
+    public string? Version { get; init; }
 }
 
 /// <summary>A team's SharePoint site and the server-relative path of its default library (<c>/sites/x/Shared Documents</c>).</summary>
@@ -41,7 +44,11 @@ internal enum ChatKind
 /// <summary>A chat the account is in: the aggregator's <c>chats[]</c> entry.</summary>
 /// <param name="Title">The chat's own topic, where it has one; null for a 1:1 or an untitled group (then named for its members).</param>
 /// <param name="MemberMris">The other people's mris (the account's own left out), for naming a 1:1 or group chat.</param>
-internal sealed record ChatInfo(string Id, string? Title, ChatKind Kind, IReadOnlyList<string> MemberMris, DateTimeOffset? LastUpdated);
+internal sealed record ChatInfo(string Id, string? Title, ChatKind Kind, IReadOnlyList<string> MemberMris, DateTimeOffset? LastUpdated)
+{
+    /// <summary>The aggregator's version of the chat, which moves on as it changes: an unchanged one is not read again.</summary>
+    public string? Version { get; init; }
+}
 
 /// <summary>One message of a conversation (a channel's or a chat's): the chat service's <c>messages[]</c> entry.</summary>
 /// <param name="RootId">The opening message of its thread (channel posts are grouped by this); null or itself for a root.</param>

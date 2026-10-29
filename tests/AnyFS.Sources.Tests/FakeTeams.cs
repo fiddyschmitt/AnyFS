@@ -89,6 +89,7 @@ internal sealed class FakeTeams : ITeamsApi
             _people[fromMri] = fromName;
         }
 
+        Bump(threadId, id);
         return message;
     }
 
@@ -140,6 +141,33 @@ internal sealed class FakeTeams : ITeamsApi
 
     /// <summary>Renames a person (as when the source later learns a sender's name from a message).</summary>
     public void Rename(string mri, string displayName) => _people[mri] = displayName;
+
+    /// <summary>Moves a conversation's version on, as the aggregator does when it changes (a post does it itself).</summary>
+    public void Bump(string threadId, string version)
+    {
+        for (var i = 0; i < _chats.Count; i++)
+        {
+            if (_chats[i].Id == threadId)
+            {
+                _chats[i] = _chats[i] with { Version = version };
+            }
+        }
+
+        for (var i = 0; i < _teams.Count; i++)
+        {
+            if (_teams[i].Channels.Any(c => c.Id == threadId))
+            {
+                _teams[i] = _teams[i] with { Channels = _teams[i].Channels.Select(c => c.Id == threadId ? c with { Version = version } : c).ToList() };
+            }
+        }
+    }
+
+    /// <summary>Replaces a message as it is now (edited, reacted to), without moving its conversation's version on.</summary>
+    public void Replace(string threadId, TeamsMessage message)
+    {
+        var list = _messages[threadId];
+        list[list.FindIndex(m => m.Id == message.Id)] = message;
+    }
 
     // --- files ---------------------------------------------------------------------------------------------------------
 

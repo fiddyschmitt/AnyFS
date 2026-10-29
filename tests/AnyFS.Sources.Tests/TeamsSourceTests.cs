@@ -375,6 +375,55 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task AnUnchangedConversationIsNotReadAgainAndAChangedOneOnlyItsNewestPage()
+    {
+        var fake = new FakeTeams();
+        var chat = fake.AddChat(ChatKind.Group, "Project Axle", [Jane, John], When);
+        fake.Post(chat.Id, John, "John Roe", "<p>Kickoff Monday</p>", When);
+        await using var source = await StartAsync(fake, s => s.RefreshSeconds = 0); // every listing asks
+
+        CollectionAssert.Contains(await NamesAsync(source, "Chats/Project Axle"), "chat.md");
+        var calls = fake.MessageCalls;
+        await NamesAsync(source, "Chats/Project Axle");
+        Assert.AreEqual(calls, fake.MessageCalls, "its version has not moved on: not read again");
+
+        fake.Post(chat.Id, Jane, "Jane Doe", "<p>Agenda attached</p>", When.AddHours(1));
+        await NamesAsync(source, "Chats/Project Axle");
+        Assert.AreEqual(calls + 1, fake.MessageCalls, "changed: its newest page alone");
+        var md = await TextAsync(source, "Chats/Project Axle/chat.md");
+        StringAssert.Contains(md, "Kickoff Monday");
+        StringAssert.Contains(md, "Agenda attached");
+    }
+
+    [TestMethod]
+    public async Task TheListingsTheLastRunSawOpenAtOnceAtTheNextStart()
+    {
+        var fake = Seed();
+        var context = new TestSourceContext();
+        await using (var first = new TeamsSource(new TeamsSettings { Account = fake.Account }, fake.StandIn()))
+        {
+            await first.InitialiseAsync(context, CancellationToken.None);
+            CollectionAssert.Contains(await NamesAsync(first, "Chats"), "Project Axle");
+        }
+
+        // the next run, the same state folder: answered from what the last saw while Teams is slow, then listed afresh
+        fake.AddChat(ChatKind.Group, "Later chat", [Jane], When);
+        fake.StructureDelay = TimeSpan.FromSeconds(2);
+        await using var next = new TeamsSource(new TeamsSettings { Account = fake.Account }, fake.StandIn());
+        await next.InitialiseAsync(context, CancellationToken.None);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var names = await NamesAsync(next, "Chats");
+        Assert.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(1), $"answered from the saved listing, not the aggregator ({clock.Elapsed.TotalSeconds:F1} s)");
+        CollectionAssert.DoesNotContain(names, "Later chat", "what the last run saw");
+        for (var i = 0; i < 100 && !(await NamesAsync(next, "Chats")).Contains("Later chat"); i++)
+        {
+            await Task.Delay(100);
+        }
+
+        CollectionAssert.Contains(await NamesAsync(next, "Chats"), "Later chat", "listed afresh behind that answer");
+    }
+
+    [TestMethod]
     public void AReactionsEmojiIsNamedOrByItsCodePoint()
     {
         Assert.AreEqual("👍", TeamsText.EmojiOf("like"));

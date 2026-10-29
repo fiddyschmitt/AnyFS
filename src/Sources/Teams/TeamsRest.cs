@@ -51,6 +51,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
                 channels.Add(new ChannelInfo(Str(c, "id") ?? "", Str(c, "displayName") ?? "", Bool(c, "isGeneral"), Int(c, "channelType") != 0)
                 {
                     FilesPath = NullIfEmpty(Str(Obj(c, "defaultFileSettings"), "filesRelativePath")),
+                    Version = NullIfEmpty(Str(c, "version")),
                 });
             }
 
@@ -62,7 +63,10 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         foreach (var c in Arr(doc.RootElement, "chats"))
         {
             var members = Arr(c, "members").Select(m => Str(m, "mri") ?? "").Where(m => m.Length > 0).ToList();
-            chats.Add(new ChatInfo(Str(c, "id") ?? "", NullIfEmpty(Str(c, "title")), KindOf(c), members, Time(Str(c, "lastUpdatedTime") ?? Str(c, "version"))));
+            chats.Add(new ChatInfo(Str(c, "id") ?? "", NullIfEmpty(Str(c, "title")), KindOf(c), members, Time(Str(c, "lastUpdatedTime") ?? Str(c, "version")))
+            {
+                Version = NullIfEmpty(Str(c, "version")),
+            });
         }
 
         return new TeamsStructure(teams, chats);
