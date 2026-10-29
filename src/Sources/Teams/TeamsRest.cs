@@ -128,9 +128,12 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
 
     // --- service discovery ---------------------------------------------------------------------------------------------
 
+    /// <summary>The region's services and the skype token the authz call hands out, as discovered (again once that token runs low).</summary>
+    internal Task<Services> ServicesAsync(CancellationToken ct) => DiscoverAsync(ct);
+
     private async Task<Services> DiscoverAsync(CancellationToken ct)
     {
-        if (_services is { } ready)
+        if (_services is { } ready && ready.SkypeExpires - DateTimeOffset.UtcNow > TimeSpan.FromMinutes(10))
         {
             return ready;
         }
@@ -142,11 +145,19 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         var aggregator = (Str(gtms, "chatServiceAggregator") ?? Str(gtms, "chatSvcAggAfd") ?? throw VfsException.Unavailable("Teams did not say where its aggregator is")).TrimEnd('/');
         var chatService = (Str(gtms, "chatService") ?? Str(gtms, "chatServiceAfd") ?? throw VfsException.Unavailable("Teams did not say where its chat service is")).TrimEnd('/');
         var middleTier = (Str(gtms, "middleTier") ?? $"{teamsApiHost.AbsoluteUri.TrimEnd('/')}/api/mt/apac").TrimEnd('/');
+        var ams = (Str(gtms, "amsV2") ?? Str(gtms, "ams"))?.TrimEnd('/');
+
+        // the skype token Teams' media service (inline images) takes, with its life in seconds (purple-teams reads both forms)
+        var tokens = Obj(doc.RootElement, "tokens");
+        var skypeToken = Str(tokens, "skypeToken") ?? Str(Obj(doc.RootElement, "skypeToken"), "skypetoken");
+        var life = Int(tokens, "expiresIn") is > 0 and var seconds ? seconds : Int(Obj(doc.RootElement, "skypeToken"), "expiresIn");
+        var skypeExpires = skypeToken is null ? DateTimeOffset.MaxValue : DateTimeOffset.UtcNow.AddSeconds(life > 0 ? life : 3600);
         logger.LogInformation("teams: services for {Account}: aggregator {Aggregator}, chat service {ChatService}", Account, aggregator, chatService);
-        return _services = new Services(aggregator, chatService, middleTier);
+        return _services = new Services(aggregator, chatService, middleTier, ams, skypeToken, skypeExpires);
     }
 
-    private sealed record Services(string Aggregator, string ChatService, string MiddleTier);
+    /// <summary>The region's services (authz regionGtms), the media service's host, and the skype token it takes.</summary>
+    internal sealed record Services(string Aggregator, string ChatService, string MiddleTier, string? Ams, string? SkypeToken, DateTimeOffset SkypeExpires);
 
     // --- the send path -------------------------------------------------------------------------------------------------
 

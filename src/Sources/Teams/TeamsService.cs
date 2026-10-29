@@ -16,15 +16,31 @@ internal enum TeamsService
 
     /// <summary>The middle tier: the region's service discovery and people's names (api.spaces.*).</summary>
     MiddleTier,
+
+    /// <summary>
+    /// SharePoint and OneDrive: a team's files and the files shared in chats. Its audience is SharePoint's app id in both
+    /// clouds (00000003-0000-0ff1-ce00-000000000000), or a tenant's SharePoint host. The page mints it as it loads, but a
+    /// sign-in does not wait for it: the source asks for it only to read files.
+    /// </summary>
+    SharePoint,
 }
 
 internal static class TeamsServices
 {
-    public static readonly TeamsService[] All = Enum.GetValues<TeamsService>();
+    /// <summary>The services every sign-in reads before it is done: the teams, chats, messages and people.</summary>
+    public static readonly TeamsService[] Core = [TeamsService.ChatService, TeamsService.Aggregator, TeamsService.MiddleTier];
+
+    /// <summary>SharePoint's app id: the audience of a SharePoint or OneDrive token in every cloud seen.</summary>
+    public const string SharePointApp = "00000003-0000-0ff1-ce00-000000000000";
 
     /// <summary>The service a token's audience is for, by the audience's host; null for one the source does not use.</summary>
     public static TeamsService? Of(string? audience)
     {
+        if (audience is not null && audience.Trim().Equals(SharePointApp, StringComparison.OrdinalIgnoreCase))
+        {
+            return TeamsService.SharePoint;
+        }
+
         if (audience is null || !Uri.TryCreate(audience.Trim(), UriKind.Absolute, out var uri))
         {
             return null;
@@ -34,6 +50,12 @@ internal static class TeamsServices
         return host.StartsWith("ic3.", StringComparison.OrdinalIgnoreCase) ? TeamsService.ChatService
             : host.StartsWith("chatsvcagg.", StringComparison.OrdinalIgnoreCase) ? TeamsService.Aggregator
             : host.StartsWith("api.spaces.", StringComparison.OrdinalIgnoreCase) ? TeamsService.MiddleTier
+            : IsSharePointHost(host) ? TeamsService.SharePoint
             : null;
     }
+
+    /// <summary>A tenant's SharePoint or OneDrive host, in any cloud (sharepoint.com, sharepoint.us, sharepoint-mil.us, sharepoint.cn).</summary>
+    public static bool IsSharePointHost(string host)
+        => host.EndsWith(".sharepoint.com", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".sharepoint.us", StringComparison.OrdinalIgnoreCase)
+            || host.EndsWith(".sharepoint-mil.us", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".sharepoint.cn", StringComparison.OrdinalIgnoreCase);
 }

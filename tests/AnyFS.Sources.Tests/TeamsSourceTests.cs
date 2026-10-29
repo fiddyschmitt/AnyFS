@@ -290,11 +290,14 @@ public class TeamsSourceTests
         Assert.AreEqual(TeamsService.MiddleTier, TeamsServices.Of("https://api.spaces.skype.com"));
         Assert.AreEqual(TeamsService.MiddleTier, TeamsServices.Of("https://api.spaces.skype.com/"));
 
+        // SharePoint's, for the files: its app id in both clouds, or a tenant's host
+        Assert.AreEqual(TeamsService.SharePoint, TeamsServices.Of("00000003-0000-0ff1-ce00-000000000000"));
+        Assert.AreEqual(TeamsService.SharePoint, TeamsServices.Of("https://contoso.sharepoint.us"));
+
         // the client's other tokens are not the source's
         Assert.IsNull(TeamsServices.Of("https://presence.gov.teams.microsoft.us/"));
         Assert.IsNull(TeamsServices.Of("https://outlook.office365.us"));
         Assert.IsNull(TeamsServices.Of("https://graph.microsoft.us"));
-        Assert.IsNull(TeamsServices.Of("00000003-0000-0ff1-ce00-000000000000"));
         Assert.IsNull(TeamsServices.Of(null));
     }
 }
