@@ -15,6 +15,14 @@ internal enum TeamsSignIn
 /// </summary>
 internal sealed record TeamsCloud(string Name, string TeamsHost, string ApiHost, string Display)
 {
+    /// <summary>Microsoft Graph's address in the cloud (where a Graph token's audience does not name it).</summary>
+    public string GraphHost => Name switch
+    {
+        "gcc-high" => "https://graph.microsoft.us",
+        "dod" => "https://dod-graph.microsoft.us",
+        _ => "https://graph.microsoft.com",
+    };
+
     public static readonly TeamsCloud Global = new("global", "https://teams.cloud.microsoft", "https://teams.microsoft.com", "Microsoft 365 (global)");
 
     // the US government clouds: GCC High's verified at a GCC High tenant (its authz answers at gov.teams.microsoft.us);
@@ -50,6 +58,10 @@ public sealed class TeamsSettings
     [Setting("Files", Order = 7,
         Hint = "In each channel, a files folder: the channel's folder of its team's document library. In each post and chat, an attachments folder: the files its messages share and their inline images. Read from the team's SharePoint site, the sender's OneDrive and Teams' own media service.")]
     public bool Files { get; set; } = true;
+
+    [Setting("Groups", Order = 8,
+        Hint = "An Other groups folder: every group site you can open beyond your teams above (public groups you have not joined among them), each with its files. And groups.md: every group there is, with its details — every group in the organisation where the Teams client gives a token that can list them (GCC High's does), else every group you can see.")]
+    public bool Groups { get; set; } = true;
 
     [Setting("Cloud", Advanced = true, Order = 10, Kind = SettingKind.Choice,
         Choices = ["Microsoft 365 (global)", "US Gov (GCC High)", "US Gov (DoD)"],

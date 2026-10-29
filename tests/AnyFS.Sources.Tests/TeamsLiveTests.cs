@@ -52,7 +52,7 @@ public class TeamsLiveTests
 
         var root = await ListAsync(source, "");
         Assert.IsTrue(root.Any(e => e.Name == "Chats"), "the root has a Chats folder");
-        var teams = root.Where(e => e.Name != "Chats").ToList();
+        var teams = root.Where(e => e.Name is not ("Chats" or "Other groups" or "groups.md")).ToList();
         Assert.IsTrue(teams.Count > 0, "the account is in at least one team (the sandbox seed)");
 
         // a team lists its channels, a channel its posts folder
@@ -113,6 +113,26 @@ public class TeamsLiveTests
         StringAssert.Contains(chatMd, "😆 ");
         StringAssert.Contains(chatMd, "edited\n\nA chat message, edited");
         StringAssert.Contains(chatMd, "*This message was deleted.*");
+    }
+
+    /// <summary>The sandbox's groups: the sample groups the tester has not joined, with their files, and groups.md (from SharePoint: Microsoft 365's client gives no Graph token).</summary>
+    [TestMethod]
+    [Timeout(300_000)]
+    public async Task TheOtherGroupsAndGroupsMdShowTheSandboxsGroups()
+    {
+        var (account, _) = Env();
+        await using var source = await StartAsync(account);
+
+        var others = (await ListAsync(source, "Other groups")).Select(e => e.Name).ToList();
+        CollectionAssert.Contains(others, "Mark 8 Project Team", "a public sample group the tester has not joined");
+        CollectionAssert.DoesNotContain(others, "AnyFS Lab", "its team is at the root");
+        Assert.IsTrue((await ListAsync(source, "Other groups/Mark 8 Project Team")).Count > 0, "its library, readable without joining");
+
+        var md = await TextAsync(source, "groups.md");
+        StringAssert.Contains(md, $"The groups {account} can see, from SharePoint");
+        StringAssert.Contains(md, "| Mark 8 Project Team | Microsoft 365 group | Public |");
+        StringAssert.Contains(md, "| AnyFS Lab | Microsoft 365 group | Private | yes | owner |");
+        StringAssert.Contains(md, "| MSFT | Microsoft 365 group | Org-wide | yes | member |");
     }
 
     /// <summary>The seeded sandbox's files: the channel's folder of its team's library, a thread's and a chat's attachments.</summary>

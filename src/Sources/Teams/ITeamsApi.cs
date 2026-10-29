@@ -45,4 +45,14 @@ internal interface ITeamsApi : IAsyncDisposable
 
     /// <summary>An inline image's bytes, from Teams' media service; null when it cannot be read (a host other than Teams' own is never asked).</summary>
     Task<TeamsImage?> ImageAsync(string src, CancellationToken ct);
+
+    /// <summary>Every Microsoft 365 group site the account can open (SharePoint search, which leaves out what it may not see).</summary>
+    Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Every group there is, with its details: every group of the organisation from Microsoft Graph where the web client
+    /// gives a Graph token; else the group sites the account can open, with SharePoint's details of each and what the
+    /// aggregator says of <paramref name="joined"/>.
+    /// </summary>
+    Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, CancellationToken ct);
 }

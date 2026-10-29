@@ -23,6 +23,13 @@ internal enum TeamsService
     /// sign-in does not wait for it: the source asks for it only to read files.
     /// </summary>
     SharePoint,
+
+    /// <summary>
+    /// Microsoft Graph (graph.microsoft.com, graph.microsoft.us, dod-graph.microsoft.us): GCC High's web client mints one
+    /// (Group.Read.All among its scopes), Microsoft 365's none (spike 18). Kept when the page sends it, never waited for at
+    /// a sign-in; <c>groups.md</c> lists every group of the organisation through it where there is one.
+    /// </summary>
+    Graph,
 }
 
 internal static class TeamsServices
@@ -33,12 +40,25 @@ internal static class TeamsServices
     /// <summary>SharePoint's app id: the audience of a SharePoint or OneDrive token in every cloud seen.</summary>
     public const string SharePointApp = "00000003-0000-0ff1-ce00-000000000000";
 
+    /// <summary>Microsoft Graph's app id, an audience a Graph token can carry instead of its host.</summary>
+    public const string GraphApp = "00000003-0000-0000-c000-000000000000";
+
     /// <summary>The service a token's audience is for, by the audience's host; null for one the source does not use.</summary>
     public static TeamsService? Of(string? audience)
     {
         if (audience is not null && audience.Trim().Equals(SharePointApp, StringComparison.OrdinalIgnoreCase))
         {
             return TeamsService.SharePoint;
+        }
+
+        if (audience is not null && audience.Trim().Equals(GraphApp, StringComparison.OrdinalIgnoreCase))
+        {
+            return TeamsService.Graph;
+        }
+
+        if (audience is not null && Uri.TryCreate(audience.Trim(), UriKind.Absolute, out var graph) && IsGraphHost(graph.Host))
+        {
+            return TeamsService.Graph;
         }
 
         if (audience is null || !Uri.TryCreate(audience.Trim(), UriKind.Absolute, out var uri))
@@ -53,6 +73,11 @@ internal static class TeamsServices
             : IsSharePointHost(host) ? TeamsService.SharePoint
             : null;
     }
+
+    /// <summary>Microsoft Graph's host in a cloud: graph.microsoft.com, graph.microsoft.us (GCC High), dod-graph.microsoft.us.</summary>
+    public static bool IsGraphHost(string host)
+        => host.Equals("graph.microsoft.com", StringComparison.OrdinalIgnoreCase) || host.Equals("graph.microsoft.us", StringComparison.OrdinalIgnoreCase)
+            || host.Equals("dod-graph.microsoft.us", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>A tenant's SharePoint or OneDrive host, in any cloud (sharepoint.com, sharepoint.us, sharepoint-mil.us, sharepoint.cn).</summary>
     public static bool IsSharePointHost(string host)

@@ -3,7 +3,65 @@ namespace AnyFS.Sources.Teams;
 /// <summary>A team the account is in: the aggregator's <c>teams[]</c> entry (spec 7.9, spike 18).</summary>
 /// <param name="Id">The team's thread id (<c>19:…@thread.tacv2</c>).</param>
 /// <param name="GroupId">The Microsoft 365 group behind the team, from which its SharePoint site is found (files).</param>
-internal sealed record TeamInfo(string Id, string DisplayName, string? GroupId, IReadOnlyList<ChannelInfo> Channels);
+internal sealed record TeamInfo(string Id, string DisplayName, string? GroupId, IReadOnlyList<ChannelInfo> Channels)
+{
+    /// <summary>Whether the account owns the team (the aggregator's <c>memberRoleString</c> "admin"), not only belongs to it.</summary>
+    public bool Owner { get; init; }
+
+    /// <summary>Who may join: the aggregator's <c>accessType</c> (1 private, 2 public, 3 org-wide); 0 when it does not say.</summary>
+    public int AccessType { get; init; }
+
+    /// <summary>How many belong to it (<c>membershipSummary.totalMemberCount</c>); null when not given.</summary>
+    public int? Members { get; init; }
+}
+
+/// <summary>A Microsoft 365 group's SharePoint site, as SharePoint search finds those the account can open.</summary>
+internal sealed record GroupSite(string GroupId, string Name, string SiteUrl, string? Description, DateTimeOffset? Created);
+
+/// <summary>A group of the organisation and what is known of it: from Microsoft Graph everything there; else what SharePoint and the aggregator tell.</summary>
+internal sealed record GroupInfo(string Id, string Name)
+{
+    /// <summary>Microsoft 365 group, Security group, Mail-enabled security group or Distribution list.</summary>
+    public string? Kind { get; init; }
+
+    /// <summary>Public, Private, Hidden membership or Org-wide; null where unknown or for a group that has none.</summary>
+    public string? Visibility { get; init; }
+
+    /// <summary>Whether it has a team; null where unknown.</summary>
+    public bool? Team { get; init; }
+
+    public bool Dynamic { get; init; }
+
+    public string? Description { get; init; }
+
+    public string? Mail { get; init; }
+
+    public string? Alias { get; init; }
+
+    public string? Classification { get; init; }
+
+    public string? MembershipRule { get; init; }
+
+    public string? SiteUrl { get; init; }
+
+    public DateTimeOffset? Created { get; init; }
+
+    public DateTimeOffset? Renewed { get; init; }
+
+    public DateTimeOffset? Expires { get; init; }
+
+    public bool? OnPremisesSynced { get; init; }
+
+    public bool? RoleAssignable { get; init; }
+
+    public int? Members { get; init; }
+}
+
+/// <summary>
+/// The groups for <c>groups.md</c>: every one in the organisation (<see cref="Complete"/>, from Microsoft Graph), else those
+/// the account can see; with the ones it belongs to and owns, and where they came from.
+/// </summary>
+internal sealed record GroupsDirectory(IReadOnlyList<GroupInfo> Groups, IReadOnlySet<string> Member, IReadOnlySet<string> Owner, bool Complete, string From);
 
 /// <summary>A channel of a team: its own conversation thread.</summary>
 /// <param name="Id">The channel's thread id, which is also the conversation id its messages are read by.</param>

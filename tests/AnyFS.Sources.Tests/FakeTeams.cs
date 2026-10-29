@@ -243,6 +243,26 @@ internal sealed class FakeTeams : ITeamsApi
 
     private static string Download(string site, string path) => "https://download.test/" + Uri.EscapeDataString($"{site}|{path}");
 
+    // --- groups --------------------------------------------------------------------------------------------------------
+
+    private readonly List<GroupSite> _groupSites = [];
+
+    /// <summary>What GroupsAsync answers, as Graph lists every group; null answers the group sites, as SharePoint shows them.</summary>
+    public GroupsDirectory? Directory { get; set; }
+
+    /// <summary>A group site the account can open (its library's files added with <see cref="AddLibraryFile"/>).</summary>
+    public void AddGroupSite(GroupSite site) => _groupSites.Add(site);
+
+    public Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct) => Task.FromResult<IReadOnlyList<GroupSite>>(_groupSites.ToList());
+
+    public Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, CancellationToken ct)
+        => Task.FromResult(Directory ?? new GroupsDirectory(
+            _groupSites.Select(s => new GroupInfo(s.GroupId, s.Name) { Kind = "Microsoft 365 group", SiteUrl = s.SiteUrl, Description = s.Description, Created = s.Created }).ToList(),
+            joined.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
+            joined.Where(t => t.Owner).Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
+            Complete: false,
+            "SharePoint"));
+
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     public TeamsStandIn StandIn() => new(this);

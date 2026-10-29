@@ -61,8 +61,31 @@ internal sealed class RootFolder : TmFolder
             children.Add(new ChatsFolder());
         }
 
+        if (source.Settings.Groups)
+        {
+            children.Add(new OtherGroupsFolder());
+            children.Add(new MarkdownFile("groups.md", await source.GroupsMarkdownAsync(ct).ConfigureAwait(false), null));
+        }
+
         return children;
     }
+}
+
+/// <summary>Every group site the account can open beyond its teams above (public groups it has not joined among them): a folder each, of the group's library. Walked as the others are.</summary>
+internal sealed class OtherGroupsFolder() : TmFolder("Other groups")
+{
+    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
+    {
+        var groups = await source.OtherGroupsAsync(ct).ConfigureAwait(false);
+        var names = TeamsNames.Unique(groups.Select(g => g.Name).ToList());
+        return groups.Select((g, i) => (TmNode)new GroupFolder(g, names[i])).ToList();
+    }
+}
+
+/// <summary>A group the account has no team of here: its site's library, as the library has it.</summary>
+internal sealed class GroupFolder(GroupSite group, string name) : TmFolder(name, group.Created)
+{
+    public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct) => LibraryFolder.ChildrenAsync(source, group.SiteUrl, "", ct);
 }
 
 /// <summary>A team: a folder per channel.</summary>

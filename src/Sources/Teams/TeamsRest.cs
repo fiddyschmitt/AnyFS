@@ -19,7 +19,10 @@ namespace AnyFS.Sources.Teams;
 /// <param name="tokenFor">The bearer for a service; the second argument is a token the service just refused, else null.</param>
 /// <param name="handler">The handler requests go through: a test's fake; null for the network.</param>
 /// <param name="sharePointHost">The host the page used the SharePoint token on (the tenant's OneDrive or SharePoint), once that token is read.</param>
-internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, CancellationToken, Task<string>> tokenFor, int concurrency, ILogger logger, HttpMessageHandler? handler = null, Func<string?>? sharePointHost = null) : ITeamsApi
+/// <param name="optionalToken">A token for a service the page mints only sometimes (Graph), or null when there is none; never a failure.</param>
+/// <param name="graphHost">Microsoft Graph's address in the cloud, where a Graph token's audience does not name it.</param>
+internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, CancellationToken, Task<string>> tokenFor, int concurrency, ILogger logger, HttpMessageHandler? handler = null, Func<string?>? sharePointHost = null,
+    Func<TeamsService, CancellationToken, Task<string?>>? optionalToken = null, string graphHost = "https://graph.microsoft.com") : ITeamsApi
 {
     // the client version Teams' media service takes its "platform id" from (49: Teams for work), as purple-teams sends it
     private const string ClientVersion = "49/25113001312";
@@ -56,7 +59,13 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             }
 
             var groupId = Str(Obj(t, "teamSiteInformation"), "groupId") ?? Str(t, "groupId");
-            teams.Add(new TeamInfo(Str(t, "id") ?? "", Str(t, "displayName") ?? "(team)", groupId, channels));
+            var summary = Obj(t, "membershipSummary");
+            teams.Add(new TeamInfo(Str(t, "id") ?? "", Str(t, "displayName") ?? "(team)", groupId, channels)
+            {
+                Owner = string.Equals(Str(t, "memberRoleString"), "admin", StringComparison.OrdinalIgnoreCase) || Int(t, "memberRole") == 2,
+                AccessType = Int(t, "accessType"),
+                Members = Int(summary, "totalMemberCount") is > 0 and var count ? count : null,
+            });
         }
 
         var chats = new List<ChatInfo>();
@@ -243,6 +252,209 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         var size = item.ValueKind == JsonValueKind.Object && item.TryGetProperty("size", out var s) && s.TryGetInt64(out var bytes) ? bytes : 0;
         return new DriveEntry(name!, folder, folder ? 0 : size, Time(Str(item, "lastModifiedDateTime")), folder ? null : Str(item, "@content.downloadUrl"));
     }
+
+    // --- groups: SharePoint search, Graph -------------------------------------------------------------------------------
+
+    public async Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct)
+    {
+        await tokenFor(TeamsService.SharePoint, null, ct).ConfigureAwait(false);
+        var host = sharePointHost?.Invoke() is { } seen ? TeamsFiles.RootHost(seen) : throw VfsException.Unavailable("Teams on the web named no SharePoint host for the groups");
+        var sites = new Dictionary<string, GroupSite>(StringComparer.OrdinalIgnoreCase);
+        for (var start = 0; ; start += 500)
+        {
+            using var doc = await GetAsync($"https://{host}/_api/search/query?querytext='WebTemplate:GROUP'&selectproperties='Title,Path,GroupId,Description,Created'&rowlimit=500&startrow={start}&trimduplicates=false", TeamsService.SharePoint, ct).ConfigureAwait(false);
+            var results = Obj(Obj(doc.RootElement, "PrimaryQueryResult"), "RelevantResults");
+            var rows = Arr(Obj(results, "Table"), "Rows").ToList();
+            foreach (var row in rows)
+            {
+                var cells = Arr(row, "Cells").Where(c => Str(c, "Key") is not null).GroupBy(c => Str(c, "Key")!).ToDictionary(g => g.Key, g => Str(g.First(), "Value"));
+                if (cells.GetValueOrDefault("GroupId") is { Length: > 0 } group && cells.GetValueOrDefault("Path") is { Length: > 0 } path
+                    && Uri.TryCreate(path, UriKind.Absolute, out var site) && TeamsServices.IsSharePointHost(site.Host))
+                {
+                    sites.TryAdd(group, new GroupSite(group, cells.GetValueOrDefault("Title") ?? group, path.TrimEnd('/'), NullIfEmpty(cells.GetValueOrDefault("Description")), Time(cells.GetValueOrDefault("Created"))));
+                }
+            }
+
+            if (rows.Count == 0 || start + rows.Count >= Int(results, "TotalRows"))
+            {
+                return sites.Values.ToList();
+            }
+        }
+    }
+
+    public async Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, CancellationToken ct)
+    {
+        var sites = (await GroupSitesAsync(ct).ConfigureAwait(false)).ToDictionary(s => s.GroupId, StringComparer.OrdinalIgnoreCase);
+        if (optionalToken is not null && await optionalToken(TeamsService.Graph, ct).ConfigureAwait(false) is { } graph)
+        {
+            try
+            {
+                return await GraphGroupsAsync(graph, sites, joined, ct).ConfigureAwait(false);
+            }
+            catch (VfsException ex)
+            {
+                logger.LogInformation("teams: Microsoft Graph did not list the groups ({Error}); listing those SharePoint shows", ex.Message);
+            }
+        }
+
+        return await SharePointGroupsAsync(sites, joined, ct).ConfigureAwait(false);
+    }
+
+    // the group fields Graph lists them with: all a group's own, none that costs a request per group
+    private const string GroupFields = "id,displayName,description,mail,mailNickname,visibility,groupTypes,securityEnabled,mailEnabled,createdDateTime,renewedDateTime,expirationDateTime,classification,resourceProvisioningOptions,membershipRule,isAssignableToRole,onPremisesSyncEnabled";
+
+    /// <summary>Every group of the organisation (Graph's /groups), with the account's memberships and ownerships, and each one's site where SharePoint showed it.</summary>
+    private async Task<GroupsDirectory> GraphGroupsAsync(string token, Dictionary<string, GroupSite> sites, IReadOnlyList<TeamInfo> joined, CancellationToken ct)
+    {
+        var root = GraphRoot(token);
+        var groups = new List<GroupInfo>();
+        await foreach (var g in GraphPagesAsync($"{root}/v1.0/groups?$select={GroupFields}&$top=999", token, ct).ConfigureAwait(false))
+        {
+            var id = Str(g, "id") ?? "";
+            var types = Arr(g, "groupTypes").Select(t => t.GetString()).ToList();
+            var unified = types.Contains("Unified", StringComparer.OrdinalIgnoreCase);
+            var mailEnabled = Bool(g, "mailEnabled");
+            var securityEnabled = Bool(g, "securityEnabled");
+            groups.Add(new GroupInfo(id, Str(g, "displayName") ?? id)
+            {
+                Kind = unified ? "Microsoft 365 group" : mailEnabled && securityEnabled ? "Mail-enabled security group" : securityEnabled ? "Security group" : mailEnabled ? "Distribution list" : "Group",
+                Visibility = Str(g, "visibility") switch { "HiddenMembership" => "Hidden membership", { Length: > 0 } v => v, _ => null },
+                Team = unified ? Arr(g, "resourceProvisioningOptions").Any(o => string.Equals(o.GetString(), "Team", StringComparison.OrdinalIgnoreCase)) : null,
+                Dynamic = types.Contains("DynamicMembership", StringComparer.OrdinalIgnoreCase),
+                Description = NullIfEmpty(Str(g, "description")),
+                Mail = NullIfEmpty(Str(g, "mail")),
+                Alias = NullIfEmpty(Str(g, "mailNickname")),
+                Classification = NullIfEmpty(Str(g, "classification")),
+                MembershipRule = NullIfEmpty(Str(g, "membershipRule")),
+                SiteUrl = sites.GetValueOrDefault(id)?.SiteUrl,
+                Created = Time(Str(g, "createdDateTime")),
+                Renewed = Time(Str(g, "renewedDateTime")),
+                Expires = Time(Str(g, "expirationDateTime")),
+                OnPremisesSynced = OptionalBool(g, "onPremisesSyncEnabled"),
+                RoleAssignable = OptionalBool(g, "isAssignableToRole"),
+                Members = joined.FirstOrDefault(t => string.Equals(t.GroupId, id, StringComparison.OrdinalIgnoreCase))?.Members,
+            });
+        }
+
+        var member = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await foreach (var g in GraphPagesAsync($"{root}/v1.0/me/memberOf/microsoft.graph.group?$select=id&$top=999", token, ct).ConfigureAwait(false))
+        {
+            member.Add(Str(g, "id") ?? "");
+        }
+
+        var owner = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await foreach (var g in GraphPagesAsync($"{root}/v1.0/me/ownedObjects/microsoft.graph.group?$select=id&$top=999", token, ct).ConfigureAwait(false))
+        {
+            owner.Add(Str(g, "id") ?? "");
+        }
+
+        logger.LogInformation("teams: Microsoft Graph lists {Count:N0} groups; the account is in {Member:N0}", groups.Count, member.Count);
+        return new GroupsDirectory(groups, member, owner, Complete: true, "Microsoft Graph");
+    }
+
+    /// <summary>Graph's address for a token: the host its audience names, else the cloud's.</summary>
+    private string GraphRoot(string token)
+        => TeamsWebSession.Claims(token).Aud is { } aud && Uri.TryCreate(aud.Trim(), UriKind.Absolute, out var uri) && TeamsServices.IsGraphHost(uri.Host)
+            ? $"https://{uri.Host}"
+            : graphHost.TrimEnd('/');
+
+    /// <summary>A Graph collection's items, page by page (its nextLink, only ever on a Graph host); a 429 or 503 waits as asked.</summary>
+    private async IAsyncEnumerable<JsonElement> GraphPagesAsync(string url, string token, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        string? next = url;
+        while (next is not null)
+        {
+            JsonDocument doc;
+            for (var attempt = 0; ; attempt++)
+            {
+                await _pace.WaitAsync(ct).ConfigureAwait(false);
+                using var request = new HttpRequestMessage(HttpMethod.Get, next);
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                request.Headers.Accept.ParseAdd("application/json");
+                using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+                if ((int)response.StatusCode is 429 or 503 && attempt < 5)
+                {
+                    await Task.Delay(response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(Math.Min(30, 1 << attempt)), ct).ConfigureAwait(false);
+                    continue;
+                }
+
+                var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    throw Error(response.StatusCode, next, text);
+                }
+
+                doc = JsonDocument.Parse(text);
+                break;
+            }
+
+            using (doc)
+            {
+                foreach (var item in Arr(doc.RootElement, "value"))
+                {
+                    yield return item.Clone();
+                }
+
+                next = Str(doc.RootElement, "@odata.nextLink") is { } link && Uri.TryCreate(link, UriKind.Absolute, out var uri) && TeamsServices.IsGraphHost(uri.Host) ? link : null;
+            }
+        }
+    }
+
+    /// <summary>The group sites the account can open, each with SharePoint's details of its group (SP.Directory), and the aggregator's word on the teams it is in.</summary>
+    private async Task<GroupsDirectory> SharePointGroupsAsync(Dictionary<string, GroupSite> sites, IReadOnlyList<TeamInfo> joined, CancellationToken ct)
+    {
+        var host = sharePointHost?.Invoke() is { } seen ? TeamsFiles.RootHost(seen) : null;
+        var details = await Task.WhenAll(sites.Values.Select(async site =>
+        {
+            try
+            {
+                using var doc = await GetAsync($"https://{host}/_api/SP.Directory.DirectorySession/Group('{Uri.EscapeDataString(site.GroupId)}')", TeamsService.SharePoint, ct).ConfigureAwait(false);
+                var g = doc.RootElement;
+                return (site, Public: OptionalBool(g, "isPublic"), Mail: NullIfEmpty(Str(g, "mail")), Alias: NullIfEmpty(Str(g, "alias")), Description: NullIfEmpty(Str(g, "description")));
+            }
+            catch (VfsException)
+            {
+                return (site, Public: (bool?)null, Mail: (string?)null, Alias: (string?)null, Description: site.Description);
+            }
+        })).ConfigureAwait(false);
+
+        var groups = new List<GroupInfo>();
+        foreach (var (site, isPublic, mail, alias, description) in details)
+        {
+            var team = joined.FirstOrDefault(t => string.Equals(t.GroupId, site.GroupId, StringComparison.OrdinalIgnoreCase));
+            groups.Add(new GroupInfo(site.GroupId, site.Name)
+            {
+                Kind = "Microsoft 365 group",
+                Visibility = team?.AccessType == 3 ? "Org-wide" : isPublic switch { true => "Public", false => "Private", _ => null },
+                Team = team is not null ? true : null,
+                Description = description ?? site.Description,
+                Mail = mail,
+                Alias = alias,
+                SiteUrl = site.SiteUrl,
+                Created = site.Created,
+                Members = team?.Members,
+            });
+        }
+
+        // a team with no site SharePoint shows (a sample team never given one) is still a group the account is in
+        foreach (var team in joined.Where(t => t.GroupId is not null && !sites.ContainsKey(t.GroupId!)))
+        {
+            groups.Add(new GroupInfo(team.GroupId!, team.DisplayName)
+            {
+                Kind = "Microsoft 365 group",
+                Visibility = team.AccessType switch { 1 => "Private", 2 => "Public", 3 => "Org-wide", _ => null },
+                Team = true,
+                Members = team.Members,
+            });
+        }
+
+        var member = joined.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var owner = joined.Where(t => t.Owner).Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return new GroupsDirectory(groups, member, owner, Complete: false, "SharePoint");
+    }
+
+    private static bool? OptionalBool(JsonElement e, string name)
+        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) ? v.ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => null } : null;
 
     // --- inline images: Teams' media service -----------------------------------------------------------------------------
 

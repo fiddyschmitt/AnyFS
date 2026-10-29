@@ -68,7 +68,7 @@ public class TeamsSourceTests
     public async Task TheRootShowsTheTeamsAndTheChatsFolder()
     {
         await using var source = await StartAsync(Seed());
-        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats" }, await NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "groups.md" }, await NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "General", "Random" }, await NamesAsync(source, "AnyFS Lab"));
         CollectionAssert.AreEqual(new[] { "posts", "files" }, await NamesAsync(source, "AnyFS Lab/General"));
     }
@@ -127,6 +127,63 @@ public class TeamsSourceTests
         StringAssert.Contains(md, $"(attachments/{image})");
         Assert.IsFalse(md.Contains("asyncgw", StringComparison.Ordinal), "the image points at its copy, not the media service");
         Assert.AreEqual(1, fake.ImageCalls, "an image is read once, however often its thread is listed or opened");
+    }
+
+    [TestMethod]
+    public async Task OtherGroupsAreTheGroupSitesBeyondTheTeamsEachWithItsLibrary()
+    {
+        var fake = new FakeTeams();
+        var team = fake.AddTeam("AnyFS Lab", FakeTeams.Channel("General", general: true));
+        fake.AddGroupSite(new GroupSite(team.GroupId!, "AnyFS Lab", Site, null, When));
+        const string Mark8 = "https://contoso.sharepoint.com/sites/Mark8ProjectTeam";
+        fake.AddGroupSite(new GroupSite("g-mark8", "Mark 8 Project Team", Mark8, "The Mark 8", When));
+        fake.AddGroupSite(new GroupSite("g-retail", "Retail", "https://contoso.sharepoint.com/sites/Retail", null, When));
+        fake.AddLibraryFile(Mark8, "Plan.docx", Encoding.UTF8.GetBytes("the plan"), When);
+        fake.AddLibraryFile(Mark8, "Design/spec.md", Encoding.UTF8.GetBytes("# Spec"), When);
+        await using var source = await StartAsync(fake);
+
+        CollectionAssert.AreEqual(new[] { "Mark 8 Project Team", "Retail" }, await NamesAsync(source, "Other groups"), "not the team's own, which is above");
+        CollectionAssert.AreEqual(new[] { "Design", "Plan.docx" }, await NamesAsync(source, "Other groups/Mark 8 Project Team"));
+        Assert.AreEqual("the plan", await TextAsync(source, "Other groups/Mark 8 Project Team/Plan.docx"));
+        Assert.AreEqual("# Spec", await TextAsync(source, "Other groups/Mark 8 Project Team/Design/spec.md"));
+    }
+
+    [TestMethod]
+    public async Task GroupsMdHasEveryGroupWithItsDetails()
+    {
+        var fake = new FakeTeams();
+        var team = fake.AddTeam("AnyFS Lab", FakeTeams.Channel("General", general: true));
+        fake.Directory = new GroupsDirectory(
+        [
+            new GroupInfo(team.GroupId!, "AnyFS Lab") { Kind = "Microsoft 365 group", Visibility = "Private", Team = true, Mail = "anyfslab@contoso.com", Alias = "anyfslab", SiteUrl = Site, Members = 4, Created = When },
+            new GroupInfo("g-board", "Board | Exec") { Kind = "Microsoft 365 group", Visibility = "Hidden membership", Team = false, Description = "The board,\nprivately" },
+            new GroupInfo("g-sales", "Sales staff") { Kind = "Security group", Dynamic = true, MembershipRule = "(user.department -eq \"Sales\")", OnPremisesSynced = true },
+            new GroupInfo("g-news", "All news") { Kind = "Distribution list", Mail = "news@contoso.com" },
+        ],
+            new HashSet<string>([team.GroupId!, "g-sales"]),
+            new HashSet<string>([team.GroupId!]),
+            Complete: true,
+            "Microsoft Graph");
+        await using var source = await StartAsync(fake);
+
+        var md = await TextAsync(source, "groups.md");
+        StringAssert.Contains(md, "Every group in the organisation, as Microsoft Graph lists them for tester@contoso.com: 4 (");
+        StringAssert.Contains(md, "| AnyFS Lab | Microsoft 365 group | Private | yes | owner | anyfslab@contoso.com |");
+        StringAssert.Contains(md, "| Board \\| Exec | Microsoft 365 group | Hidden membership | no |  |  |", "a pipe in a name escaped; not joined");
+        StringAssert.Contains(md, "| Sales staff | Security group |  |  | member |  |");
+        StringAssert.Contains(md, "### Board | Exec\n\n- Kind: Microsoft 365 group\n- Visibility: Hidden membership\n- Description: The board, privately\n- Id: g-board");
+        StringAssert.Contains(md, "- Membership: dynamic, by the rule (user.department -eq \"Sales\")");
+        StringAssert.Contains(md, "- Synced from on-premises: yes");
+        StringAssert.Contains(md, "- Kind: Microsoft 365 group, with a team\n- Visibility: Private\n- You: owner\n- Members: 4");
+    }
+
+    [TestMethod]
+    public async Task WithGroupsOffThereIsNoOtherGroupsFolderNorGroupsMd()
+    {
+        var fake = Seed();
+        fake.AddGroupSite(new GroupSite("g-retail", "Retail", "https://contoso.sharepoint.com/sites/Retail", null, When));
+        await using var source = await StartAsync(fake, s => s.Groups = false);
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats" }, await NamesAsync(source, ""));
     }
 
     [TestMethod]
@@ -465,10 +522,16 @@ public class TeamsSourceTests
         Assert.AreEqual(TeamsService.SharePoint, TeamsServices.Of("00000003-0000-0ff1-ce00-000000000000"));
         Assert.AreEqual(TeamsService.SharePoint, TeamsServices.Of("https://contoso.sharepoint.us"));
 
+        // Graph's, for groups.md: each cloud's host, or its app id
+        Assert.AreEqual(TeamsService.Graph, TeamsServices.Of("https://graph.microsoft.us"));
+        Assert.AreEqual(TeamsService.Graph, TeamsServices.Of("https://graph.microsoft.com/"));
+        Assert.AreEqual(TeamsService.Graph, TeamsServices.Of("https://dod-graph.microsoft.us"));
+        Assert.AreEqual(TeamsService.Graph, TeamsServices.Of("00000003-0000-0000-c000-000000000000"));
+
         // the client's other tokens are not the source's
         Assert.IsNull(TeamsServices.Of("https://presence.gov.teams.microsoft.us/"));
         Assert.IsNull(TeamsServices.Of("https://outlook.office365.us"));
-        Assert.IsNull(TeamsServices.Of("https://graph.microsoft.us"));
+        Assert.IsNull(TeamsServices.Of("https://graph.windows.net"), "Azure AD Graph, retired, is not Microsoft Graph");
         Assert.IsNull(TeamsServices.Of(null));
     }
 }

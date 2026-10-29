@@ -25,6 +25,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     private static readonly TimeSpan SilentDeadline = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan InteractiveDeadline = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan SharePointGrace = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan OptionalDeadline = TimeSpan.FromSeconds(30);
 
     // the services every sign-in reads, one bearer each (spike 18): matched by audience host, so any cloud's; SharePoint's
     // is kept when the page sends it and waited for only when asked for
@@ -105,6 +106,59 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             progress($"Sign in to Teams in the {BrowserName} window that opened");
             var shown = await CaptureAsync(headless: false, InteractiveDeadline, service, ct).ConfigureAwait(false);
             return Fresh(service) ?? throw new SignInRequiredException(shown.Failure ?? $"no sign-in to {teamsHost.Host} was read", permanent: shown.Final);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    // the services a launch waited for in vain (Graph, where the client mints none), and until when none is waited for again
+    private readonly ConcurrentDictionary<TeamsService, DateTimeOffset> _absent = new();
+
+    /// <summary>
+    /// A bearer for a service the page mints only sometimes (Graph: GCC High's client, not Microsoft 365's): the one kept if
+    /// it is fresh; else, where <paramref name="wait"/>, one headless launch waiting for it a short while; null when none came
+    /// — and then none is waited for again for two hours. Never a sign-in, never a failure.
+    /// </summary>
+    public async Task<string?> OptionalTokenAsync(TeamsService service, bool wait, CancellationToken ct)
+    {
+        if (Fresh(service) is { } kept)
+        {
+            return kept;
+        }
+
+        if (!wait || (_absent.TryGetValue(service, out var until) && until > DateTimeOffset.UtcNow))
+        {
+            return null;
+        }
+
+        var gate = ProfileLocks.For(profileDir);
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            if (Fresh(service) is { } again)
+            {
+                return again;
+            }
+
+            try
+            {
+                await CaptureAsync(headless: true, OptionalDeadline, service, ct).ConfigureAwait(false);
+            }
+            catch (SignInRequiredException ex)
+            {
+                logger.LogInformation("teams: no {Service} token without a sign-in ({Error})", service, ex.Message);
+            }
+
+            if (Fresh(service) is { } got)
+            {
+                return got;
+            }
+
+            logger.LogInformation("teams: Teams on the web gave no {Service} token; not waited for again for two hours", service);
+            _absent[service] = DateTimeOffset.UtcNow.AddHours(2);
+            return null;
         }
         finally
         {

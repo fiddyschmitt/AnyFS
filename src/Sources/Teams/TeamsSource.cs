@@ -108,7 +108,9 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
         }
 
-        return new TeamsRest(new Uri(cloud.ApiHost), (service, refused, c) => Renew(session, service, refused, c), _settings.Concurrency, Logger, sharePointHost: () => session.SharePointHost)
+        // Graph only where the web client mints it (GCC High's does, Microsoft 365's not: spike 18): waited for there alone
+        return new TeamsRest(new Uri(cloud.ApiHost), (service, refused, c) => Renew(session, service, refused, c), _settings.Concurrency, Logger, sharePointHost: () => session.SharePointHost,
+            optionalToken: (service, c) => session.OptionalTokenAsync(service, wait: cloud.Name != TeamsCloud.Global.Name, c), graphHost: cloud.GraphHost)
         {
             Account = session.Account ?? _settings.AccountHint,
             Mri = session.Mri,
@@ -322,6 +324,38 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }, ct).ConfigureAwait(false);
         var (attachments, names) = await AttachmentsAsync(messages, ct).ConfigureAwait(false);
         return (TeamsText.Chat(messages, ChatName(chat), NameOf, names), attachments);
+    }
+
+    // --- groups --------------------------------------------------------------------------------------------------------
+
+    /// <summary>The group sites the account can open other than its teams' (Other groups), read again each refresh interval.</summary>
+    internal async Task<IReadOnlyList<GroupSite>> OtherGroupsAsync(CancellationToken ct)
+    {
+        var teams = (await StructureAsync(ct).ConfigureAwait(false)).Teams.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var sites = await Cache.GetAsync("groupsites", _settings.Refresh, c => Api.GroupSitesAsync(c), ct).ConfigureAwait(false);
+        return sites.Where(s => !teams.Contains(s.GroupId)).OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>
+    /// <c>groups.md</c>: every group there is, with its details, read again each walk interval; one that cannot be read says
+    /// why in the file rather than failing the root's listing, and is read again at the next.
+    /// </summary>
+    internal async Task<byte[]> GroupsMarkdownAsync(CancellationToken ct)
+    {
+        try
+        {
+            return await Cache.GetAsync("groups.md", ReadWholeEvery, async c =>
+            {
+                var directory = await Api.GroupsAsync((await StructureAsync(c).ConfigureAwait(false)).Teams, c).ConfigureAwait(false);
+                return TeamsText.Groups(directory, Api.Account);
+            }, ct).ConfigureAwait(false);
+        }
+        catch (VfsException ex)
+        {
+            Cache.Forget("groups.md");
+            Logger.LogInformation("teams: the groups could not be read ({Error})", ex.Message);
+            return TeamsText.GroupsUnread(ex.Message);
+        }
     }
 
     // --- files ---------------------------------------------------------------------------------------------------------

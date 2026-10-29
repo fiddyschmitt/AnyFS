@@ -51,6 +51,78 @@ internal static class TeamsText
         return Encoding.UTF8.GetBytes(text.ToString());
     }
 
+    /// <summary>
+    /// <c>groups.md</c>: what the groups are and where they came from, a table of them all (name, kind, visibility, team, the
+    /// account's part, email), then each one's details, every field known. Sorted by name.
+    /// </summary>
+    public static byte[] Groups(GroupsDirectory directory, string account)
+    {
+        var groups = directory.Groups.OrderBy(g => g.Name, StringComparer.OrdinalIgnoreCase).ThenBy(g => g.Id, StringComparer.Ordinal).ToList();
+        string You(GroupInfo g) => directory.Owner.Contains(g.Id) ? "owner" : directory.Member.Contains(g.Id) ? "member" : "";
+        string YesNo(bool? b) => b switch { true => "yes", false => "no", _ => "" };
+
+        var text = new StringBuilder("# Groups\n\n");
+        var mine = groups.Count(g => You(g).Length > 0);
+        if (directory.Complete)
+        {
+            var kinds = groups.GroupBy(g => g.Kind ?? "Group").OrderByDescending(k => k.Count()).Select(k => $"{k.Count():N0} {Plural(k.Key, k.Count())}");
+            var teams = groups.Count(g => g.Team == true);
+            text.Append(CultureInfo.InvariantCulture, $"Every group in the organisation, as {directory.From} lists them for {account}: {groups.Count:N0} ({string.Join(", ", kinds)}; {teams:N0} with a team). ")
+                .Append(CultureInfo.InvariantCulture, $"{account} is in {mine:N0} of them.\n\n");
+        }
+        else
+        {
+            text.Append(CultureInfo.InvariantCulture, $"The groups {account} can see, from {directory.From}: {groups.Count:N0}, being every public group and the private ones it is in. It is in {mine:N0} of them. ")
+                .Append("Private groups it is not in are not listed, and whether a group it is not in has a team is not known: Teams on the web gives no token here that can list every group (GCC High's gives one).\n\n");
+        }
+
+        text.Append("| Group | Kind | Visibility | Team | You | Email |\n|---|---|---|---|---|---|\n");
+        foreach (var g in groups)
+        {
+            text.Append(CultureInfo.InvariantCulture, $"| {Cell(g.Name)} | {Cell(g.Kind)} | {Cell(g.Visibility)} | {YesNo(g.Team)} | {You(g)} | {Cell(g.Mail)} |\n");
+        }
+
+        text.Append("\n## Details\n");
+        foreach (var g in groups)
+        {
+            text.Append("\n### ").Append(Clean(g.Name)).Append("\n\n");
+            void Field(string name, string? value)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    text.Append("- ").Append(name).Append(": ").Append(Clean(value)).Append('\n');
+                }
+            }
+
+            Field("Kind", g.Kind is null ? null : g.Team == true ? $"{g.Kind}, with a team" : g.Kind);
+            Field("Visibility", g.Visibility);
+            Field("You", You(g));
+            Field("Members", g.Members?.ToString("N0", CultureInfo.InvariantCulture));
+            Field("Email", g.Mail);
+            Field("Alias", g.Alias);
+            Field("Site", g.SiteUrl);
+            Field("Created", Stamp(g.Created, "yyyy-MM-dd HH:mm"));
+            Field("Renewed", Stamp(g.Renewed, "yyyy-MM-dd HH:mm"));
+            Field("Expires", Stamp(g.Expires, "yyyy-MM-dd HH:mm"));
+            Field("Classification", g.Classification);
+            Field("Membership", g.Dynamic ? $"dynamic{(g.MembershipRule is { Length: > 0 } rule ? $", by the rule {rule}" : "")}" : null);
+            Field("Synced from on-premises", YesNo(g.OnPremisesSynced));
+            Field("Can be given roles", YesNo(g.RoleAssignable));
+            Field("Description", g.Description);
+            Field("Id", g.Id);
+        }
+
+        return Encoding.UTF8.GetBytes(text.ToString());
+    }
+
+    /// <summary><c>groups.md</c> when the groups could not be read: why, rather than a root that fails to list.</summary>
+    public static byte[] GroupsUnread(string why) => Encoding.UTF8.GetBytes($"# Groups\n\nThe groups could not be read: {Clean(why)}\n");
+
+    private static string Plural(string kind, int count) => count == 1 ? kind : kind.EndsWith("list", StringComparison.Ordinal) ? kind + "s" : kind.Replace("group", "groups", StringComparison.Ordinal);
+
+    /// <summary>A table cell's text: on one line, its pipes escaped.</summary>
+    private static string Cell(string? text) => text is null ? "" : Clean(text).Replace("|", "\\|", StringComparison.Ordinal);
+
     /// <summary>The thread-folder name: the time, the author and, where the opening message has text, its first line; safe for Windows.</summary>
     public static string ThreadName(TeamsMessage root, Func<string?, string> nameOf)
     {
