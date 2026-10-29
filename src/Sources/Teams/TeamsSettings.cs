@@ -54,7 +54,7 @@ public sealed class TeamsSettings
     public string Cloud { get; set; } = "Microsoft 365 (global)";
 
     [Setting("Browser", Advanced = true, Order = 11, Kind = SettingKind.FilePath,
-        Hint = "The Edge, Chrome or Chromium to open for the web session's sign-in. Leave empty to find one automatically. AnyFS opens it with a profile of its own, never your everyday browser's.")]
+        Hint = "The Edge, Chrome, Chromium or Firefox to open for the web session's sign-in. Leave empty to find one automatically: Edge, Chrome or Chromium, and Firefox (through its WebDriver) where an organisation's policy keeps AnyFS out of those. AnyFS opens it with a profile of its own, never your everyday browser's.")]
     public string? BrowserPath { get; set; }
 
     [Setting("Conversations active in the last (days)", Advanced = true, Order = 12,

@@ -85,10 +85,12 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         var cloud = _settings.TheCloud;
 
         // as the other web sessions: the test variable wins, then the setting (which must exist), then whatever is installed
+        // (a Chromium browser, else Firefox, which the session drives through WebDriver)
         var browser = BrowserLocator.Find(_settings.Browser, "ANYFS_TEAMS_BROWSER")
+            ?? (_settings.Browser is null ? BrowserLocator.FindKind(BrowserKind.Firefox) : null)
             ?? throw new SourceFailedException(_settings.Browser is { } set
                 ? $"The browser in the source's Browser setting was not found: {set}."
-                : "No Edge, Chrome or Chromium was found for the Teams web session; set one in the source's Browser setting.", permanent: true);
+                : "No Edge, Chrome, Chromium or Firefox was found for the Teams web session; set one in the source's Browser setting.", permanent: true);
         var profile = WebSignInTarget.ProfileFor("teams-browser", _settings.AccountHint, "ANYFS_TEAMS_PROFILES");
         var session = new TeamsWebSession(new Uri(cloud.TeamsHost), browser, profile, _settings.AccountHint, Logger);
         try
