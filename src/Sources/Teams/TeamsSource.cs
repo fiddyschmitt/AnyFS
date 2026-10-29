@@ -93,25 +93,25 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         var session = new TeamsWebSession(new Uri(cloud.TeamsHost), browser, profile, _settings.AccountHint, Logger);
         try
         {
-            await session.TokenAsync("https://chatsvcagg.teams.microsoft.com", interactive: true, m => Context.ReportProgress(m), ct).ConfigureAwait(false);
+            await session.TokenAsync(TeamsService.Aggregator, interactive: true, m => Context.ReportProgress(m), ct).ConfigureAwait(false);
         }
         catch (SignInRequiredException ex)
         {
             throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
         }
 
-        return new TeamsRest(new Uri(cloud.ApiHost), (aud, c) => Renew(session, aud, c), _settings.Concurrency, Logger)
+        return new TeamsRest(new Uri(cloud.ApiHost), (service, c) => Renew(session, service, c), _settings.Concurrency, Logger)
         {
             Account = session.Account ?? _settings.AccountHint,
             Mri = session.Mri,
         };
     }
 
-    private async Task<string> Renew(TeamsWebSession session, string audience, CancellationToken ct)
+    private async Task<string> Renew(TeamsWebSession session, TeamsService service, CancellationToken ct)
     {
         try
         {
-            return await session.TokenAsync(audience, interactive: false, _ => { }, ct).ConfigureAwait(false);
+            return await session.TokenAsync(service, interactive: false, _ => { }, ct).ConfigureAwait(false);
         }
         catch (SignInRequiredException ex)
         {
@@ -248,7 +248,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             var chats = cutoff is { } since ? structure.Chats.Where(ch => ch.LastUpdated is null || ch.LastUpdated >= since).ToList() : structure.Chats;
 
             // the people a chat is named for: learn their names once, so a 1:1 or untitled group is named, not an mri
-            var mris = chats.SelectMany(ch => ch.MemberMris).Where(m => m != Api.Mri && !_names.ContainsKey(m)).Distinct().ToList();
+            var mris = chats.SelectMany(ch => ch.MemberMris).Where(m => !IsMe(m) && !_names.ContainsKey(m)).Distinct().ToList();
             foreach (var batch in mris.Chunk(100))
             {
                 try
@@ -337,7 +337,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             return TeamsNames.Safe(chat.Title);
         }
 
-        var others = chat.MemberMris.Where(m => m != Api.Mri).Select(NameOf).Where(n => n.Length > 0).Distinct().ToList();
+        var others = chat.MemberMris.Where(m => !IsMe(m)).Select(NameOf).Where(n => n.Length > 0).Distinct().ToList();
         var name = others.Count switch
         {
             0 => chat.Kind == ChatKind.Meeting ? "Meeting" : "Chat",
@@ -360,6 +360,12 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             }
         }
     }
+
+    /// <summary>
+    /// Whether an mri is the signed-in account's. Its own mri is built from a token's object id (<c>8:orgid:&lt;oid&gt;</c>);
+    /// matching on the id holds whatever prefix a cloud's chats carry.
+    /// </summary>
+    private bool IsMe(string mri) => Api.Mri is { } me && ShortMri(mri).Equals(ShortMri(me), StringComparison.OrdinalIgnoreCase);
 
     private static string ShortMri(string mri)
     {

@@ -13,13 +13,8 @@ namespace AnyFS.Sources.Teams;
 /// conversation's messages. Each call carries the bearer for that service's audience, which <paramref name="tokenFor"/>
 /// supplies (the live web session, or a test's). Requests are paced per host and a 429's Retry-After is honoured.
 /// </summary>
-internal sealed class TeamsRest(Uri teamsApiHost, Func<string, CancellationToken, Task<string>> tokenFor, int concurrency, ILogger logger) : ITeamsApi
+internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, CancellationToken, Task<string>> tokenFor, int concurrency, ILogger logger) : ITeamsApi
 {
-    // the token audiences the services want (spike 18)
-    private const string MiddleTierAud = "https://api.spaces.skype.com";
-    private const string AggregatorAud = "https://chatsvcagg.teams.microsoft.com";
-    private const string ChatServiceAud = "https://ic3.teams.office.com";
-
     private readonly HttpClient _http = new(new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, PooledConnectionLifetime = TimeSpan.FromMinutes(2) })
     {
         Timeout = TimeSpan.FromSeconds(100),
@@ -36,7 +31,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<string, CancellationToken
     public async Task<TeamsStructure> StructureAsync(CancellationToken ct)
     {
         var services = await DiscoverAsync(ct).ConfigureAwait(false);
-        using var doc = await GetAsync($"{services.Aggregator}/api/v3/teams/users/me?isPrefetch=false&enableMembershipSummary=true", AggregatorAud, ct).ConfigureAwait(false);
+        using var doc = await GetAsync($"{services.Aggregator}/api/v3/teams/users/me?isPrefetch=false&enableMembershipSummary=true", TeamsService.Aggregator, ct).ConfigureAwait(false);
         var teams = new List<TeamInfo>();
         foreach (var t in Arr(doc.RootElement, "teams"))
         {
@@ -78,7 +73,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<string, CancellationToken
 
         var services = await DiscoverAsync(ct).ConfigureAwait(false);
         var body = new System.Text.Json.Nodes.JsonArray(mris.Select(m => (System.Text.Json.Nodes.JsonNode)m).ToArray()).ToJsonString();
-        using var doc = await SendAsync(HttpMethod.Post, $"{services.MiddleTier}/beta/users/fetchShortProfile?isMailEnabled=false&enableGuest=true&includeIBBarredUsers=true", MiddleTierAud, body, ct).ConfigureAwait(false);
+        using var doc = await SendAsync(HttpMethod.Post, $"{services.MiddleTier}/beta/users/fetchShortProfile?isMailEnabled=false&enableGuest=true&includeIBBarredUsers=true", TeamsService.MiddleTier, body, ct).ConfigureAwait(false);
         var people = new List<Person>();
         var root = doc.RootElement;
         var list = root.ValueKind == JsonValueKind.Array ? root.EnumerateArray() : Arr(root, "value");
@@ -106,7 +101,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<string, CancellationToken
 
     private async Task<MessagePage> PageAsync(string url, CancellationToken ct)
     {
-        using var doc = await GetAsync(url, ChatServiceAud, ct).ConfigureAwait(false);
+        using var doc = await GetAsync(url, TeamsService.ChatService, ct).ConfigureAwait(false);
         var messages = new List<TeamsMessage>();
         foreach (var m in Arr(doc.RootElement, "messages"))
         {
@@ -137,10 +132,12 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<string, CancellationToken
             return ready;
         }
 
-        using var doc = await SendAsync(HttpMethod.Post, $"{teamsApiHost.AbsoluteUri.TrimEnd('/')}/api/authsvc/v1.0/authz", MiddleTierAud, "{}", ct).ConfigureAwait(false);
+        using var doc = await SendAsync(HttpMethod.Post, $"{teamsApiHost.AbsoluteUri.TrimEnd('/')}/api/authsvc/v1.0/authz", TeamsService.MiddleTier, "{}", ct).ConfigureAwait(false);
         var gtms = Obj(doc.RootElement, "regionGtms");
-        var aggregator = (Str(gtms, "chatServiceAggregator") ?? AggregatorAud).TrimEnd('/');
-        var chatService = (Str(gtms, "chatService") ?? throw VfsException.Unavailable("Teams did not say where its chat service is")).TrimEnd('/');
+
+        // each service's own host, else its front door on the Teams host (both clouds name both)
+        var aggregator = (Str(gtms, "chatServiceAggregator") ?? Str(gtms, "chatSvcAggAfd") ?? throw VfsException.Unavailable("Teams did not say where its aggregator is")).TrimEnd('/');
+        var chatService = (Str(gtms, "chatService") ?? Str(gtms, "chatServiceAfd") ?? throw VfsException.Unavailable("Teams did not say where its chat service is")).TrimEnd('/');
         var middleTier = (Str(gtms, "middleTier") ?? $"{teamsApiHost.AbsoluteUri.TrimEnd('/')}/api/mt/apac").TrimEnd('/');
         logger.LogInformation("teams: services for {Account}: aggregator {Aggregator}, chat service {ChatService}", Account, aggregator, chatService);
         return _services = new Services(aggregator, chatService, middleTier);
@@ -150,9 +147,9 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<string, CancellationToken
 
     // --- the send path -------------------------------------------------------------------------------------------------
 
-    private Task<JsonDocument> GetAsync(string url, string audience, CancellationToken ct) => SendAsync(HttpMethod.Get, url, audience, null, ct);
+    private Task<JsonDocument> GetAsync(string url, TeamsService service, CancellationToken ct) => SendAsync(HttpMethod.Get, url, service, null, ct);
 
-    private async Task<JsonDocument> SendAsync(HttpMethod method, string url, string audience, string? body, CancellationToken ct)
+    private async Task<JsonDocument> SendAsync(HttpMethod method, string url, TeamsService service, string? body, CancellationToken ct)
     {
         await _inFlight.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -160,7 +157,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<string, CancellationToken
             for (var attempt = 0; ; attempt++)
             {
                 await _pace.WaitAsync(ct).ConfigureAwait(false);
-                var token = await tokenFor(audience, ct).ConfigureAwait(false);
+                var token = await tokenFor(service, ct).ConfigureAwait(false);
                 using var request = new HttpRequestMessage(method, url);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 request.Headers.Accept.ParseAdd("application/json");

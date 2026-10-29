@@ -278,4 +278,23 @@ public class TeamsSourceTests
         Assert.AreEqual("jane (contoso.com)", plugin.SuggestName(new TeamsSettings { Account = "jane@contoso.com" }));
         Assert.AreEqual("teams", plugin.TypeId);
     }
+
+    [TestMethod]
+    public void TokensAreMatchedToTheirServiceInEveryCloud()
+    {
+        // Microsoft 365 (spike 18) and GCC High (the sign-in audit at a GCC High tenant)
+        Assert.AreEqual(TeamsService.ChatService, TeamsServices.Of("https://ic3.teams.office.com"));
+        Assert.AreEqual(TeamsService.ChatService, TeamsServices.Of("https://ic3.gov.teams.microsoft.us"));
+        Assert.AreEqual(TeamsService.Aggregator, TeamsServices.Of("https://chatsvcagg.teams.microsoft.com"));
+        Assert.AreEqual(TeamsService.Aggregator, TeamsServices.Of("https://chatsvcagg.gov.teams.microsoft.us"));
+        Assert.AreEqual(TeamsService.MiddleTier, TeamsServices.Of("https://api.spaces.skype.com"));
+        Assert.AreEqual(TeamsService.MiddleTier, TeamsServices.Of("https://api.spaces.skype.com/"));
+
+        // the client's other tokens are not the source's
+        Assert.IsNull(TeamsServices.Of("https://presence.gov.teams.microsoft.us/"));
+        Assert.IsNull(TeamsServices.Of("https://outlook.office365.us"));
+        Assert.IsNull(TeamsServices.Of("https://graph.microsoft.us"));
+        Assert.IsNull(TeamsServices.Of("00000003-0000-0ff1-ce00-000000000000"));
+        Assert.IsNull(TeamsServices.Of(null));
+    }
 }

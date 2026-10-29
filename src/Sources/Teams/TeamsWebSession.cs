@@ -21,10 +21,10 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     private static readonly TimeSpan SilentDeadline = TimeSpan.FromSeconds(75);
     private static readonly TimeSpan InteractiveDeadline = TimeSpan.FromMinutes(10);
 
-    // the service audiences the source needs a bearer for (spike 18)
-    private static readonly string[] Wanted = ["https://ic3.teams.office.com", "https://chatsvcagg.teams.microsoft.com", "https://api.spaces.skype.com"];
+    // the services the source needs a bearer for, one each (spike 18): matched by audience host, so any cloud's
+    private static readonly TeamsService[] Wanted = TeamsServices.All;
 
-    private readonly ConcurrentDictionary<string, (string Token, DateTimeOffset Expires)> _tokens = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<TeamsService, (string Token, DateTimeOffset Expires)> _tokens = new();
 
     public string BrowserName => BrowserLocator.DisplayName(browserPath);
 
@@ -34,10 +34,10 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     /// <summary>The account's own mri (<c>8:orgid:&lt;object id&gt;</c>), from a token's object-id claim.</summary>
     public string? Mri { get; private set; }
 
-    /// <summary>A bearer for <paramref name="audience"/> good for at least ten more minutes; captures a fresh set from the browser when none is in hand.</summary>
-    public async Task<string> TokenAsync(string audience, bool interactive, Action<string> progress, CancellationToken ct)
+    /// <summary>A bearer for <paramref name="service"/> good for at least ten more minutes; captures a fresh set from the browser when none is in hand.</summary>
+    public async Task<string> TokenAsync(TeamsService service, bool interactive, Action<string> progress, CancellationToken ct)
     {
-        if (Fresh(audience) is { } kept)
+        if (Fresh(service) is { } kept)
         {
             return kept;
         }
@@ -46,7 +46,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (Fresh(audience) is { } again)
+            if (Fresh(service) is { } again)
             {
                 return again;
             }
@@ -62,7 +62,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
                 throw new SignInRequiredException(fatal, permanent: true);
             }
 
-            if (Fresh(audience) is { } fresh)
+            if (Fresh(service) is { } fresh)
             {
                 return fresh;
             }
@@ -75,7 +75,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             logger.LogInformation("teams: no sign-in to read for {Host} without a window ({Why}); opening {Browser} for the person to sign in", teamsHost.Host, silent.Failure, BrowserName);
             progress($"Sign in to Teams in the {BrowserName} window that opened");
             var shown = await CaptureAsync(headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
-            return Fresh(audience) ?? throw new SignInRequiredException(shown.Failure ?? $"no sign-in to {teamsHost.Host} was read", permanent: shown.Final);
+            return Fresh(service) ?? throw new SignInRequiredException(shown.Failure ?? $"no sign-in to {teamsHost.Host} was read", permanent: shown.Final);
         }
         finally
         {
@@ -84,9 +84,9 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     }
 
     /// <summary>Forgets a token the service refused: the next ask reads a fresh one.</summary>
-    public void Invalidate(string audience) => _tokens.TryRemove(audience, out _);
+    public void Invalidate(TeamsService service) => _tokens.TryRemove(service, out _);
 
-    private string? Fresh(string audience) => _tokens.TryGetValue(audience, out var t) && t.Expires - DateTimeOffset.UtcNow > Margin ? t.Token : null;
+    private string? Fresh(TeamsService service) => _tokens.TryGetValue(service, out var t) && t.Expires - DateTimeOffset.UtcNow > Margin ? t.Token : null;
 
     private void Keep(string token)
     {
@@ -96,15 +96,14 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             return;
         }
 
-        var match = Wanted.FirstOrDefault(w => aud.TrimEnd('/').Equals(w, StringComparison.OrdinalIgnoreCase));
-        if (match is null)
+        if (TeamsServices.Of(aud) is not { } service)
         {
             return;
         }
 
         Account ??= account;
         Mri ??= mri;
-        _tokens[match] = (token, expires.Value);
+        _tokens[service] = (token, expires.Value);
     }
 
     /// <summary>What one browser launch came to: whether a fresh set was captured, else why not and whether trying again can help.</summary>
