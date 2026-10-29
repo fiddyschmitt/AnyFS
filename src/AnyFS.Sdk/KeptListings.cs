@@ -1,4 +1,6 @@
+using System.IO.Compression;
 using System.Runtime.ExceptionServices;
+using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
@@ -52,6 +54,84 @@ public sealed class KeptListings : IAsyncDisposable
         Cache = _options.Keep
             ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { RefreshAfter = _options.RefreshAfter }
             : new ListingCache(_options.UnkeptFor, lister, time: _time);
+        if (_options.Keep && _options.SaveTo is { } saved)
+        {
+            Load(saved);
+        }
+    }
+
+    private const int SavedVersion = 1;
+
+    /// <summary>The listings an earlier run saved for the same <see cref="KeptListingsOptions.SaveKey"/>, kept as old (refreshed as they are opened).</summary>
+    private void Load(string path)
+    {
+        try
+        {
+            using var file = File.OpenRead(path);
+            using var zip = new GZipStream(file, CompressionMode.Decompress);
+            if (JsonSerializer.Deserialize(zip, SavedListingsJson.Default.SavedListings) is not { Version: SavedVersion } saved || saved.Key != (_options.SaveKey ?? ""))
+            {
+                return;
+            }
+
+            foreach (var (folder, listing) in saved.Listings)
+            {
+                Cache.Restore(folder, listing);
+            }
+
+            _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run answer at once, each listed afresh as it is opened", _options.Name, saved.Listings.Count);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            // the first run
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException or NotSupportedException)
+        {
+            _logger.LogInformation("{Name}: the listings saved by the last run could not be read ({Error}); listing afresh", _options.Name, ex.Message);
+        }
+    }
+
+    /// <summary>Saves the listings held now (<see cref="KeptListingsOptions.SaveTo"/>): written whole beside the file and moved into place, so a crash leaves the last good one.</summary>
+    private void Save()
+    {
+        if (!_options.Keep || _options.SaveTo is not { } path)
+        {
+            return;
+        }
+
+        try
+        {
+            var saved = new SavedListings(SavedVersion, _options.SaveKey ?? "", Cache.Snapshot().ToDictionary(p => p.Key, p => p.Value.ToList(), StringComparer.Ordinal));
+            if (Path.GetDirectoryName(path) is { Length: > 0 } folder)
+            {
+                Directory.CreateDirectory(folder);
+            }
+
+            var temp = path + ".tmp";
+            using (var file = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+            using (var zip = new GZipStream(file, CompressionLevel.Fastest))
+            {
+                JsonSerializer.Serialize(zip, saved, SavedListingsJson.Default.SavedListings);
+            }
+
+            // an antivirus holding the old file refuses the replace for a moment
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    File.Move(temp, path, overwrite: true);
+                    break;
+                }
+                catch (Exception ex) when ((ex is UnauthorizedAccessException or IOException) && attempt < 6)
+                {
+                    Thread.Sleep(10 << (attempt - 1));
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            _logger.LogInformation("{Name}: the listings could not be saved for the next run ({Error})", _options.Name, ex.Message);
+        }
     }
 
     /// <summary>The listings: answer <see cref="IVfsOperations.ListAsync"/> and stats from it, and keep it right after a write.</summary>
@@ -183,6 +263,7 @@ public sealed class KeptListings : IAsyncDisposable
         await walking.ConfigureAwait(false);
         _firstWalk.TrySetResult();
         _stopping.Dispose();
+        Save();
     }
 
     /// <summary>The walks: the first counting into the source's counters, then one every <see cref="KeptListingsOptions.WalkEvery"/> after the last ended.</summary>
@@ -208,6 +289,8 @@ public sealed class KeptListings : IAsyncDisposable
                 {
                     _logger.LogInformation("{Name}: walked in {Seconds:F0} s: {Files:N0} files in {Folders:N0} folders, and the folders it leaves out are listed when opened", _options.Name, seconds, counters.FilesKnown, counters.DirectoriesKnown);
                 }
+
+                Save();
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -403,4 +486,20 @@ public sealed record KeptListingsOptions
 
     /// <summary>What the log calls the source, at the start of its lines ("sharepoint").</summary>
     public string Name { get; init; } = "source";
+
+    /// <summary>
+    /// With listings kept, the file they are saved to (in the source's state folder) after each walk and when the source
+    /// stops, and read back from at its next start: folders then open at once, each listed afresh behind its first answer.
+    /// Null keeps them for the run alone.
+    /// </summary>
+    public string? SaveTo { get; init; }
+
+    /// <summary>What the saved listings must have been saved for to be read back (the account, the server): another's are not.</summary>
+    public string? SaveKey { get; init; }
 }
+
+/// <summary>The listings a run saved (<see cref="KeptListingsOptions.SaveTo"/>): what they are for, and each folder's.</summary>
+internal sealed record SavedListings(int Version, string Key, Dictionary<string, List<VfsEntry>> Listings);
+
+[System.Text.Json.Serialization.JsonSerializable(typeof(SavedListings))]
+internal sealed partial class SavedListingsJson : System.Text.Json.Serialization.JsonSerializerContext;

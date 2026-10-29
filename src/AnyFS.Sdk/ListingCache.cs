@@ -85,6 +85,37 @@ public sealed class ListingCache
         }
     }
 
+    /// <summary>The listings held now, by folder path: what a source saves to answer at once after its next start (<see cref="Restore"/>).</summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>> Snapshot()
+    {
+        lock (_gate)
+        {
+            return _entries.Where(e => !IsExpired(e.Value)).ToDictionary(e => e.Key, e => e.Value.List, StringComparer.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// Keeps a listing an earlier run saved (<see cref="Snapshot"/>) as the listing of <paramref name="path"/>, as old: it
+    /// answers at once and is listed afresh behind the first answer (<see cref="RefreshAfter"/>; without that, by the next
+    /// walk). A listing this run already has wins.
+    /// </summary>
+    public void Restore(string path, IReadOnlyList<VfsEntry> listing)
+    {
+        ArgumentNullException.ThrowIfNull(listing);
+        lock (_gate)
+        {
+            if (_entries.ContainsKey(path))
+            {
+                return;
+            }
+
+            // checked a year ago: past any refresh age
+            var now = _time.GetTimestamp();
+            _entries[path] = new Entry(now, listing) { Checked = now - (long)(TimeSpan.FromDays(365).TotalSeconds * _time.TimestampFrequency) };
+            TrimIfNeededLocked();
+        }
+    }
+
     /// <summary>The same as <see cref="GetAsync"/> (kept for plugins built against SDK 0.2).</summary>
     [Obsolete(NoRefreshOnRepeat)]
     public ValueTask<IReadOnlyList<VfsEntry>> ListAsync(string path, CancellationToken ct) => GetAsync(path, ct);

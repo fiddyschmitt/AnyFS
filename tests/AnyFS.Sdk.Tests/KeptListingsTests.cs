@@ -242,6 +242,56 @@ public class KeptListingsTests
         Assert.AreEqual(1, Listed(""));
     }
 
+    [TestMethod]
+    public async Task SavedListingsAnswerTheNextRunAtOnceThenAreListedAfresh()
+    {
+        var file = Path.Combine(Path.GetTempPath(), $"anyfs-kept-{Guid.NewGuid():N}.json.gz");
+        try
+        {
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, RefreshAfter = TimeSpan.FromMinutes(1), SaveTo = file, SaveKey = "jane@contoso.com" };
+            await using (var first = Kept(new SourceCounters(), options))
+            {
+                await first.Cache.GetAsync("", CancellationToken.None);
+                await first.Cache.GetAsync("docs", CancellationToken.None);
+            }
+
+            Assert.IsTrue(File.Exists(file), "saved when the source stops");
+            _listed.Clear();
+            _tree["docs"].Add(VfsEntry.File("new.txt", 4));
+
+            // the next run: the saved listing at once, without the upstream; then listed afresh behind that answer
+            await using (var next = Kept(new SourceCounters(), options))
+            {
+                var docs = await next.Cache.GetAsync("docs", CancellationToken.None);
+                CollectionAssert.AreEqual(new[] { "sub", "a.txt", "b.txt" }, docs.Select(e => e.Name).ToArray(), "what the last run saw");
+                for (var i = 0; i < 100 && Listed("docs") == 0; i++)
+                {
+                    await Task.Delay(20);
+                }
+
+                Assert.AreEqual(1, Listed("docs"), "listed afresh behind the first answer");
+                for (var i = 0; i < 100 && (await next.Cache.GetAsync("docs", CancellationToken.None)).Count < 4; i++)
+                {
+                    await Task.Delay(20);
+                }
+
+                Assert.AreEqual(4, (await next.Cache.GetAsync("docs", CancellationToken.None)).Count);
+            }
+
+            // another account's saved listings are not read
+            _listed.Clear();
+            await using (var other = Kept(new SourceCounters(), options with { SaveKey = "john@contoso.com" }))
+            {
+                await other.Cache.GetAsync("docs", CancellationToken.None);
+                Assert.AreEqual(1, Listed("docs"), "listed, not answered from jane's");
+            }
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
     /// <summary>A source that only lists, for the host's generic walk.</summary>
     private sealed class ListingSource(Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> list) : IVfsOperations
     {
