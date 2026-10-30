@@ -126,8 +126,8 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     private string? _page;
 
     /// <summary>
-    /// Probe (branch build): one headless load of another of Teams' pages (<paramref name="path"/> on the Teams host), for
-    /// the services of <paramref name="want"/> not in hand; the services in hand after it.
+    /// Probe (branch build): one headless load of another page (<paramref name="path"/> on the Teams host, or a full https
+    /// address: a team's SharePoint site), for the services of <paramref name="want"/> not in hand; the services in hand after it.
     /// </summary>
     internal async Task<IReadOnlyList<TeamsService>> ProbeLoadAsync(string? path, IReadOnlyCollection<TeamsService> want, TimeSpan deadline, CancellationToken ct)
     {
@@ -135,7 +135,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            _page = path is null ? null : $"{teamsHost.AbsoluteUri.TrimEnd('/')}{path}";
+            _page = path is null ? null : path.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ? path : $"{teamsHost.AbsoluteUri.TrimEnd('/')}{path}";
             var missing = want.Where(s => Fresh(s) is null).ToList();
             if (missing.Count > 0)
             {

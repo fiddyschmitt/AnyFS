@@ -25,6 +25,7 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
     // what the structure section found, for the later sections (never written out)
     private readonly List<(string Team, string? Group, List<string> Channels)> _teams = [];
     private readonly List<(string Id, bool Meeting)> _chats = [];
+    private string? _site;
     private TeamsRest.Services? _services;
 
     // the items the recordings name (their video and transcript, in Teams' media service and in OneDrive), for the checks
@@ -79,12 +80,12 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
                 asked = true;
                 Line($"  asked the page for them itself (a headless load): {(await rest.ProbeSeekAsync(ct).ConfigureAwait(false) ? "one came" : "none came")}");
 
-                // whether the page hands them out given longer than the source's load waits (90 s): Teams' deep links (/l/…)
-                // stop at its "open in the app or the web" page when headless, so the start page is the one to hold open
-                if (rest.ProbeLoad is { } load)
+                // whether the team's own SharePoint site, opened in the same profile, hands one out (the start page held open
+                // for 4 minutes did not, 30-Oct-2026; Teams' deep links stop at its "open in the app or the web" page headless)
+                if (rest.ProbeLoad is { } load && _site is { } site)
                 {
-                    var came = await load(null, TimeSpan.FromMinutes(4), ct).ConfigureAwait(false);
-                    Line($"  the start page held open headless for up to 4 minutes: {(came.Count == 0 ? "neither in hand after it" : $"{string.Join(" and ", came)} in hand after it")}");
+                    var came = await load(site, TimeSpan.FromMinutes(2), ct).ConfigureAwait(false);
+                    Line($"  a team's SharePoint site opened headless for up to 2 minutes: {(came.Count == 0 ? "neither in hand after it" : $"{string.Join(" and ", came)} in hand after it")}");
                 }
 
                 continue;
@@ -233,6 +234,14 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
             {
                 Line($"    {name}: {chats.Count(c => Obj(c, name).ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null))} chats; {Union(chats.SelectMany(c => JsonIn(c, name)).Take(50), 3)}");
             }
+
+            // the values main's meeting.md reads from meetingInformation (8151a0a), by their form, pattern or kind alone
+            var infos = chats.SelectMany(c => JsonIn(c, "meetingInformation")).ToList();
+            var recurrences = infos.Select(i => Obj(i, "eventRecurrencePattern")).ToList();
+            Line($"    meetingInformation's values: startTime {Counted(infos.Select(i => Form(Str(i, "startTime"))))} ({Patterns(infos.Select(i => Pattern(Str(i, "startTime"))))}); endTime {Counted(infos.Select(i => Form(Str(i, "endTime"))))}");
+            Line($"      isCancelled {Counted(infos.Select(i => Obj(i, "isCancelled").ValueKind.ToString()))}; organizerId {Counted(infos.Select(i => IdForm(Str(i, "organizerId"))))}; meetingJoinUrl {infos.Count(i => Str(i, "meetingJoinUrl")?.StartsWith("https://", StringComparison.OrdinalIgnoreCase) == true)} https of {infos.Count}");
+            Line($"      patternType {Counted(recurrences.Select(r => Str(r, "patternType")))}; daysOfTheWeek {Counted(recurrences.SelectMany(r => Arr(Obj(r, "weekly"), "daysOfTheWeek")).Select(d => d.ValueKind == JsonValueKind.String ? d.GetString() : d.ValueKind.ToString()))}; interval {Counted(recurrences.Select(r => Form(Str(Obj(r, "weekly"), "interval"))))}");
+            Line($"      meetingType {Counted(infos.Select(i => Str(i, "meetingType")))}; appointmentType {Counted(infos.Select(i => Str(i, "appointmentType")))}; rsvpStatus {Counted(chats.SelectMany(c => JsonIn(c, "userMeetingInfo")).Select(u => Str(u, "rsvpStatus")))}");
             Line($"  conversationFolders: {Arr(root, "conversationFolders").Count()}; a folder: {Union(Arr(root, "conversationFolders"), 3)}");
             Line($"  privateFeeds: {string.Join(", ", Arr(root, "privateFeeds").Select(f => Safe(Str(f, "id"))))}; a feed: {Union(Arr(root, "privateFeeds"), 1)}");
             var users = Obj(root, "users");
@@ -346,6 +355,7 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
             var ended = parsed.Where(x => Find(x, "ended") is not null).ToList();
             var parts = ended.SelectMany(x => Finds(Find(x, "partlist"), "part")).ToList();
             Line($"  calls: {calls.Count} messages, {parsed.Count} parse as XML, {ended.Count} ended; parts {parts.Count}, with a displayName {parts.Count(p => Find(p, "displayName")?.Value is { Length: > 0 })}; durations {Counted(parts.Select(p => Form(Find(p, "duration")?.Value)))}");
+            Line($"    conversationStartTime's patterns: {Patterns(ended.Select(x => Pattern(Find(x, "conversationStartTime")?.Value)))}");
             Line($"    conversationStartTime {Counted(ended.Select(x => Form(Find(x, "conversationStartTime")?.Value)))}; startTime {Counted(ended.Select(x => Form(Find(Find(x, "meetingDetails"), "startTime")?.Value)))}; endTime {Counted(ended.Select(x => Form(Find(Find(x, "meetingDetails"), "endTime")?.Value)))}");
             Line($"    meetingType {Counted(ended.Select(x => Find(Find(x, "meetingDetails"), "meetingType")?.Value))}; callEventType {Counted(ended.Select(x => Find(x, "callEventType")?.Value))}; with a subject {ended.Count(x => Find(Find(x, "meetingDetails"), "subject")?.Value is { Length: > 0 })}, an organiser {ended.Count(x => Find(Find(x, "meetingDetails"), "organizerUpn")?.Value is { Length: > 0 })}, a call id {ended.Count(x => Find(x, "callId")?.Value is { Length: > 0 })}");
             var recordings = all.Where(m => Str(m, "messagetype") == "RichText/Media_CallRecording").Select(m => Markup(Str(m, "content"))).OfType<System.Xml.Linq.XElement>()
@@ -572,6 +582,10 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
             {
                 Line($"    with {key}: {properties.Count(p => Str(p, key) is { Length: > 0 })} of {properties.Count}");
             }
+
+            // a team's own SharePoint site, for the later part's headless load of it (never written out)
+            _site = properties.Select(p => Str(p, "sharepointSiteUrl"))
+                .FirstOrDefault(s => Uri.TryCreate(s, UriKind.Absolute, out var site) && site.Scheme == Uri.UriSchemeHttps && TeamsServices.IsSharePointHost(site.Host));
 
             Line($"  a member: {Union(members, 1)}; roles {Values(members, "role")}; meeting roles {Values(members, "meetingRole")}");
         }
@@ -950,10 +964,41 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
         var v when v.All(char.IsAsciiDigit) => "digits",
         var v when double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out _) => "decimal",
         var v when v.StartsWith('P') => "XML duration",
-        var v when v.Contains('T', StringComparison.Ordinal) && DateTimeOffset.TryParse(v, CultureInfo.InvariantCulture, DateTimeStyles.None, out _) => v.EndsWith('Z') ? "ISO time, Z" : "ISO time",
+        var v when v.Contains('T', StringComparison.Ordinal) && DateTimeOffset.TryParse(v, CultureInfo.InvariantCulture, DateTimeStyles.None, out _) => v.EndsWith('Z') ? "ISO time Z" : "ISO time",
         var v when v.Contains(':', StringComparison.Ordinal) && TimeSpan.TryParse(v, CultureInfo.InvariantCulture, out _) => "h:mm:ss",
         _ => "other",
     };
+
+    /// <summary>
+    /// A value's pattern alone, for a form <see cref="Form"/> does not name: each digit a 9, each letter an a, the rest as it is,
+    /// at most 40 characters (<c>10/30/2026 12:00:00 PM</c> is <c>99/99/9999 99:99:99 aa</c>); never its value.
+    /// </summary>
+    internal static string Pattern(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "none";
+        }
+
+        var shown = string.Concat(value.Trim().Take(40).Select(c => char.IsDigit(c) ? '9' : char.IsLetter(c) ? 'a' : c));
+        return shown.All(c => c is '9' or 'a' or ' ' or '.' or ',' or '/' or ':' or '-' or '+' or '(' or ')') ? shown : "(not plain)";
+    }
+
+    /// <summary>What an id is, alone: an object id (a GUID), an mri, other, none.</summary>
+    private static string IdForm(string? id) => id switch
+    {
+        null or "" => "none",
+        _ when System.Guid.TryParse(id, out _) => "object id",
+        _ when id.StartsWith("8:", StringComparison.Ordinal) => "mri",
+        _ => "other",
+    };
+
+    /// <summary>The patterns across the items, each counted; not taken out as <see cref="Counted"/> takes values out (a pattern holds none).</summary>
+    private static string Patterns(IEnumerable<string> patterns)
+    {
+        var counts = patterns.GroupBy(p => p).OrderByDescending(g => g.Count()).Select(g => $"{g.Key} x{g.Count()}").ToList();
+        return counts.Count == 0 ? "(none)" : string.Join("; ", counts.Take(10));
+    }
 
     /// <summary>A message's markup as one XML element, as main's TeamsMeetings reads it; null where it does not parse.</summary>
     private static System.Xml.Linq.XElement? Markup(string? content)

@@ -134,12 +134,39 @@ public class TeamsProbeTests
     {
         Assert.AreEqual("digits", TeamsProbe.Form("3730"));
         Assert.AreEqual("decimal", TeamsProbe.Form("3555.2"));
-        Assert.AreEqual("ISO time, Z", TeamsProbe.Form("2026-10-30T10:00:00.000Z"));
+        Assert.AreEqual("ISO time Z", TeamsProbe.Form("2026-10-30T10:00:00.000Z"));
         Assert.AreEqual("ISO time", TeamsProbe.Form("2026-10-30T10:00:00+10:00"));
         Assert.AreEqual("h:mm:ss", TeamsProbe.Form("1:02:10"));
         Assert.AreEqual("XML duration", TeamsProbe.Form("PT1H2M"));
         Assert.AreEqual("other", TeamsProbe.Form("Weekly sync"));
         Assert.AreEqual("none", TeamsProbe.Form(" "));
+
+        // a form it does not name, by its pattern: never the value
+        Assert.AreEqual("99/99/9999 99:99:99 aa", TeamsProbe.Pattern("10/30/2026 12:00:00 PM"));
+        Assert.AreEqual("aaa, 99 aaa 9999 99:99:99 aaa", TeamsProbe.Pattern("Thu, 30 Oct 2026 12:00:00 GMT"));
+        Assert.AreEqual("(not plain)", TeamsProbe.Pattern("jane@contoso.com"));
+    }
+
+    /// <summary>
+    /// A team's SharePoint site opened headless in the Teams profile, as the later part does at work where the page hands
+    /// out no SharePoint token: what came is printed (whether a SharePoint page hands out a bearer token at all, or only its
+    /// session cookie).
+    /// </summary>
+    [TestMethod]
+    [Timeout(300_000)]
+    public async Task ATeamsSharePointSiteCanBeOpenedHeadless()
+    {
+        var account = Environment.GetEnvironmentVariable("ANYFS_TEST_TEAMS_ACCOUNT");
+        if (string.IsNullOrWhiteSpace(account) || string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ANYFS_TEAMS_PROFILES")))
+        {
+            Assert.Inconclusive("set ANYFS_TEST_TEAMS_ACCOUNT and ANYFS_TEAMS_PROFILES to probe the sandbox");
+        }
+
+        var browser = BrowserLocator.Find(null, "ANYFS_TEAMS_BROWSER") ?? throw new AssertInconclusiveException("no browser");
+        var session = new TeamsWebSession(new Uri(TeamsCloud.Global.TeamsHost), browser, WebSignInTarget.ProfileFor("teams-browser", account, "ANYFS_TEAMS_PROFILES"), account, NullLogger.Instance);
+        var site = $"https://{account.Split('@')[1].Split('.')[0]}.sharepoint.com/sites/anyfslab";
+        var came = await session.ProbeLoadAsync(site, [TeamsService.SharePoint, TeamsService.Graph], TimeSpan.FromSeconds(60), CancellationToken.None);
+        Console.WriteLine($"in hand after the team's SharePoint site: {(came.Count == 0 ? "neither" : string.Join(", ", came))}");
     }
 
     /// <summary>The later part's longer load of the start page: headless, in a session with no tokens yet (the sandbox's start page hands SharePoint's out at once).</summary>
