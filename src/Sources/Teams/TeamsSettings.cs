@@ -109,7 +109,7 @@ public sealed class TeamsSettings
     public bool ChannelMessages { get; set; } = true;
 
     [Setting("Chats", Order = 6,
-        Hint = "Your 1:1, group and meeting chats, each a Markdown file of the whole conversation with its shared files and images. The chats hidden in Teams are in a Hidden chats folder.")]
+        Hint = "Your 1:1, group and meeting chats, each a Markdown file: who is in it (guests, bots and other organisations' people marked), who started it and when, its pinned messages, then the conversation, with its shared files and images. The chats hidden in Teams are in a Hidden chats folder.")]
     public bool Chats { get; set; } = true;
 
     [Setting("Files", Order = 7,

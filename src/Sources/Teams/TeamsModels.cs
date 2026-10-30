@@ -187,6 +187,20 @@ internal sealed record ChatInfo(string Id, string? Title, ChatKind Kind, IReadOn
 
     /// <summary>Hidden from the chat list in Teams (<c>hidden</c>); a new message shows it again.</summary>
     public bool Hidden { get; init; }
+
+    /// <summary>When it was started (<c>createdAt</c>), and by whom (<c>creator</c>, an mri).</summary>
+    public DateTimeOffset? Created { get; init; }
+
+    public string? CreatorMri { get; init; }
+
+    /// <summary>With people of other organisations (<c>isExternal</c>).</summary>
+    public bool External { get; init; }
+
+    /// <summary>Muted by the account (its own member entry's <c>isMuted</c>).</summary>
+    public bool Muted { get; init; }
+
+    /// <summary>The ids of the messages pinned in it (<c>pinnedItems</c>, where it names them).</summary>
+    public IReadOnlyList<string> PinnedIds { get; init; } = [];
 }
 
 /// <summary>A call in the account's call history (the chat service's <c>48:calllogs</c>, each message's <c>call-log</c>).</summary>
@@ -233,6 +247,9 @@ internal sealed record TeamsMessage(
     /// <summary>The addresses of its inline images (its HTML's AMSImage <c>img</c> elements), in order; empty when none.</summary>
     public IReadOnlyList<string> Images { get; init; } = [];
 
+    /// <summary>Pinned in its conversation (<c>properties.pinned</c>).</summary>
+    public bool Pinned { get; init; }
+
     /// <summary>A real message people wrote, not a system activity (member added, call ended, channel renamed).</summary>
     public bool IsContent => MessageType.StartsWith("RichText", StringComparison.OrdinalIgnoreCase) || MessageType.Equals("Text", StringComparison.OrdinalIgnoreCase);
 
@@ -249,5 +266,24 @@ internal sealed record TeamsStructure(IReadOnlyList<TeamInfo> Teams, IReadOnlyLi
 /// <summary>A page of a conversation's messages and the link to the page before it (older messages), for paging.</summary>
 internal sealed record MessagePage(IReadOnlyList<TeamsMessage> Messages, string? OlderLink);
 
-/// <summary>A person, for turning an mri into a name in the Markdown.</summary>
-internal sealed record Person(string Mri, string DisplayName);
+/// <summary>A person, for turning an mri into a name in the Markdown, and telling a guest, a bot or another organisation's person in chat.md.</summary>
+internal sealed record Person(string Mri, string DisplayName)
+{
+    /// <summary>A guest in the organisation (the middle tier's <c>userType</c> Guest).</summary>
+    public bool Guest { get; init; }
+
+    /// <summary>A bot or an app (<c>type</c> BOT).</summary>
+    public bool Bot { get; init; }
+
+    /// <summary>Their organisation's name (<c>tenantName</c>).</summary>
+    public string? Organisation { get; init; }
+}
+
+/// <summary>What chat.md says of its chat above the messages (spec 7.9).</summary>
+/// <param name="Link">The address that opens the chat in Teams.</param>
+/// <param name="Members">The members by name, the account as "you", each guest, bot or another organisation's person marked; at most <see cref="TeamsText.MembersShown"/> of <paramref name="MemberCount"/>.</param>
+/// <param name="StartedBy">Who started it, by name.</param>
+/// <param name="Pinned">Its pinned messages among those read.</param>
+/// <param name="Earlier">Where its earlier messages are, where it goes back further than chat.md.</param>
+internal sealed record ChatDetails(string? Link, ChatKind Kind, IReadOnlyList<string> Members, int MemberCount, DateTimeOffset? Started, string? StartedBy,
+    bool External, bool Muted, bool Hidden, IReadOnlyList<TeamsMessage> Pinned, string? Earlier = null);

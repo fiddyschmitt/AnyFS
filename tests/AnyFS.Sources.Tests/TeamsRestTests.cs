@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using AnyFS.Sdk;
 using AnyFS.Sources.Teams;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -451,7 +452,10 @@ public class TeamsRestTests
           "channels":[{"id":"19:general","displayName":"General","isGeneral":true,"description":"Everything","creationTime":"2026-10-01T00:00:00Z","creator":"8:orgid:jane","isShared":true,"isFavorite":true,
             "tabs":[{"name":"Wiki","tabType":"website","settings":{"subtype":"webpage","websiteUrl":"https://wiki.t.com/x"}},{"name":"Plan.docx","tabType":"files","settings":{"subtype":"pinnedFile"}},
                     {"name":"Planner","tabType":"extension","settings":{}},{"name":"","tabType":"website"},{"name":"Odd","tabType":"website","settings":{"websiteUrl":"javascript:alert(1)"}}]}]}],
-         "chats":[{"id":"19:old","title":"Old","members":[],"hidden":true},{"id":"19:new","title":"New","members":[]}]}
+         "chats":[{"id":"19:old","title":"Old","hidden":true,"createdAt":"2026-10-01T09:00:00.000Z","creator":"8:orgid:jane","isExternal":true,
+                   "members":[{"mri":"8:orgid:me","objectId":"me","role":"Admin","isMuted":true},{"mri":"8:orgid:jane","objectId":"jane","role":"Admin","isMuted":false}],
+                   "pinnedItems":[{"messageId":"1001"},"1002",{"other":"x"}]},
+                  {"id":"19:new","title":"New","members":[{"mri":"8:orgid:me","isMuted":false},{"mri":"8:orgid:ann","isMuted":true}],"pinnedItems":"[{\"id\":\"2001\"}]"}]}
         """;
 
     /// <summary>The chat service's special conversations and threads, and the aggregator: an account with no 48:mentions where <paramref name="noMentions"/>.</summary>
@@ -478,6 +482,14 @@ public class TeamsRestTests
                 "/v1/users/ME/conversations/48:notifications/messages" => Notifications,
                 "/v1/threads/19:general" => Thread,
                 "/v1/threads/19:odd" => """{"properties":{"sharepointSiteUrl":"https://evil.example/sites/x","channelDocsFolderRelativeUrl":"/sites/x/Shared Documents/Odd"},"rosterSummary":{"memberCount":"3"}}""",
+
+                // the middle tier's people, as the sandbox's lookup answers (userType, type, tenantName)
+                "/beta/users/fetchShortProfile" => """
+                    [{"mri":"8:orgid:jane","displayName":"Jane Doe","userType":"Member","type":"ADUser","tenantName":"Contoso"},
+                     {"mri":"8:orgid:ann","displayName":"Ann Lee","userType":"Guest","type":"ADUser","tenantName":"Contoso"},
+                     {"mri":"28:polly","displayName":"Polly","type":"BOT","accountEnabled":true},
+                     {"mri":"8:orgid:kim","displayName":"Kim Park","userType":"Member","type":"ADUser","tenantName":"Fabrikam"}]
+                    """,
                 _ => null,
             };
             return Task.FromResult(new HttpResponseMessage(body is null ? HttpStatusCode.NotFound : HttpStatusCode.OK) { Content = new StringContent(body ?? "{}", Encoding.UTF8, "application/json") });
@@ -545,7 +557,7 @@ public class TeamsRestTests
     [TestMethod]
     public async Task TheStructureCarriesTheTeamsChannelsTabsAndHiddenChats()
     {
-        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, new Feeds());
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, new Feeds()) { Mri = "8:orgid:me" };
         var structure = await rest.StructureAsync(CancellationToken.None);
 
         var team = structure.Teams.Single();
@@ -563,5 +575,44 @@ public class TeamsRestTests
         }, general.Tabs.ToArray(), "one with no name left out; a website's address only where it is a web address");
 
         CollectionAssert.AreEqual(new[] { ("Old", true), ("New", false) }, structure.Chats.Select(c => (c.Title, c.Hidden)).ToArray());
+
+        // a chat's start, its maker, other organisations, the account's own mute (not another member's), its pinned messages
+        var old = structure.Chats[0];
+        Assert.AreEqual((DateTimeOffset.Parse("2026-10-01T09:00:00Z"), "8:orgid:jane", true, true), (old.Created, old.CreatorMri, old.External, old.Muted));
+        CollectionAssert.AreEqual(new[] { "1001", "1002" }, old.PinnedIds.ToArray(), "objects naming the message or ids; one naming none left out");
+        var fresh = structure.Chats[1];
+        Assert.IsFalse(fresh.Muted, "another member muted it, not the account");
+        CollectionAssert.AreEqual(new[] { "2001" }, fresh.PinnedIds.ToArray(), "pinnedItems held as a JSON string");
+    }
+
+    [TestMethod]
+    public void AMessageIsPinnedWhereItsPinnedPropertySaysSo()
+    {
+        bool Pinned(string properties)
+        {
+            using var doc = JsonDocument.Parse(properties);
+            return TeamsRest.PinnedOf(doc.RootElement);
+        }
+
+        Assert.IsTrue(Pinned("""{"pinned":true}"""));
+        Assert.IsTrue(Pinned("""{"pinned":"true"}"""));
+        Assert.IsTrue(Pinned("""{"pinned":1793273720290}"""), "a time");
+        Assert.IsTrue(Pinned("""{"pinned":{"pinnedBy":"8:orgid:jane","pinnedTime":1793273720290}}"""));
+        Assert.IsTrue(Pinned("""{"pinned":"{\"pinnedBy\":\"8:orgid:jane\"}"}"""), "the same held as a string");
+        Assert.IsFalse(Pinned("""{"pinned":"false"}"""));
+        Assert.IsFalse(Pinned("""{"pinned":{"isPinned":false,"pinnedBy":"8:orgid:jane"}}"""), "unpinned");
+        Assert.IsFalse(Pinned("""{"pinned":""}"""));
+        Assert.IsFalse(Pinned("""{"edittime":"1"}"""));
+    }
+
+    [TestMethod]
+    public async Task ThePeopleLookupTellsGuestsBotsAndOrganisations()
+    {
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, new Feeds());
+        var people = (await rest.PeopleAsync(["8:orgid:jane", "8:orgid:ann", "28:polly", "8:orgid:kim"], CancellationToken.None)).ToDictionary(p => p.Mri);
+        Assert.AreEqual((false, false, "Contoso"), (people["8:orgid:jane"].Guest, people["8:orgid:jane"].Bot, people["8:orgid:jane"].Organisation));
+        Assert.IsTrue(people["8:orgid:ann"].Guest);
+        Assert.AreEqual((true, null), (people["28:polly"].Bot, people["28:polly"].Organisation));
+        Assert.AreEqual("Fabrikam", people["8:orgid:kim"].Organisation);
     }
 }

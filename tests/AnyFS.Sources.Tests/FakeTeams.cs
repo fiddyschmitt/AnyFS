@@ -63,14 +63,27 @@ internal sealed class FakeTeams : ITeamsApi
     /// <summary>Replaces a team as the aggregator now gives it (its details), by its id.</summary>
     public void SetTeam(TeamInfo team) => _teams[_teams.FindIndex(t => t.Id == team.Id)] = team;
 
-    public void AddPerson(string mri, string displayName) => _people[mri] = displayName;
+    /// <summary>Replaces a chat as the aggregator now gives it (its details), by its id.</summary>
+    public void SetChat(ChatInfo chat) => _chats[_chats.FindIndex(c => c.Id == chat.Id)] = chat;
+
+    private readonly Dictionary<string, Person> _kinds = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A person the people lookup names: a guest, a bot, of an organisation (the middle tier's userType, type, tenantName).</summary>
+    public void AddPerson(string mri, string displayName, bool guest = false, bool bot = false, string? organisation = null)
+    {
+        _people[mri] = displayName;
+        _kinds[mri] = new Person(mri, displayName) { Guest = guest, Bot = bot, Organisation = organisation };
+    }
+
+    /// <summary>The mris the people lookup was asked about, in order.</summary>
+    public List<string> PeopleAsked { get; } = [];
 
     /// <summary>
     /// Adds a message to a conversation; a reply points at <paramref name="rootId"/> (a channel post's thread). An edited one
     /// carries its edit time, a deleted one its deletion time and no content (as the chat service gives them).
     /// </summary>
     public TeamsMessage Post(string threadId, string fromMri, string? fromName, string html, DateTimeOffset when, string? rootId = null, string messageType = "RichText/Html",
-        DateTimeOffset? edited = null, DateTimeOffset? deleted = null, IReadOnlyList<Reaction>? reactions = null, IReadOnlyList<SharedFile>? files = null)
+        DateTimeOffset? edited = null, DateTimeOffset? deleted = null, IReadOnlyList<Reaction>? reactions = null, IReadOnlyList<SharedFile>? files = null, bool pinned = false)
     {
         var id = (when.ToUnixTimeMilliseconds()).ToString();
         var message = new TeamsMessage(id, rootId, rootId, fromMri, when, messageType, deleted is null ? html : null, fromName)
@@ -80,6 +93,7 @@ internal sealed class FakeTeams : ITeamsApi
             Reactions = reactions ?? [],
             Files = files ?? [],
             Images = deleted is null ? TeamsFiles.ImagesIn(html) : [],
+            Pinned = pinned,
         };
         if (!_messages.TryGetValue(threadId, out var list))
         {
@@ -138,9 +152,20 @@ internal sealed class FakeTeams : ITeamsApi
     }
 
     public Task<IReadOnlyList<Person>> PeopleAsync(IReadOnlyList<string> mris, CancellationToken ct)
-        => PeopleFails
-            ? throw new VfsException(VfsError.IoError, "Teams (fake) answered 400: the people lookup refused")
-            : Task.FromResult<IReadOnlyList<Person>>(mris.Where(_people.ContainsKey).Select(m => new Person(m, _people[m])).ToList());
+    {
+        if (PeopleFails)
+        {
+            throw new VfsException(VfsError.IoError, "Teams (fake) answered 400: the people lookup refused");
+        }
+
+        lock (PeopleAsked)
+        {
+            PeopleAsked.AddRange(mris);
+        }
+
+        return Task.FromResult<IReadOnlyList<Person>>(mris.Where(_people.ContainsKey)
+            .Select(m => _kinds.TryGetValue(m, out var kind) ? kind with { DisplayName = _people[m] } : new Person(m, _people[m])).ToList());
+    }
 
     /// <summary>Renames a person (as when the source later learns a sender's name from a message).</summary>
     public void Rename(string mri, string displayName) => _people[mri] = displayName;

@@ -301,20 +301,36 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             var cutoff = Cutoff;
             var chats = cutoff is { } since ? structure.Chats.Where(ch => ch.LastUpdated is null || ch.LastUpdated >= since).ToList() : structure.Chats;
 
-            // the people a chat is named for: learn their names once, so a 1:1 or untitled group is named, not an mri
-            await LearnPeopleAsync(chats.SelectMany(ch => ch.MemberMris).Where(m => !IsMe(m)), "their chats are named by id", c).ConfigureAwait(false);
+            // the people a chat is named for: learn their names once, so a 1:1 or untitled group is named, not an mri; and the
+            // account's own organisation, so chat.md can tell another's
+            var me = Api.Mri is { } mri ? new[] { mri } : [];
+            await LearnPeopleAsync(chats.SelectMany(ch => ch.MemberMris).Where(m => !IsMe(m)).Concat(me), "their chats are named by id", c).ConfigureAwait(false);
             return structure with { Chats = chats };
         }, ct);
 
-    /// <summary>The names of people not yet known, a hundred a call; a call that fails leaves those as mris.</summary>
+    // the people looked up, by mri (chat.md marks a guest, a bot, another organisation's person), and each mri asked about:
+    // once, whether the middle tier names it or not
+    private readonly ConcurrentDictionary<string, Person> _people = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, byte> _asked = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The people not yet asked about, a hundred a call: their names and kinds; a call that fails leaves those as mris, to ask again.</summary>
     private async Task LearnPeopleAsync(IEnumerable<string> mris, string otherwise, CancellationToken ct)
     {
-        foreach (var batch in mris.Where(m => !_names.ContainsKey(m)).Distinct().Chunk(100))
+        foreach (var batch in mris.Where(m => !_asked.ContainsKey(m)).Distinct(StringComparer.OrdinalIgnoreCase).Chunk(100))
         {
             try
             {
                 var people = await Api.PeopleAsync(batch, ct).ConfigureAwait(false);
+                foreach (var person in people)
+                {
+                    _people[person.Mri] = person;
+                }
+
                 Remember(people.Select(p => (p.Mri, p.DisplayName)));
+                foreach (var mri in batch)
+                {
+                    _asked.TryAdd(mri, 0);
+                }
             }
             catch (VfsException ex)
             {
@@ -361,7 +377,44 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             return all;
         }, ct).ConfigureAwait(false);
         var (attachments, names) = await AttachmentsAsync(messages, ct).ConfigureAwait(false);
-        return (TeamsText.Chat(messages, ChatName(chat), NameOf, names, TeamsLinks.Chat(LinkHost, chat)), attachments);
+        var now = (await StructureAsync(ct).ConfigureAwait(false)).Chats.FirstOrDefault(ch => ch.Id == chat.Id) ?? chat;
+        return (TeamsText.Chat(messages, ChatName(chat), NameOf, names, DetailsOf(now, messages)), attachments);
+    }
+
+    /// <summary>
+    /// What chat.md says of its chat above the messages: its link, kind and members (the account as "you", then by name; a
+    /// guest, a bot or another organisation's person marked), who started it and when, whether it is with other
+    /// organisations, muted or hidden, and its pinned messages among those read.
+    /// </summary>
+    private ChatDetails DetailsOf(ChatInfo chat, IReadOnlyList<TeamsMessage> messages)
+    {
+        var home = _people.Values.FirstOrDefault(p => IsMe(p.Mri))?.Organisation;
+        var members = chat.MemberMris.Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(m => (Me: IsMe(m), Name: MemberName(m, home)))
+            .OrderBy(m => m.Me ? 0 : 1).ThenBy(m => m.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(m => m.Name).ToList();
+        var pinnedIds = chat.PinnedIds.ToHashSet(StringComparer.Ordinal);
+        var pinned = messages.Where(m => m.IsContent && m.Deleted is null && (m.Pinned || pinnedIds.Contains(m.Id)))
+            .OrderBy(m => m.Composed ?? DateTimeOffset.MinValue).ThenBy(m => m.Id, StringComparer.Ordinal).ToList();
+        return new ChatDetails(TeamsLinks.Chat(LinkHost, chat), chat.Kind, members.Take(TeamsText.MembersShown).ToList(), members.Count, chat.Created,
+            chat.CreatorMri is { } creator ? (IsMe(creator) ? "you" : NameOf(creator)) : null, chat.External, chat.Muted, chat.Hidden, pinned);
+    }
+
+    /// <summary>A chat member as chat.md names them: "you", else their name, marked where a guest, a bot or of an organisation other than the account's.</summary>
+    private string MemberName(string mri, string? home)
+    {
+        if (IsMe(mri))
+        {
+            return "you";
+        }
+
+        var name = NameOf(mri);
+        var note = !_people.TryGetValue(mri, out var person) ? null
+            : person.Bot ? "bot"
+            : person.Guest ? "guest"
+            : person.Organisation is { } organisation && home is not null && !organisation.Equals(home, StringComparison.OrdinalIgnoreCase) ? organisation
+            : null;
+        return note is null ? name : $"{name} ({note})";
     }
 
     // --- groups --------------------------------------------------------------------------------------------------------

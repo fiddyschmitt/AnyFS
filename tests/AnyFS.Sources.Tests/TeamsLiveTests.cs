@@ -104,6 +104,9 @@ public class TeamsLiveTests
         var text = Encoding.UTF8.GetString(buffer);
         StringAssert.StartsWith(text, "https://teams.microsoft.com/l/chat/", "chat.md opens with the address that opens it in Teams");
         StringAssert.Contains(text, "/conversations\n\n# ", "then a heading");
+        StringAssert.Contains(text, "\n\n- Kind: ", "then what the chat is");
+        StringAssert.Contains(text, "\n- Members (");
+        StringAssert.Contains(text, "you", "the account among its members");
     }
 
     /// <summary>Every chat's folder, the hidden ones (Chats/Hidden chats) among them: the sandbox's seeded chat is hidden.</summary>

@@ -94,10 +94,51 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             {
                 Version = NullIfEmpty(Str(c, "version")),
                 Hidden = Bool(c, "hidden"),
+                Created = Time(Str(c, "createdAt")),
+                CreatorMri = NullIfEmpty(Str(c, "creator")),
+                External = Bool(c, "isExternal"),
+                Muted = Arr(c, "members").Any(m => Bool(m, "isMuted") && Mri is { } me && SameMri(Str(m, "mri"), me)),
+                PinnedIds = PinnedIdsOf(c),
             });
         }
 
         return new TeamsStructure(teams, chats);
+    }
+
+    /// <summary>Whether two mris are one person's: by the object id they end with, whatever prefix a cloud's chats carry.</summary>
+    private static bool SameMri(string? a, string b) => a is not null && Tail(a).Equals(Tail(b), StringComparison.OrdinalIgnoreCase);
+
+    private static string Tail(string mri) => mri[(mri.LastIndexOf(':') + 1)..];
+
+    /// <summary>
+    /// The messages a chat has pinned, as its <c>pinnedItems</c> names them: an array (or a JSON string of one) of ids, or of
+    /// objects naming the message (<c>messageId</c>, <c>id</c>, <c>clientMessageId</c>). Seen at a GCC High tenant, by name
+    /// alone (the probe records no values), so read leniently: none where it names none.
+    /// </summary>
+    internal static IReadOnlyList<string> PinnedIdsOf(JsonElement chat)
+    {
+        var items = Obj(chat, "pinnedItems");
+        if (items.ValueKind == JsonValueKind.String && items.GetString() is { } held && held.TrimStart().StartsWith('['))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(held);
+                items = doc.RootElement.Clone();
+            }
+            catch (JsonException)
+            {
+                return [];
+            }
+        }
+
+        if (items.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return items.EnumerateArray()
+            .Select(i => i.ValueKind == JsonValueKind.String ? i.GetString() : Str(i, "messageId") ?? Str(i, "messageid") ?? Str(i, "id") ?? Str(i, "clientMessageId") ?? Str(i, "clientmessageid"))
+            .OfType<string>().Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).ToList();
     }
 
     /// <summary>
@@ -284,7 +325,12 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             var name = Str(p, "displayName") ?? Str(p, "givenName");
             if (mri is not null && !string.IsNullOrWhiteSpace(name))
             {
-                people.Add(new Person(mri, name!));
+                people.Add(new Person(mri, name!)
+                {
+                    Guest = string.Equals(Str(p, "userType"), "Guest", StringComparison.OrdinalIgnoreCase),
+                    Bot = string.Equals(Str(p, "type"), "BOT", StringComparison.OrdinalIgnoreCase),
+                    Organisation = NullIfEmpty(Str(p, "tenantName")),
+                });
             }
         }
 
@@ -972,11 +1018,46 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
                 Reactions = ReactionsOf(properties),
                 Files = FilesOf(properties),
                 Images = TeamsFiles.ImagesIn(Str(m, "content")),
+                Pinned = PinnedOf(properties),
             });
         }
 
         var older = Str(Obj(doc.RootElement, "_metadata"), "backwardLink");
         return new MessagePage(messages, NullIfEmpty(older));
+    }
+
+    /// <summary>
+    /// Whether a message is pinned (<c>properties.pinned</c>, seen at a GCC High tenant by name alone, so read leniently):
+    /// true, a time, or what says who pinned it, as an object or a JSON string of one; not where it says false.
+    /// </summary>
+    internal static bool PinnedOf(JsonElement properties)
+    {
+        var pinned = Obj(properties, "pinned");
+        if (pinned.ValueKind == JsonValueKind.String && pinned.GetString()?.Trim() is { Length: > 0 } text)
+        {
+            if (!text.StartsWith('{'))
+            {
+                return !text.Equals("false", StringComparison.OrdinalIgnoreCase) && text != "0" && !text.Equals("null", StringComparison.OrdinalIgnoreCase);
+            }
+
+            try
+            {
+                using var doc = JsonDocument.Parse(text);
+                pinned = doc.RootElement.Clone();
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        return pinned.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.Number => pinned.TryGetInt64(out var at) && at > 0,
+            JsonValueKind.Object => pinned.EnumerateObject().Any() && !pinned.EnumerateObject().Any(p => p.Value.ValueKind == JsonValueKind.False && p.Name.Contains("pinned", StringComparison.OrdinalIgnoreCase)),
+            _ => false,
+        };
     }
 
     // --- service discovery ---------------------------------------------------------------------------------------------

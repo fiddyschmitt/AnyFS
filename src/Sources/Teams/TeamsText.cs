@@ -45,13 +45,72 @@ internal static class TeamsText
         return Encoding.UTF8.GetBytes(text.ToString());
     }
 
-    /// <summary>A chat: the address that opens it in Teams (where given) on the first line, then all of its messages, oldest first.</summary>
-    public static byte[] Chat(IReadOnlyList<TeamsMessage> messages, string title, Func<string?, string> nameOf, AttachmentNames? attachments = null, string? link = null)
+    /// <summary>
+    /// A chat: the address that opens it in Teams (where given) on the first line, its title, what it is (<paramref name="details"/>:
+    /// its kind, members, who started it and when, its pinned messages…), then its messages, oldest first.
+    /// </summary>
+    public static byte[] Chat(IReadOnlyList<TeamsMessage> messages, string title, Func<string?, string> nameOf, AttachmentNames? attachments = null, ChatDetails? details = null)
     {
-        var text = Start(link);
+        var text = Start(details?.Link);
         text.Append("# ").Append(Clean(title)).Append("\n\n");
+        if (details is not null)
+        {
+            Details(text, details, nameOf);
+        }
+
         Conversation(text, messages, nameOf, attachments ?? AttachmentNames.None);
         return Encoding.UTF8.GetBytes(text.ToString());
+    }
+
+    /// <summary>How many of a chat's members chat.md names (a meeting's chat can have hundreds).</summary>
+    public const int MembersShown = 50;
+
+    private static void Details(StringBuilder text, ChatDetails details, Func<string?, string> nameOf)
+    {
+        text.Append("- Kind: ").Append(details.Kind switch { ChatKind.OneOnOne => "1:1 chat", ChatKind.Meeting => "Meeting chat", _ => "Group chat" }).Append('\n');
+        if (details.Members.Count > 0)
+        {
+            var more = details.MemberCount - details.Members.Count;
+            text.Append(CultureInfo.InvariantCulture, $"- Members ({details.MemberCount:N0}): ").AppendJoin(", ", details.Members.Select(Clean))
+                .Append(more > 0 ? string.Create(CultureInfo.InvariantCulture, $" and {more:N0} more") : "").Append('\n');
+        }
+
+        if (details.Started is not null || details.StartedBy is not null)
+        {
+            text.Append("- Started: ").Append(Stamp(details.Started, "yyyy-MM-dd HH:mm") ?? "?").Append(details.StartedBy is { } who ? $" by {Clean(who)}" : "").Append('\n');
+        }
+
+        if (details.External)
+        {
+            text.Append("- With people from other organisations\n");
+        }
+
+        if (details.Muted)
+        {
+            text.Append("- Muted\n");
+        }
+
+        if (details.Hidden)
+        {
+            text.Append("- Hidden in Teams\n");
+        }
+
+        if (details.Pinned.Count > 0)
+        {
+            text.Append("- Pinned:\n");
+            foreach (var message in details.Pinned)
+            {
+                text.Append("  - ").Append(Clean(Who(message, nameOf))).Append(", ").Append(Stamp(message.Composed, "yyyy-MM-dd HH:mm") ?? "?")
+                    .Append(Subject(message) is { } first ? $": {Clean(first)}" : "").Append('\n');
+            }
+        }
+
+        if (details.Earlier is { } earlier)
+        {
+            text.Append("- Earlier messages: ").Append(earlier).Append('\n');
+        }
+
+        text.Append('\n');
     }
 
     /// <summary>A file's text so far: the address that opens its thing in Teams on the first line, as a SharePoint page's Markdown starts with the page's.</summary>

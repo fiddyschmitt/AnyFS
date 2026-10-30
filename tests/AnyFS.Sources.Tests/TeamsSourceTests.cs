@@ -798,6 +798,55 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task AChatMdSaysWhoIsInItWhoStartedItAndWhatIsPinned()
+    {
+        const string Ann = "8:orgid:00000000-0000-0000-0000-00000000ann";
+        const string Polly = "28:00000000-0000-0000-0000-00000000poly";
+        const string Kim = "8:orgid:00000000-0000-0000-0000-00000000kim";
+        var fake = new FakeTeams();
+        fake.AddPerson(fake.Mri!, "AnyFS tester", organisation: "Contoso");
+        fake.AddPerson(Jane, "Jane Doe", organisation: "Contoso");
+        fake.AddPerson(Ann, "Ann Lee", guest: true, organisation: "Contoso");
+        fake.AddPerson(Polly, "Polly", bot: true);
+        fake.AddPerson(Kim, "Kim Park", organisation: "Fabrikam");
+        var chat = fake.AddChat(ChatKind.Group, "Project Axle", [fake.Mri!, Jane, Ann, Polly, Kim], When);
+        fake.Post(chat.Id, Jane, "Jane Doe", "<p>Agenda for Monday</p><p>and more</p>", When, pinned: true);
+        var plan = fake.Post(chat.Id, Kim, "Kim Park", "<p>The plan</p>", When.AddMinutes(5));
+        fake.Post(chat.Id, Ann, "Ann Lee", "<p>Thanks</p>", When.AddMinutes(9));
+        fake.SetChat((await fake.StructureAsync(CancellationToken.None)).Chats.Single(c => c.Id == chat.Id) with
+        {
+            Created = When.AddDays(-2), CreatorMri = Jane, External = true, Muted = true, PinnedIds = [plan.Id],
+        });
+        var crowd = fake.AddChat(ChatKind.Meeting, "All hands", Enumerable.Range(0, 60).Select(i => $"8:orgid:00000000-0000-0000-0000-{i:D12}").ToList(), When);
+        fake.Post(crowd.Id, Jane, "Jane Doe", "<p>Welcome</p>", When);
+        await using var source = await StartAsync(fake);
+
+        StringAssert.Contains(await TextAsync(source, "Chats/Project Axle/chat.md"),
+            $"/conversations\n\n# Project Axle\n\n- Kind: Group chat\n- Members (5): you, Ann Lee (guest), Jane Doe, Kim Park (Fabrikam), Polly (bot)\n"
+            + $"- Started: {Local(When.AddDays(-2))} by Jane Doe\n- With people from other organisations\n- Muted\n"
+            + $"- Pinned:\n  - Jane Doe, {Local(When)}: Agenda for Monday\n  - Kim Park, {Local(When.AddMinutes(5))}: The plan\n\n**Jane Doe**");
+
+        // a meeting's crowd: named up to fifty
+        var hands = await TextAsync(source, "Chats/All hands/chat.md");
+        StringAssert.Contains(hands, "- Kind: Meeting chat\n- Members (60): ");
+        StringAssert.Contains(hands, " and 10 more\n");
+    }
+
+    [TestMethod]
+    public async Task ThePeopleLookupAsksAboutEachPersonOnce()
+    {
+        const string Stranger = "8:orgid:00000000-0000-0000-0000-00000stranger";
+        var fake = Seed();
+        fake.AddChat(ChatKind.OneOnOne, null, [Stranger], When);
+        await using var source = await StartAsync(fake, s => s.RefreshSeconds = 0); // every listing reads the structure again
+
+        await NamesAsync(source, "Chats");
+        await NamesAsync(source, "Chats");
+        CollectionAssert.AllItemsAreUnique(fake.PeopleAsked);
+        CollectionAssert.Contains(fake.PeopleAsked, Stranger, "asked once, though the lookup names no one for it");
+    }
+
+    [TestMethod]
     public async Task ATeamNamedAsOneOfTheRootsOwnIsNumbered()
     {
         var fake = new FakeTeams();
