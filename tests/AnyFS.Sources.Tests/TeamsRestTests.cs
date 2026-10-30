@@ -404,8 +404,8 @@ public class TeamsRestTests
         Assert.AreEqual(0, refusals);
     }
 
-    // the shapes a GCC High account's call history and activity feed have (the work probe, 30-Oct-2026): call-log and
-    // activity held as JSON strings (or objects), the feed repeating the mentions
+    // the shapes a GCC High account's call history, activity feed and channel threads have (the work probe, 30-Oct-2026):
+    // call-log and activity held as JSON strings (or objects), the feed repeating the mentions
     private const string CallsNewest = """
         {"messages":[
           {"id":"2","messagetype":"Event/Call","composetime":"2026-10-30T02:00:00.000Z","properties":{"call-log":"{\"startTime\":\"2026-10-30T01:00:00.000Z\",\"connectTime\":\"2026-10-30T01:00:05.000Z\",\"endTime\":\"2026-10-30T01:12:05.000Z\",\"callDirection\":\"outgoing\",\"callType\":\"twoParty\",\"callState\":\"accepted\",\"originatorParticipant\":{\"id\":\"8:orgid:me\",\"displayName\":\"Tester\"},\"targetParticipant\":{\"id\":\"8:orgid:jane\",\"displayName\":\"Jane Doe\"},\"participants\":[\"8:orgid:me\",\"8:orgid:jane\"]}"}},
@@ -434,7 +434,21 @@ public class TeamsRestTests
         ],"_metadata":{}}
         """;
 
-    /// <summary>The chat service's special conversations: an account with no 48:mentions where <paramref name="noMentions"/>.</summary>
+    private const string Thread = """
+        {"id":"19:general","type":"Thread","properties":{"sharepointSiteUrl":"https://t.sharepoint.com/sites/anyfslab/","channelDocsFolderRelativeUrl":"/sites/anyfslab/Shared Documents/General"},
+         "rosterSummary":{"memberCount":12,"botCount":1,"readerCount":0,"roleCounts":{"User":10,"Admin":2},"externalMemberCount":0,"explicitlyAddedCount":0,"blockedCount":0}}
+        """;
+
+    private const string Structure = """
+        {"teams":[{"id":"19:team","displayName":"Lab","description":"The lab","smtpAddress":"lab@t.com","classification":"Internal","isFavorite":true,"isTeamLocked":true,"accessType":1,"memberRoleString":"Admin",
+          "membershipSummary":{"totalMemberCount":12,"adminRoleCount":2,"botCount":1},
+          "channels":[{"id":"19:general","displayName":"General","isGeneral":true,"description":"Everything","creationTime":"2026-10-01T00:00:00Z","creator":"8:orgid:jane","isShared":true,"isFavorite":true,
+            "tabs":[{"name":"Wiki","tabType":"website","settings":{"subtype":"webpage","websiteUrl":"https://wiki.t.com/x"}},{"name":"Plan.docx","tabType":"files","settings":{"subtype":"pinnedFile"}},
+                    {"name":"Planner","tabType":"extension","settings":{}},{"name":"","tabType":"website"},{"name":"Odd","tabType":"website","settings":{"websiteUrl":"javascript:alert(1)"}}]}]}],
+         "chats":[{"id":"19:old","title":"Old","members":[],"hidden":true},{"id":"19:new","title":"New","members":[]}]}
+        """;
+
+    /// <summary>The chat service's special conversations and threads, and the aggregator: an account with no 48:mentions where <paramref name="noMentions"/>.</summary>
     private sealed class Feeds(bool noMentions = false) : HttpMessageHandler
     {
         public List<string> Asked { get; } = [];
@@ -451,10 +465,13 @@ public class TeamsRestTests
             var body = path switch
             {
                 "/api/authsvc/v1.0/authz" => Authz,
+                "/api/v3/teams/users/me" => Structure,
                 "/v1/users/ME/conversations/48:calllogs/messages" when uri.Query.Contains("syncState", StringComparison.Ordinal) => CallsOlder,
                 "/v1/users/ME/conversations/48:calllogs/messages" => CallsNewest,
                 "/v1/users/ME/conversations/48:mentions/messages" when !noMentions => Mentions,
                 "/v1/users/ME/conversations/48:notifications/messages" => Notifications,
+                "/v1/threads/19:general" => Thread,
+                "/v1/threads/19:odd" => """{"properties":{"sharepointSiteUrl":"https://evil.example/sites/x","channelDocsFolderRelativeUrl":"/sites/x/Shared Documents/Odd"},"rosterSummary":{"memberCount":"3"}}""",
                 _ => null,
             };
             return Task.FromResult(new HttpResponseMessage(body is null ? HttpStatusCode.NotFound : HttpStatusCode.OK) { Content = new StringContent(body ?? "{}", Encoding.UTF8, "application/json") });
@@ -504,5 +521,41 @@ public class TeamsRestTests
         await using var none = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, new Service(_ => HttpStatusCode.OK));
         Assert.IsNull(await none.ActivityAsync(10, CancellationToken.None));
         Assert.IsNull(await none.CallsAsync(10, CancellationToken.None));
+    }
+
+    [TestMethod]
+    public async Task AChannelsThreadTellsItsSiteFolderAndRoster()
+    {
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, new Feeds());
+        var details = await rest.ThreadDetailsAsync("19:general", CancellationToken.None);
+        Assert.AreEqual(new ThreadDetails("https://t.sharepoint.com/sites/anyfslab", "/sites/anyfslab/Shared Documents/General", 12, 2, 0, 1), details);
+
+        // a site off SharePoint is not taken; a count given as a string is left out; a thread not answered for is none
+        var odd = await rest.ThreadDetailsAsync("19:odd", CancellationToken.None);
+        Assert.AreEqual(new ThreadDetails(null, "/sites/x/Shared Documents/Odd", null, null, null, null), odd);
+        Assert.IsNull(await rest.ThreadDetailsAsync("19:gone", CancellationToken.None));
+    }
+
+    [TestMethod]
+    public async Task TheStructureCarriesTheTeamsChannelsTabsAndHiddenChats()
+    {
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, new Feeds());
+        var structure = await rest.StructureAsync(CancellationToken.None);
+
+        var team = structure.Teams.Single();
+        Assert.AreEqual(("The lab", "lab@t.com", "Internal", true, true, false, 1, true), (team.Description, team.Mail, team.Classification, team.Favourite, team.Locked, team.Archived, team.AccessType, team.Owner));
+        Assert.AreEqual((12, 2, 1), (team.Members, team.Owners, team.Bots));
+
+        var general = team.Channels.Single();
+        Assert.AreEqual(("Everything", DateTimeOffset.Parse("2026-10-01T00:00:00Z"), "8:orgid:jane", true, true), (general.Description, general.Created, general.CreatorMri, general.Shared, general.Favourite));
+        CollectionAssert.AreEqual(new[]
+        {
+            new TabInfo("Wiki", "Website", "https://wiki.t.com/x"),
+            new TabInfo("Plan.docx", "Pinned file", null),
+            new TabInfo("Planner", "App", null),
+            new TabInfo("Odd", "Website", null),
+        }, general.Tabs.ToArray(), "one with no name left out; a website's address only where it is a web address");
+
+        CollectionAssert.AreEqual(new[] { ("Old", true), ("New", false) }, structure.Chats.Select(c => (c.Title, c.Hidden)).ToArray());
     }
 }

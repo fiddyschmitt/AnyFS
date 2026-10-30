@@ -36,6 +36,9 @@ internal interface ITeamsApi : IAsyncDisposable
     /// </summary>
     Task<IReadOnlyList<ActivityItem>?> ActivityAsync(int max, CancellationToken ct);
 
+    /// <summary>What the chat service tells of a channel's thread: its SharePoint site and folder, and how many are in it; null where it does not answer.</summary>
+    Task<ThreadDetails?> ThreadDetailsAsync(string threadId, CancellationToken ct);
+
     /// <summary>
     /// Where a channel's files are: its site and the folder's path within the site's default library (the channel's
     /// <see cref="ChannelInfo.FilesPath"/> where Teams gives one, else the channel's name in its team's site, found from the

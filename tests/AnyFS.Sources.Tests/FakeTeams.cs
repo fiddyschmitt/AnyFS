@@ -60,6 +60,9 @@ internal sealed class FakeTeams : ITeamsApi
         return chat;
     }
 
+    /// <summary>Replaces a team as the aggregator now gives it (its details), by its id.</summary>
+    public void SetTeam(TeamInfo team) => _teams[_teams.FindIndex(t => t.Id == team.Id)] = team;
+
     public void AddPerson(string mri, string displayName) => _people[mri] = displayName;
 
     /// <summary>
@@ -355,7 +358,7 @@ internal sealed class FakeTeams : ITeamsApi
             ? graph with { Groups = graph.Groups.Where(g => graph.Member.Contains(g.Id) || graph.Owner.Contains(g.Id)).ToList(), Scope = GroupsScope.Yours }
             : GroupsDirectory.OfTeams(joined));
 
-    // --- the call history, the activity feed ----------------------------------------------------------------------------
+    // --- the call history, the activity feed, a channel's thread --------------------------------------------------------
 
     /// <summary>The account's call history, newest first; null for an account with none (the chat service's 404).</summary>
     public List<CallRecord>? Calls { get; set; }
@@ -371,6 +374,14 @@ internal sealed class FakeTeams : ITeamsApi
 
     private int _callsCalls;
 
+    /// <summary>What the chat service tells of a channel's thread, by its id; one not here is not answered for.</summary>
+    public Dictionary<string, ThreadDetails> Threads { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>How many channels' thread details have been asked for.</summary>
+    public int ThreadCalls => _threadCalls;
+
+    private int _threadCalls;
+
     public Task<IReadOnlyList<CallRecord>?> CallsAsync(int max, CancellationToken ct)
     {
         Interlocked.Increment(ref _callsCalls);
@@ -380,6 +391,12 @@ internal sealed class FakeTeams : ITeamsApi
     }
 
     public Task<IReadOnlyList<ActivityItem>?> ActivityAsync(int max, CancellationToken ct) => Task.FromResult<IReadOnlyList<ActivityItem>?>(Activity?.Take(2 * max).ToList());
+
+    public Task<ThreadDetails?> ThreadDetailsAsync(string threadId, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _threadCalls);
+        return Task.FromResult(Threads.TryGetValue(threadId, out var details) ? details : null);
+    }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 

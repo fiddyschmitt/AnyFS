@@ -598,6 +598,39 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     }
 
     /// <summary>
+    /// A channel's thread details (its SharePoint site and folder, how many are in it), kept for a walk interval, a thread the
+    /// chat service does not answer for too (its details are then left out of channel.md and team.md).
+    /// </summary>
+    internal async Task<ThreadDetails?> ThreadDetailsAsync(string threadId, CancellationToken ct)
+        => (await Cache.GetAsync($"thread:{threadId}", ReadWholeEvery, async c =>
+        {
+            try
+            {
+                return new[] { await Api.ThreadDetailsAsync(threadId, c).ConfigureAwait(false) };
+            }
+            catch (VfsException ex)
+            {
+                Logger.LogInformation("teams: a channel's details could not be read ({Error})", ex.Message);
+                return new ThreadDetails?[] { null };
+            }
+        }, ct).ConfigureAwait(false))[0];
+
+    /// <summary>
+    /// What team.md tells beyond the aggregator: its General channel's thread details (<see cref="ThreadDetailsAsync"/>); with
+    /// the names of the people who made its channels looked up for channel.md, once a walk interval (one not found shows
+    /// as an id).
+    /// </summary>
+    internal async Task<ThreadDetails?> TeamDetailsAsync(TeamInfo team, CancellationToken ct)
+    {
+        await Cache.GetAsync($"makers:{team.Id}", ReadWholeEvery, async c =>
+        {
+            await LearnPeopleAsync(team.Channels.Select(ch => ch.CreatorMri).OfType<string>(), "its channels' makers show as ids", c).ConfigureAwait(false);
+            return team;
+        }, ct).ConfigureAwait(false);
+        return team.Channels.FirstOrDefault(c => c.IsGeneral) is { } general ? await ThreadDetailsAsync(general.Id, ct).ConfigureAwait(false) : null;
+    }
+
+    /// <summary>
     /// A file built behind the listings, never in them: as last built, and built again at first, each walk interval (or
     /// <paramref name="every"/>), and as soon as a token comes that reaches further; a token gone leaves what was built.
     /// </summary>

@@ -245,6 +245,116 @@ internal static class TeamsText
         return clean.Length <= length ? clean : clean[..length].TrimEnd() + "…";
     }
 
+    /// <summary>
+    /// <c>team.md</c>: a team's details: what it is for, who may join, its email, how many belong to it (its General channel's
+    /// roster where the chat service gives it, as channel.md says: the aggregator's count leaves owners and bots out) and the
+    /// account's part, its site, and its channels.
+    /// </summary>
+    public static byte[] Team(TeamInfo team, ThreadDetails? general)
+    {
+        var text = new StringBuilder("# ").Append(Clean(team.DisplayName)).Append("\n\n");
+        if (team.Description is { } description)
+        {
+            text.Append(description.Trim()).Append("\n\n");
+        }
+
+        void Field(string name, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                text.Append("- ").Append(name).Append(": ").Append(Clean(value)).Append('\n');
+            }
+        }
+
+        Field("Privacy", team.AccessType switch { 1 => "Private", 2 => "Public", 3 => "Org-wide", _ => null });
+        Field("Email", team.Mail);
+        Field("You", team.Owner ? "owner" : "member");
+        Field("Members", Members(general?.Members ?? team.Members, general?.Owners ?? team.Owners, general?.External, general?.Bots ?? team.Bots));
+        Field("Classification", team.Classification);
+        Field("Site", general?.SiteUrl);
+        Field("Favourite", team.Favourite ? "yes" : null);
+        Field("Archived", team.Archived ? "yes" : null);
+        Field("Locked", team.Locked ? "yes" : null);
+        text.Append("\n## Channels\n\n| Channel | Kind | Description |\n|---|---|---|\n");
+        foreach (var channel in team.Channels)
+        {
+            text.Append(CultureInfo.InvariantCulture, $"| {Cell(channel.DisplayName)} | {ChannelKind(channel)} | {Cell(channel.Description)} |\n");
+        }
+
+        return Encoding.UTF8.GetBytes(text.ToString());
+    }
+
+    /// <summary>
+    /// <c>channel.md</c>: a channel's details: what it is for, its kind, when and by whom it was made, how many are in it,
+    /// where its files are, and its tabs (each website's address).
+    /// </summary>
+    public static byte[] Channel(ChannelInfo channel, TeamInfo team, ThreadDetails? details, Func<string?, string> nameOf)
+    {
+        var text = new StringBuilder("# ").Append(Clean(channel.DisplayName)).Append("\n\nA channel of ").Append(Clean(team.DisplayName)).Append(".\n\n");
+        if (channel.Description is { } description)
+        {
+            text.Append(description.Trim()).Append("\n\n");
+        }
+
+        void Field(string name, string? value)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                text.Append("- ").Append(name).Append(": ").Append(value).Append('\n');
+            }
+        }
+
+        Field("Kind", ChannelKind(channel));
+        Field("Made", channel.Created is null && channel.CreatorMri is null ? null : $"{Stamp(channel.Created, "yyyy-MM-dd") ?? "?"}{(channel.CreatorMri is { } creator ? $" by {Clean(nameOf(creator))}" : "")}");
+        Field("Members", Members(details?.Members ?? (channel.IsGeneral ? team.Members : null), details?.Owners, details?.External, details?.Bots));
+        Field("Files", FilesAddress(details) is { } files ? $"<{files}>" : null);
+        Field("Favourite", channel.Favourite ? "yes" : null);
+        if (channel.Tabs.Count > 0)
+        {
+            text.Append("\n## Tabs\n\n");
+            foreach (var tab in channel.Tabs)
+            {
+                text.Append("- ").Append(Clean(tab.Name)).Append(": ").Append(tab.Kind).Append(tab.Url is { } url ? $", <{url}>" : "").Append('\n');
+            }
+        }
+
+        return Encoding.UTF8.GetBytes(text.ToString());
+    }
+
+    private static string ChannelKind(ChannelInfo channel) => (channel.Shared ? "Shared" : channel.IsPrivate ? "Private" : "Standard") + (channel.IsGeneral ? " (General)" : "");
+
+    private static string? Members(int? members, int? owners, int? external, int? bots)
+    {
+        if (members is null)
+        {
+            return null;
+        }
+
+        var parts = new List<string>();
+        if (owners is > 0)
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture, $"{owners:N0} owner{(owners == 1 ? "" : "s")}"));
+        }
+
+        if (external is > 0)
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture, $"{external:N0} from other organisations"));
+        }
+
+        if (bots is > 0)
+        {
+            parts.Add(string.Create(CultureInfo.InvariantCulture, $"{bots:N0} bot{(bots == 1 ? "" : "s")}"));
+        }
+
+        return string.Create(CultureInfo.InvariantCulture, $"{members:N0}") + (parts.Count == 0 ? "" : $" ({string.Join(", ", parts)})");
+    }
+
+    /// <summary>The channel's folder's address: its site's host with the folder's server-relative path; null where either is unknown.</summary>
+    private static string? FilesAddress(ThreadDetails? details)
+        => details?.SiteUrl is { } site && details.FolderPath is { } folder && Uri.TryCreate(site, UriKind.Absolute, out var root) && Uri.TryCreate(root, folder, out var address)
+            ? address.AbsoluteUri
+            : null;
+
     /// <summary>A table cell's text: on one line, its pipes escaped.</summary>
     private static string Cell(string? text) => text is null ? "" : Clean(text).Replace("|", "\\|", StringComparison.Ordinal);
 

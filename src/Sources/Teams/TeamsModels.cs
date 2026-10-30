@@ -13,7 +13,31 @@ internal sealed record TeamInfo(string Id, string DisplayName, string? GroupId, 
 
     /// <summary>How many belong to it (<c>membershipSummary.totalMemberCount</c>); null when not given.</summary>
     public int? Members { get; init; }
+
+    /// <summary>How many of them own it (<c>membershipSummary.adminRoleCount</c>); null when not given.</summary>
+    public int? Owners { get; init; }
+
+    /// <summary>How many bots are in it (<c>membershipSummary.botCount</c>); null when not given.</summary>
+    public int? Bots { get; init; }
+
+    public string? Description { get; init; }
+
+    /// <summary>The team's email address (<c>smtpAddress</c>).</summary>
+    public string? Mail { get; init; }
+
+    public string? Classification { get; init; }
+
+    /// <summary>Shown among the account's favourites in Teams (<c>isFavorite</c>).</summary>
+    public bool Favourite { get; init; }
+
+    public bool Archived { get; init; }
+
+    /// <summary>Locked by its owners (<c>isTeamLocked</c>).</summary>
+    public bool Locked { get; init; }
 }
+
+/// <summary>A tab of a channel (a website, an app, a pinned file): its name, what kind it is, and a website's address.</summary>
+internal sealed record TabInfo(string Name, string Kind, string? Url);
 
 /// <summary>A Microsoft 365 group whose SharePoint site the account can open, as a search or Graph's list of groups finds it.</summary>
 /// <param name="GroupId">The group's id where it is named (SharePoint's search and Graph's list do; Microsoft Search through Graph does not).</param>
@@ -109,7 +133,28 @@ internal sealed record ChannelInfo(string Id, string DisplayName, bool IsGeneral
 
     /// <summary>The aggregator's version of the channel's conversation, which moves on as it changes: an unchanged one is not read again.</summary>
     public string? Version { get; init; }
+
+    public string? Description { get; init; }
+
+    /// <summary>When it was made (<c>creationTime</c>), and by whom (<c>creator</c>, an mri).</summary>
+    public DateTimeOffset? Created { get; init; }
+
+    public string? CreatorMri { get; init; }
+
+    /// <summary>A shared channel (<c>isShared</c>): one shared with other teams or people of other organisations.</summary>
+    public bool Shared { get; init; }
+
+    /// <summary>Shown among the account's favourites in Teams (<c>isFavorite</c>).</summary>
+    public bool Favourite { get; init; }
+
+    public IReadOnlyList<TabInfo> Tabs { get; init; } = [];
 }
+
+/// <summary>
+/// What the chat service tells of a channel's thread beyond the aggregator: where its files are and how many are in it
+/// (<c>/v1/threads/{id}</c>: its properties' SharePoint site and folder, its roster summary).
+/// </summary>
+internal sealed record ThreadDetails(string? SiteUrl, string? FolderPath, int? Members, int? Owners, int? External, int? Bots);
 
 /// <summary>A team's SharePoint site and the server-relative path of its default library (<c>/sites/x/Shared Documents</c>).</summary>
 internal sealed record TeamSite(string Url, string LibraryPath);

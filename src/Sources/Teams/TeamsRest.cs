@@ -59,6 +59,12 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
                 {
                     FilesPath = NullIfEmpty(Str(Obj(c, "defaultFileSettings"), "filesRelativePath")),
                     Version = NullIfEmpty(Str(c, "version")),
+                    Description = NullIfEmpty(Str(c, "description")),
+                    Created = Time(Str(c, "creationTime")),
+                    CreatorMri = NullIfEmpty(Str(c, "creator")),
+                    Shared = Bool(c, "isShared"),
+                    Favourite = Bool(c, "isFavorite"),
+                    Tabs = Arr(c, "tabs").Select(TabOf).OfType<TabInfo>().ToList(),
                 });
             }
 
@@ -69,6 +75,14 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
                 Owner = string.Equals(Str(t, "memberRoleString"), "admin", StringComparison.OrdinalIgnoreCase) || Int(t, "memberRole") == 2,
                 AccessType = Int(t, "accessType"),
                 Members = Int(summary, "totalMemberCount") is > 0 and var count ? count : null,
+                Owners = summary.ValueKind == JsonValueKind.Object && summary.TryGetProperty("adminRoleCount", out _) ? Int(summary, "adminRoleCount") : null,
+                Bots = summary.ValueKind == JsonValueKind.Object && summary.TryGetProperty("botCount", out _) ? Int(summary, "botCount") : null,
+                Description = NullIfEmpty(Str(t, "description")),
+                Mail = NullIfEmpty(Str(t, "smtpAddress")),
+                Classification = NullIfEmpty(Str(t, "classification")),
+                Favourite = Bool(t, "isFavorite"),
+                Archived = Bool(t, "isArchived"),
+                Locked = Bool(t, "isTeamLocked"),
             });
         }
 
@@ -86,7 +100,30 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         return new TeamsStructure(teams, chats);
     }
 
-    // --- the call history, the activity feed -----------------------------------------------------------------------------
+    /// <summary>
+    /// A channel's tab as the aggregator gives it (<c>name</c>, <c>tabType</c>, <c>settings.subtype</c>, the website's
+    /// <c>settings.websiteUrl</c>): a website, a pinned file, an app; null for one with no name.
+    /// </summary>
+    internal static TabInfo? TabOf(JsonElement tab)
+    {
+        if (NullIfEmpty(Str(tab, "name")) is not { } name)
+        {
+            return null;
+        }
+
+        var settings = Obj(tab, "settings");
+        var kind = $"{Str(tab, "tabType")} {Str(settings, "subtype")}";
+        var website = kind.Contains("webpage", StringComparison.OrdinalIgnoreCase) || kind.Contains("website", StringComparison.OrdinalIgnoreCase);
+        var address = NullIfEmpty(Str(settings, "websiteUrl")) ?? NullIfEmpty(Str(settings, "url"));
+        return new TabInfo(name,
+            website ? "Website"
+                : kind.Contains("pin", StringComparison.OrdinalIgnoreCase) ? "Pinned file"
+                : kind.Contains("extension", StringComparison.OrdinalIgnoreCase) ? "App"
+                : "Tab",
+            website && Uri.TryCreate(address, UriKind.Absolute, out var site) && site.Scheme is "https" or "http" ? address : null);
+    }
+
+    // --- the call history, the activity feed, a channel's thread ---------------------------------------------------------
 
     public async Task<IReadOnlyList<CallRecord>?> CallsAsync(int max, CancellationToken ct)
     {
@@ -197,6 +234,26 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             JsonValueKind.Array => value.EnumerateArray().Where(v => v.ValueKind == JsonValueKind.Object).ToList(),
             _ => [],
         };
+    }
+
+    public async Task<ThreadDetails?> ThreadDetailsAsync(string threadId, CancellationToken ct)
+    {
+        var services = await DiscoverAsync(ct).ConfigureAwait(false);
+        try
+        {
+            using var doc = await GetAsync($"{services.ChatService}/v1/threads/{Uri.EscapeDataString(threadId)}?view=msnp24Equivalent", TeamsService.ChatService, ct).ConfigureAwait(false);
+            var properties = Obj(doc.RootElement, "properties");
+            var roster = Obj(doc.RootElement, "rosterSummary");
+            int? Count(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : null;
+            var site = NullIfEmpty(Str(properties, "sharepointSiteUrl"));
+            return new ThreadDetails(site is not null && Uri.TryCreate(site, UriKind.Absolute, out var uri) && TeamsServices.IsSharePointHost(uri.Host) ? site.TrimEnd('/') : null,
+                NullIfEmpty(Str(properties, "channelDocsFolderRelativeUrl")), Count(roster, "memberCount"), Count(Obj(roster, "roleCounts"), "Admin"),
+                Count(roster, "externalMemberCount"), Count(roster, "botCount"));
+        }
+        catch (VfsException ex) when (ex.Error is VfsError.NotFound or VfsError.AccessDenied)
+        {
+            return null;
+        }
     }
 
     public async Task<MessagePage> MessagesAsync(string threadId, int max, CancellationToken ct)

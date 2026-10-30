@@ -90,7 +90,7 @@ public class TeamsLiveTests
         var channels = (await ListAsync(source, teams[0].Name)).Where(e => e.IsDirectory).ToList();
         Assert.IsTrue(channels.Count > 0, $"{teams[0].Name} has channels");
         var posts = await ListAsync(source, $"{teams[0].Name}/{channels[0].Name}");
-        CollectionAssert.AreEqual(new[] { "posts", "files" }, posts.Select(p => p.Name).ToArray());
+        CollectionAssert.AreEqual(new[] { "posts", "files", "channel.md" }, posts.Select(p => p.Name).ToArray());
 
         // the chats, each a chat.md
         var chats = await ChatFoldersAsync(source);
@@ -121,6 +121,44 @@ public class TeamsLiveTests
         }
 
         return chats;
+    }
+
+    /// <summary>
+    /// The team's and the channel's details (team.md, channel.md: the General channel's thread names the team's site), and
+    /// the activity feed (activity.md: the sandbox's has an entry). The sandbox has no call history (48:calllogs is 404), so
+    /// no calls.md, unless it has one by now.
+    /// </summary>
+    [TestMethod]
+    [Timeout(300_000)]
+    public async Task TheTeamsDetailsAndTheActivityFeedAreServed()
+    {
+        var (account, _) = Env();
+        await using var source = await StartAsync(account);
+
+        var team = await TextAsync(source, "AnyFS Lab/team.md");
+        StringAssert.StartsWith(team, "# AnyFS Lab\n");
+        StringAssert.Contains(team, "- You: owner\n");
+        StringAssert.Contains(team, "- Site: https://");
+        StringAssert.Contains(team, "| General | Standard (General) |");
+
+        var channel = await TextAsync(source, "AnyFS Lab/General/channel.md");
+        StringAssert.StartsWith(channel, "# General\n\nA channel of AnyFS Lab.\n");
+        StringAssert.Contains(channel, "- Kind: Standard (General)\n");
+        StringAssert.Contains(channel, "- Files: <https://");
+
+        // built behind the listings: shown once built
+        var root = (await ListAsync(source, "")).Select(e => e.Name).ToList();
+        for (var deadline = DateTime.UtcNow.AddMinutes(1); !root.Contains("activity.md") && DateTime.UtcNow < deadline; root = (await ListAsync(source, "")).Select(e => e.Name).ToList())
+        {
+            await Task.Delay(500);
+        }
+
+        CollectionAssert.Contains(root, "activity.md");
+        StringAssert.StartsWith(await TextAsync(source, "activity.md"), "# Activity\n\nThe account's activity feed as Teams keeps it: ");
+        if (root.Contains("calls.md"))
+        {
+            StringAssert.StartsWith(await TextAsync(source, "calls.md"), "# Calls\n\nThe account's call history as Teams keeps it: ");
+        }
     }
 
     private static async Task<string> TextAsync(ISource source, string path)

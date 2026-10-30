@@ -118,8 +118,10 @@ file calls without it or Graph's (`GraphReady`) as the live seam does; with Grap
 their sites, as Graph's list of groups does, or (`GraphListsNoGroups`) the sites without their groups, as Microsoft Search
 does where Graph refuses that list. Its `Calls` and `Activity` are the chat service's call history and activity feed (null
 for an account with none: the sandbox has no call history), `CallsFail` refuses the call history, and `AddChat(hidden:
-true)` makes a chat one hidden in Teams. `TeamsRestTests` read the services' answers through a fake handler (the call
-history's and activity feed's shapes as a GCC High account's are), and
+true)` makes a chat one hidden in Teams. `Threads` holds what the chat service tells of a channel's thread (its site,
+folder and roster, for channel.md and team.md), and `SetTeam` gives a team its details. `TeamsRestTests` read the
+services' answers through a fake handler (the call history's, activity feed's and threads' shapes as a GCC High account's
+are), and
 `TeamsFilesTests` check where its tokens may go. `TeamsLiveTests` read the sandbox when `ANYFS_TEST_TEAMS_ACCOUNT` (the tester,
 `anyfs-tester@<tenant>.onmicrosoft.com`) and `ANYFS_TEAMS_PROFILES` (the root of the browser profiles signed in as it, such as
 `%LOCALAPPDATA%\AnyFS\tests\outlook-browser`: Teams signs in from the same Microsoft 365 session) are set;

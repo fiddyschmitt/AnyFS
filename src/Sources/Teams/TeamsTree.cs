@@ -128,26 +128,34 @@ internal sealed class GroupFolder(GroupSite group, string name) : TmFolder(name,
             : [];
 }
 
-/// <summary>A team: a folder per channel.</summary>
+/// <summary>A team: a folder per channel, and <c>team.md</c>, the team's details.</summary>
 internal sealed class TeamFolder(TeamInfo team, string name) : TmFolder(name)
 {
+    public const string DetailsFile = "team.md";
+
     public TeamInfo Team { get; } = team;
 
-    public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
+    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
-        var names = TeamsNames.Unique(Team.Channels.Select(c => c.DisplayName).ToList());
-        return Task.FromResult<IReadOnlyList<TmNode>>(Team.Channels.Select((c, i) => (TmNode)new ChannelFolder(Team, c, names[i])).ToList());
+        var names = TeamsNames.Unique(Team.Channels.Select(c => c.DisplayName).ToList(), [DetailsFile]);
+        var children = Team.Channels.Select((c, i) => (TmNode)new ChannelFolder(Team, c, names[i])).ToList();
+        var general = await source.TeamDetailsAsync(Team, ct).ConfigureAwait(false);
+        children.Add(new MarkdownFile(DetailsFile, TeamsText.Team(Team, general), null));
+        return children;
     }
 }
 
-/// <summary>A channel: its posts, and its files (the channel's folder of its team's SharePoint library) while SharePoint's token or Graph's is in hand.</summary>
+/// <summary>
+/// A channel: its posts, its files (the channel's folder of its team's SharePoint library) while SharePoint's token or
+/// Graph's is in hand, and <c>channel.md</c>, the channel's details.
+/// </summary>
 internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string name) : TmFolder(name)
 {
     public TeamInfo Team { get; } = team;
 
     public ChannelInfo Channel { get; } = channel;
 
-    public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
+    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
         var children = new List<TmNode>();
         if (source.Settings.ChannelMessages)
@@ -161,7 +169,9 @@ internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string n
             children.Add(new ChannelFilesFolder(Team, Channel));
         }
 
-        return Task.FromResult<IReadOnlyList<TmNode>>(children);
+        var details = await source.ThreadDetailsAsync(Channel.Id, ct).ConfigureAwait(false);
+        children.Add(new MarkdownFile("channel.md", TeamsText.Channel(Channel, Team, details, source.NameOf), Channel.Created));
+        return children;
     }
 }
 

@@ -69,8 +69,8 @@ public class TeamsSourceTests
     {
         await using var source = await StartAsync(Seed());
         CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "all-groups.md", "groups.md" }, await NamesAsync(source, ""));
-        CollectionAssert.AreEqual(new[] { "General", "Random" }, await NamesAsync(source, "AnyFS Lab"));
-        CollectionAssert.AreEqual(new[] { "posts", "files" }, await NamesAsync(source, "AnyFS Lab/General"));
+        CollectionAssert.AreEqual(new[] { "General", "Random", "team.md" }, await NamesAsync(source, "AnyFS Lab"));
+        CollectionAssert.AreEqual(new[] { "posts", "files", "channel.md" }, await NamesAsync(source, "AnyFS Lab/General"));
     }
 
     private const string Site = "https://contoso.sharepoint.com/sites/lab";
@@ -238,7 +238,7 @@ public class TeamsSourceTests
 
         CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "groups.md" }, await NamesAsync(source, ""));
         Assert.AreEqual(VfsError.NotFound, (await Assert.ThrowsExactlyAsync<VfsException>(() => NamesAsync(source, "Other groups"))).Error);
-        CollectionAssert.AreEqual(new[] { "posts" }, await NamesAsync(source, "AnyFS Lab/General"));
+        CollectionAssert.AreEqual(new[] { "posts", "channel.md" }, await NamesAsync(source, "AnyFS Lab/General"));
         var thread = (await NamesAsync(source, "AnyFS Lab/General/posts")).Single();
         CollectionAssert.AreEqual(new[] { "post.md" }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}"), "the shared file is left out, not waited for");
         StringAssert.Contains(await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/post.md"), "- 📎 report.docx");
@@ -264,11 +264,11 @@ public class TeamsSourceTests
 
         // answered at once without the token, which is asked for behind the listings
         CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "groups.md" }, await NamesAsync(source, ""));
-        CollectionAssert.AreEqual(new[] { "posts" }, await NamesAsync(source, "AnyFS Lab/General"));
+        CollectionAssert.AreEqual(new[] { "posts", "channel.md" }, await NamesAsync(source, "AnyFS Lab/General"));
 
         // it comes: the kept listings of the root and the channel are listed afresh, all-groups.md read from SharePoint
         hold.SetResult();
-        CollectionAssert.AreEqual(new[] { "posts", "files" }, await UntilAsync(() => NamesAsync(source, "AnyFS Lab/General"), n => n.Contains("files")));
+        CollectionAssert.AreEqual(new[] { "posts", "files", "channel.md" }, await UntilAsync(() => NamesAsync(source, "AnyFS Lab/General"), n => n.Contains("files")));
         CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "all-groups.md", "groups.md" }, await NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "plan.txt" }, await NamesAsync(source, "AnyFS Lab/General/files"));
         CollectionAssert.AreEqual(new[] { "Retail" }, await NamesAsync(source, "Other groups"));
@@ -300,7 +300,7 @@ public class TeamsSourceTests
         CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "all-groups.md", "groups.md" }, await NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "Mark 8 Project Team" }, await NamesAsync(source, "Other groups"), "the team's own site, found without its group, is still left out");
         Assert.AreEqual("the plan", await TextAsync(source, "Other groups/Mark 8 Project Team/Plan.docx"));
-        CollectionAssert.AreEqual(new[] { "posts", "files" }, await NamesAsync(source, "AnyFS Lab/General"));
+        CollectionAssert.AreEqual(new[] { "posts", "files", "channel.md" }, await NamesAsync(source, "AnyFS Lab/General"));
         CollectionAssert.AreEqual(new[] { "report.docx" }, await NamesAsync(source, "AnyFS Lab/General/files"));
 
         var thread = (await NamesAsync(source, "AnyFS Lab/General/posts")).Single();
@@ -331,7 +331,7 @@ public class TeamsSourceTests
         fake.Post(general.Id, Jane, "Jane Doe", "<p>The report</p>", When, files: [new SharedFile("report.docx", $"{Site}/Shared Documents/General/report.docx", null)]);
         await using var source = await StartAsync(fake, s => s.Files = false);
 
-        CollectionAssert.AreEqual(new[] { "posts" }, await NamesAsync(source, "AnyFS Lab/General"));
+        CollectionAssert.AreEqual(new[] { "posts", "channel.md" }, await NamesAsync(source, "AnyFS Lab/General"));
         var thread = (await NamesAsync(source, "AnyFS Lab/General/posts")).Single();
         CollectionAssert.AreEqual(new[] { "post.md" }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}"));
         StringAssert.Contains(await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/post.md"), "- 📎 report.docx");
@@ -715,6 +715,49 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task TeamMdAndChannelMdTellTheirDetails()
+    {
+        var fake = new FakeTeams();
+        fake.AddPerson(Jane, "Jane Doe");
+        var general = FakeTeams.Channel("General", general: true) with { Description = "Everything", Created = When, CreatorMri = Jane };
+        var design = FakeTeams.Channel("Design", priv: true) with
+        {
+            Description = "Drawings and specs",
+            Created = When.AddDays(1),
+            CreatorMri = Jane,
+            Favourite = true,
+            Tabs = [new TabInfo("Wiki | old", "Website", "https://wiki.contoso.com/design"), new TabInfo("Plan", "Pinned file", null)],
+        };
+        var named = FakeTeams.Channel("team.md");
+        var team = fake.AddTeam("AnyFS Lab", general, design, named);
+        fake.SetTeam(team with { Description = "The lab's team", Mail = "anyfslab@contoso.com", AccessType = 1, Owner = true, Members = 12, Owners = 2, Bots = 1, Classification = "Internal", Favourite = true });
+        fake.Threads[general.Id] = new ThreadDetails("https://contoso.sharepoint.com/sites/anyfslab", "/sites/anyfslab/Shared Documents/General", 12, 2, 0, 1);
+        fake.Threads[design.Id] = new ThreadDetails("https://contoso.sharepoint.com/sites/anyfslab-Design", "/sites/anyfslab-Design/Shared Documents/Design", 3, 1, 1, null);
+        await using var source = await StartAsync(fake);
+
+        CollectionAssert.AreEqual(new[] { "General", "Design", "team.md (2)", "team.md" }, await NamesAsync(source, "AnyFS Lab"), "a channel named as the team's file is numbered");
+        var teamMd = await TextAsync(source, "AnyFS Lab/team.md");
+        StringAssert.StartsWith(teamMd, "# AnyFS Lab\n\nThe lab's team\n\n- Privacy: Private\n- Email: anyfslab@contoso.com\n- You: owner\n- Members: 12 (2 owners, 1 bot)\n- Classification: Internal\n- Site: https://contoso.sharepoint.com/sites/anyfslab\n- Favourite: yes\n");
+        StringAssert.Contains(teamMd, "## Channels\n\n| Channel | Kind | Description |\n|---|---|---|\n| General | Standard (General) | Everything |\n| Design | Private | Drawings and specs |\n| team.md | Standard |  |\n");
+
+        var channelMd = await TextAsync(source, "AnyFS Lab/Design/channel.md");
+        StringAssert.StartsWith(channelMd, "# Design\n\nA channel of AnyFS Lab.\n\nDrawings and specs\n\n");
+        StringAssert.Contains(channelMd, $"- Kind: Private\n- Made: {When.AddDays(1).ToLocalTime():yyyy-MM-dd} by Jane Doe\n- Members: 3 (1 owner, 1 from other organisations)\n- Files: <https://contoso.sharepoint.com/sites/anyfslab-Design/Shared%20Documents/Design>\n- Favourite: yes\n");
+        StringAssert.Contains(channelMd, "## Tabs\n\n- Wiki | old: Website, <https://wiki.contoso.com/design>\n- Plan: Pinned file\n");
+
+        // one the chat service does not answer for: what the aggregator gave alone
+        var namedMd = await TextAsync(source, "AnyFS Lab/team.md (2)/channel.md");
+        StringAssert.Contains(namedMd, "- Kind: Standard\n");
+        Assert.IsFalse(namedMd.Contains("Members", StringComparison.Ordinal));
+
+        // a walk interval's details: listed again, not asked again
+        var asked = fake.ThreadCalls;
+        await NamesAsync(source, "AnyFS Lab/Design");
+        await TextAsync(source, "AnyFS Lab/team.md");
+        Assert.AreEqual(asked, fake.ThreadCalls);
+    }
+
+    [TestMethod]
     public async Task ATeamNamedAsOneOfTheRootsOwnIsNumbered()
     {
         var fake = new FakeTeams();
@@ -723,7 +766,7 @@ public class TeamsSourceTests
         var root = await NamesAsync(source, "");
         Assert.AreEqual("Chats (2)", root[0]);
         CollectionAssert.Contains(root, "Chats");
-        CollectionAssert.AreEqual(new[] { "General" }, await NamesAsync(source, "Chats (2)"));
+        CollectionAssert.AreEqual(new[] { "General", "team.md" }, await NamesAsync(source, "Chats (2)"));
     }
 
     [TestMethod]
