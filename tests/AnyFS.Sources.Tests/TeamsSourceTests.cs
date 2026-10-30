@@ -68,7 +68,7 @@ public class TeamsSourceTests
     public async Task TheRootShowsTheTeamsAndTheChatsFolder()
     {
         await using var source = await StartAsync(Seed());
-        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "groups.md" }, await NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "all-groups.md", "groups.md" }, await NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "General", "Random" }, await NamesAsync(source, "AnyFS Lab"));
         CollectionAssert.AreEqual(new[] { "posts", "files" }, await NamesAsync(source, "AnyFS Lab/General"));
     }
@@ -149,7 +149,7 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
-    public async Task GroupsMdHasEveryGroupWithItsDetails()
+    public async Task AllGroupsMdHasEveryGroupAndGroupsMdTheAccountsWithTheirDetails()
     {
         var fake = new FakeTeams();
         var team = fake.AddTeam("AnyFS Lab", FakeTeams.Channel("General", general: true));
@@ -162,12 +162,13 @@ public class TeamsSourceTests
         ],
             new HashSet<string>([team.GroupId!, "g-sales"]),
             new HashSet<string>([team.GroupId!]),
-            Complete: true,
+            GroupsScope.Organisation,
             "Microsoft Graph");
         fake.GraphReady = true;
         await using var source = await StartAsync(fake);
 
-        var md = await UntilAsync(() => TextAsync(source, "groups.md"), m => !m.Contains("being read", StringComparison.Ordinal));
+        var md = await UntilAsync(() => TextAsync(source, "all-groups.md"), m => !m.Contains("being read", StringComparison.Ordinal));
+        StringAssert.StartsWith(md, "# All groups\n");
         StringAssert.Contains(md, "Every group in the organisation, as Microsoft Graph lists them for tester@contoso.com: 4 (");
         StringAssert.Contains(md, "| AnyFS Lab | Microsoft 365 group | Private | yes | owner | anyfslab@contoso.com |");
         StringAssert.Contains(md, "| Board \\| Exec | Microsoft 365 group | Hidden membership | no |  |  |", "a pipe in a name escaped; not joined");
@@ -176,6 +177,30 @@ public class TeamsSourceTests
         StringAssert.Contains(md, "- Membership: dynamic, by the rule (user.department -eq \"Sales\")");
         StringAssert.Contains(md, "- Synced from on-premises: yes");
         StringAssert.Contains(md, "- Kind: Microsoft 365 group, with a team\n- Visibility: Private\n- You: owner\n- Members: 4");
+
+        // groups.md: the account's own, of every kind
+        var mine = await UntilAsync(() => TextAsync(source, "groups.md"), m => !m.Contains("being read", StringComparison.Ordinal));
+        StringAssert.StartsWith(mine, "# Your groups\n");
+        StringAssert.Contains(mine, "The groups tester@contoso.com is in, as Microsoft Graph lists them: 2 (1 Microsoft 365 group, 1 Security group). It owns 1 of them.");
+        Assert.IsFalse(mine.Contains("All news", StringComparison.Ordinal), "a group the account is not in");
+    }
+
+    [TestMethod]
+    public async Task WhereGraphListsNoGroupsTheTeamsOwnSiteIsStillLeftOutOfOtherGroups()
+    {
+        // a Graph token without Group.Read.All: Microsoft Search's sites, named without their groups, told from the team's by its site
+        const string Mark8 = "https://contoso.sharepoint.com/sites/Mark8ProjectTeam";
+        var fake = new FakeTeams { SharePointReady = false, GraphReady = true, GraphListsNoGroups = true };
+        var team = fake.AddTeam("AnyFS Lab", FakeTeams.Channel("General", general: true));
+        fake.AddSite(team, Site);
+        fake.AddGroupSite(new GroupSite(team.GroupId!, "AnyFS Lab", Site, null, When));
+        fake.AddGroupSite(new GroupSite("g-mark8", "Mark 8 Project Team", Mark8, null, When));
+        fake.AddLibraryFile(Mark8, "Plan.docx", Encoding.UTF8.GetBytes("the plan"), When);
+        await using var source = await StartAsync(fake);
+
+        CollectionAssert.AreEqual(new[] { "Mark 8 Project Team" }, await NamesAsync(source, "Other groups"));
+        Assert.AreEqual("the plan", await TextAsync(source, "Other groups/Mark 8 Project Team/Plan.docx"));
+        CollectionAssert.DoesNotContain(await UntilAsync(() => NamesAsync(source, ""), n => !n.Contains("all-groups.md")), "all-groups.md", "no list of every group to show: Graph refused it and SharePoint's token is not in hand");
     }
 
     /// <summary>What <paramref name="read"/> gives once <paramref name="done"/> holds (work behind the listings lands), or after five seconds.</summary>
@@ -241,13 +266,13 @@ public class TeamsSourceTests
         CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "groups.md" }, await NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "posts" }, await NamesAsync(source, "AnyFS Lab/General"));
 
-        // it comes: the kept listings of the root and the channel are listed afresh, groups.md read again
+        // it comes: the kept listings of the root and the channel are listed afresh, all-groups.md read from SharePoint
         hold.SetResult();
         CollectionAssert.AreEqual(new[] { "posts", "files" }, await UntilAsync(() => NamesAsync(source, "AnyFS Lab/General"), n => n.Contains("files")));
-        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "groups.md" }, await NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "all-groups.md", "groups.md" }, await NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "plan.txt" }, await NamesAsync(source, "AnyFS Lab/General/files"));
         CollectionAssert.AreEqual(new[] { "Retail" }, await NamesAsync(source, "Other groups"));
-        StringAssert.Contains(await UntilAsync(() => TextAsync(source, "groups.md"), m => m.Contains("from SharePoint", StringComparison.Ordinal)), "The groups tester@contoso.com can see, from SharePoint: 1,");
+        StringAssert.Contains(await UntilAsync(() => TextAsync(source, "all-groups.md"), m => m.Contains("from SharePoint", StringComparison.Ordinal)), "The groups tester@contoso.com can see, from SharePoint: 1,");
     }
 
     [TestMethod]
@@ -267,12 +292,12 @@ public class TeamsSourceTests
         fake.AddLibraryFile(Site, "General/report.docx", Encoding.UTF8.GetBytes("a report"), When);
         var shared = $"{Site}/Shared Documents/General/report.docx";
         fake.Post(general.Id, Jane, "Jane Doe", "<p>The report</p>", When, files: [new SharedFile("report.docx", shared, $"{Site}/")]);
-        fake.Directory = new GroupsDirectory([new GroupInfo(team.GroupId!, "AnyFS Lab")], new HashSet<string>([team.GroupId!]), new HashSet<string>(), Complete: true, "Microsoft Graph");
+        fake.Directory = new GroupsDirectory([new GroupInfo(team.GroupId!, "AnyFS Lab")], new HashSet<string>([team.GroupId!]), new HashSet<string>(), GroupsScope.Organisation, "Microsoft Graph");
         using var context = new TestSourceContext();
         await using var source = new TeamsSource(new TeamsSettings { Account = fake.Account }, fake.StandIn());
         await source.InitialiseAsync(context, CancellationToken.None);
 
-        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "groups.md" }, await NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "all-groups.md", "groups.md" }, await NamesAsync(source, ""));
         CollectionAssert.AreEqual(new[] { "Mark 8 Project Team" }, await NamesAsync(source, "Other groups"), "the team's own site, found without its group, is still left out");
         Assert.AreEqual("the plan", await TextAsync(source, "Other groups/Mark 8 Project Team/Plan.docx"));
         CollectionAssert.AreEqual(new[] { "posts", "files" }, await NamesAsync(source, "AnyFS Lab/General"));

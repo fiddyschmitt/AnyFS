@@ -44,7 +44,10 @@ internal sealed class MarkdownFile(string name, byte[] content, DateTimeOffset? 
     public static IVfsFile Open(byte[] content) => new MemoryFile(content, "a Teams conversation as Markdown");
 }
 
-/// <summary>The source's root: a folder per team, then the Chats folder, Other groups (while SharePoint's token or Graph's is in hand) and groups.md.</summary>
+/// <summary>
+/// The source's root: a folder per team, then the Chats folder, Other groups (while SharePoint's token or Graph's is in
+/// hand), all-groups.md (every group) and groups.md (the account's).
+/// </summary>
 internal sealed class RootFolder : TmFolder
 {
     public RootFolder() : base("")
@@ -69,6 +72,12 @@ internal sealed class RootFolder : TmFolder
                 children.Add(new OtherGroupsFolder());
             }
 
+            // every group, while a token lists more than the account's own (or once it has been built)
+            if (source.AllGroupsMarkdown() is { } all)
+            {
+                children.Add(new MarkdownFile("all-groups.md", all, null));
+            }
+
             children.Add(new MarkdownFile("groups.md", source.GroupsMarkdown(), null));
         }
 
@@ -90,10 +99,13 @@ internal sealed class OtherGroupsFolder() : TmFolder("Other groups")
     }
 }
 
-/// <summary>A group the account has no team of here: its site's library, as the library has it.</summary>
+/// <summary>A group the account has no team of here: its site's library, as the library has it (its site found from the group where the list did not name it; none while it has none).</summary>
 internal sealed class GroupFolder(GroupSite group, string name) : TmFolder(name, group.Created)
 {
-    public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct) => LibraryFolder.ChildrenAsync(source, group.SiteUrl, "", ct);
+    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
+        => (group.SiteUrl ?? (group.GroupId is { } id ? await source.Api.SiteOfGroupAsync(id, ct).ConfigureAwait(false) : null)) is { } site
+            ? await LibraryFolder.ChildrenAsync(source, site, "", ct).ConfigureAwait(false)
+            : [];
 }
 
 /// <summary>A team: a folder per channel.</summary>

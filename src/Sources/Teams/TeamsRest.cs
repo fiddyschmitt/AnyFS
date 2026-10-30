@@ -317,38 +317,51 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
     }
 
-    public async Task<string?> TeamSiteAsync(TeamInfo team, CancellationToken ct)
-    {
-        if (team.GroupId is not { } group)
-        {
-            return null;
-        }
+    // a group's site as Graph found it from the group's drive (null: none), kept; a failure is not
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task<string?>> _groupSites = new(StringComparer.OrdinalIgnoreCase);
 
+    public async Task<string?> SiteOfGroupAsync(string group, CancellationToken ct)
+    {
         if (ViaGraph)
         {
+            var lookup = _groupSites.GetOrAdd(group, id => GraphSiteOfGroupAsync(id, CancellationToken.None));
             try
             {
-                using var doc = await GetAsync($"{GraphRoot()}/v1.0/groups/{Uri.EscapeDataString(group)}/drive?$select=id,webUrl,sharePointIds", TeamsService.Graph, ct).ConfigureAwait(false);
-                if ((NullIfEmpty(Str(Obj(doc.RootElement, "sharePointIds"), "siteUrl")) ?? TeamsFiles.SiteOfLibrary(Str(doc.RootElement, "webUrl"))) is not { } site)
-                {
-                    return null;
-                }
-
-                if (Str(doc.RootElement, "id") is { Length: > 0 } drive)
-                {
-                    _drives.TryAdd(site.TrimEnd('/'), Task.FromResult<string?>(drive));
-                }
-
-                return site.TrimEnd('/');
+                return await lookup.WaitAsync(ct).ConfigureAwait(false);
             }
-            catch (VfsException ex) when (ex.Error == VfsError.NotFound)
+            catch (VfsException) when (lookup.IsFaulted)
             {
-                return null;
+                _groupSites.TryRemove(new KeyValuePair<string, Task<string?>>(group, lookup));
+                throw;
             }
         }
 
         await tokenFor(TeamsService.SharePoint, null, ct).ConfigureAwait(false);
         return sharePointHost?.Invoke() is { } seen ? (await GroupSiteAsync(TeamsFiles.RootHost(seen), group).ConfigureAwait(false))?.Url : null;
+    }
+
+    /// <summary>A group's site from its drive (sharePointIds, else the library's address), its drive kept for the site; null for a group with none (404).</summary>
+    private async Task<string?> GraphSiteOfGroupAsync(string group, CancellationToken ct)
+    {
+        try
+        {
+            using var doc = await GetAsync($"{GraphRoot()}/v1.0/groups/{Uri.EscapeDataString(group)}/drive?$select=id,webUrl,sharePointIds", TeamsService.Graph, ct).ConfigureAwait(false);
+            if ((NullIfEmpty(Str(Obj(doc.RootElement, "sharePointIds"), "siteUrl")) ?? TeamsFiles.SiteOfLibrary(Str(doc.RootElement, "webUrl"))) is not { } site)
+            {
+                return null;
+            }
+
+            if (Str(doc.RootElement, "id") is { Length: > 0 } drive)
+            {
+                _drives.TryAdd(site.TrimEnd('/'), Task.FromResult<string?>(drive));
+            }
+
+            return site.TrimEnd('/');
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.NotFound)
+        {
+            return null;
+        }
     }
 
     public async Task<HttpResponseMessage> ContentAsync(string downloadUrl, long offset, CancellationToken ct)
@@ -445,22 +458,59 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
     }
 
-    // Microsoft Search's page of sites (its largest for SharePoint's kinds)
-    private const int SearchPage = 500;
-
     /// <summary>
-    /// Every Microsoft 365 group site the account can open, from Microsoft Search through Graph: the index SharePoint's own
-    /// search reads, trimmed alike to what the account may see (Sites.Read.All; GCC High's Graph token carries
-    /// Sites.ReadWrite.All). A site found so is not named by its group: Search gives no group id.
+    /// The Microsoft 365 groups whose sites the account can open, from Graph's list of the organisation's groups
+    /// (Group.Read.All, which GCC High's Graph token carries): the public ones and those it is in, as SharePoint's search
+    /// would show them, each named without its site (found when the group is opened). Where Graph refuses the list,
+    /// Microsoft Search.
     /// </summary>
     private async Task<IReadOnlyList<GroupSite>> GraphGroupSitesAsync(CancellationToken ct)
     {
+        var root = GraphRoot();
+        try
+        {
+            var member = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            await foreach (var g in GraphPagesAsync($"{root}/v1.0/me/memberOf/microsoft.graph.group?$select=id&$top=999", ct).ConfigureAwait(false))
+            {
+                member.Add(Str(g, "id") ?? "");
+            }
+
+            var groups = new List<GroupSite>();
+            await foreach (var g in GraphPagesAsync($"{root}/v1.0/groups?$filter=groupTypes/any(c:c%20eq%20'Unified')&$select=id,displayName,description,createdDateTime,visibility&$top=999", ct).ConfigureAwait(false))
+            {
+                if (Str(g, "id") is { Length: > 0 } id && (string.Equals(Str(g, "visibility"), "Public", StringComparison.OrdinalIgnoreCase) || member.Contains(id)))
+                {
+                    groups.Add(new GroupSite(id, Str(g, "displayName") ?? id, null, NullIfEmpty(Str(g, "description")), Time(Str(g, "createdDateTime"))));
+                }
+            }
+
+            return groups;
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.AccessDenied)
+        {
+            logger.LogInformation("teams: Microsoft Graph did not list the groups ({Error}); searching their sites instead, as far as Microsoft Search reaches", ex.Message);
+            return await SearchGroupSitesAsync(root, ct).ConfigureAwait(false);
+        }
+    }
+
+    // Microsoft Search's reach for SharePoint's kinds, and a page of it (Microsoft Learn: no more than 1,000 results)
+    private const int SearchReach = 1000;
+    private const int SearchPage = 500;
+
+    /// <summary>
+    /// The group sites the account can open, from Microsoft Search through Graph (Sites.Read.All): the index SharePoint's own
+    /// search reads, trimmed alike. It names no site's group, and reaches no further than its first 1,000 results; paging
+    /// stops there, or where a page brings nothing new (its paging is reported to run on past the end on large sets).
+    /// </summary>
+    private async Task<IReadOnlyList<GroupSite>> SearchGroupSitesAsync(string root, CancellationToken ct)
+    {
         var sites = new Dictionary<string, GroupSite>(StringComparer.OrdinalIgnoreCase);
-        for (var from = 0; ; from += SearchPage)
+        for (var from = 0; from < SearchReach; from += SearchPage)
         {
             var body = $$"""{"requests":[{"entityTypes":["site"],"query":{"queryString":"WebTemplate:GROUP"},"from":{{from}},"size":{{SearchPage}}}]}""";
-            using var doc = await SendAsync(HttpMethod.Post, $"{GraphRoot()}/v1.0/search/query", TeamsService.Graph, body, ct).ConfigureAwait(false);
+            using var doc = await SendAsync(HttpMethod.Post, $"{root}/v1.0/search/query", TeamsService.Graph, body, ct).ConfigureAwait(false);
             var found = Arr(Arr(doc.RootElement, "value").FirstOrDefault(), "hitsContainers").FirstOrDefault();
+            var before = sites.Count;
             var hits = Arr(found, "hits").ToList();
             foreach (var site in hits.Select(h => Obj(h, "resource")))
             {
@@ -471,17 +521,22 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
                 }
             }
 
-            if (hits.Count == 0 || !Bool(found, "moreResultsAvailable"))
+            if (sites.Count == before || !Bool(found, "moreResultsAvailable"))
             {
-                return sites.Values.ToList();
+                break;
             }
         }
+
+        return sites.Values.ToList();
     }
 
-    public async Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct)
+    public async Task<GroupsDirectory?> AllGroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct)
     {
-        // the sites by their group: SharePoint's search names it, Graph's does not
-        var bySite = (sites ?? []).Where(s => s.GroupId is not null).GroupBy(s => s.GroupId!, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        // the sites by their group, where the search named both
+        var bySite = (sites ?? []).Where(s => s.GroupId is not null && s.SiteUrl is not null).GroupBy(s => s.GroupId!, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        // SharePoint's search's sites (each with its group and site), the groups it shows, where Graph lists none
+        var visible = SharePointReady && sites is not null && sites.All(s => s.GroupId is not null && s.SiteUrl is not null);
         if (GraphReady)
         {
             try
@@ -490,11 +545,57 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             }
             catch (VfsException ex)
             {
-                logger.LogInformation("teams: Microsoft Graph did not list the groups ({Error}); listing {Instead}", ex.Message, SharePointReady && sites is not null ? "those SharePoint shows" : "the teams' own");
+                logger.LogInformation("teams: Microsoft Graph did not list every group ({Error}){Instead}", ex.Message, visible ? "; listing those SharePoint shows" : "");
             }
         }
 
-        return SharePointReady && sites is not null ? await SharePointGroupsAsync(bySite, joined, ct).ConfigureAwait(false) : GroupsDirectory.OfTeams(joined);
+        return visible ? await SharePointGroupsAsync(bySite, joined, ct).ConfigureAwait(false) : null;
+    }
+
+    public async Task<GroupsDirectory> MyGroupsAsync(IReadOnlyList<TeamInfo> joined, CancellationToken ct)
+    {
+        if (GraphReady)
+        {
+            try
+            {
+                var root = GraphRoot();
+                var groups = new List<GroupInfo>();
+                var named = 0;
+                await foreach (var g in GraphPagesAsync($"{root}/v1.0/me/memberOf/microsoft.graph.group?$select={GroupFields}&$top=999", ct).ConfigureAwait(false))
+                {
+                    if (Str(g, "displayName") is not null)
+                    {
+                        named++;
+                        groups.Add(GraphGroupOf(g, [], joined));
+                    }
+                    else if (Str(g, "id") is { Length: > 0 } id)
+                    {
+                        groups.Add(joined.FirstOrDefault(t => string.Equals(t.GroupId, id, StringComparison.OrdinalIgnoreCase)) is { } team ? GroupInfo.OfTeam(team) : new GroupInfo(id, id));
+                    }
+                }
+
+                // a token that may not read the groups (without Group.Read.All, as the AnyFS app's) gets their ids alone
+                if (named == 0)
+                {
+                    logger.LogInformation("teams: Microsoft Graph gave the account's groups without their details; listing its teams'");
+                    return GroupsDirectory.OfTeams(joined);
+                }
+
+                var owner = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                await foreach (var g in GraphPagesAsync($"{root}/v1.0/me/ownedObjects/microsoft.graph.group?$select=id&$top=999", ct).ConfigureAwait(false))
+                {
+                    owner.Add(Str(g, "id") ?? "");
+                }
+
+                return new GroupsDirectory(groups, groups.Select(g => g.Id).ToHashSet(StringComparer.OrdinalIgnoreCase), owner, GroupsScope.Yours, "Microsoft Graph");
+            }
+            catch (VfsException ex)
+            {
+                logger.LogInformation("teams: Microsoft Graph did not list the account's groups ({Error}); listing its teams'", ex.Message);
+            }
+        }
+
+        return GroupsDirectory.OfTeams(joined);
     }
 
     // the group fields Graph lists them with: all a group's own, none that costs a request per group
@@ -507,30 +608,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         var groups = new List<GroupInfo>();
         await foreach (var g in GraphPagesAsync($"{root}/v1.0/groups?$select={GroupFields}&$top=999", ct).ConfigureAwait(false))
         {
-            var id = Str(g, "id") ?? "";
-            var types = Arr(g, "groupTypes").Select(t => t.GetString()).ToList();
-            var unified = types.Contains("Unified", StringComparer.OrdinalIgnoreCase);
-            var mailEnabled = Bool(g, "mailEnabled");
-            var securityEnabled = Bool(g, "securityEnabled");
-            groups.Add(new GroupInfo(id, Str(g, "displayName") ?? id)
-            {
-                Kind = unified ? "Microsoft 365 group" : mailEnabled && securityEnabled ? "Mail-enabled security group" : securityEnabled ? "Security group" : mailEnabled ? "Distribution list" : "Group",
-                Visibility = Str(g, "visibility") switch { "HiddenMembership" => "Hidden membership", { Length: > 0 } v => v, _ => null },
-                Team = unified ? Arr(g, "resourceProvisioningOptions").Any(o => string.Equals(o.GetString(), "Team", StringComparison.OrdinalIgnoreCase)) : null,
-                Dynamic = types.Contains("DynamicMembership", StringComparer.OrdinalIgnoreCase),
-                Description = NullIfEmpty(Str(g, "description")),
-                Mail = NullIfEmpty(Str(g, "mail")),
-                Alias = NullIfEmpty(Str(g, "mailNickname")),
-                Classification = NullIfEmpty(Str(g, "classification")),
-                MembershipRule = NullIfEmpty(Str(g, "membershipRule")),
-                SiteUrl = sites.GetValueOrDefault(id)?.SiteUrl,
-                Created = Time(Str(g, "createdDateTime")),
-                Renewed = Time(Str(g, "renewedDateTime")),
-                Expires = Time(Str(g, "expirationDateTime")),
-                OnPremisesSynced = OptionalBool(g, "onPremisesSyncEnabled"),
-                RoleAssignable = OptionalBool(g, "isAssignableToRole"),
-                Members = joined.FirstOrDefault(t => string.Equals(t.GroupId, id, StringComparison.OrdinalIgnoreCase))?.Members,
-            });
+            groups.Add(GraphGroupOf(g, sites, joined));
         }
 
         var member = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -546,7 +624,36 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
 
         logger.LogInformation("teams: Microsoft Graph lists {Count:N0} groups; the account is in {Member:N0}", groups.Count, member.Count);
-        return new GroupsDirectory(groups, member, owner, Complete: true, "Microsoft Graph");
+        return new GroupsDirectory(groups, member, owner, GroupsScope.Organisation, "Microsoft Graph");
+    }
+
+    /// <summary>A group as Graph lists it (<see cref="GroupFields"/>), with its site where SharePoint's search showed it and the aggregator's count for a team the account is in.</summary>
+    private static GroupInfo GraphGroupOf(JsonElement g, Dictionary<string, GroupSite> sites, IReadOnlyList<TeamInfo> joined)
+    {
+        var id = Str(g, "id") ?? "";
+        var types = Arr(g, "groupTypes").Select(t => t.GetString()).ToList();
+        var unified = types.Contains("Unified", StringComparer.OrdinalIgnoreCase);
+        var mailEnabled = Bool(g, "mailEnabled");
+        var securityEnabled = Bool(g, "securityEnabled");
+        return new GroupInfo(id, Str(g, "displayName") ?? id)
+        {
+            Kind = unified ? "Microsoft 365 group" : mailEnabled && securityEnabled ? "Mail-enabled security group" : securityEnabled ? "Security group" : mailEnabled ? "Distribution list" : "Group",
+            Visibility = Str(g, "visibility") switch { "HiddenMembership" => "Hidden membership", { Length: > 0 } v => v, _ => null },
+            Team = unified ? Arr(g, "resourceProvisioningOptions").Any(o => string.Equals(o.GetString(), "Team", StringComparison.OrdinalIgnoreCase)) : null,
+            Dynamic = types.Contains("DynamicMembership", StringComparer.OrdinalIgnoreCase),
+            Description = NullIfEmpty(Str(g, "description")),
+            Mail = NullIfEmpty(Str(g, "mail")),
+            Alias = NullIfEmpty(Str(g, "mailNickname")),
+            Classification = NullIfEmpty(Str(g, "classification")),
+            MembershipRule = NullIfEmpty(Str(g, "membershipRule")),
+            SiteUrl = sites.GetValueOrDefault(id)?.SiteUrl,
+            Created = Time(Str(g, "createdDateTime")),
+            Renewed = Time(Str(g, "renewedDateTime")),
+            Expires = Time(Str(g, "expirationDateTime")),
+            OnPremisesSynced = OptionalBool(g, "onPremisesSyncEnabled"),
+            RoleAssignable = OptionalBool(g, "isAssignableToRole"),
+            Members = joined.FirstOrDefault(t => string.Equals(t.GroupId, id, StringComparison.OrdinalIgnoreCase))?.Members,
+        };
     }
 
     /// <summary>Graph's address: the host the audience of the Graph token in hand names, else the cloud's.</summary>
@@ -613,7 +720,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
 
         var member = joined.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
         var owner = joined.Where(t => t.Owner).Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return new GroupsDirectory(groups, member, owner, Complete: false, "SharePoint");
+        return new GroupsDirectory(groups, member, owner, GroupsScope.Visible, "SharePoint");
     }
 
     private static bool? OptionalBool(JsonElement e, string name)
@@ -767,6 +874,10 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
                 {
                     throw VfsException.Unavailable($"Teams ({new Uri(url).Host}) could not be reached: {ex.Message}");
                 }
+                catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    throw VfsException.Unavailable($"Teams ({new Uri(url).Host}) did not answer within {_http.Timeout.TotalSeconds:F0} s");
+                }
 
                 try
                 {
@@ -795,7 +906,15 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
                         throw Error(response.StatusCode, url, text);
                     }
 
-                    return JsonDocument.Parse(text.Length == 0 ? "{}" : text);
+                    try
+                    {
+                        return JsonDocument.Parse(text.Length == 0 ? "{}" : text);
+                    }
+                    catch (JsonException)
+                    {
+                        // a proxy's or a portal's page in place of the service's answer
+                        throw new VfsException(VfsError.IoError, $"Teams ({new Uri(url).Host}) answered with something other than JSON: {Trim(text)}");
+                    }
                 }
                 finally
                 {

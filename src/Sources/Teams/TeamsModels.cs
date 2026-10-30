@@ -15,9 +15,10 @@ internal sealed record TeamInfo(string Id, string DisplayName, string? GroupId, 
     public int? Members { get; init; }
 }
 
-/// <summary>A Microsoft 365 group's SharePoint site, as search finds those the account can open.</summary>
-/// <param name="GroupId">The group's id where the search names it (SharePoint's does; Microsoft Search through Graph does not).</param>
-internal sealed record GroupSite(string? GroupId, string Name, string SiteUrl, string? Description, DateTimeOffset? Created);
+/// <summary>A Microsoft 365 group whose SharePoint site the account can open, as a search or Graph's list of groups finds it.</summary>
+/// <param name="GroupId">The group's id where it is named (SharePoint's search and Graph's list do; Microsoft Search through Graph does not).</param>
+/// <param name="SiteUrl">The site's address where it is named (the searches do; Graph's list of groups does not, so it is found when the group is opened).</param>
+internal sealed record GroupSite(string? GroupId, string Name, string? SiteUrl, string? Description, DateTimeOffset? Created);
 
 /// <summary>A group of the organisation and what is known of it: from Microsoft Graph everything there; else what SharePoint and the aggregator tell.</summary>
 internal sealed record GroupInfo(string Id, string Name)
@@ -67,26 +68,32 @@ internal sealed record GroupInfo(string Id, string Name)
     };
 }
 
-/// <summary>
-/// The groups for <c>groups.md</c>: every one in the organisation (<see cref="Complete"/>, from Microsoft Graph), else those
-/// the account can see, else (<see cref="JoinedOnly"/>) those of its own teams; with the ones it belongs to and owns, and
-/// where they came from.
-/// </summary>
-internal sealed record GroupsDirectory(IReadOnlyList<GroupInfo> Groups, IReadOnlySet<string> Member, IReadOnlySet<string> Owner, bool Complete, string From)
+/// <summary>What a list of groups covers.</summary>
+internal enum GroupsScope
 {
-    /// <summary>Only the account's own teams' groups: Teams on the web had handed out no token that shows others (SharePoint's, Graph's).</summary>
-    public bool JoinedOnly { get; init; }
+    /// <summary>Every group in the organisation (Microsoft Graph's list of groups): <c>all-groups.md</c>.</summary>
+    Organisation,
 
-    /// <summary>The groups of the account's own teams, as the aggregator tells of them: all there is to go on without SharePoint's token or Graph's.</summary>
+    /// <summary>The groups the account can see (SharePoint's search: every public group and the private ones it is in): <c>all-groups.md</c> without Graph.</summary>
+    Visible,
+
+    /// <summary>The groups the account is in, of every kind (Graph's list of its memberships): <c>groups.md</c>.</summary>
+    Yours,
+
+    /// <summary>The groups of the account's own teams (the aggregator): <c>groups.md</c> without Graph.</summary>
+    Teams,
+}
+
+/// <summary>A list of groups for <c>groups.md</c> or <c>all-groups.md</c>: what it covers, the ones the account belongs to and owns, and where they came from.</summary>
+internal sealed record GroupsDirectory(IReadOnlyList<GroupInfo> Groups, IReadOnlySet<string> Member, IReadOnlySet<string> Owner, GroupsScope Scope, string From)
+{
+    /// <summary>The groups of the account's own teams, as the aggregator tells of them: all there is to go on without Graph's token.</summary>
     public static GroupsDirectory OfTeams(IReadOnlyList<TeamInfo> joined) => new(
         joined.Where(t => t.GroupId is not null).Select(GroupInfo.OfTeam).ToList(),
         joined.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
         joined.Where(t => t.Owner).Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
-        Complete: false,
-        "Teams")
-    {
-        JoinedOnly = true,
-    };
+        GroupsScope.Teams,
+        "Teams");
 }
 
 /// <summary>A channel of a team: its own conversation thread.</summary>

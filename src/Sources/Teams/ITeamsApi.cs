@@ -44,8 +44,11 @@ internal interface ITeamsApi : IAsyncDisposable
     /// </summary>
     Task<DriveEntry?> FileAsync(string siteUrl, string path, string? url, CancellationToken ct);
 
-    /// <summary>A team's own site (its group's), so a group site found without its group (Graph's search names none) is told from a team's; null while it has none.</summary>
-    Task<string?> TeamSiteAsync(TeamInfo team, CancellationToken ct);
+    /// <summary>
+    /// A group's own site: to open a group Graph's list named without its site, and to tell a site Microsoft Search found
+    /// without its group from a team's; null while the group has none.
+    /// </summary>
+    Task<string?> SiteOfGroupAsync(string groupId, CancellationToken ct);
 
     /// <summary>A file's content from an offset, by its download address (a range where SharePoint takes one).</summary>
     Task<HttpResponseMessage> ContentAsync(string downloadUrl, long offset, CancellationToken ct);
@@ -73,16 +76,20 @@ internal interface ITeamsApi : IAsyncDisposable
     Task<bool> SeekTokensAsync(CancellationToken ct);
 
     /// <summary>
-    /// Every Microsoft 365 group site the account can open: SharePoint's search, or Microsoft Search through Graph (the same
-    /// index, which leaves out what the account may not see; it names no site's group).
+    /// Every Microsoft 365 group whose site the account can open. With SharePoint's token, SharePoint's search (which leaves
+    /// out what the account may not see). With Graph's, Graph's list of the organisation's Microsoft 365 groups, the public
+    /// ones and those the account is in, each named without its site; where Graph refuses that list (no Group.Read.All),
+    /// Microsoft Search, which names no group and reaches no further than its first 1,000 sites.
     /// </summary>
     Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct);
 
     /// <summary>
-    /// Every group there is, with its details, from the tokens in hand (never waiting for one): every group of the
-    /// organisation from Microsoft Graph where there is a Graph token; else <paramref name="sites"/>, the group sites the
-    /// account can open, with SharePoint's details of each; else (no sites: SharePoint's token not in hand) the account's
-    /// own teams; with what the aggregator says of <paramref name="joined"/>.
+    /// <c>all-groups.md</c>'s groups, from the tokens in hand (never waiting for one): every group of the organisation from
+    /// Microsoft Graph; else <paramref name="sites"/>, the group sites SharePoint's search shows, with SharePoint's details
+    /// of each; null when neither can be had. With what the aggregator says of <paramref name="joined"/>.
     /// </summary>
-    Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct);
+    Task<GroupsDirectory?> AllGroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct);
+
+    /// <summary><c>groups.md</c>'s groups: those the account is in, of every kind, from Microsoft Graph; else those of its own teams.</summary>
+    Task<GroupsDirectory> MyGroupsAsync(IReadOnlyList<TeamInfo> joined, CancellationToken ct);
 }

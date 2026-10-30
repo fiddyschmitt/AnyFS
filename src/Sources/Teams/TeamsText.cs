@@ -52,8 +52,9 @@ internal static class TeamsText
     }
 
     /// <summary>
-    /// <c>groups.md</c>: what the groups are and where they came from, a table of them all (name, kind, visibility, team, the
-    /// account's part, email), then each one's details, every field known. Sorted by name.
+    /// <c>groups.md</c> (the account's groups) or <c>all-groups.md</c> (every group): what the groups are and where they came
+    /// from, a table of them all (name, kind, visibility, team, the account's part, email), then each one's details, every
+    /// field known. Sorted by name.
     /// </summary>
     public static byte[] Groups(GroupsDirectory directory, string account)
     {
@@ -61,24 +62,27 @@ internal static class TeamsText
         string You(GroupInfo g) => directory.Owner.Contains(g.Id) ? "owner" : directory.Member.Contains(g.Id) ? "member" : "";
         string YesNo(bool? b) => b switch { true => "yes", false => "no", _ => "" };
 
-        var text = new StringBuilder("# Groups\n\n");
+        var text = new StringBuilder(directory.Scope is GroupsScope.Organisation or GroupsScope.Visible ? "# All groups\n\n" : "# Your groups\n\n");
         var mine = groups.Count(g => You(g).Length > 0);
-        if (directory.Complete)
+        var kinds = string.Join(", ", groups.GroupBy(g => g.Kind ?? "Group").OrderByDescending(k => k.Count()).Select(k => $"{k.Count():N0} {Plural(k.Key, k.Count())}"));
+        switch (directory.Scope)
         {
-            var kinds = groups.GroupBy(g => g.Kind ?? "Group").OrderByDescending(k => k.Count()).Select(k => $"{k.Count():N0} {Plural(k.Key, k.Count())}");
-            var teams = groups.Count(g => g.Team == true);
-            text.Append(CultureInfo.InvariantCulture, $"Every group in the organisation, as {directory.From} lists them for {account}: {groups.Count:N0} ({string.Join(", ", kinds)}; {teams:N0} with a team). ")
-                .Append(CultureInfo.InvariantCulture, $"{account} is in {mine:N0} of them.\n\n");
-        }
-        else if (directory.JoinedOnly)
-        {
-            text.Append(CultureInfo.InvariantCulture, $"The groups of {account}'s own teams, from {directory.From}: {groups.Count:N0}. ")
-                .Append("Teams on the web has not handed out the token that shows the others yet (SharePoint's, or Microsoft Graph's where it gives one); AnyFS asks for it in the background, and lists them here once it comes.\n\n");
-        }
-        else
-        {
-            text.Append(CultureInfo.InvariantCulture, $"The groups {account} can see, from {directory.From}: {groups.Count:N0}, being every public group and the private ones it is in. It is in {mine:N0} of them. ")
-                .Append("Private groups it is not in are not listed, and whether a group it is not in has a team is not known: Teams on the web has handed out no token that can list every group (Microsoft 365's never does; GCC High's does as it gets round to it, and every group is listed here then).\n\n");
+            case GroupsScope.Organisation:
+                text.Append(CultureInfo.InvariantCulture, $"Every group in the organisation, as {directory.From} lists them for {account}: {groups.Count:N0} ({kinds}; {groups.Count(g => g.Team == true):N0} with a team). ")
+                    .Append(CultureInfo.InvariantCulture, $"{account} is in {mine:N0} of them (groups.md lists those).\n\n");
+                break;
+            case GroupsScope.Visible:
+                text.Append(CultureInfo.InvariantCulture, $"The groups {account} can see, from {directory.From}: {groups.Count:N0}, being every public group and the private ones it is in. It is in {mine:N0} of them. ")
+                    .Append("Private groups it is not in are not listed, and whether a group it is not in has a team is not known: Teams on the web has handed out no token that can list every group (Microsoft 365's never does; GCC High's does as it gets round to it, and every group is listed here then).\n\n");
+                break;
+            case GroupsScope.Yours:
+                text.Append(CultureInfo.InvariantCulture, $"The groups {account} is in, as {directory.From} lists them: {groups.Count:N0} ({kinds}). It owns {groups.Count(g => directory.Owner.Contains(g.Id)):N0} of them. ")
+                    .Append("Every group in the organisation is in all-groups.md.\n\n");
+                break;
+            default:
+                text.Append(CultureInfo.InvariantCulture, $"The groups of {account}'s own teams, from {directory.From}: {groups.Count:N0}. ")
+                    .Append("Its other groups need Microsoft Graph's token, which Teams on the web hands out in GCC High (as it gets round to it; AnyFS asks for it in the background) and never in Microsoft 365.\n\n");
+                break;
         }
 
         text.Append("| Group | Kind | Visibility | Team | You | Email |\n|---|---|---|---|---|---|\n");
@@ -120,11 +124,11 @@ internal static class TeamsText
         return Encoding.UTF8.GetBytes(text.ToString());
     }
 
-    /// <summary><c>groups.md</c> when the groups could not be read: why, rather than a root that fails to list.</summary>
+    /// <summary><c>groups.md</c> or <c>all-groups.md</c> when the groups could not be read: why, rather than a root that fails to list.</summary>
     public static byte[] GroupsUnread(string why) => Encoding.UTF8.GetBytes($"# Groups\n\nThe groups could not be read: {Clean(why)}\n");
 
-    /// <summary><c>groups.md</c> until its first reading lands (it is read behind the listings, which never wait on it).</summary>
-    public static byte[] GroupsBeingRead() => Encoding.UTF8.GetBytes("# Groups\n\nThe groups are being read; this file fills in shortly.\n");
+    /// <summary><c>groups.md</c> or <c>all-groups.md</c> until its first reading lands (each is read behind the listings, which never wait on it).</summary>
+    public static byte[] GroupsBeingRead() => Encoding.UTF8.GetBytes("# Groups\n\nThe groups are being read; this file fills in shortly (a large organisation's take minutes).\n");
 
     private static string Plural(string kind, int count) => count == 1 ? kind : kind.EndsWith("list", StringComparison.Ordinal) ? kind + "s" : kind.Replace("group", "groups", StringComparison.Ordinal);
 

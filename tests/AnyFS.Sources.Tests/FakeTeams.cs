@@ -242,10 +242,10 @@ internal sealed class FakeTeams : ITeamsApi
         }
     }
 
-    public Task<string?> TeamSiteAsync(TeamInfo team, CancellationToken ct)
+    public Task<string?> SiteOfGroupAsync(string groupId, CancellationToken ct)
     {
         SharePoint();
-        return Task.FromResult(team.GroupId is { } group && _sites.TryGetValue(group, out var site) ? site : null);
+        return Task.FromResult(_sites.TryGetValue(groupId, out var site) ? site : _groupSites.FirstOrDefault(s => s.GroupId == groupId)?.SiteUrl);
     }
 
     public Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, CancellationToken ct)
@@ -321,28 +321,39 @@ internal sealed class FakeTeams : ITeamsApi
 
     private readonly List<GroupSite> _groupSites = [];
 
-    /// <summary>What GroupsAsync answers with a Graph token in hand (<see cref="GraphReady"/>), as Graph lists every group.</summary>
+    /// <summary>What Graph lists with its token in hand (<see cref="GraphReady"/>): every group of the organisation (all-groups.md), and of them the account's (groups.md).</summary>
     public GroupsDirectory? Directory { get; set; }
+
+    /// <summary>When set, Graph refuses its list of groups (a token without Group.Read.All): the group sites come from Microsoft Search, without their groups.</summary>
+    public bool GraphListsNoGroups { get; set; }
 
     /// <summary>A group site the account can open (its library's files added with <see cref="AddLibraryFile"/>).</summary>
     public void AddGroupSite(GroupSite site) => _groupSites.Add(site);
 
+    /// <summary>As the live seam: SharePoint's search with its token; else Graph's list of groups (named without their sites), or Microsoft Search's sites (without their groups) where Graph refuses that list.</summary>
     public Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct)
     {
         SharePoint();
-
-        // Microsoft Search through Graph names no site's group
-        return Task.FromResult<IReadOnlyList<GroupSite>>(SharePointReady ? _groupSites.ToList() : _groupSites.Select(s => s with { GroupId = null }).ToList());
+        return Task.FromResult<IReadOnlyList<GroupSite>>(
+            SharePointReady ? _groupSites.ToList()
+            : GraphListsNoGroups ? _groupSites.Select(s => s with { GroupId = null }).ToList()
+            : _groupSites.Select(s => s with { SiteUrl = null }).ToList());
     }
 
-    /// <summary>As the live seam: Graph's every group with its token in hand, else the group sites SharePoint gave, else the teams' own.</summary>
-    public Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct)
-        => Task.FromResult(GraphReady && Directory is { } graph ? graph : !SharePointReady || sites is null ? GroupsDirectory.OfTeams(joined) : new GroupsDirectory(
+    /// <summary>As the live seam: Graph's every group with its token in hand, else the group sites SharePoint's search gave, else none.</summary>
+    public Task<GroupsDirectory?> AllGroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct)
+        => Task.FromResult(GraphReady && Directory is { } graph && !GraphListsNoGroups ? graph : !SharePointReady || sites is null ? null : new GroupsDirectory(
             sites.Where(s => s.GroupId is not null).Select(s => new GroupInfo(s.GroupId!, s.Name) { Kind = "Microsoft 365 group", SiteUrl = s.SiteUrl, Description = s.Description, Created = s.Created }).ToList(),
             joined.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
             joined.Where(t => t.Owner).Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
-            Complete: false,
+            GroupsScope.Visible,
             "SharePoint"));
+
+    /// <summary>As the live seam: the account's groups of every kind from Graph, else its teams'.</summary>
+    public Task<GroupsDirectory> MyGroupsAsync(IReadOnlyList<TeamInfo> joined, CancellationToken ct)
+        => Task.FromResult(GraphReady && Directory is { } graph && !GraphListsNoGroups
+            ? graph with { Groups = graph.Groups.Where(g => graph.Member.Contains(g.Id) || graph.Owner.Contains(g.Id)).ToList(), Scope = GroupsScope.Yours }
+            : GroupsDirectory.OfTeams(joined));
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 

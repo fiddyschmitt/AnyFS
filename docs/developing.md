@@ -114,8 +114,9 @@ services made from what the Microsoft 365 developer sandbox answered (the aggreg
 service's messages with their reactions, edits, deletions, shared files and inline images; a team's SharePoint library and
 the media service), in-process. It can hold back SharePoint's token as the page at work often does (`SharePointReady`,
 and `SharePointComesWhenAsked` with `SeekHold` for one that comes when asked for behind the listings), and refuses its
-file calls without it or Graph's (`GraphReady`) as the live seam does; with Graph's alone it gives the group sites
-without their groups, as Microsoft Search does. `TeamsRestTests` read the services' answers through a fake handler, and
+file calls without it or Graph's (`GraphReady`) as the live seam does; with Graph's alone it gives the groups without
+their sites, as Graph's list of groups does, or (`GraphListsNoGroups`) the sites without their groups, as Microsoft Search
+does where Graph refuses that list. `TeamsRestTests` read the services' answers through a fake handler, and
 `TeamsFilesTests` check where its tokens may go. `TeamsLiveTests` read the sandbox when `ANYFS_TEST_TEAMS_ACCOUNT` (the tester,
 `anyfs-tester@<tenant>.onmicrosoft.com`) and `ANYFS_TEAMS_PROFILES` (the root of the browser profiles signed in as it, such as
 `%LOCALAPPDATA%\AnyFS\tests\outlook-browser`: Teams signs in from the same Microsoft 365 session) are set;

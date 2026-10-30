@@ -117,7 +117,7 @@ public sealed class TeamsSettings
     public bool Files { get; set; } = true;
 
     [Setting("Groups", Order = 8,
-        Hint = "An Other groups folder: every group site you can open beyond your teams above (public groups you have not joined among them), each with its files, shown once Teams on the web has handed out its SharePoint token or its Microsoft Graph token. And groups.md: every group there is, with its details — every group in the organisation where the Teams client gives a token that can list them (GCC High's does), else every group you can see, else your teams' own until a token comes.")]
+        Hint = "An Other groups folder: every group site you can open beyond your teams above (public groups you have not joined among them), each with its files, shown once Teams on the web has handed out its SharePoint token or its Microsoft Graph token. And two files of groups with their details: groups.md, the groups you are in (of every kind where the Teams client gives a token that can list them, as GCC High's does; else your teams'), and all-groups.md, every group there is (every group in the organisation with that token, which can run to tens of megabytes; else every group you can see).")]
     public bool Groups { get; set; } = true;
 
     public const string AutomaticCloud = "Automatic";

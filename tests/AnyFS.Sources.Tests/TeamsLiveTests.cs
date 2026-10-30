@@ -83,7 +83,7 @@ public class TeamsLiveTests
 
         var root = await ListAsync(source, "");
         Assert.IsTrue(root.Any(e => e.Name == "Chats"), "the root has a Chats folder");
-        var teams = root.Where(e => e.Name is not ("Chats" or "Other groups" or "groups.md")).ToList();
+        var teams = root.Where(e => e.Name is not ("Chats" or "Other groups" or "all-groups.md" or "groups.md")).ToList();
         Assert.IsTrue(teams.Count > 0, "the account is in at least one team (the sandbox seed)");
 
         // a team lists its channels, a channel its posts folder
@@ -146,7 +146,7 @@ public class TeamsLiveTests
         StringAssert.Contains(chatMd, "*This message was deleted.*");
     }
 
-    /// <summary>The sandbox's groups: the sample groups the tester has not joined, with their files, and groups.md (from SharePoint: Microsoft 365's client gives no Graph token).</summary>
+    /// <summary>The sandbox's groups: the sample groups the tester has not joined, with their files, all-groups.md (from SharePoint: Microsoft 365's client gives no Graph token) and groups.md (the tester's teams').</summary>
     [TestMethod]
     [Timeout(300_000)]
     public async Task TheOtherGroupsAndGroupsMdShowTheSandboxsGroups()
@@ -160,9 +160,9 @@ public class TeamsLiveTests
         CollectionAssert.DoesNotContain(others, "AnyFS Lab", "its team is at the root");
         Assert.IsTrue((await ListAsync(source, "Other groups/Mark 8 Project Team")).Count > 0, "its library, readable without joining");
 
-        // groups.md is read behind the listings: the file says so until its reading with SharePoint's token lands
-        var md = await TextAsync(source, "groups.md");
-        for (var deadline = DateTime.UtcNow.AddMinutes(1); !md.Contains("from SharePoint", StringComparison.Ordinal) && DateTime.UtcNow < deadline; md = await TextAsync(source, "groups.md"))
+        // all-groups.md is read behind the listings: the file says so until its reading with SharePoint's token lands
+        var md = await TextAsync(source, "all-groups.md");
+        for (var deadline = DateTime.UtcNow.AddMinutes(1); !md.Contains("from SharePoint", StringComparison.Ordinal) && DateTime.UtcNow < deadline; md = await TextAsync(source, "all-groups.md"))
         {
             await Task.Delay(500);
         }
@@ -171,6 +171,12 @@ public class TeamsLiveTests
         StringAssert.Contains(md, "| Mark 8 Project Team | Microsoft 365 group | Public |");
         StringAssert.Contains(md, "| AnyFS Lab | Microsoft 365 group | Private | yes | owner |");
         StringAssert.Contains(md, "| MSFT | Microsoft 365 group | Org-wide | yes | member |");
+
+        // groups.md: the tester's own, its teams' (Microsoft 365's client gives no Graph token to list its other groups)
+        var mine = await TextAsync(source, "groups.md");
+        StringAssert.Contains(mine, $"The groups of {account}'s own teams");
+        StringAssert.Contains(mine, "| AnyFS Lab | Microsoft 365 group | Private | yes | owner |");
+        Assert.IsFalse(mine.Contains("Mark 8 Project Team", StringComparison.Ordinal), "not a group it is not in");
     }
 
     /// <summary>

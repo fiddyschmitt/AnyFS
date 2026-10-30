@@ -124,7 +124,12 @@ public class TeamsRestTests
                       {"id":"g-secret","displayName":"Secret project","groupTypes":["Unified"],"mailEnabled":true,"securityEnabled":false,"visibility":"HiddenMembership","resourceProvisioningOptions":[]}
                     ],"@odata.nextLink":"https://graph.microsoft.us/v1.0/groups?$select=id&$skiptoken=2"}
                     """,
-                "/v1.0/me/memberOf/microsoft.graph.group" => """{"value":[{"id":"g-lab"},{"id":"g-sales"}]}""",
+                "/v1.0/me/memberOf/microsoft.graph.group" => """
+                    {"value":[
+                      {"id":"g-lab","displayName":"AnyFS Lab","groupTypes":["Unified"],"mailEnabled":true,"securityEnabled":false,"visibility":"Private","resourceProvisioningOptions":["Team"]},
+                      {"id":"g-sales","displayName":"Sales staff","groupTypes":["DynamicMembership"],"mailEnabled":false,"securityEnabled":true}
+                    ]}
+                    """,
                 "/v1.0/me/ownedObjects/microsoft.graph.group" => """{"value":[{"id":"g-lab"}]}""",
                 _ => null,
             };
@@ -150,9 +155,9 @@ public class TeamsRestTests
             sharePointHost: () => "t-my.sharepoint.com", inHand: s => s == TeamsService.Graph ? GraphToken() : "token");
         Assert.IsTrue(rest.GraphReady && rest.SharePointReady);
 
-        var groups = await rest.GroupsAsync(Joined, await rest.GroupSitesAsync(CancellationToken.None), CancellationToken.None);
+        var groups = (await rest.AllGroupsAsync(Joined, await rest.GroupSitesAsync(CancellationToken.None), CancellationToken.None))!;
 
-        Assert.IsTrue(groups.Complete);
+        Assert.AreEqual(GroupsScope.Organisation, groups.Scope);
         Assert.AreEqual("Microsoft Graph", groups.From);
         var byId = groups.Groups.ToDictionary(g => g.Id);
         CollectionAssert.AreEquivalent(new[] { "g-lab", "g-secret", "g-sales", "g-news", "g-mesg" }, byId.Keys.ToArray(), "both pages; not the next link off Graph");
@@ -169,6 +174,15 @@ public class TeamsRestTests
         Assert.AreEqual("Mail-enabled security group", byId["g-mesg"].Kind);
         CollectionAssert.AreEquivalent(new[] { "g-lab", "g-sales" }, groups.Member.ToArray());
         CollectionAssert.AreEquivalent(new[] { "g-lab" }, groups.Owner.ToArray());
+
+        // the account's own groups, of every kind, without listing every group
+        var asked = directory.Asked.Count;
+        var mine = await rest.MyGroupsAsync(Joined, CancellationToken.None);
+        Assert.AreEqual(GroupsScope.Yours, mine.Scope);
+        CollectionAssert.AreEquivalent(new[] { "g-lab", "g-sales" }, mine.Groups.Select(g => g.Id).ToArray());
+        Assert.AreEqual(("Security group", true), (mine.Groups.Single(g => g.Id == "g-sales").Kind, mine.Member.Contains("g-sales")));
+        CollectionAssert.AreEquivalent(new[] { "g-lab" }, mine.Owner.ToArray());
+        Assert.IsFalse(directory.Asked.Skip(asked).Any(u => u.AbsolutePath == "/v1.0/groups"), "not the organisation's every group");
     }
 
     [TestMethod]
@@ -179,10 +193,9 @@ public class TeamsRestTests
             sharePointHost: () => "t-my.sharepoint.com", inHand: s => s == TeamsService.SharePoint ? "token" : null);
         Assert.IsFalse(rest.GraphReady);
 
-        var groups = await rest.GroupsAsync(Joined, await rest.GroupSitesAsync(CancellationToken.None), CancellationToken.None);
+        var groups = (await rest.AllGroupsAsync(Joined, await rest.GroupSitesAsync(CancellationToken.None), CancellationToken.None))!;
 
-        Assert.IsFalse(groups.Complete);
-        Assert.IsFalse(groups.JoinedOnly);
+        Assert.AreEqual(GroupsScope.Visible, groups.Scope);
         Assert.AreEqual("SharePoint", groups.From);
         var byId = groups.Groups.ToDictionary(g => g.Id);
         Assert.AreEqual(("Public", (bool?)null, "Mark8ProjectTeam@t.com"), (byId["g-mark8"].Visibility, byId["g-mark8"].Team, byId["g-mark8"].Mail), "SharePoint's directory: public; whether it has a team, unknown");
@@ -201,9 +214,10 @@ public class TeamsRestTests
             sharePointHost: () => null, inHand: _ => null);
         Assert.IsFalse(rest.SharePointReady || rest.GraphReady);
 
-        var groups = await rest.GroupsAsync(Joined, sites: null, CancellationToken.None);
+        Assert.IsNull(await rest.AllGroupsAsync(Joined, sites: null, CancellationToken.None), "no list of every group to give");
+        var groups = await rest.MyGroupsAsync(Joined, CancellationToken.None);
 
-        Assert.IsTrue(groups.JoinedOnly);
+        Assert.AreEqual(GroupsScope.Teams, groups.Scope);
         Assert.AreEqual(("Private", (bool?)true, 4), (groups.Groups.Single(g => g.Id == "g-lab").Visibility, groups.Groups.Single(g => g.Id == "g-lab").Team, groups.Groups.Single(g => g.Id == "g-lab").Members));
         Assert.AreEqual("Org-wide", groups.Groups.Single(g => g.Id == "g-msft").Visibility);
         CollectionAssert.AreEquivalent(new[] { "g-lab" }, groups.Owner.ToArray());
@@ -213,11 +227,16 @@ public class TeamsRestTests
     /// <summary>
     /// Microsoft Graph's file side, shaped as the sandbox answered it (30-Oct-2026): a channel's filesFolder (and one a team
     /// with no site has not), a drive by its site's path and by its group, a folder's children over two pages (a third page's
-    /// link off Graph), an item by path, the shares API, and Microsoft Search's group sites over two pages.
+    /// link off Graph), an item by path, the shares API, the organisation's Microsoft 365 groups with the account's
+    /// memberships (refused, 403, without Group.Read.All), and Microsoft Search's group sites, whose second page still says
+    /// there are more (as it is reported to on large sets).
     /// </summary>
     private sealed class GraphFiles : HttpMessageHandler
     {
         public List<(HttpMethod Method, Uri Uri, string? Bearer, string? Body)> Asked { get; } = [];
+
+        /// <summary>Whether Graph lists the groups (a token with Group.Read.All); else it refuses them, 403.</summary>
+        public bool ListsGroups { get; init; } = true;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -229,8 +248,23 @@ public class TeamsRestTests
             }
 
             var path = Uri.UnescapeDataString(uri.AbsolutePath);
+            if (!ListsGroups && (path == "/v1.0/groups" || path.StartsWith("/v1.0/me/memberOf", StringComparison.Ordinal)))
+            {
+                return new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("""{"error":{"code":"Authorization_RequestDenied","message":"Insufficient privileges to complete the operation."}}""", Encoding.UTF8, "application/json") };
+            }
+
             var json = path switch
             {
+                "/v1.0/me/memberOf/microsoft.graph.group" => """{"value":[{"id":"g-lab"},{"id":"g-private-in"}]}""",
+                "/v1.0/groups" when Uri.UnescapeDataString(uri.Query).Contains("groupTypes/any(c:c eq 'Unified')", StringComparison.Ordinal) => """
+                    {"value":[
+                      {"id":"g-lab","displayName":"AnyFS Lab","visibility":"Private","createdDateTime":"2026-10-29T01:05:00Z"},
+                      {"id":"g-mark8","displayName":"Mark 8 Project Team","visibility":"Public","description":"The Mark 8"},
+                      {"id":"g-private-in","displayName":"Board","visibility":"Private"},
+                      {"id":"g-private-out","displayName":"Secret project","visibility":"Private"},
+                      {"id":"g-hidden-out","displayName":"Hidden","visibility":"HiddenMembership"}
+                    ]}
+                    """,
                 "/v1.0/teams/g-lab/channels/19:general@thread.tacv2/filesFolder" => """{"name":"General","webUrl":"https://t.sharepoint.com/sites/lab/Shared%20Documents/General","parentReference":{"driveId":"b!lab"}}""",
                 "/v1.0/drives/b!lab/root:/General:/children" when !uri.Query.Contains("skiptoken", StringComparison.Ordinal) => """
                     {"value":[{"name":"Specs","folder":{"childCount":1},"size":57,"lastModifiedDateTime":"2026-10-29T11:39:11Z"},{"name":"plan.txt","file":{},"size":46}],
@@ -247,7 +281,7 @@ public class TeamsRestTests
                       {"resource":{"@odata.type":"#microsoft.graph.site","displayName":"Mark 8 Project Team","webUrl":"https://t.sharepoint.com/sites/Mark8","description":"The Mark 8"}}
                     ],"total":3,"moreResultsAvailable":true}]}]}
                     """,
-                "/v1.0/search/query" => """{"value":[{"hitsContainers":[{"hits":[{"resource":{"displayName":"Retail","webUrl":"https://t.sharepoint.com/sites/Retail"}},{"resource":{"displayName":"Elsewhere","webUrl":"https://evil.example/sites/x"}}],"total":3,"moreResultsAvailable":false}]}]}""",
+                "/v1.0/search/query" => """{"value":[{"hitsContainers":[{"hits":[{"resource":{"displayName":"Retail","webUrl":"https://t.sharepoint.com/sites/Retail"}},{"resource":{"displayName":"Elsewhere","webUrl":"https://evil.example/sites/x"}}],"total":3,"moreResultsAvailable":true}]}]}""",
                 _ when path.StartsWith("/v1.0/shares/", StringComparison.Ordinal) => """{"name":"report.docx","file":{},"size":8,"@microsoft.graph.downloadUrl":"https://t.sharepoint.com/sites/lab/_layouts/15/download.aspx?UniqueId=2"}""",
                 _ => null,
             };
@@ -287,18 +321,47 @@ public class TeamsRestTests
         CollectionAssert.AreEqual(new[] { "Plan.docx" }, (await rest.FolderAsync("https://t.sharepoint.com/sites/Mark8", "", none)).Select(f => f.Name).ToArray());
         Assert.AreEqual(1, graph.Asked.Count(a => a.Uri.AbsolutePath.EndsWith("/sites/t.sharepoint.com:/sites/Mark8:/drive", StringComparison.Ordinal)));
 
-        // the group sites from Microsoft Search, both pages, none named by its group, none off SharePoint
+        // the group sites: Graph's Microsoft 365 groups, the public ones and those the account is in, each without its site
         var sites = await rest.GroupSitesAsync(none);
-        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Mark 8 Project Team", "Retail" }, sites.Select(s => s.Name).ToArray());
-        Assert.IsTrue(sites.All(s => s.GroupId is null));
-        Assert.AreEqual("The Mark 8", sites[1].Description);
-        Assert.IsTrue(graph.Asked.Any(a => a.Body?.Contains("\"from\":500", StringComparison.Ordinal) == true), "the second page");
+        CollectionAssert.AreEquivalent(new[] { "g-lab", "g-mark8", "g-private-in" }, sites.Select(s => s.GroupId).ToArray(), "not a private or hidden group the account is not in");
+        Assert.IsTrue(sites.All(s => s.SiteUrl is null));
+        Assert.AreEqual("The Mark 8", sites.Single(s => s.GroupId == "g-mark8").Description);
+        Assert.IsFalse(graph.Asked.Any(a => a.Uri.AbsolutePath == "/v1.0/search/query"), "no search where Graph lists the groups");
 
-        // a team's own site, from its group's drive
-        Assert.AreEqual("https://t.sharepoint.com/sites/lab", await rest.TeamSiteAsync(lab, none));
+        // the account's groups given as ids alone (as Graph gives them to a token that may not read groups, the sandbox
+        // showed): its teams' instead, not a list of ids
+        var mine = await rest.MyGroupsAsync([lab], none);
+        Assert.AreEqual((GroupsScope.Teams, "AnyFS Lab"), (mine.Scope, mine.Groups.Single().Name));
+
+        // a group's own site, from its group's drive, looked up once
+        Assert.AreEqual("https://t.sharepoint.com/sites/lab", await rest.SiteOfGroupAsync("g-lab", none));
+        Assert.AreEqual("https://t.sharepoint.com/sites/lab", await rest.SiteOfGroupAsync("g-lab", none));
+        Assert.AreEqual(1, graph.Asked.Count(a => a.Uri.AbsolutePath == "/v1.0/groups/g-lab/drive"));
 
         // Graph's token, to Graph's host alone
         Assert.IsTrue(graph.Asked.All(a => a.Uri.Host == "graph.microsoft.us" && a.Bearer == token), string.Join("\n", graph.Asked.Select(a => a.Uri)));
+    }
+
+    [TestMethod]
+    public async Task WhereGraphRefusesItsGroupsTheSitesAreSearchedAsFarAsSearchReaches()
+    {
+        // a Graph token without Group.Read.All (the AnyFS app's in the sandbox): Microsoft Search, whose reach is 1,000 sites
+        // and whose paging is reported to say there is more past the end, so it stops there
+        var graph = new GraphFiles { ListsGroups = false };
+        var token = GraphToken();
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (s, _, _) => Task.FromResult(s == TeamsService.Graph ? token : "core"), concurrency: 2, NullLogger.Instance, graph,
+            sharePointHost: () => null, inHand: s => s == TeamsService.Graph ? token : null);
+
+        var sites = await rest.GroupSitesAsync(CancellationToken.None);
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Mark 8 Project Team", "Retail" }, sites.Select(s => s.Name).ToArray(), "both pages; none off SharePoint");
+        Assert.IsTrue(sites.All(s => s.GroupId is null && s.SiteUrl is not null));
+        var searches = graph.Asked.Where(a => a.Uri.AbsolutePath == "/v1.0/search/query").Select(a => a.Body!).ToList();
+        Assert.AreEqual(2, searches.Count, "no page from 1,000 on, though the last still says there are more");
+        StringAssert.Contains(searches[1], "\"from\":500");
+
+        // nor is every group listed, nor the account's, without it
+        Assert.IsNull(await rest.AllGroupsAsync([], sites, CancellationToken.None));
+        Assert.AreEqual(GroupsScope.Teams, (await rest.MyGroupsAsync([], CancellationToken.None)).Scope);
     }
 
     [TestMethod]
