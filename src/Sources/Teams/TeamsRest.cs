@@ -978,6 +978,9 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
     /// <summary>BRANCH BUILD ONLY: asks the page for the tokens it has not handed out, as the source does behind its listings.</summary>
     internal Task<bool> ProbeSeekAsync(CancellationToken ct) => SeekTokensAsync(ct);
 
+    /// <summary>Probe (branch build): a headless load of another of Teams' pages, by its path; the services in hand after it.</summary>
+    internal Func<string?, TimeSpan, CancellationToken, Task<IReadOnlyList<TeamsService>>>? ProbeLoad { get; set; }
+
     /// <summary>The host the page used SharePoint's token on, for the probe.</summary>
     internal string? ProbeSharePointHost => sharePointHost?.Invoke();
 

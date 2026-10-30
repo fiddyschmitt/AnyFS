@@ -173,6 +173,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         {
             Account = session.Account ?? _settings.AccountHint,
             Mri = session.Mri,
+            ProbeLoad = (path, deadline, c) => session.ProbeLoadAsync(path, [TeamsService.SharePoint, TeamsService.Graph], deadline, c),
         };
     }
 

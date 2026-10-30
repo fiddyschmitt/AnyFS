@@ -128,4 +128,35 @@ public class TeamsProbeTests
         Assert.IsFalse(System.Text.RegularExpressions.Regex.IsMatch(report, @"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+\.[A-Za-z0-9.-]+"), "no address (a key such as @type is no address)");
         Assert.IsFalse(report.Contains("section failed", StringComparison.Ordinal), "every section ran");
     }
+
+    [TestMethod]
+    public void AValueIsShownByItsFormAlone()
+    {
+        Assert.AreEqual("digits", TeamsProbe.Form("3730"));
+        Assert.AreEqual("decimal", TeamsProbe.Form("3555.2"));
+        Assert.AreEqual("ISO time, Z", TeamsProbe.Form("2026-10-30T10:00:00.000Z"));
+        Assert.AreEqual("ISO time", TeamsProbe.Form("2026-10-30T10:00:00+10:00"));
+        Assert.AreEqual("h:mm:ss", TeamsProbe.Form("1:02:10"));
+        Assert.AreEqual("XML duration", TeamsProbe.Form("PT1H2M"));
+        Assert.AreEqual("other", TeamsProbe.Form("Weekly sync"));
+        Assert.AreEqual("none", TeamsProbe.Form(" "));
+    }
+
+    /// <summary>The later part's longer load of the start page: headless, in a session with no tokens yet (the sandbox's start page hands SharePoint's out at once).</summary>
+    [TestMethod]
+    [Timeout(300_000)]
+    public async Task TheStartPageCanBeHeldOpenHeadlessForTheTokens()
+    {
+        var account = Environment.GetEnvironmentVariable("ANYFS_TEST_TEAMS_ACCOUNT");
+        if (string.IsNullOrWhiteSpace(account) || string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ANYFS_TEAMS_PROFILES")))
+        {
+            Assert.Inconclusive("set ANYFS_TEST_TEAMS_ACCOUNT and ANYFS_TEAMS_PROFILES to probe the sandbox");
+        }
+
+        var browser = BrowserLocator.Find(null, "ANYFS_TEAMS_BROWSER") ?? throw new AssertInconclusiveException("no browser");
+        var session = new TeamsWebSession(new Uri(TeamsCloud.Global.TeamsHost), browser, WebSignInTarget.ProfileFor("teams-browser", account, "ANYFS_TEAMS_PROFILES"), account, NullLogger.Instance);
+        var came = await session.ProbeLoadAsync(null, [TeamsService.SharePoint], TimeSpan.FromSeconds(75), CancellationToken.None);
+        CollectionAssert.Contains(came.ToList(), TeamsService.SharePoint, "the sandbox's start page hands SharePoint's token out");
+        Assert.IsNotNull(session.InHand(TeamsService.Aggregator), "and signs in as ever");
+    }
 }

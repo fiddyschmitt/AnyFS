@@ -122,6 +122,42 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     /// <summary>A bearer for <paramref name="service"/> good for at least ten more minutes, if one is in hand; null, never a wait, if not.</summary>
     public string? InHand(TeamsService service) => Fresh(service);
 
+    // the probe's page in place of the start page, for one load (branch build)
+    private string? _page;
+
+    /// <summary>
+    /// Probe (branch build): one headless load of another of Teams' pages (<paramref name="path"/> on the Teams host), for
+    /// the services of <paramref name="want"/> not in hand; the services in hand after it.
+    /// </summary>
+    internal async Task<IReadOnlyList<TeamsService>> ProbeLoadAsync(string? path, IReadOnlyCollection<TeamsService> want, TimeSpan deadline, CancellationToken ct)
+    {
+        var gate = ProfileLocks.For(profileDir);
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            _page = path is null ? null : $"{teamsHost.AbsoluteUri.TrimEnd('/')}{path}";
+            var missing = want.Where(s => Fresh(s) is null).ToList();
+            if (missing.Count > 0)
+            {
+                try
+                {
+                    await CaptureAsync(headless: true, deadline, missing, ct).ConfigureAwait(false);
+                }
+                catch (SignInRequiredException ex)
+                {
+                    logger.LogInformation("teams: the probe's load of another page gave nothing ({Error})", ex.Message);
+                }
+            }
+
+            return want.Where(s => Fresh(s) is not null).ToList();
+        }
+        finally
+        {
+            _page = null;
+            gate.Release();
+        }
+    }
+
     /// <summary>
     /// For the background alone (nothing waits on it): one headless load of the page, waiting a while for the tokens of
     /// <paramref name="services"/> it mints only as it gets round to them (SharePoint's; Graph's in the US Gov clouds) and
@@ -375,7 +411,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             }
 
             await Task.Delay(300, ct).ConfigureAwait(false);
-            await cdp.SendAsync("Page.navigate", new JsonObject { ["url"] = StartPage }, page, ct).ConfigureAwait(false);
+            await cdp.SendAsync("Page.navigate", new JsonObject { ["url"] = _page ?? StartPage }, page, ct).ConfigureAwait(false);
             var capture = await WaitAsync(headless, deadline, want, () => wrongAccount, () => pages.Values.FirstOrDefault(u => u.Length > 0) ?? "", () => pages.IsEmpty, ct).ConfigureAwait(false);
             return (capture, null);
         }
@@ -416,7 +452,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         try
         {
             logger.LogInformation("teams: opened Firefox through WebDriver {Mode} for {Host}", mode, teamsHost.Host);
-            browser.Navigate(StartPage);
+            browser.Navigate(_page ?? StartPage);
             return await WaitAsync(headless, deadline, want, () => wrongAccount, () => browser.Page ?? "", () => !browser.Open, ct).ConfigureAwait(false);
         }
         catch (IOException ex)

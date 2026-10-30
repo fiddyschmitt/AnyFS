@@ -78,6 +78,15 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
             {
                 asked = true;
                 Line($"  asked the page for them itself (a headless load): {(await rest.ProbeSeekAsync(ct).ConfigureAwait(false) ? "one came" : "none came")}");
+
+                // whether the page hands them out given longer than the source's load waits (90 s): Teams' deep links (/l/…)
+                // stop at its "open in the app or the web" page when headless, so the start page is the one to hold open
+                if (rest.ProbeLoad is { } load)
+                {
+                    var came = await load(null, TimeSpan.FromMinutes(4), ct).ConfigureAwait(false);
+                    Line($"  the start page held open headless for up to 4 minutes: {(came.Count == 0 ? "neither in hand after it" : $"{string.Join(" and ", came)} in hand after it")}");
+                }
+
                 continue;
             }
 
@@ -218,6 +227,12 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
             // what chat.md reads a chat's pinned messages from (main's 2970f3c reads it leniently): its shape, held as JSON or not
             var pinned = chats.SelectMany(c => JsonIn(c, "pinnedItems")).ToList();
             Line($"    pinnedItems: {chats.Count(c => Obj(c, "pinnedItems").ValueKind != JsonValueKind.Undefined)} chats have it, kinds {Counted(chats.Select(c => Obj(c, "pinnedItems").ValueKind.ToString()))}; parsed: {Union(pinned.Take(50), 3)}");
+
+            // what a meeting's chat says of its meeting beyond its messages (for meeting.md), by shape
+            foreach (var name in new[] { "meetingInformation", "meetingContent", "recentAttendanceReport", "userMeetingInfo", "meetingObjectsConfig" })
+            {
+                Line($"    {name}: {chats.Count(c => Obj(c, name).ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null))} chats; {Union(chats.SelectMany(c => JsonIn(c, name)).Take(50), 3)}");
+            }
             Line($"  conversationFolders: {Arr(root, "conversationFolders").Count()}; a folder: {Union(Arr(root, "conversationFolders"), 3)}");
             Line($"  privateFeeds: {string.Join(", ", Arr(root, "privateFeeds").Select(f => Safe(Str(f, "id"))))}; a feed: {Union(Arr(root, "privateFeeds"), 1)}");
             var users = Obj(root, "users");
@@ -324,6 +339,19 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
             var files = all.SelectMany(m => FileEntries(Obj(m, "properties"))).ToList();
             Line($"  shared files in meeting chats: {files.Count}; a file: {Union(files, 2)}; kinds: {Counted(files.Select(f => Extension(Str(f, "fileName") ?? Str(f, "title"))))}");
             Line($"  their addresses: {string.Join(" | ", files.Select(f => UrlShape(Str(f, "objectUrl") ?? Str(Obj(f, "fileInfo"), "fileUrl"))).Distinct().Take(8))}");
+
+            // the values main's meeting.md reads (1ccd8e6, TeamsMeetings), by their form alone: whether it reads them as they are
+            var calls = all.Where(m => Str(m, "messagetype") == "Event/Call").ToList();
+            var parsed = calls.Select(m => Markup(Str(m, "content"))).OfType<System.Xml.Linq.XElement>().ToList();
+            var ended = parsed.Where(x => Find(x, "ended") is not null).ToList();
+            var parts = ended.SelectMany(x => Finds(Find(x, "partlist"), "part")).ToList();
+            Line($"  calls: {calls.Count} messages, {parsed.Count} parse as XML, {ended.Count} ended; parts {parts.Count}, with a displayName {parts.Count(p => Find(p, "displayName")?.Value is { Length: > 0 })}; durations {Counted(parts.Select(p => Form(Find(p, "duration")?.Value)))}");
+            Line($"    conversationStartTime {Counted(ended.Select(x => Form(Find(x, "conversationStartTime")?.Value)))}; startTime {Counted(ended.Select(x => Form(Find(Find(x, "meetingDetails"), "startTime")?.Value)))}; endTime {Counted(ended.Select(x => Form(Find(Find(x, "meetingDetails"), "endTime")?.Value)))}");
+            Line($"    meetingType {Counted(ended.Select(x => Find(Find(x, "meetingDetails"), "meetingType")?.Value))}; callEventType {Counted(ended.Select(x => Find(x, "callEventType")?.Value))}; with a subject {ended.Count(x => Find(Find(x, "meetingDetails"), "subject")?.Value is { Length: > 0 })}, an organiser {ended.Count(x => Find(Find(x, "meetingDetails"), "organizerUpn")?.Value is { Length: > 0 })}, a call id {ended.Count(x => Find(x, "callId")?.Value is { Length: > 0 })}");
+            var recordings = all.Where(m => Str(m, "messagetype") == "RichText/Media_CallRecording").Select(m => Markup(Str(m, "content"))).OfType<System.Xml.Linq.XElement>()
+                .Select(x => Find(x, "URIObject") ?? x).ToList();
+            Line($"  recordings that parse as XML: {recordings.Count}; status {Counted(recordings.Select(r => Find(r, "RecordingStatus")?.Attribute("status")?.Value))}; duration {Counted(recordings.Select(r => Form(Find(r, "RecordingContent")?.Attribute("duration")?.Value)))}; timestamp {Counted(recordings.Select(r => Form(Find(r, "RecordingContent")?.Attribute("timestamp")?.Value)))}");
+            Line($"    with an OriginalName {recordings.Count(r => Find(r, "OriginalName")?.Attribute("v")?.Value is { Length: > 0 })} (ending .mp4 {recordings.Count(r => Find(r, "OriginalName")?.Attribute("v")?.Value?.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase) == true)}), a Title {recordings.Count(r => Find(r, "Title")?.Value is { Length: > 0 })}, an amsVideo item {recordings.Count(r => Finds(Find(r, "RecordingContent"), "item").Any(i => i.Attribute("type")?.Value == "amsVideo"))}, a call id {recordings.Count(r => Finds(Find(r, "Identifiers"), "Id").Any(i => i.Attribute("type")?.Value == "callId"))}; distinct amsVideo items {recordings.SelectMany(r => Finds(Find(r, "RecordingContent"), "item")).Where(i => i.Attribute("type")?.Value == "amsVideo").Select(i => i.Attribute("uri")?.Value).Distinct().Count()}");
         }
         finally
         {
@@ -914,6 +942,42 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
         shown = Number().Replace(shown, "<n>");
         return shown.Length <= 60 ? shown : shown[..60] + "…";
     }
+
+    /// <summary>A value's form alone, for the report: digits, a decimal, an ISO time (with Z or an offset), h:mm:ss, an XML duration, other, none.</summary>
+    internal static string Form(string? value) => value?.Trim() switch
+    {
+        null or "" => "none",
+        var v when v.All(char.IsAsciiDigit) => "digits",
+        var v when double.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out _) => "decimal",
+        var v when v.StartsWith('P') => "XML duration",
+        var v when v.Contains('T', StringComparison.Ordinal) && DateTimeOffset.TryParse(v, CultureInfo.InvariantCulture, DateTimeStyles.None, out _) => v.EndsWith('Z') ? "ISO time, Z" : "ISO time",
+        var v when v.Contains(':', StringComparison.Ordinal) && TimeSpan.TryParse(v, CultureInfo.InvariantCulture, out _) => "h:mm:ss",
+        _ => "other",
+    };
+
+    /// <summary>A message's markup as one XML element, as main's TeamsMeetings reads it; null where it does not parse.</summary>
+    private static System.Xml.Linq.XElement? Markup(string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content) || !content.TrimStart().StartsWith('<'))
+        {
+            return null;
+        }
+
+        try
+        {
+            return System.Xml.Linq.XElement.Parse($"<markup>{content}</markup>");
+        }
+        catch (System.Xml.XmlException)
+        {
+            return null;
+        }
+    }
+
+    private static System.Xml.Linq.XElement? Find(System.Xml.Linq.XElement? parent, string name)
+        => parent?.Elements().FirstOrDefault(e => e.Name.LocalName.Equals(name, StringComparison.OrdinalIgnoreCase));
+
+    private static IEnumerable<System.Xml.Linq.XElement> Finds(System.Xml.Linq.XElement? parent, string name)
+        => parent?.Elements().Where(e => e.Name.LocalName.Equals(name, StringComparison.OrdinalIgnoreCase)) ?? [];
 
     /// <summary>A value that names a kind, as the report shows it: kept when it is short and plain, else taken out.</summary>
     internal static string Safe(string? value)
