@@ -214,6 +214,10 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
             Line($"    a member: {Union(chats.SelectMany(c => Arr(c, "members")).Take(200), 1)}; member roles: {Values(chats.SelectMany(c => Arr(c, "members")), "role")}");
             Line($"    fileReferences: {Union(chats.Select(c => Obj(c, "fileReferences")).Where(f => f.ValueKind != JsonValueKind.Undefined).Take(50), 3)}");
             Line($"    meetingPolicy: {Union(chats.Select(c => Obj(c, "meetingPolicy")).Where(f => f.ValueKind != JsonValueKind.Undefined).Take(50), 2)}");
+
+            // what chat.md reads a chat's pinned messages from (main's 2970f3c reads it leniently): its shape, held as JSON or not
+            var pinned = chats.SelectMany(c => JsonIn(c, "pinnedItems")).ToList();
+            Line($"    pinnedItems: {chats.Count(c => Obj(c, "pinnedItems").ValueKind != JsonValueKind.Undefined)} chats have it, kinds {Counted(chats.Select(c => Obj(c, "pinnedItems").ValueKind.ToString()))}; parsed: {Union(pinned.Take(50), 3)}");
             Line($"  conversationFolders: {Arr(root, "conversationFolders").Count()}; a folder: {Union(Arr(root, "conversationFolders"), 3)}");
             Line($"  privateFeeds: {string.Join(", ", Arr(root, "privateFeeds").Select(f => Safe(Str(f, "id"))))}; a feed: {Union(Arr(root, "privateFeeds"), 1)}");
             var users = Obj(root, "users");
@@ -255,7 +259,8 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
         }
     }
 
-    private readonly HashSet<string> _special = new(StringComparer.Ordinal) { "48:notifications", "48:threads", "48:calllogs", "48:mentions", "48:saved" };
+    // 48:notes: Teams' chat with yourself, likely kept as a conversation of its own (a "notes to self" folder if so)
+    private readonly HashSet<string> _special = new(StringComparer.Ordinal) { "48:notifications", "48:threads", "48:calllogs", "48:mentions", "48:saved", "48:notes" };
 
     private async Task SpecialAsync(CancellationToken ct)
     {
