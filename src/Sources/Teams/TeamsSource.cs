@@ -133,7 +133,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
 
         return new TeamsRest(new Uri(cloud.ApiHost), (service, refused, c) => Renew(session, service, refused, c), _settings.Concurrency, Logger, sharePointHost: () => session.SharePointHost,
-            inHand: session.InHand, seek: c => session.SeekAsync(sought, c), graphHost: cloud.GraphHost)
+            inHand: session.InHand, seek: c => session.SeekAsync(sought, c, _teamSite), graphHost: cloud.GraphHost)
         {
             Account = session.Account ?? _settings.AccountHint,
             Mri = session.Mri,
@@ -770,7 +770,9 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         {
             try
             {
-                return new[] { await Api.ThreadDetailsAsync(threadId, c).ConfigureAwait(false) };
+                var details = await Api.ThreadDetailsAsync(threadId, c).ConfigureAwait(false);
+                _teamSite ??= details?.SiteUrl;
+                return new[] { details };
             }
             catch (VfsException ex)
             {
@@ -918,11 +920,13 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     /// <summary>
     /// Asks behind the listings for the tokens the page has not handed out (SharePoint's; Graph's in the US Gov clouds), one ask
-    /// at a time and as the session's back-off allows. When one comes, the root and the channels are listed afresh, so Other
+    /// at a time and as the session's back-off allows: by a load of a team's SharePoint site where one is known (its own
+    /// page hands both out), else of Teams' page. When one comes, the root and the channels are listed afresh, so Other
     /// groups, the files folders and groups.md show what it opens.
     /// </summary>
     private void SeekTokens() => Behind(ref _seek, "asking for the tokens", async ct =>
     {
+        await KnowATeamSiteAsync(ct).ConfigureAwait(false);
         if (await Api.SeekTokensAsync(ct).ConfigureAwait(false))
         {
             // the group sites read again: behind the answer when there is one, else at the next asking
@@ -930,6 +934,31 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             await RelistAsync(ct).ConfigureAwait(false);
         }
     });
+
+    // a team's SharePoint site, as a channel's thread names it: the page the tokens are asked for with (see SeekTokens)
+    private string? _teamSite;
+
+    /// <summary>
+    /// Learns a team's SharePoint site for the token load, where none is known yet: the first team's whose General channel's
+    /// thread names one (read with the core tokens, kept as channel.md keeps it); none where no thread names one.
+    /// </summary>
+    private async Task KnowATeamSiteAsync(CancellationToken ct)
+    {
+        try
+        {
+            foreach (var team in _teamSite is null ? (await StructureAsync(ct).ConfigureAwait(false)).Teams : [])
+            {
+                if (team.Channels.FirstOrDefault(c => c.IsGeneral) is { } general && await ThreadDetailsAsync(general.Id, ct).ConfigureAwait(false) is { SiteUrl: not null })
+                {
+                    return;
+                }
+            }
+        }
+        catch (VfsException ex)
+        {
+            Logger.LogInformation("teams: no team's SharePoint site was found to ask the tokens with ({Error}); Teams' page is asked", ex.Message);
+        }
+    }
 
     /// <summary>The root and every channel listed afresh behind their answers: what a token that came since opens shows.</summary>
     private async Task RelistAsync(CancellationToken ct)

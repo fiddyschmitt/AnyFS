@@ -123,13 +123,15 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     public string? InHand(TeamsService service) => Fresh(service);
 
     /// <summary>
-    /// For the background alone (nothing waits on it): one headless load of the page, waiting a while for the tokens of
-    /// <paramref name="services"/> it mints only as it gets round to them (SharePoint's; Graph's in the US Gov clouds) and
-    /// that are not in hand; true when one came. One that does not come is not waited for again for half an hour, then an
-    /// hour, two... up to eight. No load while the core tokens near their renewal (the load holds the profile, which their
+    /// For the background alone (nothing waits on it): one headless load, waiting a while for the tokens of
+    /// <paramref name="services"/> not in hand (SharePoint's; Graph's in the US Gov clouds); true when one came. The load is
+    /// of <paramref name="page"/> where given (a team's SharePoint site, whose own page hands out SharePoint's and Graph's
+    /// tokens, where Teams' page at a GCC High tenant handed out neither, 30-Oct-2026), else of Teams' page, which mints
+    /// them only as it gets round to them. One that does not come is not waited for again for half an hour, then an hour,
+    /// two... up to eight. No load while the core tokens near their renewal (the load holds the profile, which their
     /// renewal would wait on); never a sign-in window, never a failure.
     /// </summary>
-    public async Task<bool> SeekAsync(IReadOnlyCollection<TeamsService> services, CancellationToken ct)
+    public async Task<bool> SeekAsync(IReadOnlyCollection<TeamsService> services, CancellationToken ct, string? page = null)
     {
         List<TeamsService> Missing()
         {
@@ -152,7 +154,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             {
                 try
                 {
-                    await CaptureAsync(headless: true, OptionalDeadline, missing, ct).ConfigureAwait(false);
+                    await CaptureAsync(headless: true, OptionalDeadline, missing, ct, page).ConfigureAwait(false);
                 }
                 catch (SignInRequiredException ex)
                 {
@@ -163,7 +165,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             foreach (var service in missing.Where(s => Fresh(s) is null))
             {
                 var next = _absent.TryGetValue(service, out var before) ? before.Next : TimeSpan.FromMinutes(30);
-                logger.LogInformation("teams: Teams on the web gave no {Service} token in a {Seconds:F0} s load; asked again in {Minutes:F0} min", service, OptionalDeadline.TotalSeconds, next.TotalMinutes);
+                logger.LogInformation("teams: {Page} gave no {Service} token in a {Seconds:F0} s load; asked again in {Minutes:F0} min", page is null ? "Teams on the web" : "A team's SharePoint site", service, OptionalDeadline.TotalSeconds, next.TotalMinutes);
                 _absent[service] = (DateTimeOffset.UtcNow + next, TimeSpan.FromTicks(Math.Min(next.Ticks * 2, TimeSpan.FromHours(8).Ticks)));
             }
 
@@ -280,11 +282,11 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     private sealed record Capture(bool Got, string? Failure = null, bool Final = false);
 
     /// <summary>One capture: done once the core services' tokens and <paramref name="want"/>'s are in hand.</summary>
-    private async Task<Capture> CaptureAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, CancellationToken ct)
+    private async Task<Capture> CaptureAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, CancellationToken ct, string? address = null)
     {
         if (!_viaFirefox)
         {
-            var (capture, noDevTools) = await CaptureInChromiumAsync(headless, deadline, want, ct).ConfigureAwait(false);
+            var (capture, noDevTools) = await CaptureInChromiumAsync(headless, deadline, want, ct, address).ConfigureAwait(false);
             if (noDevTools is null || _firefox is null)
             {
                 return capture;
@@ -293,11 +295,11 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             UseFirefox(noDevTools);
         }
 
-        return await CaptureInFirefoxAsync(headless, deadline, want, ct).ConfigureAwait(false);
+        return await CaptureInFirefoxAsync(headless, deadline, want, ct, address).ConfigureAwait(false);
     }
 
     /// <summary>One capture in the Chromium browser over DevTools; with why there was no DevTools when the launch gave none.</summary>
-    private async Task<(Capture Capture, string? NoDevTools)> CaptureInChromiumAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, CancellationToken ct)
+    private async Task<(Capture Capture, string? NoDevTools)> CaptureInChromiumAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, CancellationToken ct, string? address = null)
     {
         var mode = headless ? "headless" : "with a window";
         DevToolsBrowser? browser = null;
@@ -375,7 +377,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             }
 
             await Task.Delay(300, ct).ConfigureAwait(false);
-            await cdp.SendAsync("Page.navigate", new JsonObject { ["url"] = StartPage }, page, ct).ConfigureAwait(false);
+            await cdp.SendAsync("Page.navigate", new JsonObject { ["url"] = address ?? StartPage }, page, ct).ConfigureAwait(false);
             var capture = await WaitAsync(headless, deadline, want, () => wrongAccount, () => pages.Values.FirstOrDefault(u => u.Length > 0) ?? "", () => pages.IsEmpty, ct).ConfigureAwait(false);
             return (capture, null);
         }
@@ -397,7 +399,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     }
 
     /// <summary>One capture in Firefox through WebDriver: the page's requests come from its WebDriver BiDi events.</summary>
-    private async Task<Capture> CaptureInFirefoxAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, CancellationToken ct)
+    private async Task<Capture> CaptureInFirefoxAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, CancellationToken ct, string? address = null)
     {
         var mode = headless ? "headless" : "with a window";
         string? wrongAccount = null;
@@ -416,7 +418,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         try
         {
             logger.LogInformation("teams: opened Firefox through WebDriver {Mode} for {Host}", mode, teamsHost.Host);
-            browser.Navigate(StartPage);
+            browser.Navigate(address ?? StartPage);
             return await WaitAsync(headless, deadline, want, () => wrongAccount, () => browser.Page ?? "", () => !browser.Open, ct).ConfigureAwait(false);
         }
         catch (IOException ex)

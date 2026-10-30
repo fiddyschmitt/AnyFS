@@ -135,7 +135,9 @@ only one). `TheLibrariesAreReadThroughGraphWithoutSharePointsToken` reads the li
 at work: the sandbox's Teams page mints no Graph token, so it takes the AnyFS app's from a `tests/fixtures/SharePointSignIn`
 sign-in as the tester (`ANYFS_TEST_GRAPH_CACHE`, else the fixture's default file) and withholds SharePoint's.
 `EarlierMessagesAreReadBackThroughTheChatServicesOwnLinks` gives the sandbox's few posts a history (a newest read of two,
-two to a page) and checks every post lands once, in posts or a month of earlier. `TeamsSandboxSeed` seeds the sandbox for them, once, with `ANYFS_SEED_TEAMS=1` beside those two: the team "AnyFS
+two to a page) and checks every post lands once, in posts or a month of earlier.
+`ATeamsSharePointSiteHandsOutTheTokensTeamsPageDoesNot` asks for Graph's token (which Teams' page never hands out in
+Microsoft 365) with a load of the team's SharePoint site, as the source asks for its missing tokens. `TeamsSandboxSeed` seeds the sandbox for them, once, with `ANYFS_SEED_TEAMS=1` beside those two: the team "AnyFS
 Lab" with its SharePoint site, a thread in General with replies, reactions, an edit, a deletion, a shared file and an inline
 image, files in the channel's folder, and the same in the tester's first chat; a run skips what it finds seeded. That chat
 is hidden in Teams, so the live tests look in `Chats/Hidden chats` too. Teams is cloud only, so there is no lab machine

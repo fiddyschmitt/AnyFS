@@ -386,6 +386,37 @@ public class TeamsLiveTests
         CollectionAssert.AreEqual(all, seen.Order(StringComparer.Ordinal).ToList(), "every post once, in the posts folder or a month of earlier");
     }
 
+    /// <summary>
+    /// The background token load by a team's SharePoint site (its address from the General channel's thread): in Microsoft
+    /// 365 Teams' page never hands out Graph's token (spike 18), the site's own page does, as SharePoint's at a GCC High
+    /// tenant where Teams' page handed out neither.
+    /// </summary>
+    [TestMethod]
+    [Timeout(300_000)]
+    public async Task ATeamsSharePointSiteHandsOutTheTokensTeamsPageDoesNot()
+    {
+        var (account, _) = Env();
+        var browser = BrowserLocator.Find(null, "ANYFS_TEAMS_BROWSER") ?? throw new AssertInconclusiveException("no browser for the web session");
+        var session = new TeamsWebSession(new Uri(TeamsCloud.Global.TeamsHost), browser, WebSignInTarget.ProfileFor("teams-browser", account, "ANYFS_TEAMS_PROFILES"), account, NullLogger.Instance);
+        await session.TokenAsync(TeamsService.Aggregator, interactive: false, _ => { }, CancellationToken.None);
+        if (session.InHand(TeamsService.Graph) is not null)
+        {
+            Assert.Inconclusive("Teams' page handed out Graph's token itself this time");
+        }
+
+        await using var rest = new TeamsRest(new Uri(TeamsCloud.Global.ApiHost), (s, _, c) => session.TokenAsync(s, interactive: false, _ => { }, c), 4, NullLogger.Instance)
+        {
+            Account = session.Account ?? account,
+            Mri = session.Mri,
+        };
+        var general = (await rest.StructureAsync(CancellationToken.None)).Teams.First(t => t.DisplayName == "AnyFS Lab").Channels.First(c => c.IsGeneral);
+        var site = (await rest.ThreadDetailsAsync(general.Id, CancellationToken.None))?.SiteUrl;
+        Assert.IsNotNull(site, "the General channel's thread names its team's site");
+
+        Assert.IsTrue(await session.SeekAsync([TeamsService.Graph], CancellationToken.None, site), "a token came with the site's page");
+        Assert.IsNotNull(session.InHand(TeamsService.Graph));
+    }
+
     /// <summary>The seeded sandbox's files: the channel's folder of its team's library, a thread's and a chat's attachments.</summary>
     [TestMethod]
     [Timeout(300_000)]
