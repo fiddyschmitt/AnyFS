@@ -1,4 +1,6 @@
+using System.Text.Json;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 
 namespace AnyFS.Sources.Teams;
 
@@ -33,6 +35,61 @@ internal sealed record TeamsCloud(string Name, string TeamsHost, string ApiHost,
     public static readonly TeamsCloud UsGovDod = new("dod", "https://dod.teams.microsoft.us", "https://dod.teams.microsoft.us", "US Gov (DoD)");
 
     public static readonly IReadOnlyList<TeamsCloud> All = [Global, UsGov, UsGovDod];
+
+    /// <summary>The cloud an organisation is in, by what the identity platform publishes for its domain: DoD, GCC High, else the global cloud (GCC "moderate" among it).</summary>
+    public static TeamsCloud Of(MicrosoftRealm realm) => realm.IsDod ? UsGovDod : realm.IsUsGovernment ? UsGov : Global;
+
+    /// <summary>A cloud by its <see cref="Name"/>; null for none.</summary>
+    public static TeamsCloud? Named(string? name) => All.FirstOrDefault(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The cloud a source signs in to, and how it was found: the one chosen in its settings; else, for Automatic, the one
+    /// the identity platform publishes for the account's domain (no sign-in needed), remembered in the source's state
+    /// folder; the one remembered when that cannot be read now; else the global cloud.
+    /// </summary>
+    /// <param name="handler">The lookup's handler: a test's; null for the network.</param>
+    internal static async Task<(TeamsCloud Cloud, string How)> ResolveAsync(TeamsSettings settings, string stateDirectory, HttpMessageHandler? handler, CancellationToken ct)
+    {
+        if (settings.ChosenCloud is { } chosen)
+        {
+            return (chosen, "as chosen in the source's settings");
+        }
+
+        var account = settings.AccountHint;
+        var domain = MicrosoftRealm.DomainOf(account) ?? account;
+        var file = Path.Combine(stateDirectory, "cloud.json");
+        if (await MicrosoftRealm.LookupAsync(account, handler, ct).ConfigureAwait(false) is { } realm)
+        {
+            var found = Of(realm);
+            try
+            {
+                Directory.CreateDirectory(stateDirectory);
+                await File.WriteAllTextAsync(file, new System.Text.Json.Nodes.JsonObject { ["domain"] = domain, ["cloud"] = found.Name }.ToJsonString(), ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // kept for this start alone
+            }
+
+            return (found, $"found from {realm}");
+        }
+
+        try
+        {
+            using var kept = JsonDocument.Parse(await File.ReadAllTextAsync(file, ct).ConfigureAwait(false));
+            string? S(string name) => kept.RootElement.ValueKind == JsonValueKind.Object && kept.RootElement.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+            if (string.Equals(S("domain"), domain, StringComparison.OrdinalIgnoreCase) && Named(S("cloud")) is { } last)
+            {
+                return (last, $"as last found for {domain}: Microsoft's sign-in details for it could not be read now");
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            // none remembered
+        }
+
+        return (Global, $"Microsoft's sign-in details named no organisation for {domain}, so the global cloud; choose the Cloud setting if that is wrong");
+    }
 }
 
 public sealed class TeamsSettings
@@ -63,10 +120,12 @@ public sealed class TeamsSettings
         Hint = "An Other groups folder: every group site you can open beyond your teams above (public groups you have not joined among them), each with its files, shown once Teams on the web has handed out its SharePoint token or its Microsoft Graph token. And groups.md: every group there is, with its details — every group in the organisation where the Teams client gives a token that can list them (GCC High's does), else every group you can see, else your teams' own until a token comes.")]
     public bool Groups { get; set; } = true;
 
+    public const string AutomaticCloud = "Automatic";
+
     [Setting("Cloud", Advanced = true, Order = 10, Kind = SettingKind.Choice,
-        Choices = ["Microsoft 365 (global)", "US Gov (GCC High)", "US Gov (DoD)"],
-        Hint = "Which Microsoft cloud the account is in. Global for almost everyone; the US Government clouds use their own Teams hosts.")]
-    public string Cloud { get; set; } = "Microsoft 365 (global)";
+        Choices = [AutomaticCloud, "Microsoft 365 (global)", "US Gov (GCC High)", "US Gov (DoD)"],
+        Hint = "Which Microsoft cloud the account is in: the US Government clouds have Teams hosts of their own. Automatic finds it from the account's domain, from what Microsoft publishes for every organisation (no sign-in needed), at each start, and keeps the last answer for a start that cannot look it up. Choose one to set it yourself.")]
+    public string Cloud { get; set; } = AutomaticCloud;
 
     [Setting("Browser", Advanced = true, Order = 11, Kind = SettingKind.FilePath,
         Hint = "The Edge, Chrome, Chromium or Firefox to open for the web session's sign-in. Leave empty to find one automatically: Edge, Chrome or Chromium, and Firefox (through its WebDriver) where an organisation's policy keeps AnyFS out of those. AnyFS opens it with a profile of its own, never your everyday browser's.")]
@@ -93,11 +152,13 @@ public sealed class TeamsSettings
 
     internal TeamsSignIn EffectiveSignIn => TeamsSignIn.WebSession;
 
-    internal TeamsCloud TheCloud => Cloud.Trim() switch
+    /// <summary>The cloud chosen in the settings; null for Automatic (found from the account, <see cref="TeamsCloud.ResolveAsync"/>).</summary>
+    internal TeamsCloud? ChosenCloud => (Cloud ?? "").Trim() switch
     {
         var c when c.Contains("DoD", StringComparison.OrdinalIgnoreCase) => TeamsCloud.UsGovDod,
         var c when c.Contains("GCC", StringComparison.OrdinalIgnoreCase) || c.Contains("Gov", StringComparison.OrdinalIgnoreCase) => TeamsCloud.UsGov,
-        _ => TeamsCloud.Global,
+        var c when c.Contains("global", StringComparison.OrdinalIgnoreCase) || c.Contains("365", StringComparison.OrdinalIgnoreCase) => TeamsCloud.Global,
+        _ => null,
     };
 
     internal string? Browser => string.IsNullOrWhiteSpace(BrowserPath) ? null : BrowserPath.Trim();

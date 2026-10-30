@@ -61,6 +61,18 @@ public class TeamsLiveTests
         }
     }
 
+    /// <summary>The account's cloud, from what the identity platform publishes for its domain: the sandbox is in the global cloud (region AS, Singapore).</summary>
+    [TestMethod]
+    [Timeout(60_000)]
+    public async Task TheAccountsCloudIsFoundFromItsDomain()
+    {
+        var (account, _) = Env();
+        var realm = await MicrosoftRealm.LookupAsync(account, null, CancellationToken.None);
+        Assert.IsNotNull(realm, "the identity platform names the sandbox's organisation");
+        Assert.AreEqual(("microsoftonline.com", "AS", "graph.microsoft.com"), (realm.CloudInstance, realm.Region, realm.GraphHost));
+        Assert.AreSame(TeamsCloud.Global, TeamsCloud.Of(realm));
+    }
+
     [TestMethod]
     [Timeout(300_000)]
     public async Task TheAccountsTeamsChannelsAndChatsAreServed()

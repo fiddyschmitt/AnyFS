@@ -34,6 +34,9 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     private RootFolder? _root;
     private bool _degraded;
 
+    // the cloud signed in to: the one chosen, else found from the account at the start (a stand-in's: the global cloud)
+    private TeamsCloud _cloud = TeamsCloud.Global;
+
     public TeamsSource(TeamsSettings settings)
         : this(settings, standIn: null)
     {
@@ -57,6 +60,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     protected override async Task OnInitialiseAsync(CancellationToken ct)
     {
+        _cloud = _settings.ChosenCloud ?? TeamsCloud.Global;
         _api = _standIn?.Api ?? await SignInAsync(ct).ConfigureAwait(false);
         _cache = new TeamsCache(_stopping.Token);
         _root = new RootFolder();
@@ -75,7 +79,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
             // the listings last run saw open at once at the next start, for the same account and cloud
             SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
-            SaveKey = $"{_api.Account}|{_settings.TheCloud.Name}",
+            SaveKey = $"{_api.Account}|{_cloud.Name}",
         });
         _kept.StartWalks();
         Logger.LogInformation("teams: serving {Account}", _api.Account);
@@ -88,7 +92,11 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     /// </summary>
     private async Task<ITeamsApi> SignInAsync(CancellationToken ct)
     {
-        var cloud = _settings.TheCloud;
+        // the cloud before the browser opens: its sign-in page is on the cloud's own Teams host
+        var (cloud, how) = await TeamsCloud.ResolveAsync(_settings, Context.StateDirectory, handler: null, ct).ConfigureAwait(false);
+        _cloud = cloud;
+        Logger.LogInformation("teams: {Account} signs in to {Cloud} ({How})", _settings.AccountHint, cloud.Display, how);
+        Context.ReportProgress($"Signing in to Teams in {cloud.Display}");
 
         // as the other web sessions: the test variable wins, then the setting (which must exist), then whatever is installed
         // (a Chromium browser, else Firefox, which the session drives through WebDriver)
