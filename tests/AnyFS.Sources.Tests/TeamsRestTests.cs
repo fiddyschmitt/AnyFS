@@ -598,6 +598,8 @@ public class TeamsRestTests
         Assert.IsTrue(Pinned("""{"pinned":"true"}"""));
         Assert.IsTrue(Pinned("""{"pinned":1793273720290}"""), "a time");
         Assert.IsTrue(Pinned("""{"pinned":{"pinnedBy":"8:orgid:jane","pinnedTime":1793273720290}}"""));
+        Assert.IsTrue(Pinned("""{"pinned":"{\"creatorId\":\"8:orgid:jane\",\"pinnedTime\":\"1793273720290\"}"}"""), "the shape seen at work");
+        Assert.IsFalse(Pinned("""{"pinned":{"creatorId":"8:orgid:jane","pinnedTime":0}}"""), "no pin time");
         Assert.IsTrue(Pinned("""{"pinned":"{\"pinnedBy\":\"8:orgid:jane\"}"}"""), "the same held as a string");
         Assert.IsFalse(Pinned("""{"pinned":"false"}"""));
         Assert.IsFalse(Pinned("""{"pinned":{"isPinned":false,"pinnedBy":"8:orgid:jane"}}"""), "unpinned");

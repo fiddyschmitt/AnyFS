@@ -1027,8 +1027,9 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
     }
 
     /// <summary>
-    /// Whether a message is pinned (<c>properties.pinned</c>, seen at a GCC High tenant by name alone, so read leniently):
-    /// true, a time, or what says who pinned it, as an object or a JSON string of one; not where it says false.
+    /// Whether a message is pinned (<c>properties.pinned</c>: at a GCC High tenant <c>{creatorId, pinnedTime}</c>, read
+    /// leniently): true, a time, or what says who pinned it and when, as an object or a JSON string of one; not where it
+    /// says false or its pin time is none.
     /// </summary>
     internal static bool PinnedOf(JsonElement properties)
     {
@@ -1055,7 +1056,8 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         {
             JsonValueKind.True => true,
             JsonValueKind.Number => pinned.TryGetInt64(out var at) && at > 0,
-            JsonValueKind.Object => pinned.EnumerateObject().Any() && !pinned.EnumerateObject().Any(p => p.Value.ValueKind == JsonValueKind.False && p.Name.Contains("pinned", StringComparison.OrdinalIgnoreCase)),
+            JsonValueKind.Object => pinned.EnumerateObject().Any() && !pinned.EnumerateObject().Any(p => p.Name.Contains("pinned", StringComparison.OrdinalIgnoreCase)
+                && (p.Value.ValueKind is JsonValueKind.False or JsonValueKind.Null || p.Value.ToString() is "" or "0")),
             _ => false,
         };
     }
