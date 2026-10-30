@@ -140,7 +140,7 @@ internal sealed class TeamFolder(TeamInfo team, string name) : TmFolder(name)
         var names = TeamsNames.Unique(Team.Channels.Select(c => c.DisplayName).ToList(), [DetailsFile]);
         var children = Team.Channels.Select((c, i) => (TmNode)new ChannelFolder(Team, c, names[i])).ToList();
         var general = await source.TeamDetailsAsync(Team, ct).ConfigureAwait(false);
-        children.Add(new MarkdownFile(DetailsFile, TeamsText.Team(Team, general), null));
+        children.Add(new MarkdownFile(DetailsFile, TeamsText.Team(Team, general, TeamsLinks.Team(source.LinkHost, Team)), null));
         return children;
     }
 }
@@ -160,7 +160,7 @@ internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string n
         var children = new List<TmNode>();
         if (source.Settings.ChannelMessages)
         {
-            children.Add(new PostsFolder(Channel));
+            children.Add(new PostsFolder(Team, Channel));
         }
 
         // the files only while what reads them is in hand: nothing waits for SharePoint's token or Graph's
@@ -170,7 +170,7 @@ internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string n
         }
 
         var details = await source.ThreadDetailsAsync(Channel.Id, ct).ConfigureAwait(false);
-        children.Add(new MarkdownFile("channel.md", TeamsText.Channel(Channel, Team, details, source.NameOf), Channel.Created));
+        children.Add(new MarkdownFile("channel.md", TeamsText.Channel(Channel, Team, details, source.NameOf, TeamsLinks.Channel(source.LinkHost, Team, Channel)), Channel.Created));
         return children;
     }
 }
@@ -233,7 +233,7 @@ internal sealed class AttachmentsFolder(IReadOnlyList<TmNode> attachments, DateT
 }
 
 /// <summary>A channel's posts: a folder per thread (the opening message and its replies). Not walked: the messages are a call.</summary>
-internal sealed class PostsFolder(ChannelInfo channel) : TmFolder("posts", null)
+internal sealed class PostsFolder(TeamInfo team, ChannelInfo channel) : TmFolder("posts", null)
 {
     public override bool Walked => false;
 
@@ -241,7 +241,7 @@ internal sealed class PostsFolder(ChannelInfo channel) : TmFolder("posts", null)
     {
         var threads = await source.ThreadsAsync(channel.Id, ct).ConfigureAwait(false);
         var names = TeamsNames.Unique(threads.Select(t => TeamsText.ThreadName(t[0], source.NameOf)).ToList());
-        return threads.Select((t, i) => (TmNode)new ThreadFolder(names[i], t)).ToList();
+        return threads.Select((t, i) => (TmNode)new ThreadFolder(team, channel, names[i], t)).ToList();
     }
 }
 
@@ -249,14 +249,14 @@ internal sealed class PostsFolder(ChannelInfo channel) : TmFolder("posts", null)
 /// One channel post: <c>post.md</c>, the opening message and its replies, and its <c>attachments</c> (the files they share,
 /// their inline images) where it has any; built when the post itself is listed (not when its posts folder is).
 /// </summary>
-internal sealed class ThreadFolder(string name, IReadOnlyList<TeamsMessage> thread) : TmFolder(name, thread[0].Composed)
+internal sealed class ThreadFolder(TeamInfo team, ChannelInfo channel, string name, IReadOnlyList<TeamsMessage> thread) : TmFolder(name, thread[0].Composed)
 {
     public override bool Walked => false;
 
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
         var (attachments, names) = await source.AttachmentsAsync(thread, ct).ConfigureAwait(false);
-        var children = new List<TmNode> { new MarkdownFile("post.md", TeamsText.Post(thread, source.NameOf, names), thread[0].Composed) };
+        var children = new List<TmNode> { new MarkdownFile("post.md", TeamsText.Post(thread, source.NameOf, names, TeamsLinks.Post(source.LinkHost, team, channel, thread)), thread[0].Composed) };
         if (attachments.Count > 0)
         {
             children.Add(new AttachmentsFolder(attachments, thread[^1].Composed));

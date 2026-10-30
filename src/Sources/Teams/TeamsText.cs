@@ -31,10 +31,13 @@ internal static class TeamsText
     // until the page is fetched again, so each is converted once (a posts folder named and built its roots three times)
     private static readonly ConditionalWeakTable<TeamsMessage, string> Converted = new();
 
-    /// <summary>A channel post: the thread's messages (the root first, then its replies in time order), under a heading.</summary>
-    public static byte[] Post(IReadOnlyList<TeamsMessage> thread, Func<string?, string> nameOf, AttachmentNames? attachments = null)
+    /// <summary>
+    /// A channel post: the address that opens it in Teams (<paramref name="link"/>, where given) on the first line, then the
+    /// thread's messages (the root first, then its replies in time order) under a heading.
+    /// </summary>
+    public static byte[] Post(IReadOnlyList<TeamsMessage> thread, Func<string?, string> nameOf, AttachmentNames? attachments = null, string? link = null)
     {
-        var text = new StringBuilder();
+        var text = Start(link);
         var root = thread[0];
         var heading = Subject(root) ?? $"{Who(root, nameOf)} · {Stamp(root.Composed, "d MMM yyyy HH:mm")}";
         text.Append("# ").Append(Clean(heading)).Append("\n\n");
@@ -42,14 +45,17 @@ internal static class TeamsText
         return Encoding.UTF8.GetBytes(text.ToString());
     }
 
-    /// <summary>A chat: all of its messages, oldest first.</summary>
-    public static byte[] Chat(IReadOnlyList<TeamsMessage> messages, string title, Func<string?, string> nameOf, AttachmentNames? attachments = null)
+    /// <summary>A chat: the address that opens it in Teams (where given) on the first line, then all of its messages, oldest first.</summary>
+    public static byte[] Chat(IReadOnlyList<TeamsMessage> messages, string title, Func<string?, string> nameOf, AttachmentNames? attachments = null, string? link = null)
     {
-        var text = new StringBuilder();
+        var text = Start(link);
         text.Append("# ").Append(Clean(title)).Append("\n\n");
         Conversation(text, messages, nameOf, attachments ?? AttachmentNames.None);
         return Encoding.UTF8.GetBytes(text.ToString());
     }
+
+    /// <summary>A file's text so far: the address that opens its thing in Teams on the first line, as a SharePoint page's Markdown starts with the page's.</summary>
+    private static StringBuilder Start(string? link) => link is null ? new StringBuilder() : new StringBuilder(link).Append("\n\n");
 
     /// <summary>
     /// <c>groups.md</c> (the account's groups) or <c>all-groups.md</c> (every group): what the groups are and where they came
@@ -248,11 +254,11 @@ internal static class TeamsText
     /// <summary>
     /// <c>team.md</c>: a team's details: what it is for, who may join, its email, how many belong to it (its General channel's
     /// roster where the chat service gives it, as channel.md says: the aggregator's count leaves owners and bots out) and the
-    /// account's part, its site, and its channels.
+    /// account's part, its site, and its channels; the address that opens it in Teams (where given) on the first line.
     /// </summary>
-    public static byte[] Team(TeamInfo team, ThreadDetails? general)
+    public static byte[] Team(TeamInfo team, ThreadDetails? general, string? link = null)
     {
-        var text = new StringBuilder("# ").Append(Clean(team.DisplayName)).Append("\n\n");
+        var text = Start(link).Append("# ").Append(Clean(team.DisplayName)).Append("\n\n");
         if (team.Description is { } description)
         {
             text.Append(description.Trim()).Append("\n\n");
@@ -286,11 +292,12 @@ internal static class TeamsText
 
     /// <summary>
     /// <c>channel.md</c>: a channel's details: what it is for, its kind, when and by whom it was made, how many are in it,
-    /// where its files are, and its tabs (each website's address).
+    /// where its files are, and its tabs (each website's address); the address that opens it in Teams (where given) on the
+    /// first line.
     /// </summary>
-    public static byte[] Channel(ChannelInfo channel, TeamInfo team, ThreadDetails? details, Func<string?, string> nameOf)
+    public static byte[] Channel(ChannelInfo channel, TeamInfo team, ThreadDetails? details, Func<string?, string> nameOf, string? link = null)
     {
-        var text = new StringBuilder("# ").Append(Clean(channel.DisplayName)).Append("\n\nA channel of ").Append(Clean(team.DisplayName)).Append(".\n\n");
+        var text = Start(link).Append("# ").Append(Clean(channel.DisplayName)).Append("\n\nA channel of ").Append(Clean(team.DisplayName)).Append(".\n\n");
         if (channel.Description is { } description)
         {
             text.Append(description.Trim()).Append("\n\n");

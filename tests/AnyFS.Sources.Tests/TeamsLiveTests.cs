@@ -101,7 +101,9 @@ public class TeamsLiveTests
         await using var chat = await source.OpenAsync($"{chats[0]}/chat.md", VfsOpenMode.Read, CancellationToken.None);
         var buffer = new byte[chat.Length];
         await chat.ReadFullyAsync(0, buffer, CancellationToken.None);
-        StringAssert.StartsWith(Encoding.UTF8.GetString(buffer), "# ", "chat.md opens with a heading");
+        var text = Encoding.UTF8.GetString(buffer);
+        StringAssert.StartsWith(text, "https://teams.microsoft.com/l/chat/", "chat.md opens with the address that opens it in Teams");
+        StringAssert.Contains(text, "/conversations\n\n# ", "then a heading");
     }
 
     /// <summary>Every chat's folder, the hidden ones (Chats/Hidden chats) among them: the sandbox's seeded chat is hidden.</summary>
@@ -136,13 +138,17 @@ public class TeamsLiveTests
         await using var source = await StartAsync(account);
 
         var team = await TextAsync(source, "AnyFS Lab/team.md");
-        StringAssert.StartsWith(team, "# AnyFS Lab\n");
+        StringAssert.StartsWith(team, "https://teams.microsoft.com/l/team/");
+        StringAssert.Contains(team, "/conversations?groupId=");
+        StringAssert.Contains(team, "\n\n# AnyFS Lab\n");
         StringAssert.Contains(team, "- You: owner\n");
         StringAssert.Contains(team, "- Site: https://");
         StringAssert.Contains(team, "| General | Standard (General) |");
 
         var channel = await TextAsync(source, "AnyFS Lab/General/channel.md");
-        StringAssert.StartsWith(channel, "# General\n\nA channel of AnyFS Lab.\n");
+        StringAssert.StartsWith(channel, "https://teams.microsoft.com/l/channel/");
+        StringAssert.Contains(channel, "/General?groupId=");
+        StringAssert.Contains(channel, "\n\n# General\n\nA channel of AnyFS Lab.\n");
         StringAssert.Contains(channel, "- Kind: Standard (General)\n");
         StringAssert.Contains(channel, "- Files: <https://");
 

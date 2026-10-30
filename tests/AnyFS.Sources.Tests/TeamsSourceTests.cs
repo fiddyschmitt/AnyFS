@@ -755,11 +755,12 @@ public class TeamsSourceTests
 
         CollectionAssert.AreEqual(new[] { "General", "Design", "team.md (2)", "team.md" }, await NamesAsync(source, "AnyFS Lab"), "a channel named as the team's file is numbered");
         var teamMd = await TextAsync(source, "AnyFS Lab/team.md");
-        StringAssert.StartsWith(teamMd, "# AnyFS Lab\n\nThe lab's team\n\n- Privacy: Private\n- Email: anyfslab@contoso.com\n- You: owner\n- Members: 12 (2 owners, 1 bot)\n- Classification: Internal\n- Site: https://contoso.sharepoint.com/sites/anyfslab\n- Favourite: yes\n");
+        StringAssert.StartsWith(teamMd, $"https://teams.microsoft.com/l/team/{Uri.EscapeDataString(team.Id)}/conversations?groupId={team.GroupId}\n\n"
+            + "# AnyFS Lab\n\nThe lab's team\n\n- Privacy: Private\n- Email: anyfslab@contoso.com\n- You: owner\n- Members: 12 (2 owners, 1 bot)\n- Classification: Internal\n- Site: https://contoso.sharepoint.com/sites/anyfslab\n- Favourite: yes\n");
         StringAssert.Contains(teamMd, "## Channels\n\n| Channel | Kind | Description |\n|---|---|---|\n| General | Standard (General) | Everything |\n| Design | Private | Drawings and specs |\n| team.md | Standard |  |\n");
 
         var channelMd = await TextAsync(source, "AnyFS Lab/Design/channel.md");
-        StringAssert.StartsWith(channelMd, "# Design\n\nA channel of AnyFS Lab.\n\nDrawings and specs\n\n");
+        StringAssert.StartsWith(channelMd, $"https://teams.microsoft.com/l/channel/{Uri.EscapeDataString(design.Id)}/Design?groupId={team.GroupId}\n\n# Design\n\nA channel of AnyFS Lab.\n\nDrawings and specs\n\n");
         StringAssert.Contains(channelMd, $"- Kind: Private\n- Made: {When.AddDays(1).ToLocalTime():yyyy-MM-dd} by Jane Doe\n- Members: 3 (1 owner, 1 from other organisations)\n- Files: <https://contoso.sharepoint.com/sites/anyfslab-Design/Shared%20Documents/Design>\n- Favourite: yes\n");
         StringAssert.Contains(channelMd, "## Tabs\n\n- Wiki | old: Website, <https://wiki.contoso.com/design>\n- Plan: Pinned file\n");
 
@@ -773,6 +774,27 @@ public class TeamsSourceTests
         await NamesAsync(source, "AnyFS Lab/Design");
         await TextAsync(source, "AnyFS Lab/team.md");
         Assert.AreEqual(asked, fake.ThreadCalls);
+    }
+
+    [TestMethod]
+    public async Task APostAndAChatStartWithTheAddressThatOpensThemInTeams()
+    {
+        var fake = Seed();
+        var structure = await fake.StructureAsync(CancellationToken.None);
+        var team = structure.Teams.Single();
+        var general = team.Channels.Single(c => c.IsGeneral);
+        var chat = structure.Chats.Single(c => c.Kind == ChatKind.OneOnOne);
+        await using var source = await StartAsync(fake);
+
+        var build = (await NamesAsync(source, "AnyFS Lab/General/posts")).Single(p => p.Contains("Build is green", StringComparison.Ordinal));
+        var root = When.ToUnixTimeMilliseconds().ToString(System.Globalization.CultureInfo.InvariantCulture);
+        StringAssert.StartsWith(await TextAsync(source, $"AnyFS Lab/General/posts/{build}/post.md"),
+            $"https://teams.microsoft.com/l/message/{Uri.EscapeDataString(general.Id)}/{root}?groupId={team.GroupId}&parentMessageId={root}&createdTime={root}\n\n# Build is green\n\n");
+        StringAssert.StartsWith(await TextAsync(source, "Chats/Jane Doe/chat.md"), $"https://teams.microsoft.com/l/chat/{Uri.EscapeDataString(chat.Id)}/conversations\n\n# Jane Doe\n\n");
+
+        // in GCC High, on its own Teams host
+        await using var gov = await StartAsync(fake, s => s.Cloud = "US Gov (GCC High)");
+        StringAssert.StartsWith(await TextAsync(gov, "Chats/Jane Doe/chat.md"), $"https://gov.teams.microsoft.us/l/chat/{Uri.EscapeDataString(chat.Id)}/conversations\n\n");
     }
 
     [TestMethod]

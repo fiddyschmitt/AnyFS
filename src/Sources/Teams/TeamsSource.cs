@@ -52,6 +52,9 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     internal TeamsSettings Settings => _settings;
 
+    /// <summary>The host Teams' own links open on, in the cloud signed in to (<see cref="TeamsLinks"/>).</summary>
+    internal string LinkHost => _cloud.ApiHost.TrimEnd('/');
+
     internal ITeamsApi Api => _api ?? throw VfsException.Unavailable("Teams is not signed in to yet");
 
     private TeamsCache Cache => _cache ?? throw VfsException.Unavailable("Teams is not signed in to yet");
@@ -358,7 +361,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             return all;
         }, ct).ConfigureAwait(false);
         var (attachments, names) = await AttachmentsAsync(messages, ct).ConfigureAwait(false);
-        return (TeamsText.Chat(messages, ChatName(chat), NameOf, names), attachments);
+        return (TeamsText.Chat(messages, ChatName(chat), NameOf, names, TeamsLinks.Chat(LinkHost, chat)), attachments);
     }
 
     // --- groups --------------------------------------------------------------------------------------------------------
