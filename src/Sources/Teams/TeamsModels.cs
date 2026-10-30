@@ -139,7 +139,24 @@ internal sealed record ChatInfo(string Id, string? Title, ChatKind Kind, IReadOn
 {
     /// <summary>The aggregator's version of the chat, which moves on as it changes: an unchanged one is not read again.</summary>
     public string? Version { get; init; }
+
+    /// <summary>Hidden from the chat list in Teams (<c>hidden</c>); a new message shows it again.</summary>
+    public bool Hidden { get; init; }
 }
+
+/// <summary>A call in the account's call history (the chat service's <c>48:calllogs</c>, each message's <c>call-log</c>).</summary>
+/// <param name="Direction">incoming or outgoing, as Teams writes it.</param>
+/// <param name="State">How it went: accepted, missed, declined… as Teams writes it.</param>
+/// <param name="Originator">Who called (a name), and <paramref name="Target"/> who was called.</param>
+internal sealed record CallRecord(DateTimeOffset? Start, DateTimeOffset? Connected, DateTimeOffset? End, string? Direction, string? Type, string? State, string? Originator, string? Target, int Participants);
+
+/// <summary>An entry of the account's activity feed (the chat service's <c>48:notifications</c> and <c>48:mentions</c>, each message's <c>activity</c>).</summary>
+/// <param name="Type">What happened, as Teams names it (mentions, reply, reaction, teamMembershipChange…), with <paramref name="Subtype"/>.</param>
+/// <param name="From">Who did it (a name, where Teams gives one).</param>
+/// <param name="Topic">Where, as Teams names it (a thread's topic), where it does; else found from <paramref name="ThreadId"/>.</param>
+/// <param name="Preview">The start of the message, as Teams shows it in the feed.</param>
+/// <param name="Mention">A mention of the account (<c>48:mentions</c>, or a mention in the feed), each once.</param>
+internal sealed record ActivityItem(DateTimeOffset? When, string Type, string? Subtype, string? From, string? Topic, string? ThreadId, string? Preview, bool Mention);
 
 /// <summary>One message of a conversation (a channel's or a chat's): the chat service's <c>messages[]</c> entry.</summary>
 /// <param name="RootId">The opening message of its thread (channel posts are grouped by this); null or itself for a root.</param>

@@ -627,6 +627,106 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task HiddenChatsAreInAHiddenChatsFolder()
+    {
+        var fake = Seed();
+        var hidden = fake.AddChat(ChatKind.Group, "Old project", [Jane], When, hidden: true);
+        fake.Post(hidden.Id, Jane, "Jane Doe", "<p>Archived talk</p>", When);
+        fake.AddChat(ChatKind.Group, "Hidden chats", [John], When);
+        await using var source = await StartAsync(fake);
+
+        CollectionAssert.AreEquivalent(new[] { "Jane Doe", "Project Axle", "Hidden chats (2)", "Hidden chats" }, await NamesAsync(source, "Chats"), "a chat named as the folder is numbered");
+        CollectionAssert.AreEqual(new[] { "Old project" }, await NamesAsync(source, "Chats/Hidden chats"));
+        StringAssert.Contains(await TextAsync(source, "Chats/Hidden chats/Old project/chat.md"), "Archived talk");
+    }
+
+    private static string Local(DateTimeOffset when) => when.ToLocalTime().ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+
+    [TestMethod]
+    public async Task CallsMdIsTheCallHistoryAndActivityMdTheFeed()
+    {
+        var fake = Seed();
+        var structure = await fake.StructureAsync(CancellationToken.None);
+        var general = structure.Teams.Single().Channels.Single(c => c.IsGeneral);
+        var axle = structure.Chats.Single(c => c.Title == "Project Axle");
+        fake.Calls =
+        [
+            new CallRecord(When.AddHours(2), When.AddHours(2).AddSeconds(5), When.AddHours(2).AddMinutes(12).AddSeconds(5), "outgoing", "twoParty", "accepted", "Tester", "Jane Doe", 2),
+            new CallRecord(When, null, When.AddSeconds(30), "incoming", "twoParty", "missed", "John Roe", "Tester", 2),
+            new CallRecord(When.AddDays(-1), When.AddDays(-1), When.AddDays(-1).AddHours(1).AddMinutes(2).AddSeconds(3), "outgoing", "group", "accepted", "Tester", "Project | Axle", 4),
+        ];
+        fake.Activity =
+        [
+            new ActivityItem(When.AddHours(1), "mentions", "mention", "Jane Doe", null, general.Id, "@Tester can you look?", true),
+            new ActivityItem(When.AddMinutes(30), "reply", null, "John Roe", "A topic Teams named", axle.Id, "Sure", false),
+            new ActivityItem(When.AddMinutes(10), "reactionInChat", "like", "John Roe", "Somewhere else", "19:unknown", null, false),
+            new ActivityItem(When.AddMinutes(5), "msGraph", "privateMeetingCreated", null, null, null, null, false),
+        ];
+        await using var source = await StartAsync(fake);
+
+        CollectionAssert.IsSubsetOf(new[] { "calls.md", "activity.md" }, await UntilAsync(() => NamesAsync(source, ""), n => n.Contains("calls.md") && n.Contains("activity.md")));
+        var calls = await TextAsync(source, "calls.md");
+        StringAssert.StartsWith(calls, "# Calls\n\nThe account's call history as Teams keeps it: 3 calls, newest first.\n");
+        StringAssert.Contains(calls, $"| {Local(When.AddHours(2))} | Out | Jane Doe | 1:1 | Answered | 12:00 |");
+        StringAssert.Contains(calls, $"| {Local(When)} | In | John Roe | 1:1 | Missed |  |");
+        StringAssert.Contains(calls, "| Out | Project \\| Axle (+2) | Group | Answered | 1:02:03 |");
+
+        var activity = await TextAsync(source, "activity.md");
+        StringAssert.Contains(activity, "1 mention and 3 other entries, newest first.");
+        StringAssert.Contains(activity, $"## Mentions\n\n| When | What | Who | Where | Message |\n|---|---|---|---|---|\n| {Local(When.AddHours(1))} | Mentioned you | Jane Doe | AnyFS Lab / General | @Tester can you look? |\n");
+        StringAssert.Contains(activity, "| Replied | John Roe | Chat: Project Axle | Sure |", "a chat by its folder's name");
+        StringAssert.Contains(activity, "| Reacted | John Roe | Somewhere else |  |", "else where Teams says");
+        StringAssert.Contains(activity, "| Private meeting created |  |  |  |");
+    }
+
+    [TestMethod]
+    public async Task WithoutACallHistoryThereIsNoCallsMdAndOneRefusedSaysWhy()
+    {
+        var fake = Seed();
+        fake.Activity = [];
+        await using (var source = await StartAsync(fake))
+        {
+            // no call history (the chat service's 404, as the sandbox's): no calls.md; an empty feed is still activity.md
+            var root = await UntilAsync(() => NamesAsync(source, ""), n => n.Contains("activity.md"));
+            CollectionAssert.DoesNotContain(root, "calls.md");
+            StringAssert.Contains(await TextAsync(source, "activity.md"), "## Mentions\n\nNone.\n");
+        }
+
+        fake.CallsFail = true;
+        await using (var source = await StartAsync(fake))
+        {
+            await UntilAsync(() => NamesAsync(source, ""), n => n.Contains("calls.md"));
+            StringAssert.Contains(await TextAsync(source, "calls.md"), "The call history could not be read: Teams (fake) answered 403");
+        }
+
+        // off: neither is shown, nor asked for
+        fake.CallsFail = false;
+        fake.Calls = [new CallRecord(When, When, When.AddMinutes(1), "outgoing", "twoParty", "accepted", "Tester", "Jane Doe", 2)];
+        var asked = fake.CallsCalls;
+        await using (var source = await StartAsync(fake, s => s.CallsAndActivity = false))
+        {
+            await NamesAsync(source, "");
+            await Task.Delay(200);
+            var root = await NamesAsync(source, "");
+            CollectionAssert.DoesNotContain(root, "calls.md");
+            CollectionAssert.DoesNotContain(root, "activity.md");
+            Assert.AreEqual(asked, fake.CallsCalls);
+        }
+    }
+
+    [TestMethod]
+    public async Task ATeamNamedAsOneOfTheRootsOwnIsNumbered()
+    {
+        var fake = new FakeTeams();
+        fake.AddTeam("Chats", FakeTeams.Channel("General", general: true));
+        await using var source = await StartAsync(fake);
+        var root = await NamesAsync(source, "");
+        Assert.AreEqual("Chats (2)", root[0]);
+        CollectionAssert.Contains(root, "Chats");
+        CollectionAssert.AreEqual(new[] { "General" }, await NamesAsync(source, "Chats (2)"));
+    }
+
+    [TestMethod]
     public void AReactionsEmojiIsNamedOrByItsCodePoint()
     {
         Assert.AreEqual("👍", TeamsText.EmojiOf("like"));

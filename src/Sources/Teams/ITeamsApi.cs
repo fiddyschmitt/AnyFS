@@ -27,6 +27,15 @@ internal interface ITeamsApi : IAsyncDisposable
     /// <summary>The people's display names by mri, as many as are known in one call (the middle tier); an mri with no name is left out.</summary>
     Task<IReadOnlyList<Person>> PeopleAsync(IReadOnlyList<string> mris, CancellationToken ct);
 
+    /// <summary>The account's call history, newest first, up to <paramref name="max"/> calls (the chat service's <c>48:calllogs</c>); null where the account has none.</summary>
+    Task<IReadOnlyList<CallRecord>?> CallsAsync(int max, CancellationToken ct);
+
+    /// <summary>
+    /// The account's activity feed and its mentions, newest first, up to <paramref name="max"/> of each (the chat service's
+    /// <c>48:notifications</c> and <c>48:mentions</c>); null where the account has neither.
+    /// </summary>
+    Task<IReadOnlyList<ActivityItem>?> ActivityAsync(int max, CancellationToken ct);
+
     /// <summary>
     /// Where a channel's files are: its site and the folder's path within the site's default library (the channel's
     /// <see cref="ChannelInfo.FilesPath"/> where Teams gives one, else the channel's name in its team's site, found from the

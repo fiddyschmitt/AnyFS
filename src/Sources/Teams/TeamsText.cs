@@ -125,12 +125,125 @@ internal static class TeamsText
     }
 
     /// <summary><c>groups.md</c> or <c>all-groups.md</c> when the groups could not be read: why, rather than a root that fails to list.</summary>
-    public static byte[] GroupsUnread(string why) => Encoding.UTF8.GetBytes($"# Groups\n\nThe groups could not be read: {Clean(why)}\n");
+    public static byte[] GroupsUnread(string why) => Unread("Groups", "The groups", why);
+
+    /// <summary>A file built behind the listings (groups.md, calls.md…) when what it shows could not be read: why.</summary>
+    public static byte[] Unread(string title, string what, string why) => Encoding.UTF8.GetBytes($"# {title}\n\n{what} could not be read: {Clean(why)}\n");
 
     /// <summary><c>groups.md</c> or <c>all-groups.md</c> until its first reading lands (each is read behind the listings, which never wait on it).</summary>
     public static byte[] GroupsBeingRead() => Encoding.UTF8.GetBytes("# Groups\n\nThe groups are being read; this file fills in shortly (a large organisation's take minutes).\n");
 
     private static string Plural(string kind, int count) => count == 1 ? kind : kind.EndsWith("list", StringComparison.Ordinal) ? kind + "s" : kind.Replace("group", "groups", StringComparison.Ordinal);
+
+    /// <summary>
+    /// <c>calls.md</c>: the account's call history, newest first: when, which way, with whom, what kind, how it went, and how
+    /// long it lasted (from the answer to the end).
+    /// </summary>
+    public static byte[] Calls(IReadOnlyList<CallRecord> calls)
+    {
+        var text = new StringBuilder("# Calls\n\n");
+        text.Append(CultureInfo.InvariantCulture, $"The account's call history as Teams keeps it: {calls.Count:N0} call{(calls.Count == 1 ? "" : "s")}, newest first.\n");
+        if (calls.Count > 0)
+        {
+            text.Append("\n| When | Which way | With | Kind | How it went | Length |\n|---|---|---|---|---|---|\n");
+            foreach (var call in calls)
+            {
+                var incoming = string.Equals(call.Direction, "incoming", StringComparison.OrdinalIgnoreCase);
+                var with = incoming ? call.Originator : call.Target;
+                var others = call.Participants > 2 ? $"{with ?? "?"} (+{call.Participants - 2})" : with;
+                var length = call.Connected is { } from && call.End is { } to && to > from ? Duration(to - from) : "";
+                text.Append(CultureInfo.InvariantCulture, $"| {Stamp(call.Start, "yyyy-MM-dd HH:mm")} | {Cell(incoming ? "In" : string.Equals(call.Direction, "outgoing", StringComparison.OrdinalIgnoreCase) ? "Out" : call.Direction)} | {Cell(others)} | {Cell(CallKind(call.Type))} | {Cell(Outcome(call.State))} | {length} |\n");
+            }
+        }
+
+        return Encoding.UTF8.GetBytes(text.ToString());
+    }
+
+    private static string? CallKind(string? type) => type?.ToLowerInvariant() switch
+    {
+        "twoparty" => "1:1",
+        "group" or "multiparty" => "Group",
+        "meeting" => "Meeting",
+        _ => Words(type),
+    };
+
+    private static string? Outcome(string? state) => state?.ToLowerInvariant() switch
+    {
+        "accepted" => "Answered",
+        "missed" => "Missed",
+        "declined" => "Declined",
+        "voicemail" => "Voicemail",
+        "transferred" => "Transferred",
+        "forwarded" => "Forwarded",
+        _ => Words(state),
+    };
+
+    private static string Duration(TimeSpan span) => span.TotalHours >= 1 ? span.ToString(@"h\:mm\:ss", CultureInfo.InvariantCulture) : span.ToString(@"m\:ss", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// <c>activity.md</c>: the account's activity feed as Teams keeps it, newest first: its mentions, then everything else
+    /// (replies, reactions, being added to a team…): when, what, who, where, and the start of the message.
+    /// </summary>
+    public static byte[] Activity(IReadOnlyList<ActivityItem> items, Func<ActivityItem, string?> whereOf)
+    {
+        var mentions = items.Where(i => i.Mention).ToList();
+        var others = items.Where(i => !i.Mention).ToList();
+        var text = new StringBuilder("# Activity\n\n");
+        text.Append(CultureInfo.InvariantCulture, $"The account's activity feed as Teams keeps it: {mentions.Count:N0} mention{(mentions.Count == 1 ? "" : "s")} and {others.Count:N0} other entr{(others.Count == 1 ? "y" : "ies")}, newest first.\n");
+        Section("Mentions", mentions);
+        Section("Everything else", others);
+        return Encoding.UTF8.GetBytes(text.ToString());
+
+        void Section(string title, List<ActivityItem> list)
+        {
+            text.Append("\n## ").Append(title).Append("\n\n");
+            if (list.Count == 0)
+            {
+                text.Append("None.\n");
+                return;
+            }
+
+            text.Append("| When | What | Who | Where | Message |\n|---|---|---|---|---|\n");
+            foreach (var item in list)
+            {
+                text.Append(CultureInfo.InvariantCulture, $"| {Stamp(item.When, "yyyy-MM-dd HH:mm")} | {Cell(What(item))} | {Cell(item.From)} | {Cell(whereOf(item))} | {Cell(Shorten(item.Preview, 120))} |\n");
+            }
+        }
+    }
+
+    /// <summary>What an activity was, in words: a mention, a reply, a reaction, else Teams' own name for it.</summary>
+    private static string What(ActivityItem item)
+    {
+        var kind = $"{item.Type} {item.Subtype}";
+        return item.Mention || kind.Contains("mention", StringComparison.OrdinalIgnoreCase) ? "Mentioned you"
+            : kind.Contains("reply", StringComparison.OrdinalIgnoreCase) ? "Replied"
+            : kind.Contains("reaction", StringComparison.OrdinalIgnoreCase) || kind.Contains("like", StringComparison.OrdinalIgnoreCase) ? "Reacted"
+            : string.Equals(item.Subtype, "addedToTeam", StringComparison.OrdinalIgnoreCase) ? "Added you to a team"
+            : Words(item.Subtype ?? item.Type) ?? "Activity";
+    }
+
+    /// <summary>Teams' camel-case names in words: <c>privateMeetingCreated</c> is "Private meeting created".</summary>
+    private static string? Words(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return null;
+        }
+
+        var spaced = string.Concat(name.Select((c, i) => i > 0 && char.IsUpper(c) && !char.IsUpper(name[i - 1]) ? " " + char.ToLowerInvariant(c) : c.ToString()));
+        return char.ToUpperInvariant(spaced[0]) + spaced[1..];
+    }
+
+    private static string? Shorten(string? text, int length)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var clean = Clean(text);
+        return clean.Length <= length ? clean : clean[..length].TrimEnd() + "…";
+    }
 
     /// <summary>A table cell's text: on one line, its pipes escaped.</summary>
     private static string Cell(string? text) => text is null ? "" : Clean(text).Replace("|", "\\|", StringComparison.Ordinal);

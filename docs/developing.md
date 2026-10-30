@@ -116,7 +116,10 @@ the media service), in-process. It can hold back SharePoint's token as the page 
 and `SharePointComesWhenAsked` with `SeekHold` for one that comes when asked for behind the listings), and refuses its
 file calls without it or Graph's (`GraphReady`) as the live seam does; with Graph's alone it gives the groups without
 their sites, as Graph's list of groups does, or (`GraphListsNoGroups`) the sites without their groups, as Microsoft Search
-does where Graph refuses that list. `TeamsRestTests` read the services' answers through a fake handler, and
+does where Graph refuses that list. Its `Calls` and `Activity` are the chat service's call history and activity feed (null
+for an account with none: the sandbox has no call history), `CallsFail` refuses the call history, and `AddChat(hidden:
+true)` makes a chat one hidden in Teams. `TeamsRestTests` read the services' answers through a fake handler (the call
+history's and activity feed's shapes as a GCC High account's are), and
 `TeamsFilesTests` check where its tokens may go. `TeamsLiveTests` read the sandbox when `ANYFS_TEST_TEAMS_ACCOUNT` (the tester,
 `anyfs-tester@<tenant>.onmicrosoft.com`) and `ANYFS_TEAMS_PROFILES` (the root of the browser profiles signed in as it, such as
 `%LOCALAPPDATA%\AnyFS\tests\outlook-browser`: Teams signs in from the same Microsoft 365 session) are set;
@@ -125,8 +128,9 @@ only one). `TheLibrariesAreReadThroughGraphWithoutSharePointsToken` reads the li
 at work: the sandbox's Teams page mints no Graph token, so it takes the AnyFS app's from a `tests/fixtures/SharePointSignIn`
 sign-in as the tester (`ANYFS_TEST_GRAPH_CACHE`, else the fixture's default file) and withholds SharePoint's. `TeamsSandboxSeed` seeds the sandbox for them, once, with `ANYFS_SEED_TEAMS=1` beside those two: the team "AnyFS
 Lab" with its SharePoint site, a thread in General with replies, reactions, an edit, a deletion, a shared file and an inline
-image, files in the channel's folder, and the same in the tester's first chat; a run skips what it finds seeded. Teams is
-cloud only, so there is no lab machine or E2E row for it.
+image, files in the channel's folder, and the same in the tester's first chat; a run skips what it finds seeded. That chat
+is hidden in Teams, so the live tests look in `Chats/Hidden chats` too. Teams is cloud only, so there is no lab machine
+or E2E row for it.
 
 ## Publish
 

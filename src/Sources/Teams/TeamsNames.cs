@@ -41,11 +41,14 @@ internal static class TeamsNames
         return Devices.Contains(stem) ? "_" + safe : safe;
     }
 
-    /// <summary>Display names for a set of things in order: each made <see cref="Safe"/>, twins in case numbered after the first.</summary>
-    public static IReadOnlyList<string> Unique(IReadOnlyList<string> raw)
+    /// <summary>
+    /// Display names for a set of things in order: each made <see cref="Safe"/>, twins in case numbered after the first; one
+    /// that would be a <paramref name="reserved"/> name (a file or folder the source puts beside them) numbered too.
+    /// </summary>
+    public static IReadOnlyList<string> Unique(IReadOnlyList<string> raw, IEnumerable<string>? reserved = null)
     {
         var names = new string[raw.Count];
-        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var taken = new HashSet<string>(reserved ?? [], StringComparer.OrdinalIgnoreCase);
         var order = Enumerable.Range(0, raw.Count).OrderBy(i => Safe(raw[i]) == raw[i] ? 0 : 1).ThenBy(i => i).ToList();
         foreach (var i in order)
         {

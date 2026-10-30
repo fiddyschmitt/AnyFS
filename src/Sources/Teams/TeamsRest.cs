@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -78,10 +79,124 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             chats.Add(new ChatInfo(Str(c, "id") ?? "", NullIfEmpty(Str(c, "title")), KindOf(c), members, Time(Str(c, "lastUpdatedTime") ?? Str(c, "version")))
             {
                 Version = NullIfEmpty(Str(c, "version")),
+                Hidden = Bool(c, "hidden"),
             });
         }
 
         return new TeamsStructure(teams, chats);
+    }
+
+    // --- the call history, the activity feed -----------------------------------------------------------------------------
+
+    public async Task<IReadOnlyList<CallRecord>?> CallsAsync(int max, CancellationToken ct)
+    {
+        if (await SpecialAsync("48:calllogs", max, ct).ConfigureAwait(false) is not { } messages)
+        {
+            return null;
+        }
+
+        var calls = new List<CallRecord>();
+        foreach (var message in messages)
+        {
+            foreach (var log in JsonValues(Obj(message, "properties"), "call-log"))
+            {
+                var participants = Arr(log, "participantList").Count() is > 0 and var listed ? listed : Arr(log, "participants").Count();
+                calls.Add(new CallRecord(Time(Str(log, "startTime")), Time(Str(log, "connectTime")), Time(Str(log, "endTime")), NullIfEmpty(Str(log, "callDirection")),
+                    NullIfEmpty(Str(log, "callType")), NullIfEmpty(Str(log, "callState")), NullIfEmpty(Str(Obj(log, "originatorParticipant"), "displayName")),
+                    NullIfEmpty(Str(Obj(log, "targetParticipant"), "displayName")), participants));
+            }
+        }
+
+        return calls.OrderByDescending(c => c.Start ?? DateTimeOffset.MinValue).ToList();
+    }
+
+    public async Task<IReadOnlyList<ActivityItem>?> ActivityAsync(int max, CancellationToken ct)
+    {
+        var feed = await SpecialAsync("48:notifications", max, ct).ConfigureAwait(false);
+        var mentions = await SpecialAsync("48:mentions", max, ct).ConfigureAwait(false);
+        if (feed is null && mentions is null)
+        {
+            return null;
+        }
+
+        // the feed holds the mentions too (activityType "mentions"): each mention once, by the message it is in
+        var items = new List<ActivityItem>();
+        var mentioned = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (messages, fromMentions) in new[] { (mentions ?? [], true), (feed ?? [], false) })
+        {
+            foreach (var message in messages)
+            {
+                foreach (var activity in JsonValues(Obj(message, "properties"), "activity"))
+                {
+                    var type = Str(activity, "activityType") ?? "activity";
+                    var subtype = NullIfEmpty(Str(activity, "activitySubtype"));
+                    var when = Time(Str(activity, "activityTimestamp")) ?? Time(Str(message, "composetime"));
+                    var thread = NullIfEmpty(Str(activity, "sourceThreadId"));
+                    var mention = fromMentions || $"{type} {subtype}".Contains("mention", StringComparison.OrdinalIgnoreCase);
+                    if (mention && !mentioned.Add($"{thread}|{NullIfEmpty(Str(activity, "sourceMessageId")) ?? when?.ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture)}"))
+                    {
+                        continue;
+                    }
+
+                    items.Add(new ActivityItem(when, type, subtype, NullIfEmpty(Str(activity, "sourceUserImDisplayName")) ?? NullIfEmpty(Str(message, "imdisplayname")),
+                        NullIfEmpty(Str(activity, "sourceThreadTopic")), thread, NullIfEmpty(Str(activity, "messagePreview")), mention));
+                }
+            }
+        }
+
+        return items.OrderByDescending(i => i.When ?? DateTimeOffset.MinValue).ToList();
+    }
+
+    /// <summary>
+    /// A special conversation's messages (the call history, the activity feed), newest first, as raw JSON, up to
+    /// <paramref name="max"/>; null where the account has none of it (404).
+    /// </summary>
+    private async Task<List<JsonElement>?> SpecialAsync(string id, int max, CancellationToken ct)
+    {
+        var services = await DiscoverAsync(ct).ConfigureAwait(false);
+        var messages = new List<JsonElement>();
+        string? next = $"{services.ChatService}/v1/users/ME/conversations/{Uri.EscapeDataString(id)}/messages?view=msnp24Equivalent|supportsMessageProperties&pageSize={Math.Clamp(max, 1, 200)}&startTime=1";
+        try
+        {
+            while (next is not null && messages.Count < max)
+            {
+                using var doc = await GetAsync(next, TeamsService.ChatService, ct).ConfigureAwait(false);
+                var page = Arr(doc.RootElement, "messages").Select(m => m.Clone()).ToList();
+                messages.AddRange(page);
+                next = page.Count == 0 ? null : NullIfEmpty(Str(Obj(doc.RootElement, "_metadata"), "backwardLink"));
+            }
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.NotFound)
+        {
+            return null;
+        }
+
+        return messages.Take(max).ToList();
+    }
+
+    /// <summary>A property's JSON objects: an object, an array's objects, or either held as a string.</summary>
+    private static IEnumerable<JsonElement> JsonValues(JsonElement properties, string name)
+    {
+        var value = Obj(properties, name);
+        if (value.ValueKind == JsonValueKind.String && value.GetString() is { } text && text.TrimStart() is { Length: > 0 } held && (held[0] == '{' || held[0] == '['))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(held);
+                value = doc.RootElement.Clone();
+            }
+            catch (JsonException)
+            {
+                return [];
+            }
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.Object => [value],
+            JsonValueKind.Array => value.EnumerateArray().Where(v => v.ValueKind == JsonValueKind.Object).ToList(),
+            _ => [],
+        };
     }
 
     public async Task<MessagePage> MessagesAsync(string threadId, int max, CancellationToken ct)

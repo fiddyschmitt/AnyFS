@@ -46,10 +46,14 @@ internal sealed class MarkdownFile(string name, byte[] content, DateTimeOffset? 
 
 /// <summary>
 /// The source's root: a folder per team, then the Chats folder, Other groups (while SharePoint's token or Graph's is in
-/// hand), all-groups.md (every group) and groups.md (the account's).
+/// hand), all-groups.md (every group) and groups.md (the account's), calls.md (the call history) and activity.md (the
+/// activity feed) where the account has them.
 /// </summary>
 internal sealed class RootFolder : TmFolder
 {
+    // the root's own folders and files: a team of one of these names is numbered
+    private static readonly string[] Reserved = [ChatsFolder.FolderName, OtherGroupsFolder.FolderName, "all-groups.md", "groups.md", "calls.md", "activity.md"];
+
     public RootFolder() : base("")
     {
     }
@@ -57,7 +61,7 @@ internal sealed class RootFolder : TmFolder
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
         var teams = source.Settings.ChannelMessages || source.Settings.Files ? await source.TeamsAsync(ct).ConfigureAwait(false) : [];
-        var names = TeamsNames.Unique(teams.Select(t => t.DisplayName).ToList());
+        var names = TeamsNames.Unique(teams.Select(t => t.DisplayName).ToList(), Reserved);
         var children = teams.Select((t, i) => (TmNode)new TeamFolder(t, names[i])).ToList();
         if (source.Settings.Chats)
         {
@@ -81,6 +85,20 @@ internal sealed class RootFolder : TmFolder
             children.Add(new MarkdownFile("groups.md", source.GroupsMarkdown(), null));
         }
 
+        // built behind the listings: shown once built, where the account has them
+        if (source.Settings.CallsAndActivity)
+        {
+            if (source.CallsMarkdown() is { } calls)
+            {
+                children.Add(new MarkdownFile("calls.md", calls, null));
+            }
+
+            if (source.ActivityMarkdown() is { } activity)
+            {
+                children.Add(new MarkdownFile("activity.md", activity, null));
+            }
+        }
+
         return children;
     }
 }
@@ -89,8 +107,10 @@ internal sealed class RootFolder : TmFolder
 /// Every group site the account can open beyond its teams above (public groups it has not joined among them): a folder
 /// each, of the group's library. Listed while SharePoint's token or Graph's is in hand; walked as the others are.
 /// </summary>
-internal sealed class OtherGroupsFolder() : TmFolder("Other groups")
+internal sealed class OtherGroupsFolder() : TmFolder(FolderName)
 {
+    public const string FolderName = "Other groups";
+
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
         var groups = await source.OtherGroupsAsync(ct).ConfigureAwait(false);
@@ -232,15 +252,38 @@ internal sealed class ThreadFolder(string name, IReadOnlyList<TeamsMessage> thre
     }
 }
 
-/// <summary>The account's chats: a folder per chat.</summary>
-internal sealed class ChatsFolder() : TmFolder("Chats")
+/// <summary>The account's chats: a folder per chat, and the chats hidden in Teams in a Hidden chats folder (where there are any).</summary>
+internal sealed class ChatsFolder() : TmFolder(FolderName)
 {
+    public const string FolderName = "Chats";
+
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
         var chats = await source.ChatsAsync(ct).ConfigureAwait(false);
-        var names = TeamsNames.Unique(chats.Select(source.ChatName).ToList());
+        var children = Folders(source, chats.Where(c => !c.Hidden).ToList(), [HiddenChatsFolder.FolderName]);
+        if (chats.Any(c => c.Hidden))
+        {
+            children.Add(new HiddenChatsFolder());
+        }
+
+        return children;
+    }
+
+    /// <summary>A folder per chat, named for it (<see cref="TeamsSource.ChatName"/>), twins numbered.</summary>
+    public static List<TmNode> Folders(TeamsSource source, IReadOnlyList<ChatInfo> chats, IEnumerable<string>? reserved = null)
+    {
+        var names = TeamsNames.Unique(chats.Select(source.ChatName).ToList(), reserved);
         return chats.Select((c, i) => (TmNode)new ChatFolder(c, names[i])).ToList();
     }
+}
+
+/// <summary>The chats hidden in Teams (a new message in one shows it again, and it moves back to Chats): a folder per chat.</summary>
+internal sealed class HiddenChatsFolder() : TmFolder(FolderName)
+{
+    public const string FolderName = "Hidden chats";
+
+    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
+        => ChatsFolder.Folders(source, (await source.ChatsAsync(ct).ConfigureAwait(false)).Where(c => c.Hidden).ToList());
 }
 
 /// <summary>One chat: <c>chat.md</c>, the whole conversation, and its <c>attachments</c> where it has any. Not walked: the messages are a call.</summary>

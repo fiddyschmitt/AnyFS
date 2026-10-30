@@ -109,7 +109,7 @@ public sealed class TeamsSettings
     public bool ChannelMessages { get; set; } = true;
 
     [Setting("Chats", Order = 6,
-        Hint = "Your 1:1, group and meeting chats, each a Markdown file of the whole conversation with its shared files and images.")]
+        Hint = "Your 1:1, group and meeting chats, each a Markdown file of the whole conversation with its shared files and images. The chats hidden in Teams are in a Hidden chats folder.")]
     public bool Chats { get; set; } = true;
 
     [Setting("Files", Order = 7,
@@ -121,6 +121,10 @@ public sealed class TeamsSettings
     public bool Groups { get; set; } = true;
 
     public const string AutomaticCloud = "Automatic";
+
+    [Setting("Calls and activity", Order = 9,
+        Hint = "At the top: calls.md, your call history (when, which way, with whom, how it went, how long), and activity.md, your activity feed (mentions, replies, reactions…), as Teams keeps them.")]
+    public bool CallsAndActivity { get; set; } = true;
 
     [Setting("Cloud", Advanced = true, Order = 10, Kind = SettingKind.Choice,
         Choices = [AutomaticCloud, "Microsoft 365 (global)", "US Gov (GCC High)", "US Gov (DoD)"],

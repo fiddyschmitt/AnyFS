@@ -494,22 +494,26 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
     }
 
-    // groups.md and all-groups.md, each as last built: its bytes (null: nothing to show); how far it reached and how far the
-    // tokens in hand let it try (all-groups.md: 2 every group, from Graph; 1 the groups SharePoint's search shows; groups.md:
-    // 1 the account's groups of every kind, from Graph; 0 its teams'; -1 unread); when
+    // a file built behind the listings (groups.md, all-groups.md, calls.md, activity.md) as last built: its bytes (null:
+    // nothing to show); how far it reached and how far the tokens in hand let it try (all-groups.md: 2 every group, from
+    // Graph; 1 the groups SharePoint's search shows; groups.md: 1 the account's groups of every kind, from Graph; 0 its
+    // teams'; calls.md and activity.md: 0; -1 unread); when
     private sealed record Built(byte[]? Bytes, int Reached, int Tried, DateTimeOffset At);
 
-    private sealed class BuiltFile(string name)
+    private sealed class BuiltFile(string name, Func<string, byte[]> unread)
     {
         public string Name { get; } = name;
+
+        /// <summary>What the file says when it could not be built and none was before: why.</summary>
+        public Func<string, byte[]> Unread { get; } = unread;
 
         public Built? Last;
 
         public Task Building = Task.CompletedTask;
     }
 
-    private readonly BuiltFile _myGroups = new("groups.md");
-    private readonly BuiltFile _allGroups = new("all-groups.md");
+    private readonly BuiltFile _myGroups = new("groups.md", TeamsText.GroupsUnread);
+    private readonly BuiltFile _allGroups = new("all-groups.md", TeamsText.GroupsUnread);
 
     // how soon a build that failed, or reached less than the one kept, is tried again
     private static readonly TimeSpan RetryAfterFailure = TimeSpan.FromMinutes(5);
@@ -537,17 +541,74 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         return Markdown(_allGroups, reach, BuildAllGroupsAsync) ?? (_allGroups.Last is null ? TeamsText.GroupsBeingRead() : null);
     }
 
+    private readonly BuiltFile _calls = new("calls.md", why => TeamsText.Unread("Calls", "The call history", why));
+    private readonly BuiltFile _activity = new("activity.md", why => TeamsText.Unread("Activity", "The activity feed", why));
+
+    // how far back calls.md and activity.md read
+    private const int MaxCalls = 1000;
+    private const int MaxActivity = 200;
+
+    /// <summary>How old calls.md and activity.md may be before they are built again: the refresh interval, a minute at the least.</summary>
+    private TimeSpan FeedsEvery => _settings.Refresh > TimeSpan.FromMinutes(1) ? _settings.Refresh : TimeSpan.FromMinutes(1);
+
     /// <summary>
-    /// A file built behind the listings, never in them: as last built, and built again at first, each walk interval, and as
-    /// soon as a token comes that reaches further; a token gone leaves what was built.
+    /// <c>calls.md</c> (spec 7.9): the account's call history (within the "within" window), built behind the listings and
+    /// again each refresh interval; null, so not shown, where the account has none or before the first build lands.
     /// </summary>
-    private byte[]? Markdown(BuiltFile file, int reach, Func<CancellationToken, Task<(byte[]? Bytes, int Reached)>> build)
+    internal byte[]? CallsMarkdown() => Markdown(_calls, 0, BuildCallsAsync, FeedsEvery);
+
+    /// <summary><c>activity.md</c> (spec 7.9): the account's activity feed and mentions, as <see cref="CallsMarkdown"/> is built.</summary>
+    internal byte[]? ActivityMarkdown() => Markdown(_activity, 0, BuildActivityAsync, FeedsEvery);
+
+    private async Task<(byte[]? Bytes, int Reached)> BuildCallsAsync(CancellationToken ct)
+    {
+        if (await Api.CallsAsync(MaxCalls, ct).ConfigureAwait(false) is not { } calls)
+        {
+            return (null, 0);
+        }
+
+        return (TeamsText.Calls(Cutoff is { } since ? calls.Where(c => c.Start is null || c.Start >= since).ToList() : calls), 0);
+    }
+
+    private async Task<(byte[]? Bytes, int Reached)> BuildActivityAsync(CancellationToken ct)
+    {
+        if (await Api.ActivityAsync(MaxActivity, ct).ConfigureAwait(false) is not { } items)
+        {
+            return (null, 0);
+        }
+
+        // where each happened: a channel as its team and name, a chat by the name its folder has
+        var structure = await StructureAsync(ct).ConfigureAwait(false);
+        var where = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var team in structure.Teams)
+        {
+            foreach (var channel in team.Channels)
+            {
+                where.TryAdd(channel.Id, $"{team.DisplayName} / {channel.DisplayName}");
+            }
+        }
+
+        foreach (var chat in structure.Chats)
+        {
+            where.TryAdd(chat.Id, $"Chat: {ChatName(chat)}");
+        }
+
+        var shown = Cutoff is { } since ? items.Where(i => i.When is null || i.When >= since).ToList() : items;
+        return (TeamsText.Activity(shown, i => i.ThreadId is { } id && where.TryGetValue(id, out var place) ? place : i.Topic), 0);
+    }
+
+    /// <summary>
+    /// A file built behind the listings, never in them: as last built, and built again at first, each walk interval (or
+    /// <paramref name="every"/>), and as soon as a token comes that reaches further; a token gone leaves what was built.
+    /// </summary>
+    private byte[]? Markdown(BuiltFile file, int reach, Func<CancellationToken, Task<(byte[]? Bytes, int Reached)>> build, TimeSpan? every = null)
     {
         var last = file.Last;
-        var stale = last is not null && DateTimeOffset.UtcNow - last.At > ReadWholeEvery;
+        var interval = every ?? ReadWholeEvery;
+        var stale = last is not null && DateTimeOffset.UtcNow - last.At > interval;
         if (last is null || reach > last.Tried || (stale && reach >= last.Reached))
         {
-            Behind(ref file.Building, $"reading {file.Name}", ct => BuildAsync(file, reach, build, ct));
+            Behind(ref file.Building, $"reading {file.Name}", ct => BuildAsync(file, reach, build, interval, ct));
         }
 
         return last?.Bytes;
@@ -556,27 +617,44 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     /// <summary>
     /// Builds a file: kept, unless it reached less than the one before (a token gone, a list refused or throttled part way),
     /// which then stays and is tried again soon; a failure keeps the one before, else the file says why. The root is listed
-    /// afresh after, so its listing measures the file.
+    /// afresh after the first build and whenever the file changed, so its listing measures it.
     /// </summary>
-    private async Task BuildAsync(BuiltFile file, int tried, Func<CancellationToken, Task<(byte[]? Bytes, int Reached)>> build, CancellationToken ct)
+    private async Task BuildAsync(BuiltFile file, int tried, Func<CancellationToken, Task<(byte[]? Bytes, int Reached)>> build, TimeSpan every, CancellationToken ct)
     {
+        // tried again in five minutes, or the file's own interval where that is sooner
+        var first = file.Last is null;
+        var before = file.Last?.Bytes;
+        var retry = DateTimeOffset.UtcNow - every + (every < RetryAfterFailure ? every : RetryAfterFailure);
         try
         {
             var (bytes, reached) = await build(ct).ConfigureAwait(false);
             file.Last = file.Last is { Bytes: not null } kept && reached < kept.Reached
-                ? kept with { At = DateTimeOffset.UtcNow - ReadWholeEvery + RetryAfterFailure }
+                ? kept with { At = retry }
                 : new Built(bytes, reached, Math.Max(tried, reached), DateTimeOffset.UtcNow);
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             Logger.LogInformation("teams: {File} could not be read ({Error})", file.Name, ex.Message);
-            file.Last = file.Last is { Reached: >= 0 } kept
-                ? kept with { At = DateTimeOffset.UtcNow - ReadWholeEvery + RetryAfterFailure }
-                : new Built(TeamsText.GroupsUnread(ex.Message), -1, tried, DateTimeOffset.UtcNow - ReadWholeEvery + RetryAfterFailure);
+            file.Last = file.Last is { Reached: >= 0 } kept ? kept with { At = retry } : new Built(file.Unread(ex.Message), -1, tried, retry);
         }
 
-        await Kept.Cache.RefreshAsync("", ct).ConfigureAwait(false);
+        var after = file.Last?.Bytes;
+        if (first || (before is null ? after is not null : after is null || !before.AsSpan().SequenceEqual(after)))
+        {
+            // a refresh joins a listing of the root already on its way, which may have measured the file before this build
+            // landed (the files build at once at the start): then once more, begun after it
+            if (!Measured(await Kept.Cache.RefreshAsync("", ct).ConfigureAwait(false), file))
+            {
+                await Kept.Cache.RefreshAsync("", ct).ConfigureAwait(false);
+            }
+        }
     }
+
+    /// <summary>Whether a root listing has a built file as it is now: served with its bytes, or not shown where it has none.</summary>
+    private bool Measured(IReadOnlyList<VfsEntry> root, BuiltFile file)
+        => file.Last?.Bytes is { } bytes
+            ? _served.TryGetValue(file.Name, out var served) && served.Latest.AsSpan().SequenceEqual(bytes)
+            : !root.Any(e => e.Name.Equals(file.Name, StringComparison.OrdinalIgnoreCase));
 
     private async Task<(byte[]? Bytes, int Reached)> BuildMyGroupsAsync(CancellationToken ct)
     {
@@ -979,7 +1057,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         Task[] behind;
         lock (_behind)
         {
-            behind = [_seek, _myGroups.Building, _allGroups.Building, _sitesReading];
+            behind = [_seek, _myGroups.Building, _allGroups.Building, _sitesReading, _calls.Building, _activity.Building];
         }
 
         try

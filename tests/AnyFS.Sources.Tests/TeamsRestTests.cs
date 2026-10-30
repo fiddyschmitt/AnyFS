@@ -403,4 +403,106 @@ public class TeamsRestTests
         Assert.AreEqual(VfsError.AccessDenied, ex.Error);
         Assert.AreEqual(0, refusals);
     }
+
+    // the shapes a GCC High account's call history and activity feed have (the work probe, 30-Oct-2026): call-log and
+    // activity held as JSON strings (or objects), the feed repeating the mentions
+    private const string CallsNewest = """
+        {"messages":[
+          {"id":"2","messagetype":"Event/Call","composetime":"2026-10-30T02:00:00.000Z","properties":{"call-log":"{\"startTime\":\"2026-10-30T01:00:00.000Z\",\"connectTime\":\"2026-10-30T01:00:05.000Z\",\"endTime\":\"2026-10-30T01:12:05.000Z\",\"callDirection\":\"outgoing\",\"callType\":\"twoParty\",\"callState\":\"accepted\",\"originatorParticipant\":{\"id\":\"8:orgid:me\",\"displayName\":\"Tester\"},\"targetParticipant\":{\"id\":\"8:orgid:jane\",\"displayName\":\"Jane Doe\"},\"participants\":[\"8:orgid:me\",\"8:orgid:jane\"]}"}},
+          {"id":"1","messagetype":"Event/Call","composetime":"2026-10-29T02:00:00.000Z","properties":{"call-log":{"startTime":"2026-10-29T01:00:00.000Z","callDirection":"incoming","callType":"twoParty","callState":"missed","originatorParticipant":{"displayName":"John Roe"},"targetParticipant":{"displayName":"Tester"},"participantList":[{"id":"a"},{"id":"b"},{"id":"c"}]}}}
+        ],"_metadata":{"backwardLink":"https://chat.test/v1/users/ME/conversations/48%3Acalllogs/messages?startTime=1&syncState=older"}}
+        """;
+
+    private const string CallsOlder = """
+        {"messages":[
+          {"id":"0","messagetype":"Event/Call","properties":{"call-log":"{\"startTime\":\"2026-10-28T01:00:00.000Z\",\"callDirection\":\"outgoing\",\"callType\":\"group\",\"callState\":\"accepted\"}"}},
+          {"id":"x","messagetype":"Text","properties":{"call-log":"not json"}}
+        ],"_metadata":{}}
+        """;
+
+    private const string Mentions = """
+        {"messages":[
+          {"id":"7","messagetype":"Text","composetime":"2026-10-30T03:00:00.000Z","properties":{"activity":"{\"activityType\":\"mentions\",\"activitySubtype\":\"mention\",\"activityTimestamp\":\"2026-10-30T03:00:00.000Z\",\"sourceThreadId\":\"19:general\",\"sourceMessageId\":\"1001\",\"sourceUserImDisplayName\":\"Jane Doe\",\"messagePreview\":\"@Tester look\"}"}}
+        ],"_metadata":{}}
+        """;
+
+    private const string Notifications = """
+        {"messages":[
+          {"id":"6","messagetype":"Text","composetime":"2026-10-30T03:00:01.000Z","properties":{"activity":"{\"activityType\":\"mentions\",\"activitySubtype\":\"mention\",\"activityTimestamp\":\"2026-10-30T03:00:00.000Z\",\"sourceThreadId\":\"19:general\",\"sourceMessageId\":\"1001\",\"sourceUserImDisplayName\":\"Jane Doe\",\"messagePreview\":\"@Tester look\"}"}},
+          {"id":"5","messagetype":"Text","composetime":"2026-10-30T02:30:00.000Z","imdisplayname":"John Roe","properties":{"activity":{"activityType":"reactionInChat","activitySubtype":"like","sourceThreadId":"19:chat","sourceMessageId":"1001"}}},
+          {"id":"4","messagetype":"Text","composetime":"2026-10-30T02:00:00.000Z","properties":{"activity":"{\"activityType\":\"msGraph\",\"activitySubtype\":\"privateMeetingCreated\",\"activityTimestamp\":\"2026-10-30T01:59:00.000Z\"}"}}
+        ],"_metadata":{}}
+        """;
+
+    /// <summary>The chat service's special conversations: an account with no 48:mentions where <paramref name="noMentions"/>.</summary>
+    private sealed class Feeds(bool noMentions = false) : HttpMessageHandler
+    {
+        public List<string> Asked { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var uri = request.RequestUri!;
+            var path = Uri.UnescapeDataString(uri.AbsolutePath);
+            lock (Asked)
+            {
+                Asked.Add(path + uri.Query);
+            }
+
+            var body = path switch
+            {
+                "/api/authsvc/v1.0/authz" => Authz,
+                "/v1/users/ME/conversations/48:calllogs/messages" when uri.Query.Contains("syncState", StringComparison.Ordinal) => CallsOlder,
+                "/v1/users/ME/conversations/48:calllogs/messages" => CallsNewest,
+                "/v1/users/ME/conversations/48:mentions/messages" when !noMentions => Mentions,
+                "/v1/users/ME/conversations/48:notifications/messages" => Notifications,
+                _ => null,
+            };
+            return Task.FromResult(new HttpResponseMessage(body is null ? HttpStatusCode.NotFound : HttpStatusCode.OK) { Content = new StringContent(body ?? "{}", Encoding.UTF8, "application/json") });
+        }
+    }
+
+    [TestMethod]
+    public async Task TheCallHistoryIsReadNewestFirstAcrossPagesAndNoFurtherThanAsked()
+    {
+        var service = new Feeds();
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, service);
+
+        var calls = await rest.CallsAsync(10, CancellationToken.None);
+        Assert.IsNotNull(calls);
+        Assert.AreEqual(3, calls.Count, "both pages; a message whose call-log is not JSON is left out");
+        var made = calls[0];
+        Assert.AreEqual(DateTimeOffset.Parse("2026-10-30T01:00:00Z"), made.Start);
+        Assert.AreEqual(DateTimeOffset.Parse("2026-10-30T01:12:05Z"), made.End);
+        Assert.AreEqual(("outgoing", "twoParty", "accepted", "Jane Doe", 2), (made.Direction, made.Type, made.State, made.Target, made.Participants));
+        Assert.AreEqual(("incoming", "missed", "John Roe", 3), (calls[1].Direction, calls[1].State, calls[1].Originator, calls[1].Participants), "a call-log given as an object; participantList counted");
+        Assert.AreEqual("group", calls[2].Type);
+
+        // no further back than asked: the first page held enough
+        service.Asked.Clear();
+        Assert.AreEqual(2, (await rest.CallsAsync(2, CancellationToken.None))!.Count);
+        Assert.IsFalse(service.Asked.Any(a => a.Contains("syncState", StringComparison.Ordinal)), "the older page is not read");
+    }
+
+    [TestMethod]
+    public async Task TheActivityFeedHasEachMentionOnceAndNoFeedsIsNoActivity()
+    {
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, new Feeds());
+        var items = await rest.ActivityAsync(10, CancellationToken.None);
+        Assert.IsNotNull(items);
+        Assert.AreEqual(3, items.Count, "the feed's copy of the mention is left out");
+        var mention = items[0];
+        Assert.AreEqual((true, "mentions", "Jane Doe", "19:general", "@Tester look"), (mention.Mention, mention.Type, mention.From, mention.ThreadId, mention.Preview));
+        Assert.AreEqual((false, "reactionInChat", "like", "John Roe"), (items[1].Mention, items[1].Type, items[1].Subtype, items[1].From), "the same message reacted to is not a mention; its sender's name from the message");
+        Assert.AreEqual(("privateMeetingCreated", DateTimeOffset.Parse("2026-10-30T01:59:00Z")), (items[2].Subtype, items[2].When));
+
+        // no 48:mentions: the feed's mentions are the mentions
+        await using var feedOnly = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, new Feeds(noMentions: true));
+        var fromFeed = await feedOnly.ActivityAsync(10, CancellationToken.None);
+        Assert.AreEqual(1, fromFeed!.Count(i => i.Mention));
+
+        // an account with neither (the sandbox's has no call history either): nothing, not a failure
+        await using var none = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, new Service(_ => HttpStatusCode.OK));
+        Assert.IsNull(await none.ActivityAsync(10, CancellationToken.None));
+        Assert.IsNull(await none.CallsAsync(10, CancellationToken.None));
+    }
 }

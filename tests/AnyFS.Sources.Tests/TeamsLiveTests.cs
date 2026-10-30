@@ -83,25 +83,44 @@ public class TeamsLiveTests
 
         var root = await ListAsync(source, "");
         Assert.IsTrue(root.Any(e => e.Name == "Chats"), "the root has a Chats folder");
-        var teams = root.Where(e => e.Name is not ("Chats" or "Other groups" or "all-groups.md" or "groups.md")).ToList();
+        var teams = root.Where(e => e.IsDirectory && e.Name is not ("Chats" or "Other groups")).ToList();
         Assert.IsTrue(teams.Count > 0, "the account is in at least one team (the sandbox seed)");
 
         // a team lists its channels, a channel its posts folder
-        var channels = await ListAsync(source, teams[0].Name);
+        var channels = (await ListAsync(source, teams[0].Name)).Where(e => e.IsDirectory).ToList();
         Assert.IsTrue(channels.Count > 0, $"{teams[0].Name} has channels");
         var posts = await ListAsync(source, $"{teams[0].Name}/{channels[0].Name}");
         CollectionAssert.AreEqual(new[] { "posts", "files" }, posts.Select(p => p.Name).ToArray());
 
         // the chats, each a chat.md
-        var chats = await ListAsync(source, "Chats");
+        var chats = await ChatFoldersAsync(source);
         Assert.IsTrue(chats.Count > 0, "the account has chats");
-        var files = await ListAsync(source, $"Chats/{chats[0].Name}");
+        var files = await ListAsync(source, chats[0]);
         CollectionAssert.Contains(files.Select(f => f.Name).ToArray(), "chat.md", "and its attachments where it has any");
 
-        await using var chat = await source.OpenAsync($"Chats/{chats[0].Name}/chat.md", VfsOpenMode.Read, CancellationToken.None);
+        await using var chat = await source.OpenAsync($"{chats[0]}/chat.md", VfsOpenMode.Read, CancellationToken.None);
         var buffer = new byte[chat.Length];
         await chat.ReadFullyAsync(0, buffer, CancellationToken.None);
         StringAssert.StartsWith(Encoding.UTF8.GetString(buffer), "# ", "chat.md opens with a heading");
+    }
+
+    /// <summary>Every chat's folder, the hidden ones (Chats/Hidden chats) among them: the sandbox's seeded chat is hidden.</summary>
+    private static async Task<List<string>> ChatFoldersAsync(ISource source)
+    {
+        var chats = new List<string>();
+        foreach (var entry in await ListAsync(source, "Chats"))
+        {
+            if (entry.Name == "Hidden chats")
+            {
+                chats.AddRange((await ListAsync(source, "Chats/Hidden chats")).Select(e => $"Chats/Hidden chats/{e.Name}"));
+            }
+            else
+            {
+                chats.Add($"Chats/{entry.Name}");
+            }
+        }
+
+        return chats;
     }
 
     private static async Task<string> TextAsync(ISource source, string path)
@@ -130,9 +149,9 @@ public class TeamsLiveTests
         Assert.IsFalse(md.Contains("will be deleted", StringComparison.Ordinal));
 
         string? chatMd = null;
-        foreach (var chat in await ListAsync(source, "Chats"))
+        foreach (var chat in await ChatFoldersAsync(source))
         {
-            var text = await TextAsync(source, $"Chats/{chat.Name}/chat.md");
+            var text = await TextAsync(source, $"{chat}/chat.md");
             if (text.Contains("A chat message with a reaction", StringComparison.Ordinal))
             {
                 chatMd = text;
@@ -249,12 +268,12 @@ public class TeamsLiveTests
         CollectionAssert.Contains((await ListAsync(source, $"AnyFS Lab/General/posts/{thread}/attachments")).Select(e => e.Name).ToArray(), "anyfs-seed.txt");
         StringAssert.StartsWith(await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/attachments/anyfs-seed.txt"), "Seeded by AnyFS");
         var chatFile = false;
-        foreach (var chat in await ListAsync(source, "Chats"))
+        foreach (var chat in await ChatFoldersAsync(source))
         {
-            if ((await ListAsync(source, $"Chats/{chat.Name}")).Any(e => e.Name == "attachments"))
+            if ((await ListAsync(source, chat)).Any(e => e.Name == "attachments"))
             {
-                CollectionAssert.Contains((await ListAsync(source, $"Chats/{chat.Name}/attachments")).Select(e => e.Name).ToArray(), "anyfs-chat-seed.txt");
-                StringAssert.StartsWith(await TextAsync(source, $"Chats/{chat.Name}/attachments/anyfs-chat-seed.txt"), "Shared in a chat");
+                CollectionAssert.Contains((await ListAsync(source, $"{chat}/attachments")).Select(e => e.Name).ToArray(), "anyfs-chat-seed.txt");
+                StringAssert.StartsWith(await TextAsync(source, $"{chat}/attachments/anyfs-chat-seed.txt"), "Shared in a chat");
                 chatFile = true;
                 break;
             }
@@ -313,15 +332,15 @@ public class TeamsLiveTests
         StringAssert.Contains(md, $"attachments/{image}");
 
         // the chat's: the file from the tester's OneDrive, and its image
-        foreach (var chat in await ListAsync(source, "Chats"))
+        foreach (var chat in await ChatFoldersAsync(source))
         {
-            var names = (await ListAsync(source, $"Chats/{chat.Name}")).Select(e => e.Name).ToList();
+            var names = (await ListAsync(source, chat)).Select(e => e.Name).ToList();
             if (names.Contains("attachments"))
             {
-                var chatFiles = (await ListAsync(source, $"Chats/{chat.Name}/attachments")).Select(e => e.Name).ToList();
+                var chatFiles = (await ListAsync(source, $"{chat}/attachments")).Select(e => e.Name).ToList();
                 CollectionAssert.Contains(chatFiles, "anyfs-chat-seed.txt");
                 Assert.IsTrue(chatFiles.Any(f => f.Contains("_image-1.", StringComparison.Ordinal)));
-                StringAssert.StartsWith(await TextAsync(source, $"Chats/{chat.Name}/attachments/anyfs-chat-seed.txt"), "Shared in a chat");
+                StringAssert.StartsWith(await TextAsync(source, $"{chat}/attachments/anyfs-chat-seed.txt"), "Shared in a chat");
                 return;
             }
         }

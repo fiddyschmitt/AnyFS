@@ -53,9 +53,9 @@ internal sealed class FakeTeams : ITeamsApi
     public static ChannelInfo Channel(string displayName, bool general = false, bool priv = false)
         => new($"19:{Guid.NewGuid():N}@thread.tacv2", displayName, general, priv);
 
-    public ChatInfo AddChat(ChatKind kind, string? title, IReadOnlyList<string> otherMris, DateTimeOffset? lastUpdated = null)
+    public ChatInfo AddChat(ChatKind kind, string? title, IReadOnlyList<string> otherMris, DateTimeOffset? lastUpdated = null, bool hidden = false)
     {
-        var chat = new ChatInfo($"19:{Guid.NewGuid():N}", title, kind, otherMris, lastUpdated ?? DateTimeOffset.UtcNow);
+        var chat = new ChatInfo($"19:{Guid.NewGuid():N}", title, kind, otherMris, lastUpdated ?? DateTimeOffset.UtcNow) { Hidden = hidden };
         _chats.Add(chat);
         return chat;
     }
@@ -354,6 +354,32 @@ internal sealed class FakeTeams : ITeamsApi
         => Task.FromResult(GraphReady && Directory is { } graph && !GraphListsNoGroups
             ? graph with { Groups = graph.Groups.Where(g => graph.Member.Contains(g.Id) || graph.Owner.Contains(g.Id)).ToList(), Scope = GroupsScope.Yours }
             : GroupsDirectory.OfTeams(joined));
+
+    // --- the call history, the activity feed ----------------------------------------------------------------------------
+
+    /// <summary>The account's call history, newest first; null for an account with none (the chat service's 404).</summary>
+    public List<CallRecord>? Calls { get; set; }
+
+    /// <summary>The account's activity feed and mentions, newest first; null for an account with neither.</summary>
+    public List<ActivityItem>? Activity { get; set; }
+
+    /// <summary>When set, the call history is refused (as a 403 would be).</summary>
+    public bool CallsFail { get; set; }
+
+    /// <summary>How many times the call history has been asked for.</summary>
+    public int CallsCalls => _callsCalls;
+
+    private int _callsCalls;
+
+    public Task<IReadOnlyList<CallRecord>?> CallsAsync(int max, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _callsCalls);
+        return CallsFail
+            ? throw new VfsException(VfsError.AccessDenied, "Teams (fake) answered 403: the call history refused")
+            : Task.FromResult<IReadOnlyList<CallRecord>?>(Calls?.Take(max).ToList());
+    }
+
+    public Task<IReadOnlyList<ActivityItem>?> ActivityAsync(int max, CancellationToken ct) => Task.FromResult<IReadOnlyList<ActivityItem>?>(Activity?.Take(2 * max).ToList());
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
