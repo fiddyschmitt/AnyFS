@@ -161,7 +161,7 @@ public class MicrosoftCloudTests
     [TestMethod]
     public async Task TheRealmLookupSaysWhichCloudAnAccountIsIn()
     {
-        // what login.microsoftonline.com's GetUserRealm answers for an account in each cloud
+        // what the identity platform publishes for an organisation's domain in each cloud (MicrosoftRealm)
         var lookups = new List<string>();
         HttpMessageHandler Realm(int status, string body) => new AnsweringHandler(request =>
         {
@@ -169,13 +169,13 @@ public class MicrosoftCloudTests
             return new HttpResponseMessage((HttpStatusCode)status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
         });
 
-        Assert.AreSame(MicrosoftCloud.UsGovernment, await MicrosoftCloud.FindAsync("jane@acme.gov", Realm(200, """{"NameSpaceType":"Managed","CloudInstanceName":"microsoftonline.us"}"""), CancellationToken.None));
-        StringAssert.StartsWith(lookups.Single(), "https://login.microsoftonline.com/GetUserRealm.srf?login=jane%40acme.gov");
-        Assert.AreSame(MicrosoftCloud.Global, await MicrosoftCloud.FindAsync("jane@contoso.com", Realm(200, """{"NameSpaceType":"Managed","CloudInstanceName":"microsoftonline.com"}"""), CancellationToken.None));
+        Assert.AreSame(MicrosoftCloud.UsGovernment, await MicrosoftCloud.FindAsync("jane@acme.gov", Realm(200, """{"tenant_region_scope":"USGov","tenant_region_sub_scope":"DODCON","cloud_instance_name":"microsoftonline.us"}"""), CancellationToken.None));
+        Assert.AreEqual("https://login.microsoftonline.com/acme.gov/v2.0/.well-known/openid-configuration", lookups.Single());
+        Assert.AreSame(MicrosoftCloud.Global, await MicrosoftCloud.FindAsync("jane@contoso.com", Realm(200, """{"tenant_region_scope":"NA","cloud_instance_name":"microsoftonline.com"}"""), CancellationToken.None));
         Assert.AreSame(MicrosoftCloud.Global, await MicrosoftCloud.FindAsync("jane@contoso.com", Realm(500, "oops"), CancellationToken.None), "a lookup that fails is the global cloud");
         Assert.AreSame(MicrosoftCloud.Global, await MicrosoftCloud.FindAsync("jane@contoso.com", Realm(200, "<html>a captive portal</html>"), CancellationToken.None));
         Assert.AreSame(MicrosoftCloud.Global, await MicrosoftCloud.FindAsync("jane@contoso.onmicrosoft.com", Realm(200, "{}"), CancellationToken.None));
-        Assert.AreEqual(4, lookups.Count, "an initial domain needs no lookup");
+        Assert.AreEqual(6, lookups.Count, "a failing host's answer is asked of the other; an initial domain needs no lookup");
     }
 
     private static SignInOptions Options(string clientId, string tenant, MicrosoftCloud? cloud)

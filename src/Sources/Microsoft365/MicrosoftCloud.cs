@@ -1,5 +1,5 @@
-using System.Text.Json;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 using Microsoft.Identity.Client;
 
 namespace AnyFS.Sources.Microsoft365;
@@ -139,8 +139,8 @@ public sealed class MicrosoftCloud
 
     /// <summary>
     /// The cloud an account is in, by its address: its tenant's initial domain says so outright (jane@contoso.onmicrosoft.us),
-    /// else Microsoft's public realm lookup (GetUserRealm, no sign-in needed; an account whose cloud instance is
-    /// microsoftonline.us is in the US Government cloud); the global cloud when the lookup says nothing or cannot be made.
+    /// else what the identity platform publishes for its domain (<see cref="MicrosoftRealm"/>, no sign-in needed; a GCC High
+    /// or DoD organisation is in the US Government cloud); the global cloud when that says nothing or cannot be read.
     /// </summary>
     /// <param name="handler">The handler the lookup goes through: a test's; null for the network.</param>
     public static async Task<MicrosoftCloud> FindAsync(string address, HttpMessageHandler? handler, CancellationToken ct)
@@ -150,24 +150,7 @@ public sealed class MicrosoftCloud
             return known;
         }
 
-        try
-        {
-            using var http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: true);
-            http.Timeout = TimeSpan.FromSeconds(15);
-            using var response = await http.GetAsync($"https://{Global.LoginHost}/GetUserRealm.srf?login={Uri.EscapeDataString(address)}&json=1", ct).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
-            {
-                return Global;
-            }
-
-            using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
-            var instance = json.RootElement.ValueKind == JsonValueKind.Object && json.RootElement.TryGetProperty("CloudInstanceName", out var c) && c.ValueKind == JsonValueKind.String ? c.GetString() : null;
-            return instance is not null && instance.EndsWith("microsoftonline.us", StringComparison.OrdinalIgnoreCase) ? UsGovernment : Global;
-        }
-        catch (Exception ex) when (ex is HttpRequestException or JsonException || ex is TaskCanceledException && !ct.IsCancellationRequested)
-        {
-            return Global;
-        }
+        return await MicrosoftRealm.LookupAsync(address, handler, ct).ConfigureAwait(false) is { IsUsGovernment: true } ? UsGovernment : Global;
     }
 
     /// <summary>The cloud to sign in to: the one chosen, else the one the site's address or the tenant's domain is in, else the global cloud.</summary>
