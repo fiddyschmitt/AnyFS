@@ -877,6 +877,107 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
     /// <summary>A service's token, for the probe to read its scopes (never written anywhere).</summary>
     internal Task<string> ProbeTokenAsync(TeamsService service, CancellationToken ct) => tokenFor(service, null, ct);
 
+    /// <summary>How the probe's ranged request goes: with the skype token (Teams' media service alone), a service's bearer, or none (a pre-signed download address on SharePoint alone).</summary>
+    internal enum ProbeAuth
+    {
+        Skype,
+        Bearer,
+        None,
+    }
+
+    /// <summary>
+    /// BRANCH BUILD ONLY: the first 16 bytes of an address, as the probe asks for them: its status (0 not asked: a host the
+    /// credential may not go to; -1 unreachable; -2 no answer in time; -3 no credential in hand), content type, the length
+    /// answered and the whole length a range names, whether ranges are taken, and those bytes (for their kind alone).
+    /// </summary>
+    internal async Task<(int Status, string? Type, long? Length, long? Total, bool Ranges, byte[] Head)> ProbeHeadAsync(string url, ProbeAuth auth, TeamsService service, CancellationToken ct)
+    {
+        var services = await DiscoverAsync(ct).ConfigureAwait(false);
+        string? credential;
+        switch (auth)
+        {
+            case ProbeAuth.Skype:
+                if (!TeamsFiles.IsMediaService(url, services.Ams))
+                {
+                    return (0, null, null, null, false, []);
+                }
+
+                credential = services.SkypeToken is { } skype ? $"skype_token {skype}" : null;
+                break;
+            case ProbeAuth.Bearer:
+                if (!MayCarry(service, url))
+                {
+                    return (0, null, null, null, false, []);
+                }
+
+                try
+                {
+                    credential = $"Bearer {await tokenFor(service, null, ct).ConfigureAwait(false)}";
+                }
+                catch (Exception ex) when (ex is VfsException or SignInRequiredException)
+                {
+                    credential = null;
+                }
+
+                break;
+            default:
+                if (!MayCarry(TeamsService.SharePoint, url))
+                {
+                    return (0, null, null, null, false, []);
+                }
+
+                credential = "";
+                break;
+        }
+
+        if (credential is null)
+        {
+            return (-3, null, null, null, false, []);
+        }
+
+        await _pace.WaitAsync(ct).ConfigureAwait(false);
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        if (credential.Length > 0)
+        {
+            request.Headers.TryAddWithoutValidation("Authorization", credential);
+        }
+
+        if (auth == ProbeAuth.Skype)
+        {
+            request.Headers.TryAddWithoutValidation("x-ms-client-version", ClientVersion);
+        }
+
+        request.Headers.Range = new RangeHeaderValue(0, 15);
+        try
+        {
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            var head = new byte[16];
+            var read = 0;
+            if (response.IsSuccessStatusCode)
+            {
+                await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+                while (read < head.Length && await body.ReadAsync(head.AsMemory(read), ct).ConfigureAwait(false) is var n and > 0)
+                {
+                    read += n;
+                }
+            }
+
+            return ((int)response.StatusCode, response.Content.Headers.ContentType?.MediaType, response.Content.Headers.ContentLength, response.Content.Headers.ContentRange?.Length,
+                response.StatusCode == HttpStatusCode.PartialContent || response.Headers.AcceptRanges.Contains("bytes"), head[..read]);
+        }
+        catch (HttpRequestException)
+        {
+            return (-1, null, null, null, false, []);
+        }
+        catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return (-2, null, null, null, false, []);
+        }
+    }
+
+    /// <summary>BRANCH BUILD ONLY: asks the page for the tokens it has not handed out, as the source does behind its listings.</summary>
+    internal Task<bool> ProbeSeekAsync(CancellationToken ct) => SeekTokensAsync(ct);
+
     /// <summary>The host the page used SharePoint's token on, for the probe.</summary>
     internal string? ProbeSharePointHost => sharePointHost?.Invoke();
 

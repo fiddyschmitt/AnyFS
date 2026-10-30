@@ -27,6 +27,9 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
     private readonly List<(string Id, bool Meeting)> _chats = [];
     private TeamsRest.Services? _services;
 
+    // the items the recordings name (their video and transcript, in Teams' media service and in OneDrive), for the checks
+    private readonly List<(string Type, string? Uri, string? DriveId, string? ItemId)> _items = [];
+
     public async Task<string> RunAsync(CancellationToken ct)
     {
         Line($"AnyFS Teams probe (branch teams-probe), {DateTimeOffset.UtcNow.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)} UTC, cloud {cloud.Display}");
@@ -38,6 +41,7 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
         await SectionAsync("conversations (the chat service)", ConversationsAsync, ct).ConfigureAwait(false);
         await SectionAsync("special conversations", SpecialAsync, ct).ConfigureAwait(false);
         await SectionAsync($"meeting chats (the latest {MeetingChats}): recordings, transcripts, calls", MeetingsAsync, ct).ConfigureAwait(false);
+        await SectionAsync("recordings and transcripts in Teams' media service (the skype token)", MediaAsync, ct).ConfigureAwait(false);
         await SectionAsync($"channel posts (up to {Channels} channels) and chats (up to {OtherChats}): properties and cards", PostsAsync, ct).ConfigureAwait(false);
         await SectionAsync("channel threads (one a team, up to 10): properties and rosters", ThreadsAsync, ct).ConfigureAwait(false);
         await SectionAsync("Microsoft Graph", GraphAsync, ct).ConfigureAwait(false);
@@ -46,6 +50,68 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
         Line("");
         Line("End of report.");
         return _text.ToString();
+    }
+
+    /// <summary>
+    /// The later part: the sections that need SharePoint's or Graph's token, once one is in hand. They are waited for up to
+    /// <paramref name="wait"/> (the source asks the page for them behind its listings; after a minute the probe asks once
+    /// itself); then the tokens, Graph, OneDrive and the recordings' and transcripts' OneDrive copies are probed. Only this
+    /// part is returned, to go after the report.
+    /// </summary>
+    public async Task<string> RunLaterAsync(TimeSpan wait, CancellationToken ct)
+    {
+        _text.Clear();
+        Line("");
+        Line($"[later: SharePoint's and Graph's tokens, waited for up to {wait.TotalMinutes:F0} minutes]");
+        var start = DateTime.UtcNow;
+        var asked = false;
+        while (true)
+        {
+            var (sharePoint, graph) = (await InHandAsync(TeamsService.SharePoint, ct).ConfigureAwait(false), await InHandAsync(TeamsService.Graph, ct).ConfigureAwait(false));
+            if (sharePoint || graph)
+            {
+                Line($"  in hand after {(DateTime.UtcNow - start).TotalMinutes:F1} min: SharePoint's {(sharePoint ? "yes" : "no")}, Graph's {(graph ? "yes" : "no")}");
+                break;
+            }
+
+            if (!asked && DateTime.UtcNow - start > TimeSpan.FromMinutes(1))
+            {
+                asked = true;
+                Line($"  asked the page for them itself (a headless load): {(await rest.ProbeSeekAsync(ct).ConfigureAwait(false) ? "one came" : "none came")}");
+                continue;
+            }
+
+            if (DateTime.UtcNow - start > wait)
+            {
+                Line($"  neither came within {wait.TotalMinutes:F0} minutes");
+                Line("");
+                Line("End of the later part.");
+                return _text.ToString();
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(15), ct).ConfigureAwait(false);
+        }
+
+        await SectionAsync("tokens, now", TokensAsync, ct).ConfigureAwait(false);
+        await SectionAsync("Microsoft Graph, now", GraphAsync, ct).ConfigureAwait(false);
+        await SectionAsync("OneDrive (SharePoint's token), now", OneDriveAsync, ct).ConfigureAwait(false);
+        await SectionAsync("recordings and transcripts in OneDrive", RecordingFilesAsync, ct).ConfigureAwait(false);
+        Line("");
+        Line("End of the later part.");
+        return _text.ToString();
+    }
+
+    private async Task<bool> InHandAsync(TeamsService service, CancellationToken ct)
+    {
+        try
+        {
+            await rest.ProbeTokenAsync(service, ct).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex) when (ex is AnyFS.Sdk.VfsException or SignInRequiredException)
+        {
+            return false;
+        }
     }
 
     private void Line(string text) => _text.Append(text).Append('\n');
@@ -239,8 +305,16 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
                 Line($"    properties: {Union(these.Select(m => Obj(m, "properties")), 1)}");
                 Line($"    properties in JSON: {PropertyShapes(these)}");
                 Line($"    content: {string.Join(" | ", these.Select(m => XmlShape(Str(m, "content"))).Where(s => s.Length > 0).Distinct().Take(6))}");
+                Line($"    content kinds: {Counted(these.Select(m => ContentKind(Str(m, "content"))))}; as JSON: {string.Join(" | ", these.Select(m => JsonShapeOf(Str(m, "content"))).Where(s => s.Length > 0).Distinct().Take(4))}");
                 Line($"    addresses: {string.Join(" | ", these.SelectMany(m => Addresses(Str(m, "content"))).Select(UrlShape).Distinct().Take(12))}");
             }
+
+            foreach (var recording in all.Where(m => Str(m, "messagetype") == "RichText/Media_CallRecording"))
+            {
+                _items.AddRange(Items(Str(recording, "content")));
+            }
+
+            Line($"  items the recordings name: {Counted(_items.Select(i => i.Type))}; with a drive and item id: {_items.Count(i => i.DriveId is not null && i.ItemId is not null)}");
 
             var files = all.SelectMany(m => FileEntries(Obj(m, "properties"))).ToList();
             Line($"  shared files in meeting chats: {files.Count}; a file: {Union(files, 2)}; kinds: {Counted(files.Select(f => Extension(Str(f, "fileName") ?? Str(f, "title"))))}");
@@ -249,6 +323,146 @@ internal sealed partial class TeamsProbe(TeamsRest rest, TeamsCloud cloud, strin
         finally
         {
             docs.ForEach(d => d.Dispose());
+        }
+    }
+
+    /// <summary>The recordings' and transcripts' copies in Teams' media service, read (their first bytes) with the skype token, which is always in hand.</summary>
+    private async Task MediaAsync(CancellationToken ct)
+    {
+        if (_items.Count == 0)
+        {
+            Line("  no recording in the meeting chats read");
+            return;
+        }
+
+        foreach (var type in _items.Select(i => i.Type).Distinct().Where(t => t.StartsWith("ams", StringComparison.OrdinalIgnoreCase) || t is "video" or "rosterevents"))
+        {
+            foreach (var item in _items.Where(i => i.Type == type && i.Uri is not null).Take(3))
+            {
+                Line($"  {Safe(type)} at {UrlShape(item.Uri)}: {HeadText(await rest.ProbeHeadAsync(item.Uri!, TeamsRest.ProbeAuth.Skype, TeamsService.ChatService, ct).ConfigureAwait(false))}");
+            }
+        }
+    }
+
+    /// <summary>The later part's check of the recordings' and transcripts' OneDrive copies: by Graph's drive item, by SharePoint's, and by the address the message gives.</summary>
+    private async Task RecordingFilesAsync(CancellationToken ct)
+    {
+        var files = _items.Where(i => i.Type.StartsWith("onedrive", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (files.Count == 0)
+        {
+            Line("  no OneDrive copy named by the recordings read");
+            return;
+        }
+
+        foreach (var type in files.Select(f => f.Type).Distinct())
+        {
+            foreach (var item in files.Where(f => f.Type == type).Take(3))
+            {
+                Line($"  {Safe(type)}:");
+                if (item.DriveId is { } drive && item.ItemId is { } id)
+                {
+                    await DriveItemAsync("through Graph's drive item", $"{rest.ProbeGraphRoot}/v1.0/drives/{Uri.EscapeDataString(drive)}/items/{Uri.EscapeDataString(id)}", TeamsService.Graph, ct).ConfigureAwait(false);
+                    if (rest.ProbeSharePointHost is not null && item.Uri is { } given && Uri.TryCreate(given, UriKind.Absolute, out var site) && TeamsServices.IsSharePointHost(site.Host))
+                    {
+                        await DriveItemAsync("through SharePoint's drive item", $"https://{site.Host}/_api/v2.0/drives/{Uri.EscapeDataString(drive)}/items/{Uri.EscapeDataString(id)}", TeamsService.SharePoint, ct).ConfigureAwait(false);
+                    }
+                }
+
+                if (item.Uri is { } uri)
+                {
+                    Line($"    at the address given, {UrlShape(uri)}, with SharePoint's token: {HeadText(await rest.ProbeHeadAsync(uri, TeamsRest.ProbeAuth.Bearer, TeamsService.SharePoint, ct).ConfigureAwait(false))}");
+                }
+            }
+        }
+    }
+
+    /// <summary>A drive item's metadata (its keys, size and whether it gives a download address), and that address's first bytes.</summary>
+    private async Task DriveItemAsync(string how, string url, TeamsService service, CancellationToken ct)
+    {
+        var (status, json) = await GetAsync(url, service, ct).ConfigureAwait(false);
+        string? download;
+        using (json)
+        {
+            var root = json?.RootElement ?? default;
+            download = Str(root, "@microsoft.graph.downloadUrl") ?? Str(root, "@content.downloadUrl");
+            Line($"    {how}: {StatusText(status)}{(json is null ? "" : $"; {Union([root], 1)}; size {Str(root, "size") ?? "?"}; a download address: {(download is null ? "no" : "yes")}; kind {Extension(Str(root, "name"))}")}");
+        }
+
+        if (download is not null)
+        {
+            Line($"      its download address: {HeadText(await rest.ProbeHeadAsync(download, TeamsRest.ProbeAuth.None, TeamsService.SharePoint, ct).ConfigureAwait(false))}");
+        }
+    }
+
+    /// <summary>A ranged request's answer as the report shows it: status, type, lengths, ranges, and what its first bytes are (never the bytes).</summary>
+    private static string HeadText((int Status, string? Type, long? Length, long? Total, bool Ranges, byte[] Head) head)
+        => head.Status <= 0
+            ? StatusText(head.Status)
+            : $"status {head.Status}; type {Safe(head.Type ?? "(none)")}; length {head.Length?.ToString(CultureInfo.InvariantCulture) ?? "?"}; whole {head.Total?.ToString(CultureInfo.InvariantCulture) ?? "?"}; ranges {(head.Ranges ? "yes" : "no")}; starts as {Kind(head.Head)}";
+
+    /// <summary>What a file's first bytes say it is (WebVTT, JSON, MP4, markup, zip, PDF), never the bytes themselves.</summary>
+    internal static string Kind(byte[] head)
+    {
+        if (head.Length == 0)
+        {
+            return "(nothing)";
+        }
+
+        var text = Encoding.ASCII.GetString(head).TrimStart('﻿', ' ', '\r', '\n', '\t', '\0');
+        return text.StartsWith("WEBVTT", StringComparison.Ordinal) ? "WebVTT"
+            : head.Length >= 8 && Encoding.ASCII.GetString(head, 4, 4) == "ftyp" ? "MP4"
+            : text.StartsWith('{') || text.StartsWith('[') ? "JSON"
+            : text.StartsWith('<') ? "markup"
+            : text.StartsWith("PK", StringComparison.Ordinal) ? "zip"
+            : text.StartsWith("%PDF", StringComparison.Ordinal) ? "PDF"
+            : head.Length >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF ? "text (UTF-8)"
+            : "other";
+    }
+
+    /// <summary>A message's content kind: none, markup, JSON or plain text.</summary>
+    private static string ContentKind(string? content)
+        => string.IsNullOrWhiteSpace(content) ? "empty" : content.TrimStart()[0] switch { '<' => "markup", '{' or '[' => "JSON", _ => "text" };
+
+    /// <summary>A message's content as JSON, its shape (keys and kinds alone); empty where it is no JSON.</summary>
+    private static string JsonShapeOf(string? content)
+    {
+        if (ContentKind(content) != "JSON")
+        {
+            return "";
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(content!);
+            return Shape(doc.RootElement, 4);
+        }
+        catch (JsonException)
+        {
+            return "(not JSON after all)";
+        }
+    }
+
+    /// <summary>The items a recording names (<c>&lt;item type uri driveId driveItemId&gt;</c>): their kind, address and drive ids.</summary>
+    internal static IEnumerable<(string Type, string? Uri, string? DriveId, string? ItemId)> Items(string? content)
+    {
+        if (string.IsNullOrEmpty(content))
+        {
+            yield break;
+        }
+
+        foreach (Match tag in Tag().Matches(content))
+        {
+            if (!tag.Groups["e"].Value.Equals("item", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var attributes = Attribute().Matches(tag.Groups["a"].Value).GroupBy(a => a.Groups["n"].Value, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key, g => System.Net.WebUtility.HtmlDecode(g.First().Groups["v"].Value), StringComparer.OrdinalIgnoreCase);
+            if (attributes.GetValueOrDefault("type") is { Length: > 0 } type)
+            {
+                yield return (type, attributes.GetValueOrDefault("uri"), attributes.GetValueOrDefault("driveId"), attributes.GetValueOrDefault("driveItemId"));
+            }
         }
     }
 

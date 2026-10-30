@@ -57,6 +57,22 @@ public class TeamsProbeTests
     }
 
     [TestMethod]
+    public void ARecordingsItemsAndAFilesKindAreReadWithoutTheirContent()
+    {
+        // a recording message's items as the work probe showed their shape: kind, address, drive and item ids
+        const string Recording = """<URIObject type="Video.2/CallRecording.1"><RecordingContent timestamp="t" duration="d"><item type="amsVideo" uri="https://api.ams.gov.teams.microsoft.us/v1/objects/0-x/views/video"/><item type="onedriveForBusinessVideo" uri="https://contoso-my.sharepoint.us/personal/jane/Documents/Recordings/a.mp4" driveId="b!drive" driveItemId="01ITEM"/><item type="onedriveForBusinessTranscript" uri="https://contoso-my.sharepoint.us/personal/jane/_api/v2.1/drives/b!drive/items/01ITEM/media/transcripts/T1/content" id="T1" driveId="b!drive" driveItemId="01ITEM"/></RecordingContent></URIObject>""";
+        var items = TeamsProbe.Items(Recording).ToList();
+        CollectionAssert.AreEqual(new[] { "amsVideo", "onedriveForBusinessVideo", "onedriveForBusinessTranscript" }, items.Select(i => i.Type).ToArray());
+        Assert.AreEqual(("b!drive", "01ITEM"), (items[1].DriveId, items[1].ItemId));
+        StringAssert.StartsWith(items[0].Uri, "https://api.ams.gov.teams.microsoft.us/");
+
+        Assert.AreEqual("WebVTT", TeamsProbe.Kind(Encoding.ASCII.GetBytes("WEBVTT\n\n00:00:0")));
+        Assert.AreEqual("MP4", TeamsProbe.Kind([0, 0, 0, 0x20, (byte)'f', (byte)'t', (byte)'y', (byte)'p', (byte)'i', (byte)'s', (byte)'o', (byte)'m']));
+        Assert.AreEqual("JSON", TeamsProbe.Kind(Encoding.ASCII.GetBytes("{\"entries\":[")));
+        Assert.AreEqual("(nothing)", TeamsProbe.Kind([]));
+    }
+
+    [TestMethod]
     public void ATokensScopesAreReadWithoutTheToken()
     {
         static string B64(string s) => Convert.ToBase64String(Encoding.UTF8.GetBytes(s)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
@@ -89,8 +105,12 @@ public class TeamsProbeTests
             Mri = session.Mri,
         };
 
-        var report = await new TeamsProbe(rest, TeamsCloud.Global, session.Mri).RunAsync(CancellationToken.None);
+        var probe = new TeamsProbe(rest, TeamsCloud.Global, session.Mri);
+        var report = await probe.RunAsync(CancellationToken.None);
+        report += await probe.RunLaterAsync(TimeSpan.FromMinutes(2), CancellationToken.None);
         Console.WriteLine(report);
+        StringAssert.Contains(report, "[recordings and transcripts in Teams' media service (the skype token)]");
+        StringAssert.Contains(report, "End of the later part.");
 
         StringAssert.Contains(report, "[teams, channels and chats (the aggregator)]");
         StringAssert.Contains(report, "End of report.");

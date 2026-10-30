@@ -96,17 +96,31 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     internal byte[]? ProbeReport { get; private set; }
 
-    /// <summary>BRANCH BUILD ONLY: runs the probe and keeps its report: in %LOCALAPPDATA%\AnyFS\teams-probe, and at the root as teams-probe.txt.</summary>
+    /// <summary>
+    /// BRANCH BUILD ONLY: runs the probe and keeps its report: in %LOCALAPPDATA%\AnyFS\teams-probe, and at the root as
+    /// teams-probe.txt. Written once the first part is done, and again with the later part (SharePoint's and Graph's
+    /// tokens waited for up to ten minutes) after it.
+    /// </summary>
     private async Task ProbeAsync(TeamsRest live, CancellationToken ct)
     {
         Logger.LogInformation("teams: probing what the account's Teams offers (branch build)");
-        var report = await new TeamsProbe(live, _cloud, live.Mri).RunAsync(ct).ConfigureAwait(false);
+        var probe = new TeamsProbe(live, _cloud, live.Mri);
+        var report = await probe.RunAsync(ct).ConfigureAwait(false);
         var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AnyFS", "teams-probe");
         Directory.CreateDirectory(folder);
         var file = Path.Combine(folder, $"{DateTime.Now.ToString("yyyy-MM-dd_HHmm", CultureInfo.InvariantCulture)}_teams-probe-{_cloud.Name}.txt");
+        await KeepReportAsync(file, report + "\n(The later part, with SharePoint's and Graph's tokens, follows here within ten minutes.)\n", ct).ConfigureAwait(false);
+        Logger.LogInformation("teams: the probe's report is at {File}, and at the source's root as teams-probe.txt; its later part follows within ten minutes", file);
+
+        report += await probe.RunLaterAsync(TimeSpan.FromMinutes(10), ct).ConfigureAwait(false);
+        await KeepReportAsync(file, report, ct).ConfigureAwait(false);
+        Logger.LogInformation("teams: the probe's report is complete at {File}", file);
+    }
+
+    private async Task KeepReportAsync(string file, string report, CancellationToken ct)
+    {
         await File.WriteAllTextAsync(file, report, ct).ConfigureAwait(false);
         ProbeReport = System.Text.Encoding.UTF8.GetBytes(report);
-        Logger.LogInformation("teams: the probe's report is at {File}, and at the source's root as teams-probe.txt", file);
         await Kept.Cache.RefreshAsync("", ct).ConfigureAwait(false);
     }
 
