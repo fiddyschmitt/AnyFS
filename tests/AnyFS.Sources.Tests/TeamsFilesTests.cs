@@ -33,6 +33,28 @@ public class TeamsFilesTests
     }
 
     [TestMethod]
+    public void GraphsSharesIdIsTheAddressInUnpaddedBase64Url()
+    {
+        // characters whose base64 has '+', '/' and padding: all three made url-safe, and the address comes back whole
+        const string Address = "https://t.sharepoint.com/sites/lab/Shared Documents/General/a>>>b???c.txt";
+        var id = TeamsFiles.ShareId(Address);
+        StringAssert.StartsWith(id, "u!");
+        Assert.IsFalse(id.IndexOfAny(['+', '/', '=']) >= 0, id);
+        var body = id[2..].Replace('-', '+').Replace('_', '/');
+        Assert.AreEqual(Address, System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(body.PadRight(body.Length + (4 - body.Length % 4) % 4, '='))));
+    }
+
+    [TestMethod]
+    public void ALibrarysSiteIsItsAddressWithoutTheLibrary()
+    {
+        Assert.AreEqual("https://t.sharepoint.com/sites/lab", TeamsFiles.SiteOfLibrary("https://t.sharepoint.com/sites/lab/Shared%20Documents"));
+        Assert.AreEqual("https://t-my.sharepoint.us/personal/jane_t_com", TeamsFiles.SiteOfLibrary("https://t-my.sharepoint.us/personal/jane_t_com/Documents"));
+        Assert.IsNull(TeamsFiles.SiteOfLibrary("https://evil.example/sites/lab/Shared%20Documents"));
+        Assert.IsNull(TeamsFiles.SiteOfLibrary(null));
+        Assert.AreEqual(TeamsFiles.SiteKey("https://t.sharepoint.com/sites/My%20Lab/"), TeamsFiles.SiteKey("https://T.sharepoint.com/sites/my lab"), "one site however each search writes it");
+    }
+
+    [TestMethod]
     public void TheMediaServiceIsTeamsOwnHostsAlone()
     {
         Assert.IsTrue(TeamsFiles.IsMediaService("https://as-prod.asyncgw.teams.microsoft.com/v1/objects/0-x/views/imgo", null));

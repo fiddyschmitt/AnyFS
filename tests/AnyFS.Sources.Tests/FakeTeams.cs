@@ -191,10 +191,18 @@ internal sealed class FakeTeams : ITeamsApi
 
     // --- the tokens the page mints as it gets round to it ---------------------------------------------------------------
 
-    /// <summary>Whether SharePoint's token is in hand (the live page's often is, not always): without it every SharePoint call is refused at once, as the live seam refuses.</summary>
+    /// <summary>
+    /// Whether SharePoint's token is in hand (the live page's often is, not always). With neither it nor Graph's, every file
+    /// call is refused at once, as the live seam refuses; with Graph's alone, the group sites come as Microsoft Search gives
+    /// them, without their groups.
+    /// </summary>
     public bool SharePointReady { get; set; } = true;
 
+    /// <summary>Whether a Graph token is in hand: every group (<see cref="Directory"/>) is listed, and the files are read with it while SharePoint's token is not in hand.</summary>
     public bool GraphReady { get; set; }
+
+    /// <summary>The shared files' own addresses asked for (Graph opens a shared file by it).</summary>
+    public List<string> SharedUrlsAsked { get; } = [];
 
     /// <summary>When set, a background ask for the tokens brings SharePoint's (once <see cref="SeekHold"/> lets it).</summary>
     public bool SharePointComesWhenAsked { get; set; }
@@ -228,10 +236,16 @@ internal sealed class FakeTeams : ITeamsApi
     private void SharePoint()
     {
         Interlocked.Increment(ref _sharePointCalls);
-        if (!SharePointReady)
+        if (!SharePointReady && !GraphReady)
         {
             throw TokenNotHandedOutException.Refusal(TeamsService.SharePoint);
         }
+    }
+
+    public Task<string?> TeamSiteAsync(TeamInfo team, CancellationToken ct)
+    {
+        SharePoint();
+        return Task.FromResult(team.GroupId is { } group && _sites.TryGetValue(group, out var site) ? site : null);
     }
 
     public Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, CancellationToken ct)
@@ -267,9 +281,17 @@ internal sealed class FakeTeams : ITeamsApi
         return Task.FromResult<IReadOnlyList<DriveEntry>>(entries.Values.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList());
     }
 
-    public Task<DriveEntry?> FileAsync(string siteUrl, string path, CancellationToken ct)
+    public Task<DriveEntry?> FileAsync(string siteUrl, string path, string? url, CancellationToken ct)
     {
         SharePoint();
+        if (url is not null && !SharePointReady)
+        {
+            lock (SharedUrlsAsked)
+            {
+                SharedUrlsAsked.Add(url);
+            }
+        }
+
         return Task.FromResult(_library.TryGetValue($"{siteUrl}|{path}", out var f) ? new DriveEntry(Path.GetFileName(path), false, f.Bytes.Length, f.Modified, Download(siteUrl, path)) : null);
     }
 
@@ -308,13 +330,15 @@ internal sealed class FakeTeams : ITeamsApi
     public Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct)
     {
         SharePoint();
-        return Task.FromResult<IReadOnlyList<GroupSite>>(_groupSites.ToList());
+
+        // Microsoft Search through Graph names no site's group
+        return Task.FromResult<IReadOnlyList<GroupSite>>(SharePointReady ? _groupSites.ToList() : _groupSites.Select(s => s with { GroupId = null }).ToList());
     }
 
-    /// <summary>As the live seam: Graph's every group with its token in hand, else the group sites given, else the teams' own.</summary>
+    /// <summary>As the live seam: Graph's every group with its token in hand, else the group sites SharePoint gave, else the teams' own.</summary>
     public Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct)
-        => Task.FromResult(GraphReady && Directory is { } graph ? graph : sites is null ? GroupsDirectory.OfTeams(joined) : new GroupsDirectory(
-            sites.Select(s => new GroupInfo(s.GroupId, s.Name) { Kind = "Microsoft 365 group", SiteUrl = s.SiteUrl, Description = s.Description, Created = s.Created }).ToList(),
+        => Task.FromResult(GraphReady && Directory is { } graph ? graph : !SharePointReady || sites is null ? GroupsDirectory.OfTeams(joined) : new GroupsDirectory(
+            sites.Where(s => s.GroupId is not null).Select(s => new GroupInfo(s.GroupId!, s.Name) { Kind = "Microsoft 365 group", SiteUrl = s.SiteUrl, Description = s.Description, Created = s.Created }).ToList(),
             joined.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
             joined.Where(t => t.Owner).Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase),
             Complete: false,

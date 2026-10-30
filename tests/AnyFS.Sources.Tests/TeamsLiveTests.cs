@@ -1,7 +1,11 @@
 using System.Text;
+using AnyFS.Fixtures;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
+using AnyFS.Sources.Common;
+using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.Teams;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Sources.Tests;
 
@@ -155,6 +159,100 @@ public class TeamsLiveTests
         StringAssert.Contains(md, "| Mark 8 Project Team | Microsoft 365 group | Public |");
         StringAssert.Contains(md, "| AnyFS Lab | Microsoft 365 group | Private | yes | owner |");
         StringAssert.Contains(md, "| MSFT | Microsoft 365 group | Org-wide | yes | member |");
+    }
+
+    /// <summary>
+    /// The libraries through Microsoft Graph alone, as at work when the page hands out Graph's token and not SharePoint's.
+    /// The sandbox's Teams client mints no Graph token, so the AnyFS app's stands in (Files.ReadWrite.All, Sites.ReadWrite.All,
+    /// no Group.Read.All), from a tests/fixtures/SharePointSignIn sign-in as the tester (ANYFS_TEST_GRAPH_CACHE names its file,
+    /// else the default); SharePoint's token is withheld.
+    /// </summary>
+    [TestMethod]
+    [Timeout(300_000)]
+    public async Task TheLibrariesAreReadThroughGraphWithoutSharePointsToken()
+    {
+        var (account, _) = Env();
+        var cache = Environment.GetEnvironmentVariable("ANYFS_TEST_GRAPH_CACHE") ?? SignInCacheFile.DefaultPath;
+        if (SignInCacheFile.Read(cache) is not { } saved)
+        {
+            Assert.Inconclusive($"no sign-in at {cache}: run tests/fixtures/SharePointSignIn --account {account}");
+            return;
+        }
+
+        var entra = new EntraSignIn(new SignInOptions(new Microsoft365Service("Teams (test)", "teams", "the libraries"), EntraSignIn.DefaultClientId, account.Split('@')[1], account,
+            SignInMethod.DeviceCode, ["Files.ReadWrite.All", "Sites.ReadWrite.All"], _ => { }, null, () => saved, _ => { }), NullLogger.Instance);
+        using (var signIn = new CancellationTokenSource(TimeSpan.FromMinutes(1)))
+        {
+            try
+            {
+                await entra.SignInAsync(signIn.Token);
+            }
+            catch (Exception ex) when (ex is SignInRequiredException or OperationCanceledException)
+            {
+                Assert.Inconclusive($"the saved sign-in for {account} has lapsed: run tests/fixtures/SharePointSignIn --account {account} ({ex.Message})");
+            }
+        }
+
+        var graph = await entra.GetAccessTokenAsync(CancellationToken.None);
+        var browser = BrowserLocator.Find(null, "ANYFS_TEAMS_BROWSER") ?? throw new AssertInconclusiveException("no browser for the web session");
+        var session = new TeamsWebSession(new Uri(TeamsCloud.Global.TeamsHost), browser, WebSignInTarget.ProfileFor("teams-browser", account, "ANYFS_TEAMS_PROFILES"), account, NullLogger.Instance);
+        await session.TokenAsync(TeamsService.Aggregator, interactive: false, _ => { }, CancellationToken.None);
+        var rest = new TeamsRest(new Uri(TeamsCloud.Global.ApiHost), (s, _, c) => s switch
+        {
+            TeamsService.Graph => Task.FromResult(graph),
+            TeamsService.SharePoint => throw TokenNotHandedOutException.Refusal(s),
+            _ => session.TokenAsync(s, interactive: false, _ => { }, c),
+        }, 4, NullLogger.Instance, inHand: s => s == TeamsService.Graph ? graph : null)
+        {
+            Account = session.Account ?? account,
+            Mri = session.Mri,
+        };
+        await using var source = new TeamsSource(new TeamsSettings { Account = account }, new TeamsStandIn(rest));
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+
+        // Other groups from Microsoft Search, the tester's own team told by its site; a group's library
+        var others = (await ListAsync(source, "Other groups")).Select(e => e.Name).ToList();
+        CollectionAssert.Contains(others, "Mark 8 Project Team");
+        CollectionAssert.DoesNotContain(others, "AnyFS Lab", "its team is at the root, though Search names no site's group");
+        Assert.IsTrue((await ListAsync(source, "Other groups/Mark 8 Project Team")).Count > 0, "its library through Graph");
+
+        // the channel's folder from filesFolder, and a file read through Graph's download address
+        var files = (await ListAsync(source, "AnyFS Lab/General/files")).Select(e => e.Name).ToList();
+        if (!files.Contains("anyfs-seed.txt"))
+        {
+            Assert.Inconclusive("the sandbox is not seeded (run TeamsSandboxSeed with ANYFS_SEED_TEAMS=1)");
+        }
+
+        CollectionAssert.Contains(files, "Specs");
+        StringAssert.StartsWith(await TextAsync(source, "AnyFS Lab/General/files/anyfs-seed.txt"), "Seeded by AnyFS");
+
+        // a thread's and a chat's shared files, opened by their own addresses (the shares API)
+        var thread = (await ListAsync(source, "AnyFS Lab/General/posts")).First(p => p.Name.Contains("A thread with replies", StringComparison.Ordinal)).Name;
+        CollectionAssert.Contains((await ListAsync(source, $"AnyFS Lab/General/posts/{thread}/attachments")).Select(e => e.Name).ToArray(), "anyfs-seed.txt");
+        StringAssert.StartsWith(await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/attachments/anyfs-seed.txt"), "Seeded by AnyFS");
+        var chatFile = false;
+        foreach (var chat in await ListAsync(source, "Chats"))
+        {
+            if ((await ListAsync(source, $"Chats/{chat.Name}")).Any(e => e.Name == "attachments"))
+            {
+                CollectionAssert.Contains((await ListAsync(source, $"Chats/{chat.Name}/attachments")).Select(e => e.Name).ToArray(), "anyfs-chat-seed.txt");
+                StringAssert.StartsWith(await TextAsync(source, $"Chats/{chat.Name}/attachments/anyfs-chat-seed.txt"), "Shared in a chat");
+                chatFile = true;
+                break;
+            }
+        }
+
+        Assert.IsTrue(chatFile, "no chat has the seeded attachments");
+
+        // groups.md: this Graph token cannot list every group (no Group.Read.All, unlike GCC High's), nor is SharePoint's in
+        // hand, so it holds the teams' own
+        var md = await TextAsync(source, "groups.md");
+        for (var deadline = DateTime.UtcNow.AddSeconds(30); md.Contains("being read", StringComparison.Ordinal) && DateTime.UtcNow < deadline; md = await TextAsync(source, "groups.md"))
+        {
+            await Task.Delay(250);
+        }
+
+        StringAssert.Contains(md, $"The groups of {session.Account ?? account}'s own teams");
     }
 
     /// <summary>The seeded sandbox's files: the channel's folder of its team's library, a thread's and a chat's attachments.</summary>

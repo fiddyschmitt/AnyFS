@@ -220,7 +220,7 @@ public class TeamsSourceTests
         var md = await UntilAsync(() => TextAsync(source, "groups.md"), m => !m.Contains("being read", StringComparison.Ordinal));
         StringAssert.Contains(md, "The groups of tester@contoso.com's own teams, from Teams: 1.");
 
-        Assert.AreEqual(0, fake.SharePointCalls, "nothing asks SharePoint without its token");
+        Assert.AreEqual(0, fake.SharePointCalls, "nothing asks for a file without a token to read it");
         Assert.IsTrue(await UntilAsync(() => Task.FromResult(fake.SeekCalls), n => n > 0) > 0, "the token is asked for behind the listings");
         Assert.IsFalse(context.HealthReports.Any(h => h.Health == ComponentHealth.Degraded), "a token not handed out is not the source's health");
     }
@@ -248,6 +248,42 @@ public class TeamsSourceTests
         CollectionAssert.AreEqual(new[] { "plan.txt" }, await NamesAsync(source, "AnyFS Lab/General/files"));
         CollectionAssert.AreEqual(new[] { "Retail" }, await NamesAsync(source, "Other groups"));
         StringAssert.Contains(await UntilAsync(() => TextAsync(source, "groups.md"), m => m.Contains("from SharePoint", StringComparison.Ordinal)), "The groups tester@contoso.com can see, from SharePoint: 1,");
+    }
+
+    [TestMethod]
+    public async Task WithGraphsTokenAloneTheFilesAndOtherGroupsAreReadThroughIt()
+    {
+        // GCC High at work: no SharePoint token, but Graph's (Files.ReadWrite.All, Sites.ReadWrite.All). The group sites come
+        // from Microsoft Search without their groups, so the team's own is told by its site; a shared file is opened by its
+        // own address
+        const string Mark8 = "https://contoso.sharepoint.com/sites/Mark8ProjectTeam";
+        var fake = new FakeTeams { SharePointReady = false, GraphReady = true };
+        var general = FakeTeams.Channel("General", general: true);
+        var team = fake.AddTeam("AnyFS Lab", general);
+        fake.AddSite(team, Site);
+        fake.AddGroupSite(new GroupSite(team.GroupId!, "AnyFS Lab", Site, null, When));
+        fake.AddGroupSite(new GroupSite("g-mark8", "Mark 8 Project Team", Mark8, null, When));
+        fake.AddLibraryFile(Mark8, "Plan.docx", Encoding.UTF8.GetBytes("the plan"), When);
+        fake.AddLibraryFile(Site, "General/report.docx", Encoding.UTF8.GetBytes("a report"), When);
+        var shared = $"{Site}/Shared Documents/General/report.docx";
+        fake.Post(general.Id, Jane, "Jane Doe", "<p>The report</p>", When, files: [new SharedFile("report.docx", shared, $"{Site}/")]);
+        fake.Directory = new GroupsDirectory([new GroupInfo(team.GroupId!, "AnyFS Lab")], new HashSet<string>([team.GroupId!]), new HashSet<string>(), Complete: true, "Microsoft Graph");
+        using var context = new TestSourceContext();
+        await using var source = new TeamsSource(new TeamsSettings { Account = fake.Account }, fake.StandIn());
+        await source.InitialiseAsync(context, CancellationToken.None);
+
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "groups.md" }, await NamesAsync(source, ""));
+        CollectionAssert.AreEqual(new[] { "Mark 8 Project Team" }, await NamesAsync(source, "Other groups"), "the team's own site, found without its group, is still left out");
+        Assert.AreEqual("the plan", await TextAsync(source, "Other groups/Mark 8 Project Team/Plan.docx"));
+        CollectionAssert.AreEqual(new[] { "posts", "files" }, await NamesAsync(source, "AnyFS Lab/General"));
+        CollectionAssert.AreEqual(new[] { "report.docx" }, await NamesAsync(source, "AnyFS Lab/General/files"));
+
+        var thread = (await NamesAsync(source, "AnyFS Lab/General/posts")).Single();
+        CollectionAssert.AreEqual(new[] { "report.docx" }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}/attachments"));
+        Assert.AreEqual("a report", await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/attachments/report.docx"));
+        CollectionAssert.Contains(fake.SharedUrlsAsked, shared, "the shared file is opened by its own address");
+        Assert.AreEqual(0, fake.SeekCalls, "with Graph's token the files need nothing asked for");
+        Assert.IsFalse(context.HealthReports.Any(h => h.Health == ComponentHealth.Degraded));
     }
 
     [TestMethod]

@@ -210,6 +210,111 @@ public class TeamsRestTests
         Assert.AreEqual(0, directory.Asked.Count, "no SharePoint and no Graph: nothing to ask");
     }
 
+    /// <summary>
+    /// Microsoft Graph's file side, shaped as the sandbox answered it (30-Oct-2026): a channel's filesFolder (and one a team
+    /// with no site has not), a drive by its site's path and by its group, a folder's children over two pages (a third page's
+    /// link off Graph), an item by path, the shares API, and Microsoft Search's group sites over two pages.
+    /// </summary>
+    private sealed class GraphFiles : HttpMessageHandler
+    {
+        public List<(HttpMethod Method, Uri Uri, string? Bearer, string? Body)> Asked { get; } = [];
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var uri = request.RequestUri!;
+            var body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
+            lock (Asked)
+            {
+                Asked.Add((request.Method, uri, request.Headers.Authorization?.Parameter, body));
+            }
+
+            var path = Uri.UnescapeDataString(uri.AbsolutePath);
+            var json = path switch
+            {
+                "/v1.0/teams/g-lab/channels/19:general@thread.tacv2/filesFolder" => """{"name":"General","webUrl":"https://t.sharepoint.com/sites/lab/Shared%20Documents/General","parentReference":{"driveId":"b!lab"}}""",
+                "/v1.0/drives/b!lab/root:/General:/children" when !uri.Query.Contains("skiptoken", StringComparison.Ordinal) => """
+                    {"value":[{"name":"Specs","folder":{"childCount":1},"size":57,"lastModifiedDateTime":"2026-10-29T11:39:11Z"},{"name":"plan.txt","file":{},"size":46}],
+                     "@odata.nextLink":"https://graph.microsoft.us/v1.0/drives/b!lab/root:/General:/children?$skiptoken=2"}
+                    """,
+                "/v1.0/drives/b!lab/root:/General:/children" => """{"value":[{"name":"older.txt","file":{},"size":3}],"@odata.nextLink":"https://evil.example/v1.0/drives/b!lab/root:/General:/children?$skiptoken=3"}""",
+                "/v1.0/drives/b!lab/root:/General/plan.txt" => """{"name":"plan.txt","file":{},"size":46,"@microsoft.graph.downloadUrl":"https://t.sharepoint.com/sites/lab/_layouts/15/download.aspx?UniqueId=1"}""",
+                "/v1.0/sites/t.sharepoint.com:/sites/Mark8:/drive" => """{"id":"b!mark8"}""",
+                "/v1.0/drives/b!mark8/root/children" => """{"value":[{"name":"Plan.docx","file":{},"size":8}]}""",
+                "/v1.0/groups/g-lab/drive" => """{"id":"b!lab","webUrl":"https://t.sharepoint.com/sites/lab/Shared%20Documents","sharePointIds":{"siteUrl":"https://t.sharepoint.com/sites/lab"}}""",
+                "/v1.0/search/query" when body?.Contains("\"from\":0", StringComparison.Ordinal) == true => """
+                    {"value":[{"hitsContainers":[{"hits":[
+                      {"resource":{"@odata.type":"#microsoft.graph.site","displayName":"AnyFS Lab","webUrl":"https://t.sharepoint.com/sites/lab","createdDateTime":"2026-10-29T11:28:31Z"}},
+                      {"resource":{"@odata.type":"#microsoft.graph.site","displayName":"Mark 8 Project Team","webUrl":"https://t.sharepoint.com/sites/Mark8","description":"The Mark 8"}}
+                    ],"total":3,"moreResultsAvailable":true}]}]}
+                    """,
+                "/v1.0/search/query" => """{"value":[{"hitsContainers":[{"hits":[{"resource":{"displayName":"Retail","webUrl":"https://t.sharepoint.com/sites/Retail"}},{"resource":{"displayName":"Elsewhere","webUrl":"https://evil.example/sites/x"}}],"total":3,"moreResultsAvailable":false}]}]}""",
+                _ when path.StartsWith("/v1.0/shares/", StringComparison.Ordinal) => """{"name":"report.docx","file":{},"size":8,"@microsoft.graph.downloadUrl":"https://t.sharepoint.com/sites/lab/_layouts/15/download.aspx?UniqueId=2"}""",
+                _ => null,
+            };
+            return new HttpResponseMessage(json is null ? HttpStatusCode.NotFound : HttpStatusCode.OK) { Content = new StringContent(json ?? """{"error":{"code":"itemNotFound"}}""", Encoding.UTF8, "application/json") };
+        }
+    }
+
+    [TestMethod]
+    public async Task WithGraphsTokenAloneTheFilesAreReadThroughGraph()
+    {
+        var graph = new GraphFiles();
+        var token = GraphToken();
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (s, _, _) => Task.FromResult(s == TeamsService.Graph ? token : "core"), concurrency: 2, NullLogger.Instance, graph,
+            sharePointHost: () => null, inHand: s => s == TeamsService.Graph ? token : null);
+        Assert.IsTrue(rest.GraphReady && !rest.SharePointReady);
+        var lab = new TeamInfo("19:lab", "AnyFS Lab", "g-lab", []);
+        var none = CancellationToken.None;
+
+        // a channel's folder, from filesFolder; a team with no site has none
+        Assert.AreEqual(("https://t.sharepoint.com/sites/lab", "General"), await rest.ChannelFilesAsync(lab, new ChannelInfo("19:general@thread.tacv2", "General", true, false), none));
+        Assert.IsNull(await rest.ChannelFilesAsync(lab with { GroupId = "g-nosite" }, new ChannelInfo("19:x@thread.tacv2", "General", true, false), none));
+
+        // its children, both pages on Graph and not the one off it; the drive filesFolder named, not looked up again
+        var files = await rest.FolderAsync("https://t.sharepoint.com/sites/lab", "General", none);
+        CollectionAssert.AreEqual(new[] { "Specs", "plan.txt", "older.txt" }, files.Select(f => f.Name).ToArray());
+        Assert.IsTrue(files[0].IsFolder);
+        Assert.IsFalse(graph.Asked.Any(a => a.Uri.AbsolutePath.Contains("/sites/", StringComparison.Ordinal) && a.Uri.AbsolutePath.Contains("lab", StringComparison.Ordinal)));
+
+        // a file by its path, with Graph's download address; a shared one by its own address
+        Assert.AreEqual("https://t.sharepoint.com/sites/lab/_layouts/15/download.aspx?UniqueId=1", (await rest.FileAsync("https://t.sharepoint.com/sites/lab", "General/plan.txt", null, none))!.DownloadUrl);
+        const string Shared = "https://t.sharepoint.com/sites/lab/Shared Documents/General/report.docx";
+        Assert.AreEqual("report.docx", (await rest.FileAsync("https://t.sharepoint.com/sites/lab", "General/report.docx", Shared, none))!.Name);
+        Assert.IsTrue(graph.Asked.Any(a => a.Uri.AbsolutePath == $"/v1.0/shares/{TeamsFiles.ShareId(Shared)}/driveItem"));
+
+        // another site's library: its drive found from its path, once
+        await rest.FolderAsync("https://t.sharepoint.com/sites/Mark8", "", none);
+        CollectionAssert.AreEqual(new[] { "Plan.docx" }, (await rest.FolderAsync("https://t.sharepoint.com/sites/Mark8", "", none)).Select(f => f.Name).ToArray());
+        Assert.AreEqual(1, graph.Asked.Count(a => a.Uri.AbsolutePath.EndsWith("/sites/t.sharepoint.com:/sites/Mark8:/drive", StringComparison.Ordinal)));
+
+        // the group sites from Microsoft Search, both pages, none named by its group, none off SharePoint
+        var sites = await rest.GroupSitesAsync(none);
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Mark 8 Project Team", "Retail" }, sites.Select(s => s.Name).ToArray());
+        Assert.IsTrue(sites.All(s => s.GroupId is null));
+        Assert.AreEqual("The Mark 8", sites[1].Description);
+        Assert.IsTrue(graph.Asked.Any(a => a.Body?.Contains("\"from\":500", StringComparison.Ordinal) == true), "the second page");
+
+        // a team's own site, from its group's drive
+        Assert.AreEqual("https://t.sharepoint.com/sites/lab", await rest.TeamSiteAsync(lab, none));
+
+        // Graph's token, to Graph's host alone
+        Assert.IsTrue(graph.Asked.All(a => a.Uri.Host == "graph.microsoft.us" && a.Bearer == token), string.Join("\n", graph.Asked.Select(a => a.Uri)));
+    }
+
+    [TestMethod]
+    public void ATokenGoesToItsOwnServiceAlone()
+    {
+        Assert.IsTrue(TeamsRest.MayCarry(TeamsService.SharePoint, "https://t.sharepoint.com/sites/x/_api/v2.0/drive/root"));
+        Assert.IsTrue(TeamsRest.MayCarry(TeamsService.SharePoint, "https://t-my.sharepoint.us/personal/x/_api/v2.0/drive/root"));
+        Assert.IsFalse(TeamsRest.MayCarry(TeamsService.SharePoint, "https://graph.microsoft.com/v1.0/me"));
+        Assert.IsFalse(TeamsRest.MayCarry(TeamsService.SharePoint, "http://t.sharepoint.com/sites/x"), "https only");
+        Assert.IsTrue(TeamsRest.MayCarry(TeamsService.Graph, "https://graph.microsoft.us/v1.0/search/query"));
+        Assert.IsTrue(TeamsRest.MayCarry(TeamsService.Graph, "https://dod-graph.microsoft.us/v1.0/me/drive"));
+        Assert.IsFalse(TeamsRest.MayCarry(TeamsService.Graph, "https://t.sharepoint.com/_api/search/query"));
+        Assert.IsFalse(TeamsRest.MayCarry(TeamsService.Graph, "https://graph.microsoft.com.evil.example/v1.0/me"));
+        Assert.IsTrue(TeamsRest.MayCarry(TeamsService.ChatService, "https://apac.ng.msg.teams.microsoft.com/v1/users/ME/conversations"));
+    }
+
     [TestMethod]
     public async Task ARefusalIsNotAskedAgainTwiceNorAfterA403()
     {

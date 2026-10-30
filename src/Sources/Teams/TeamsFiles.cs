@@ -47,6 +47,30 @@ internal static partial class TeamsFiles
 
     private static List<string> Segments(Uri uri) => uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.UnescapeDataString).ToList();
 
+    /// <summary>
+    /// The site of a library's address (<c>https://t.sharepoint.com/sites/x/Shared%20Documents</c> is the site
+    /// <c>https://t.sharepoint.com/sites/x</c>): the address without its last segment; null off SharePoint's hosts.
+    /// </summary>
+    public static string? SiteOfLibrary(string? libraryUrl)
+    {
+        if (!Uri.TryCreate(libraryUrl, UriKind.Absolute, out var library) || library.Scheme != Uri.UriSchemeHttps || !TeamsServices.IsSharePointHost(library.Host))
+        {
+            return null;
+        }
+
+        var segments = Segments(library);
+        return segments.Count == 0 ? null : $"https://{library.Host}" + string.Concat(segments.SkipLast(1).Select(s => "/" + Uri.EscapeDataString(s)));
+    }
+
+    /// <summary>A site's address in one form for comparing (unescaped, no trailing slash, either case): one search's form against another's.</summary>
+    public static string SiteKey(string siteUrl) => Uri.UnescapeDataString(siteUrl).TrimEnd('/').ToUpperInvariant();
+
+    /// <summary>
+    /// The id Microsoft Graph's shares API takes for an item's address: <c>u!</c> and the address's UTF-8 bytes in base64url,
+    /// unpadded. It opens a file by its address wherever the account may read it, its site or not.
+    /// </summary>
+    public static string ShareId(string address) => "u!" + Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(address)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
     /// <summary>A tenant's SharePoint host from its OneDrive host: <c>t-my.sharepoint.com</c> is <c>t.sharepoint.com</c>.</summary>
     public static string RootHost(string host)
     {

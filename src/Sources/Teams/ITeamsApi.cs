@@ -37,8 +37,15 @@ internal interface ITeamsApi : IAsyncDisposable
     /// <summary>A folder of a site's default library, by its path within the library (<c>General/Specs</c>): its folders and files; empty when it does not exist.</summary>
     Task<IReadOnlyList<DriveEntry>> FolderAsync(string siteUrl, string path, CancellationToken ct);
 
-    /// <summary>A file of a site's default library, by its path within the library, with a fresh download address; null when it is gone.</summary>
-    Task<DriveEntry?> FileAsync(string siteUrl, string path, CancellationToken ct);
+    /// <summary>
+    /// A file of a site's default library, by its path within the library, with a fresh download address; null when it is
+    /// gone. <paramref name="url"/> is the file's own address where a message gave it (a shared file): Graph opens such a
+    /// file by it, as one shared with the account can sit in a site it cannot open (another's OneDrive).
+    /// </summary>
+    Task<DriveEntry?> FileAsync(string siteUrl, string path, string? url, CancellationToken ct);
+
+    /// <summary>A team's own site (its group's), so a group site found without its group (Graph's search names none) is told from a team's; null while it has none.</summary>
+    Task<string?> TeamSiteAsync(TeamInfo team, CancellationToken ct);
 
     /// <summary>A file's content from an offset, by its download address (a range where SharePoint takes one).</summary>
     Task<HttpResponseMessage> ContentAsync(string downloadUrl, long offset, CancellationToken ct);
@@ -48,11 +55,14 @@ internal interface ITeamsApi : IAsyncDisposable
 
     /// <summary>
     /// Whether SharePoint's token (and the tenant's host) is in hand now: what the files, the attachments and Other groups
-    /// are read with. Never a wait: the page mints that token only as it gets round to it, and no listing waits on it.
+    /// are read with first. Never a wait: the page mints that token only as it gets round to it, and no listing waits on it.
     /// </summary>
     bool SharePointReady { get; }
 
-    /// <summary>Whether a Microsoft Graph token is in hand now (GCC High's client mints one, Microsoft 365's never): every group of the organisation is listed with it.</summary>
+    /// <summary>
+    /// Whether a Microsoft Graph token is in hand now (GCC High's client mints one, Microsoft 365's never): every group of
+    /// the organisation is listed with it, and the files are read with it while SharePoint's token is not in hand.
+    /// </summary>
     bool GraphReady { get; }
 
     /// <summary>
@@ -62,7 +72,10 @@ internal interface ITeamsApi : IAsyncDisposable
     /// </summary>
     Task<bool> SeekTokensAsync(CancellationToken ct);
 
-    /// <summary>Every Microsoft 365 group site the account can open (SharePoint search, which leaves out what it may not see).</summary>
+    /// <summary>
+    /// Every Microsoft 365 group site the account can open: SharePoint's search, or Microsoft Search through Graph (the same
+    /// index, which leaves out what the account may not see; it names no site's group).
+    /// </summary>
     Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct);
 
     /// <summary>

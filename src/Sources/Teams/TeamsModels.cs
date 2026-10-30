@@ -15,8 +15,9 @@ internal sealed record TeamInfo(string Id, string DisplayName, string? GroupId, 
     public int? Members { get; init; }
 }
 
-/// <summary>A Microsoft 365 group's SharePoint site, as SharePoint search finds those the account can open.</summary>
-internal sealed record GroupSite(string GroupId, string Name, string SiteUrl, string? Description, DateTimeOffset? Created);
+/// <summary>A Microsoft 365 group's SharePoint site, as search finds those the account can open.</summary>
+/// <param name="GroupId">The group's id where the search names it (SharePoint's does; Microsoft Search through Graph does not).</param>
+internal sealed record GroupSite(string? GroupId, string Name, string SiteUrl, string? Description, DateTimeOffset? Created);
 
 /// <summary>A group of the organisation and what is known of it: from Microsoft Graph everything there; else what SharePoint and the aggregator tell.</summary>
 internal sealed record GroupInfo(string Id, string Name)

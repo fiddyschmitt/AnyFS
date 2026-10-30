@@ -12,9 +12,11 @@ namespace AnyFS.Sources.Teams;
 /// (the <c>authz</c> call), the aggregator gives the teams, channels and chats, and the chat service gives a
 /// conversation's messages. Each call carries the bearer for that service's audience, which <paramref name="tokenFor"/>
 /// supplies (the live web session, or a test's); a 401 hands it back the token refused and tries once more with the one it
-/// gives then. Requests are paced per host and a 429's Retry-After is honoured. Files are read from SharePoint and OneDrive
-/// (their v2.0 drive API, with the SharePoint token, only ever on a SharePoint host) and inline images from Teams' media
-/// service (with the authz call's skype token, only ever on the media service's hosts).
+/// gives then. Requests are paced per host and a 429's Retry-After is honoured. Files are read from SharePoint and OneDrive:
+/// through their v2.0 drive API while the SharePoint token is in hand, else through Microsoft Graph with its token (drives,
+/// a channel's filesFolder, the shares API, Microsoft Search for the group sites); each token only ever goes to its own
+/// service's hosts. Inline images come from Teams' media service (with the authz call's skype token, only ever on the
+/// media service's hosts).
 /// </summary>
 /// <param name="tokenFor">The bearer for a service; the second argument is a token the service just refused, else null.</param>
 /// <param name="handler">The handler requests go through: a test's fake; null for the network.</param>
@@ -124,12 +126,22 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         return ValueTask.CompletedTask;
     }
 
-    // --- files: SharePoint and OneDrive ----------------------------------------------------------------------------------
+    // --- files: SharePoint and OneDrive, through SharePoint's own API or Microsoft Graph ------------------------------------
 
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task<TeamSite?>> _sites = new(StringComparer.OrdinalIgnoreCase);
 
+    // the files are read with SharePoint's token while it is in hand, else with Microsoft Graph's: GCC High's client mints
+    // one with Files.ReadWrite.All and Sites.ReadWrite.All (Microsoft 365's none). Both address a file by its site and its
+    // path in the site's default library, so what one listed the other opens.
+    private bool ViaGraph => !SharePointReady && GraphReady;
+
     public async Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, CancellationToken ct)
     {
+        if (ViaGraph)
+        {
+            return team.GroupId is { } group ? await GraphChannelFilesAsync(group, channel, ct).ConfigureAwait(false) : null;
+        }
+
         // the SharePoint token first: the host it was used on is the tenant's
         await tokenFor(TeamsService.SharePoint, null, ct).ConfigureAwait(false);
         var host = sharePointHost?.Invoke() is { } seen ? TeamsFiles.RootHost(seen) : null;
@@ -143,14 +155,28 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             return null;
         }
 
-        var site = await _sites.GetOrAdd(team.GroupId, id => SiteAsync($"https://{host}", id, CancellationToken.None)).ConfigureAwait(false);
-        if (site is null)
-        {
-            _sites.TryRemove(team.GroupId, out _);
-            return null;
-        }
+        return await GroupSiteAsync(host, team.GroupId).ConfigureAwait(false) is { } site ? (site.Url, channel.DisplayName) : null;
+    }
 
-        return (site.Url, channel.DisplayName);
+    /// <summary>A group's site from SharePoint, kept once it has one (none yet, or a failure, is asked again).</summary>
+    private async Task<TeamSite?> GroupSiteAsync(string host, string groupId)
+    {
+        var lookup = _sites.GetOrAdd(groupId, id => SiteAsync($"https://{host}", id, CancellationToken.None));
+        try
+        {
+            var site = await lookup.ConfigureAwait(false);
+            if (site is null)
+            {
+                _sites.TryRemove(new KeyValuePair<string, Task<TeamSite?>>(groupId, lookup));
+            }
+
+            return site;
+        }
+        catch (VfsException)
+        {
+            _sites.TryRemove(new KeyValuePair<string, Task<TeamSite?>>(groupId, lookup));
+            throw;
+        }
     }
 
     /// <summary>A group's site and its default library (GroupSiteManager.GetSiteStatus, status 2 when ready); null while it has none.</summary>
@@ -168,17 +194,57 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         return new TeamSite(site.TrimEnd('/'), Uri.UnescapeDataString(library.AbsolutePath));
     }
 
+    /// <summary>A channel's folder as Graph has it (filesFolder: a renamed channel's and a private channel's own site's too); null while the team has no site.</summary>
+    private async Task<(string SiteUrl, string Path)?> GraphChannelFilesAsync(string groupId, ChannelInfo channel, CancellationToken ct)
+    {
+        try
+        {
+            using var doc = await GetAsync($"{GraphRoot()}/v1.0/teams/{Uri.EscapeDataString(groupId)}/channels/{Uri.EscapeDataString(channel.Id)}/filesFolder", TeamsService.Graph, ct).ConfigureAwait(false);
+            if (Str(doc.RootElement, "webUrl") is not { } address || TeamsFiles.Locate(address, null) is not { } where)
+            {
+                return null;
+            }
+
+            if (Str(Obj(doc.RootElement, "parentReference"), "driveId") is { Length: > 0 } drive)
+            {
+                _drives.TryAdd(where.SiteUrl, Task.FromResult<string?>(drive));
+            }
+
+            return where;
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.NotFound)
+        {
+            // "Folder location for this channel is not ready yet": a team with no site
+            return null;
+        }
+    }
+
     public async Task<IReadOnlyList<DriveEntry>> FolderAsync(string siteUrl, string path, CancellationToken ct)
     {
         var entries = new List<DriveEntry>();
-        string? next = path.Length == 0 ? $"{SharePointSite(siteUrl)}/_api/v2.0/drive/root/children?$top=999" : $"{SharePointSite(siteUrl)}/_api/v2.0/drive/root:/{EscapePath(path)}:/children?$top=999";
+        var service = ViaGraph ? TeamsService.Graph : TeamsService.SharePoint;
+        string? next;
+        if (service == TeamsService.Graph)
+        {
+            if (await DriveOfAsync(siteUrl, ct).ConfigureAwait(false) is not { } drive)
+            {
+                return entries;
+            }
+
+            next = $"{GraphRoot()}/v1.0/drives/{drive}/{(path.Length == 0 ? "root/children" : $"root:/{EscapePath(path)}:/children")}?$top=999&$select=name,size,folder,file,lastModifiedDateTime";
+        }
+        else
+        {
+            next = path.Length == 0 ? $"{SharePointSite(siteUrl)}/_api/v2.0/drive/root/children?$top=999" : $"{SharePointSite(siteUrl)}/_api/v2.0/drive/root:/{EscapePath(path)}:/children?$top=999";
+        }
+
         try
         {
             while (next is not null)
             {
-                using var doc = await GetAsync(next, TeamsService.SharePoint, ct).ConfigureAwait(false);
+                using var doc = await GetAsync(next, service, ct).ConfigureAwait(false);
                 entries.AddRange(Arr(doc.RootElement, "value").Select(DriveEntryOf).OfType<DriveEntry>());
-                next = Str(doc.RootElement, "@odata.nextLink") is { } link && Uri.TryCreate(link, UriKind.Absolute, out var uri) && TeamsServices.IsSharePointHost(uri.Host) ? link : null;
+                next = Str(doc.RootElement, "@odata.nextLink") is { } link && MayCarry(service, link) ? link : null;
             }
         }
         catch (VfsException ex) when (ex.Error == VfsError.NotFound)
@@ -189,10 +255,26 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         return entries;
     }
 
-    public async Task<DriveEntry?> FileAsync(string siteUrl, string path, CancellationToken ct)
+    public async Task<DriveEntry?> FileAsync(string siteUrl, string path, string? url, CancellationToken ct)
     {
         try
         {
+            if (ViaGraph)
+            {
+                // a message's shared file by its own address: Graph's shares API reaches a file shared with the account
+                // in a site (another's OneDrive) it cannot open
+                var address = url is not null
+                    ? $"{GraphRoot()}/v1.0/shares/{TeamsFiles.ShareId(url)}/driveItem"
+                    : await DriveOfAsync(siteUrl, ct).ConfigureAwait(false) is { } drive ? $"{GraphRoot()}/v1.0/drives/{drive}/root:/{EscapePath(path)}" : null;
+                if (address is null)
+                {
+                    return null;
+                }
+
+                using var item = await GetAsync(address, TeamsService.Graph, ct).ConfigureAwait(false);
+                return DriveEntryOf(item.RootElement);
+            }
+
             using var doc = await GetAsync($"{SharePointSite(siteUrl)}/_api/v2.0/drive/root:/{EscapePath(path)}", TeamsService.SharePoint, ct).ConfigureAwait(false);
             return DriveEntryOf(doc.RootElement);
         }
@@ -200,6 +282,73 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         {
             return null;
         }
+    }
+
+    // a site's default library's Graph drive, by the site's address (null: it has none); kept, a failure not
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, Task<string?>> _drives = new(StringComparer.OrdinalIgnoreCase);
+
+    private async Task<string?> DriveOfAsync(string siteUrl, CancellationToken ct)
+    {
+        var site = new Uri(SharePointSite(siteUrl));
+        var lookup = _drives.GetOrAdd(siteUrl, _ => GraphDriveAsync(site, CancellationToken.None));
+        try
+        {
+            return await lookup.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (VfsException) when (lookup.IsFaulted)
+        {
+            _drives.TryRemove(new KeyValuePair<string, Task<string?>>(siteUrl, lookup));
+            throw;
+        }
+    }
+
+    private async Task<string?> GraphDriveAsync(Uri site, CancellationToken ct)
+    {
+        var path = Uri.UnescapeDataString(site.AbsolutePath.Trim('/'));
+        var address = path.Length == 0 ? $"{GraphRoot()}/v1.0/sites/{site.Host}/drive?$select=id" : $"{GraphRoot()}/v1.0/sites/{site.Host}:/{EscapePath(path)}:/drive?$select=id";
+        try
+        {
+            using var doc = await GetAsync(address, TeamsService.Graph, ct).ConfigureAwait(false);
+            return NullIfEmpty(Str(doc.RootElement, "id"));
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.NotFound)
+        {
+            return null;
+        }
+    }
+
+    public async Task<string?> TeamSiteAsync(TeamInfo team, CancellationToken ct)
+    {
+        if (team.GroupId is not { } group)
+        {
+            return null;
+        }
+
+        if (ViaGraph)
+        {
+            try
+            {
+                using var doc = await GetAsync($"{GraphRoot()}/v1.0/groups/{Uri.EscapeDataString(group)}/drive?$select=id,webUrl,sharePointIds", TeamsService.Graph, ct).ConfigureAwait(false);
+                if ((NullIfEmpty(Str(Obj(doc.RootElement, "sharePointIds"), "siteUrl")) ?? TeamsFiles.SiteOfLibrary(Str(doc.RootElement, "webUrl"))) is not { } site)
+                {
+                    return null;
+                }
+
+                if (Str(doc.RootElement, "id") is { Length: > 0 } drive)
+                {
+                    _drives.TryAdd(site.TrimEnd('/'), Task.FromResult<string?>(drive));
+                }
+
+                return site.TrimEnd('/');
+            }
+            catch (VfsException ex) when (ex.Error == VfsError.NotFound)
+            {
+                return null;
+            }
+        }
+
+        await tokenFor(TeamsService.SharePoint, null, ct).ConfigureAwait(false);
+        return sharePointHost?.Invoke() is { } seen ? (await GroupSiteAsync(TeamsFiles.RootHost(seen), group).ConfigureAwait(false))?.Url : null;
     }
 
     public async Task<HttpResponseMessage> ContentAsync(string downloadUrl, long offset, CancellationToken ct)
@@ -251,7 +400,9 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
 
         var folder = item.ValueKind == JsonValueKind.Object && item.TryGetProperty("folder", out _);
         var size = item.ValueKind == JsonValueKind.Object && item.TryGetProperty("size", out var s) && s.TryGetInt64(out var bytes) ? bytes : 0;
-        return new DriveEntry(name!, folder, folder ? 0 : size, Time(Str(item, "lastModifiedDateTime")), folder ? null : Str(item, "@content.downloadUrl"));
+
+        // SharePoint's v2.0 API names the download address one way, Graph another
+        return new DriveEntry(name!, folder, folder ? 0 : size, Time(Str(item, "lastModifiedDateTime")), folder ? null : Str(item, "@content.downloadUrl") ?? Str(item, "@microsoft.graph.downloadUrl"));
     }
 
     public bool SharePointReady => inHand?.Invoke(TeamsService.SharePoint) is not null && sharePointHost?.Invoke() is not null;
@@ -264,6 +415,11 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
 
     public async Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct)
     {
+        if (ViaGraph)
+        {
+            return await GraphGroupSitesAsync(ct).ConfigureAwait(false);
+        }
+
         await tokenFor(TeamsService.SharePoint, null, ct).ConfigureAwait(false);
         var host = sharePointHost?.Invoke() is { } seen ? TeamsFiles.RootHost(seen) : throw VfsException.Unavailable("Teams on the web named no SharePoint host for the groups");
         var sites = new Dictionary<string, GroupSite>(StringComparer.OrdinalIgnoreCase);
@@ -289,33 +445,67 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
     }
 
+    // Microsoft Search's page of sites (its largest for SharePoint's kinds)
+    private const int SearchPage = 500;
+
+    /// <summary>
+    /// Every Microsoft 365 group site the account can open, from Microsoft Search through Graph: the index SharePoint's own
+    /// search reads, trimmed alike to what the account may see (Sites.Read.All; GCC High's Graph token carries
+    /// Sites.ReadWrite.All). A site found so is not named by its group: Search gives no group id.
+    /// </summary>
+    private async Task<IReadOnlyList<GroupSite>> GraphGroupSitesAsync(CancellationToken ct)
+    {
+        var sites = new Dictionary<string, GroupSite>(StringComparer.OrdinalIgnoreCase);
+        for (var from = 0; ; from += SearchPage)
+        {
+            var body = $$"""{"requests":[{"entityTypes":["site"],"query":{"queryString":"WebTemplate:GROUP"},"from":{{from}},"size":{{SearchPage}}}]}""";
+            using var doc = await SendAsync(HttpMethod.Post, $"{GraphRoot()}/v1.0/search/query", TeamsService.Graph, body, ct).ConfigureAwait(false);
+            var found = Arr(Arr(doc.RootElement, "value").FirstOrDefault(), "hitsContainers").FirstOrDefault();
+            var hits = Arr(found, "hits").ToList();
+            foreach (var site in hits.Select(h => Obj(h, "resource")))
+            {
+                if (Str(site, "webUrl") is { Length: > 0 } address && Uri.TryCreate(address, UriKind.Absolute, out var uri) && TeamsServices.IsSharePointHost(uri.Host))
+                {
+                    var url = address.TrimEnd('/');
+                    sites.TryAdd(url, new GroupSite(null, NullIfEmpty(Str(site, "displayName")) ?? NullIfEmpty(Str(site, "name")) ?? url, url, NullIfEmpty(Str(site, "description")), Time(Str(site, "createdDateTime"))));
+                }
+            }
+
+            if (hits.Count == 0 || !Bool(found, "moreResultsAvailable"))
+            {
+                return sites.Values.ToList();
+            }
+        }
+    }
+
     public async Task<GroupsDirectory> GroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct)
     {
-        var bySite = (sites ?? []).ToDictionary(s => s.GroupId, StringComparer.OrdinalIgnoreCase);
-        if (inHand?.Invoke(TeamsService.Graph) is { } graph)
+        // the sites by their group: SharePoint's search names it, Graph's does not
+        var bySite = (sites ?? []).Where(s => s.GroupId is not null).GroupBy(s => s.GroupId!, StringComparer.OrdinalIgnoreCase).ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        if (GraphReady)
         {
             try
             {
-                return await GraphGroupsAsync(graph, bySite, joined, ct).ConfigureAwait(false);
+                return await GraphGroupsAsync(bySite, joined, ct).ConfigureAwait(false);
             }
             catch (VfsException ex)
             {
-                logger.LogInformation("teams: Microsoft Graph did not list the groups ({Error}); listing {Instead}", ex.Message, sites is null ? "the teams' own" : "those SharePoint shows");
+                logger.LogInformation("teams: Microsoft Graph did not list the groups ({Error}); listing {Instead}", ex.Message, SharePointReady && sites is not null ? "those SharePoint shows" : "the teams' own");
             }
         }
 
-        return sites is null ? GroupsDirectory.OfTeams(joined) : await SharePointGroupsAsync(bySite, joined, ct).ConfigureAwait(false);
+        return SharePointReady && sites is not null ? await SharePointGroupsAsync(bySite, joined, ct).ConfigureAwait(false) : GroupsDirectory.OfTeams(joined);
     }
 
     // the group fields Graph lists them with: all a group's own, none that costs a request per group
     private const string GroupFields = "id,displayName,description,mail,mailNickname,visibility,groupTypes,securityEnabled,mailEnabled,createdDateTime,renewedDateTime,expirationDateTime,classification,resourceProvisioningOptions,membershipRule,isAssignableToRole,onPremisesSyncEnabled";
 
     /// <summary>Every group of the organisation (Graph's /groups), with the account's memberships and ownerships, and each one's site where SharePoint showed it.</summary>
-    private async Task<GroupsDirectory> GraphGroupsAsync(string token, Dictionary<string, GroupSite> sites, IReadOnlyList<TeamInfo> joined, CancellationToken ct)
+    private async Task<GroupsDirectory> GraphGroupsAsync(Dictionary<string, GroupSite> sites, IReadOnlyList<TeamInfo> joined, CancellationToken ct)
     {
-        var root = GraphRoot(token);
+        var root = GraphRoot();
         var groups = new List<GroupInfo>();
-        await foreach (var g in GraphPagesAsync($"{root}/v1.0/groups?$select={GroupFields}&$top=999", token, ct).ConfigureAwait(false))
+        await foreach (var g in GraphPagesAsync($"{root}/v1.0/groups?$select={GroupFields}&$top=999", ct).ConfigureAwait(false))
         {
             var id = Str(g, "id") ?? "";
             var types = Arr(g, "groupTypes").Select(t => t.GetString()).ToList();
@@ -344,13 +534,13 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
 
         var member = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        await foreach (var g in GraphPagesAsync($"{root}/v1.0/me/memberOf/microsoft.graph.group?$select=id&$top=999", token, ct).ConfigureAwait(false))
+        await foreach (var g in GraphPagesAsync($"{root}/v1.0/me/memberOf/microsoft.graph.group?$select=id&$top=999", ct).ConfigureAwait(false))
         {
             member.Add(Str(g, "id") ?? "");
         }
 
         var owner = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        await foreach (var g in GraphPagesAsync($"{root}/v1.0/me/ownedObjects/microsoft.graph.group?$select=id&$top=999", token, ct).ConfigureAwait(false))
+        await foreach (var g in GraphPagesAsync($"{root}/v1.0/me/ownedObjects/microsoft.graph.group?$select=id&$top=999", ct).ConfigureAwait(false))
         {
             owner.Add(Str(g, "id") ?? "");
         }
@@ -359,51 +549,25 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         return new GroupsDirectory(groups, member, owner, Complete: true, "Microsoft Graph");
     }
 
-    /// <summary>Graph's address for a token: the host its audience names, else the cloud's.</summary>
-    private string GraphRoot(string token)
-        => TeamsWebSession.Claims(token).Aud is { } aud && Uri.TryCreate(aud.Trim(), UriKind.Absolute, out var uri) && TeamsServices.IsGraphHost(uri.Host)
+    /// <summary>Graph's address: the host the audience of the Graph token in hand names, else the cloud's.</summary>
+    private string GraphRoot()
+        => inHand?.Invoke(TeamsService.Graph) is { } token && TeamsWebSession.Claims(token).Aud is { } aud && Uri.TryCreate(aud.Trim(), UriKind.Absolute, out var uri) && TeamsServices.IsGraphHost(uri.Host)
             ? $"https://{uri.Host}"
             : graphHost.TrimEnd('/');
 
-    /// <summary>A Graph collection's items, page by page (its nextLink, only ever on a Graph host); a 429 or 503 waits as asked.</summary>
-    private async IAsyncEnumerable<JsonElement> GraphPagesAsync(string url, string token, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    /// <summary>A Graph collection's items, page by page (its nextLink, only ever on a Graph host).</summary>
+    private async IAsyncEnumerable<JsonElement> GraphPagesAsync(string url, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         string? next = url;
         while (next is not null)
         {
-            JsonDocument doc;
-            for (var attempt = 0; ; attempt++)
+            using var doc = await GetAsync(next, TeamsService.Graph, ct).ConfigureAwait(false);
+            foreach (var item in Arr(doc.RootElement, "value"))
             {
-                await _pace.WaitAsync(ct).ConfigureAwait(false);
-                using var request = new HttpRequestMessage(HttpMethod.Get, next);
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                request.Headers.Accept.ParseAdd("application/json");
-                using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
-                if ((int)response.StatusCode is 429 or 503 && attempt < 5)
-                {
-                    await Task.Delay(response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(Math.Min(30, 1 << attempt)), ct).ConfigureAwait(false);
-                    continue;
-                }
-
-                var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode)
-                {
-                    throw Error(response.StatusCode, next, text);
-                }
-
-                doc = JsonDocument.Parse(text);
-                break;
+                yield return item.Clone();
             }
 
-            using (doc)
-            {
-                foreach (var item in Arr(doc.RootElement, "value"))
-                {
-                    yield return item.Clone();
-                }
-
-                next = Str(doc.RootElement, "@odata.nextLink") is { } link && Uri.TryCreate(link, UriKind.Absolute, out var uri) && TeamsServices.IsGraphHost(uri.Host) ? link : null;
-            }
+            next = Str(doc.RootElement, "@odata.nextLink") is { } link && MayCarry(TeamsService.Graph, link) ? link : null;
         }
     }
 
@@ -411,25 +575,26 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
     private async Task<GroupsDirectory> SharePointGroupsAsync(Dictionary<string, GroupSite> sites, IReadOnlyList<TeamInfo> joined, CancellationToken ct)
     {
         var host = sharePointHost?.Invoke() is { } seen ? TeamsFiles.RootHost(seen) : null;
-        var details = await Task.WhenAll(sites.Values.Select(async site =>
+        var details = await Task.WhenAll(sites.Select(async pair =>
         {
+            var (id, site) = pair;
             try
             {
-                using var doc = await GetAsync($"https://{host}/_api/SP.Directory.DirectorySession/Group('{Uri.EscapeDataString(site.GroupId)}')", TeamsService.SharePoint, ct).ConfigureAwait(false);
+                using var doc = await GetAsync($"https://{host}/_api/SP.Directory.DirectorySession/Group('{Uri.EscapeDataString(id)}')", TeamsService.SharePoint, ct).ConfigureAwait(false);
                 var g = doc.RootElement;
-                return (site, Public: OptionalBool(g, "isPublic"), Mail: NullIfEmpty(Str(g, "mail")), Alias: NullIfEmpty(Str(g, "alias")), Description: NullIfEmpty(Str(g, "description")));
+                return (id, site, Public: OptionalBool(g, "isPublic"), Mail: NullIfEmpty(Str(g, "mail")), Alias: NullIfEmpty(Str(g, "alias")), Description: NullIfEmpty(Str(g, "description")));
             }
             catch (VfsException)
             {
-                return (site, Public: (bool?)null, Mail: (string?)null, Alias: (string?)null, Description: site.Description);
+                return (id, site, Public: (bool?)null, Mail: (string?)null, Alias: (string?)null, Description: site.Description);
             }
         })).ConfigureAwait(false);
 
         var groups = new List<GroupInfo>();
-        foreach (var (site, isPublic, mail, alias, description) in details)
+        foreach (var (id, site, isPublic, mail, alias, description) in details)
         {
-            var team = joined.FirstOrDefault(t => string.Equals(t.GroupId, site.GroupId, StringComparison.OrdinalIgnoreCase));
-            groups.Add(new GroupInfo(site.GroupId, site.Name)
+            var team = joined.FirstOrDefault(t => string.Equals(t.GroupId, id, StringComparison.OrdinalIgnoreCase));
+            groups.Add(new GroupInfo(id, site.Name)
             {
                 Kind = "Microsoft 365 group",
                 Visibility = team?.AccessType == 3 ? "Org-wide" : isPublic switch { true => "Public", false => "Private", _ => null },
@@ -559,8 +724,22 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
 
     private Task<JsonDocument> GetAsync(string url, TeamsService service, CancellationToken ct) => SendAsync(HttpMethod.Get, url, service, null, ct);
 
+    /// <summary>Whether a service's token may go to an address: SharePoint's to SharePoint and OneDrive alone, Graph's to Graph alone, over https.</summary>
+    internal static bool MayCarry(TeamsService service, string url)
+        => service switch
+        {
+            TeamsService.SharePoint => Uri.TryCreate(url, UriKind.Absolute, out var site) && site.Scheme == Uri.UriSchemeHttps && TeamsServices.IsSharePointHost(site.Host),
+            TeamsService.Graph => Uri.TryCreate(url, UriKind.Absolute, out var graph) && graph.Scheme == Uri.UriSchemeHttps && TeamsServices.IsGraphHost(graph.Host),
+            _ => true,
+        };
+
     private async Task<JsonDocument> SendAsync(HttpMethod method, string url, TeamsService service, string? body, CancellationToken ct)
     {
+        if (!MayCarry(service, url))
+        {
+            throw VfsException.AccessDenied(url);
+        }
+
         await _inFlight.WaitAsync(ct).ConfigureAwait(false);
         try
         {

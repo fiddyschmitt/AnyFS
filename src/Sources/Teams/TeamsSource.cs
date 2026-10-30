@@ -356,12 +356,13 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     // --- groups --------------------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Whether SharePoint's token is in hand (never waited for): what Other groups, the files folders and the shared files
-    /// are read with, each served only while it is. When it is not, it is asked for behind the listings.
+    /// Whether what reads the files is in hand (never waited for): SharePoint's token, or Microsoft Graph's where the client
+    /// mints one (GCC High's). Other groups, the files folders and the shared files are served only while it is; when it is
+    /// not, it is asked for behind the listings.
     /// </summary>
-    internal bool SharePointReady()
+    internal bool FilesReady()
     {
-        if (Api.SharePointReady)
+        if (Api.SharePointReady || Api.GraphReady)
         {
             return true;
         }
@@ -370,27 +371,76 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         return false;
     }
 
-    /// <summary>The group sites the account can open other than its teams' (Other groups), read again each refresh interval; none while SharePoint's token is not in hand.</summary>
+    /// <summary>
+    /// The group sites the account can open other than its teams' (Other groups); none while nothing that reads them is in
+    /// hand. A site found without its group (Graph's search names none) is told from a team's by the team's own site.
+    /// </summary>
     internal async Task<IReadOnlyList<GroupSite>> OtherGroupsAsync(CancellationToken ct)
     {
-        var teams = (await StructureAsync(ct).ConfigureAwait(false)).Teams.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var teams = (await StructureAsync(ct).ConfigureAwait(false)).Teams;
+        var groups = teams.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
         var sites = await GroupSitesAsync(ct).ConfigureAwait(false) ?? [];
-        return sites.Where(s => !teams.Contains(s.GroupId)).OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        var teamSites = sites.Any(s => s.GroupId is null) ? await TeamSitesAsync(teams, ct).ConfigureAwait(false) : [];
+        return sites.Where(s => s.GroupId is { } group ? !groups.Contains(group) : !teamSites.Contains(TeamsFiles.SiteKey(s.SiteUrl)))
+            .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ToList();
     }
 
+    /// <summary>The account's teams' own sites (as <see cref="TeamsFiles.SiteKey"/>), each looked up once a walk interval; a team whose site cannot be found is left out.</summary>
+    private Task<HashSet<string>> TeamSitesAsync(IReadOnlyList<TeamInfo> teams, CancellationToken ct)
+        => Cache.GetAsync("teamsites", ReadWholeEvery, async c =>
+        {
+            var sites = await Task.WhenAll(teams.Where(t => t.GroupId is not null).Select(async team =>
+            {
+                try
+                {
+                    return await Api.TeamSiteAsync(team, c).ConfigureAwait(false);
+                }
+                catch (VfsException ex)
+                {
+                    Logger.LogInformation("teams: the site of the team {Team} could not be found ({Error})", team.DisplayName, ex.Message);
+                    return null;
+                }
+            })).ConfigureAwait(false);
+            return sites.OfType<string>().Select(TeamsFiles.SiteKey).ToHashSet(StringComparer.Ordinal);
+        }, ct);
+
+    // the group sites as last read, and when; one older than the refresh interval is answered and read again behind
+    private sealed record SitesRead(IReadOnlyList<GroupSite>? Sites, DateTimeOffset At);
+
+    private SitesRead? _sitesRead;
+    private Task _sitesReading = Task.CompletedTask;
+
     /// <summary>
-    /// The group sites the account can open (SharePoint search), kept for the refresh interval; null while SharePoint's token
-    /// is not in hand (asked for behind the listings, never waited for) and when the search failed (asked again the next
-    /// interval).
+    /// The group sites the account can open (SharePoint's search, or Microsoft Search through Graph): null while nothing that
+    /// reads them is in hand (asked for behind the listings, never waited for). The first read is waited for; after it, the
+    /// last read answers at once and one older than the refresh interval is read again behind the listings, so no path
+    /// under Other groups waits on a search of a large organisation's sites. A read that fails keeps the last one.
     /// </summary>
     private async Task<IReadOnlyList<GroupSite>?> GroupSitesAsync(CancellationToken ct)
     {
-        if (!SharePointReady())
+        if (!FilesReady())
         {
             return null;
         }
 
-        var found = await Cache.GetAsync("groupsites", _settings.Refresh, async c =>
+        if (_sitesRead is { } read)
+        {
+            if (DateTimeOffset.UtcNow - read.At > _settings.Refresh)
+            {
+                Behind(ref _sitesReading, "reading the group sites", ReadSitesAsync);
+            }
+
+            return read.Sites;
+        }
+
+        await ReadSitesAsync(ct).ConfigureAwait(false);
+        return _sitesRead?.Sites;
+    }
+
+    private async Task ReadSitesAsync(CancellationToken ct)
+    {
+        // one read however many ask at once
+        var found = await Cache.GetAsync("groupsites", TimeSpan.Zero, async c =>
         {
             try
             {
@@ -398,11 +448,11 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             }
             catch (VfsException ex)
             {
-                Logger.LogInformation("teams: SharePoint search did not list the group sites ({Error})", ex.Message);
+                Logger.LogInformation("teams: the group sites could not be searched ({Error})", ex.Message);
                 return new FoundSites(null);
             }
         }, ct).ConfigureAwait(false);
-        return found.Sites;
+        _sitesRead = new SitesRead(found.Sites ?? _sitesRead?.Sites, DateTimeOffset.UtcNow);
     }
 
     private sealed record FoundSites(IReadOnlyList<GroupSite>? Sites);
@@ -507,7 +557,8 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     {
         if (await Api.SeekTokensAsync(ct).ConfigureAwait(false))
         {
-            Cache.Forget("groupsites");
+            // the group sites read again: behind the answer when there is one, else at the next asking
+            _sitesRead = _sitesRead is { Sites: not null } read ? read with { At = DateTimeOffset.MinValue } : null;
             await RelistAsync(ct).ConfigureAwait(false);
         }
     });
@@ -549,20 +600,20 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             return ([], AttachmentNames.None);
         }
 
-        // the shared files only while SharePoint's token is in hand (never waited for); the images are Teams' own
-        var shared = messages.Any(m => m.Files.Count > 0) && SharePointReady();
+        // the shared files only while what reads them is in hand (never waited for); the images are Teams' own
+        var shared = messages.Any(m => m.Files.Count > 0) && FilesReady();
         var found = new List<(string Name, Func<string, TmNode> Make, string? Image, string? File)>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var message in messages.Where(m => m.IsContent && m.Deleted is null).OrderBy(m => m.Composed ?? DateTimeOffset.MinValue).ThenBy(m => m.Id, StringComparer.Ordinal))
         {
             foreach (var file in shared ? message.Files : [])
             {
-                if (!seen.Add(file.Url) || TeamsFiles.Locate(file.Url, file.SiteUrl) is not { } where || await SharedAsync(where, ct).ConfigureAwait(false) is not { } entry)
+                if (!seen.Add(file.Url) || TeamsFiles.Locate(file.Url, file.SiteUrl) is not { } where || await SharedAsync(where, file.Url, ct).ConfigureAwait(false) is not { } entry)
                 {
                     continue;
                 }
 
-                found.Add((file.Name, name => new LibraryFile(name, where.SiteUrl, where.Path, entry.Length, entry.Modified), null, file.Url));
+                found.Add((file.Name, name => new LibraryFile(name, where.SiteUrl, where.Path, entry.Length, entry.Modified, file.Url), null, file.Url));
             }
 
             var number = 0;
@@ -598,11 +649,11 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     }
 
     /// <summary>A shared file as SharePoint or OneDrive has it now; null when it is gone or out of reach (it is left out, not failed on).</summary>
-    private async Task<DriveEntry?> SharedAsync((string SiteUrl, string Path) where, CancellationToken ct)
+    private async Task<DriveEntry?> SharedAsync((string SiteUrl, string Path) where, string url, CancellationToken ct)
     {
         try
         {
-            return await Cache.GetAsync($"shared:{where.SiteUrl}/{where.Path}", _settings.Refresh, async c => new[] { await Api.FileAsync(where.SiteUrl, where.Path, c).ConfigureAwait(false) }, ct).ConfigureAwait(false) is [var entry] ? entry : null;
+            return await Cache.GetAsync($"shared:{where.SiteUrl}/{where.Path}", _settings.Refresh, async c => new[] { await Api.FileAsync(where.SiteUrl, where.Path, url, c).ConfigureAwait(false) }, ct).ConfigureAwait(false) is [var entry] ? entry : null;
         }
         catch (VfsException ex) when (ex.Error is VfsError.AccessDenied or VfsError.Unavailable or VfsError.IoError)
         {
@@ -629,10 +680,13 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         return image;
     }
 
-    /// <summary>A SharePoint or OneDrive file, read in ranges through a download address fetched now; one that lapses mid-read (about an hour) is fetched again.</summary>
-    internal async Task<IVfsFile> OpenLibraryFileAsync(string siteUrl, string path, long length, CancellationToken ct)
+    /// <summary>
+    /// A SharePoint or OneDrive file (a shared one by its own address too), read in ranges through a download address fetched
+    /// now; one that lapses mid-read (about an hour) is fetched again.
+    /// </summary>
+    internal async Task<IVfsFile> OpenLibraryFileAsync(string siteUrl, string path, string? url, long length, CancellationToken ct)
     {
-        var entry = await Api.FileAsync(siteUrl, path, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
+        var entry = await Api.FileAsync(siteUrl, path, url, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
         var address = entry.DownloadUrl ?? throw VfsException.Unavailable($"SharePoint gave no download address for '{path}'");
         return new RandomAccessOverStream(length, async (offset, openCt) =>
         {
@@ -643,7 +697,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             }
             catch (VfsException ex) when (ex.Error == VfsError.AccessDenied)
             {
-                var again = await Api.FileAsync(siteUrl, path, openCt).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
+                var again = await Api.FileAsync(siteUrl, path, url, openCt).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
                 address = again.DownloadUrl ?? throw VfsException.Unavailable($"SharePoint gave no download address for '{path}'");
                 response = await Api.ContentAsync(address, offset, openCt).ConfigureAwait(false);
             }
@@ -832,7 +886,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         Task[] behind;
         lock (_behind)
         {
-            behind = [_seek, _groupsBuild];
+            behind = [_seek, _groupsBuild, _sitesReading];
         }
 
         try
