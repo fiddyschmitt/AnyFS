@@ -827,6 +827,62 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
     /// <summary>The region's services (authz regionGtms), the media service's host, and the skype token it takes.</summary>
     internal sealed record Services(string Aggregator, string ChatService, string MiddleTier, string? Ams, string? SkypeToken, DateTimeOffset SkypeExpires);
 
+    // --- BRANCH BUILD ONLY (teams-probe): what the probe asks with -----------------------------------------------------
+
+    /// <summary>
+    /// A request as the probe makes it, paced and to its service's own hosts alone: its status (0 a host the token may not
+    /// go to, -1 unreachable, -2 no answer in time, -3 no token in hand) and its answer's text. Never a throw.
+    /// </summary>
+    internal async Task<(int Status, string Text)> ProbeAsync(HttpMethod method, string url, TeamsService service, string? body, CancellationToken ct)
+    {
+        if (!MayCarry(service, url))
+        {
+            return (0, "");
+        }
+
+        string token;
+        try
+        {
+            token = await tokenFor(service, null, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is VfsException or SignInRequiredException)
+        {
+            return (-3, "");
+        }
+
+        await _pace.WaitAsync(ct).ConfigureAwait(false);
+        using var request = new HttpRequestMessage(method, url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Headers.Accept.ParseAdd("application/json");
+        if (body is not null)
+        {
+            request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+        }
+
+        try
+        {
+            using var response = await _http.SendAsync(request, ct).ConfigureAwait(false);
+            return ((int)response.StatusCode, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+        }
+        catch (HttpRequestException)
+        {
+            return (-1, "");
+        }
+        catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return (-2, "");
+        }
+    }
+
+    /// <summary>A service's token, for the probe to read its scopes (never written anywhere).</summary>
+    internal Task<string> ProbeTokenAsync(TeamsService service, CancellationToken ct) => tokenFor(service, null, ct);
+
+    /// <summary>The host the page used SharePoint's token on, for the probe.</summary>
+    internal string? ProbeSharePointHost => sharePointHost?.Invoke();
+
+    /// <summary>Graph's address, for the probe.</summary>
+    internal string ProbeGraphRoot => GraphRoot();
+
     // --- the send path -------------------------------------------------------------------------------------------------
 
     private Task<JsonDocument> GetAsync(string url, TeamsService service, CancellationToken ct) => SendAsync(HttpMethod.Get, url, service, null, ct);

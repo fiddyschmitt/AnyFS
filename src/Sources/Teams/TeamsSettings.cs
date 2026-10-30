@@ -150,6 +150,11 @@ public sealed class TeamsSettings
     [Setting("Requests at a time", Advanced = true, Order = 16, Hint = "How many requests AnyFS has open with Teams at once.")]
     public int Concurrency { get; set; } = 8;
 
+    // BRANCH BUILD ONLY (teams-probe): goes with the branch
+    [Setting("Probe for the next features (branch build)", Advanced = true, Order = 20,
+        Hint = "Branch build only. Once the source has started, it reads (only reads) what the account's Teams offers for the features being considered: meeting recordings and transcripts, call history, saved messages, the activity feed, bot and connector cards, chat folders, tabs and rosters. It writes a report that holds no message text, names, addresses or tenant names, at the source's root as teams-probe.txt and in %LOCALAPPDATA%\\AnyFS\\teams-probe. Off: the source as on main.")]
+    public bool Probe { get; set; } = true;
+
     internal TeamsSignIn EffectiveSignIn => TeamsSignIn.WebSession;
 
     /// <summary>The cloud chosen in the settings; null for Automatic (found from the account, <see cref="TeamsCloud.ResolveAsync"/>).</summary>

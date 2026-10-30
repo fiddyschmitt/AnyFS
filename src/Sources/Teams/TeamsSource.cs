@@ -83,6 +83,31 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         });
         _kept.StartWalks();
         Logger.LogInformation("teams: serving {Account}", _api.Account);
+
+        // BRANCH BUILD ONLY (teams-probe)
+        if (_settings.Probe && _api is TeamsRest live)
+        {
+            Behind(ref _probing, "probing Teams", c => ProbeAsync(live, c));
+        }
+    }
+
+    // BRANCH BUILD ONLY (teams-probe): the probe's run, and its report once written
+    private Task _probing = Task.CompletedTask;
+
+    internal byte[]? ProbeReport { get; private set; }
+
+    /// <summary>BRANCH BUILD ONLY: runs the probe and keeps its report: in %LOCALAPPDATA%\AnyFS\teams-probe, and at the root as teams-probe.txt.</summary>
+    private async Task ProbeAsync(TeamsRest live, CancellationToken ct)
+    {
+        Logger.LogInformation("teams: probing what the account's Teams offers (branch build)");
+        var report = await new TeamsProbe(live, _cloud, live.Mri).RunAsync(ct).ConfigureAwait(false);
+        var folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AnyFS", "teams-probe");
+        Directory.CreateDirectory(folder);
+        var file = Path.Combine(folder, $"{DateTime.Now.ToString("yyyy-MM-dd_HHmm", CultureInfo.InvariantCulture)}_teams-probe-{_cloud.Name}.txt");
+        await File.WriteAllTextAsync(file, report, ct).ConfigureAwait(false);
+        ProbeReport = System.Text.Encoding.UTF8.GetBytes(report);
+        Logger.LogInformation("teams: the probe's report is at {File}, and at the source's root as teams-probe.txt", file);
+        await Kept.Cache.RefreshAsync("", ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -979,7 +1004,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         Task[] behind;
         lock (_behind)
         {
-            behind = [_seek, _myGroups.Building, _allGroups.Building, _sitesReading];
+            behind = [_seek, _myGroups.Building, _allGroups.Building, _sitesReading, _probing];
         }
 
         try

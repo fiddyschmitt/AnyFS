@@ -81,6 +81,12 @@ internal sealed class RootFolder : TmFolder
             children.Add(new MarkdownFile("groups.md", source.GroupsMarkdown(), null));
         }
 
+        // BRANCH BUILD ONLY (teams-probe)
+        if (source.ProbeReport is { } report)
+        {
+            children.Add(new MarkdownFile("teams-probe.txt", report, null));
+        }
+
         return children;
     }
 }
