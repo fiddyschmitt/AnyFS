@@ -137,9 +137,17 @@ internal sealed class FakeTeams : ITeamsApi
         return Task.FromResult(new MessagePage(page, older));
     }
 
-    public Task<MessagePage> OlderAsync(string olderLink, CancellationToken ct)
+    /// <summary>A delay on each older page, so a test can open a month before the history has reached it.</summary>
+    public TimeSpan OlderDelay { get; set; }
+
+    public async Task<MessagePage> OlderAsync(string olderLink, CancellationToken ct)
     {
         MessageCalls++;
+        if (OlderDelay > TimeSpan.Zero)
+        {
+            await Task.Delay(OlderDelay, ct);
+        }
+
         var bar = olderLink.LastIndexOf('|');
         var threadId = olderLink[..bar];
         var before = int.Parse(olderLink[(bar + 1)..]);
@@ -148,7 +156,7 @@ internal sealed class FakeTeams : ITeamsApi
         var start = Math.Max(0, before - size);
         var page = all.Skip(start).Take(before - start).ToList();
         var older = start > 0 ? $"{threadId}|{start}" : null;
-        return Task.FromResult(new MessagePage(page, older));
+        return new MessagePage(page, older);
     }
 
     public Task<IReadOnlyList<Person>> PeopleAsync(IReadOnlyList<string> mris, CancellationToken ct)
@@ -427,7 +435,8 @@ internal sealed class FakeTeams : ITeamsApi
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
-    public TeamsStandIn StandIn() => new(this);
+    /// <summary>The seam a source reads this fake through; with a newest read of <paramref name="newest"/> messages, <paramref name="pageSize"/> to a page, so a few messages have a history.</summary>
+    public TeamsStandIn StandIn(int newest = 2_000, int pageSize = 200) => new(this, newest, pageSize);
 
     private List<TeamsMessage> Ordered(string threadId)
         => _messages.TryGetValue(threadId, out var list)

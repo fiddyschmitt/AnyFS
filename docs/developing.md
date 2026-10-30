@@ -119,7 +119,10 @@ their sites, as Graph's list of groups does, or (`GraphListsNoGroups`) the sites
 does where Graph refuses that list. Its `Calls` and `Activity` are the chat service's call history and activity feed (null
 for an account with none: the sandbox has no call history), `CallsFail` refuses the call history, and `AddChat(hidden:
 true)` makes a chat one hidden in Teams. `Threads` holds what the chat service tells of a channel's thread (its site,
-folder and roster, for channel.md and team.md), and `SetTeam` gives a team its details. `TeamsRestTests` read the
+folder and roster, for channel.md and team.md), and `SetTeam` gives a team its details; `AddPerson` can make someone a
+guest, a bot or of another organisation, and `SetChat` gives a chat its details (who started it, pinned messages).
+`StandIn(newest, pageSize)` makes a conversation's newest read and its pages small, so a few messages have a history (its
+earlier folder), and `OlderDelay` slows the older pages, so a month can be opened before the history reaches it. `TeamsRestTests` read the
 services' answers through a fake handler (the call history's, activity feed's and threads' shapes as a GCC High account's
 are), and
 `TeamsFilesTests` check where its tokens may go. `TeamsLiveTests` read the sandbox when `ANYFS_TEST_TEAMS_ACCOUNT` (the tester,
@@ -128,7 +131,9 @@ are), and
 `ANYFS_TEAMS_BROWSER` names the browser (a Firefox takes the WebDriver route that a work machine's Edge policy can make the
 only one). `TheLibrariesAreReadThroughGraphWithoutSharePointsToken` reads the libraries through Microsoft Graph alone, as
 at work: the sandbox's Teams page mints no Graph token, so it takes the AnyFS app's from a `tests/fixtures/SharePointSignIn`
-sign-in as the tester (`ANYFS_TEST_GRAPH_CACHE`, else the fixture's default file) and withholds SharePoint's. `TeamsSandboxSeed` seeds the sandbox for them, once, with `ANYFS_SEED_TEAMS=1` beside those two: the team "AnyFS
+sign-in as the tester (`ANYFS_TEST_GRAPH_CACHE`, else the fixture's default file) and withholds SharePoint's.
+`EarlierMessagesAreReadBackThroughTheChatServicesOwnLinks` gives the sandbox's few posts a history (a newest read of two,
+two to a page) and checks every post lands once, in posts or a month of earlier. `TeamsSandboxSeed` seeds the sandbox for them, once, with `ANYFS_SEED_TEAMS=1` beside those two: the team "AnyFS
 Lab" with its SharePoint site, a thread in General with replies, reactions, an edit, a deletion, a shared file and an inline
 image, files in the channel's folder, and the same in the tester's first chat; a run skips what it finds seeded. That chat
 is hidden in Teams, so the live tests look in `Chats/Hidden chats` too. Teams is cloud only, so there is no lab machine

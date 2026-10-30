@@ -339,6 +339,53 @@ public class TeamsLiveTests
         StringAssert.Contains(md, $"The groups of {session.Account ?? account}'s own teams");
     }
 
+    /// <summary>
+    /// A conversation's history, read back through the chat service's own older-page links: a newest read of two messages,
+    /// two to a page, gives the sandbox's few posts a history; every post is then in the posts folder or a month of its
+    /// earlier folder, once, as a source reading them all at once has them.
+    /// </summary>
+    [TestMethod]
+    [Timeout(300_000)]
+    public async Task EarlierMessagesAreReadBackThroughTheChatServicesOwnLinks()
+    {
+        var (account, _) = Env();
+        var browser = BrowserLocator.Find(null, "ANYFS_TEAMS_BROWSER") ?? throw new AssertInconclusiveException("no browser for the web session");
+        var session = new TeamsWebSession(new Uri(TeamsCloud.Global.TeamsHost), browser, WebSignInTarget.ProfileFor("teams-browser", account, "ANYFS_TEAMS_PROFILES"), account, NullLogger.Instance);
+        await session.TokenAsync(TeamsService.Aggregator, interactive: false, _ => { }, CancellationToken.None);
+        var rest = new TeamsRest(new Uri(TeamsCloud.Global.ApiHost), (s, _, c) => session.TokenAsync(s, interactive: false, _ => { }, c), 4, NullLogger.Instance)
+        {
+            Account = session.Account ?? account,
+            Mri = session.Mri,
+        };
+        await using var whole = new TeamsSource(new TeamsSettings { Account = account }, new TeamsStandIn(rest));
+        await whole.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        await using var small = new TeamsSource(new TeamsSettings { Account = account }, new TeamsStandIn(rest, NewestMessages: 2, PageSize: 2));
+        await small.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+
+        const string Posts = "AnyFS Lab/General/posts";
+        var all = (await ListAsync(whole, Posts)).Select(e => e.Name).Order(StringComparer.Ordinal).ToList();
+        Assert.IsTrue(all.Count > 1, "the seeded sandbox has posts");
+        CollectionAssert.Contains((await ListAsync(small, Posts)).Select(e => e.Name).ToList(), "earlier");
+
+        // the months as they land, each waited for until read; the posts folder listed afresh when the history is whole
+        List<string> seen;
+        for (var deadline = DateTime.UtcNow.AddMinutes(1); ; await Task.Delay(1000))
+        {
+            seen = (await ListAsync(small, Posts)).Select(e => e.Name).Where(n => n != "earlier").ToList();
+            foreach (var month in await ListAsync(small, $"{Posts}/earlier"))
+            {
+                seen.AddRange((await ListAsync(small, $"{Posts}/earlier/{month.Name}")).Select(e => e.Name));
+            }
+
+            if (seen.Order(StringComparer.Ordinal).SequenceEqual(all) || DateTime.UtcNow > deadline)
+            {
+                break;
+            }
+        }
+
+        CollectionAssert.AreEqual(all, seen.Order(StringComparer.Ordinal).ToList(), "every post once, in the posts folder or a month of earlier");
+    }
+
     /// <summary>The seeded sandbox's files: the channel's folder of its team's library, a thread's and a chat's attachments.</summary>
     [TestMethod]
     [Timeout(300_000)]

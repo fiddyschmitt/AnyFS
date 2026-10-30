@@ -36,11 +36,11 @@ public class TeamsSourceTests
         return fake;
     }
 
-    private static async Task<TeamsSource> StartAsync(FakeTeams fake, Action<TeamsSettings>? change = null)
+    private static async Task<TeamsSource> StartAsync(FakeTeams fake, Action<TeamsSettings>? change = null, int newest = 2_000, int pageSize = 200)
     {
         var settings = new TeamsSettings { Account = fake.Account };
         change?.Invoke(settings);
-        var source = new TeamsSource(settings, fake.StandIn());
+        var source = new TeamsSource(settings, fake.StandIn(newest, pageSize));
         await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
         return source;
     }
@@ -844,6 +844,120 @@ public class TeamsSourceTests
         await NamesAsync(source, "Chats");
         CollectionAssert.AllItemsAreUnique(fake.PeopleAsked);
         CollectionAssert.Contains(fake.PeopleAsked, Stranger, "asked once, though the lookup names no one for it");
+    }
+
+    /// <summary>A day in the middle of a month, at noon: its messages fall in that month in any time zone.</summary>
+    private static DateTimeOffset Mid(int month, int day = 15) => new(2026, month, day, 12, 0, 0, TimeSpan.Zero);
+
+    [TestMethod]
+    public async Task ALongChatsEarlierMessagesAreInAFolderPerMonth()
+    {
+        var fake = new FakeTeams();
+        fake.AddPerson(Jane, "Jane Doe");
+        var chat = fake.AddChat(ChatKind.Group, "Long chat", [Jane], Mid(10));
+        foreach (var (month, count) in new[] { (7, 4), (8, 4), (10, 6) })
+        {
+            for (var i = 0; i < count; i++)
+            {
+                fake.Post(chat.Id, Jane, "Jane Doe", $"<p>Message {month}-{i}</p>", Mid(month, 10 + i));
+            }
+        }
+
+        // a newest read of five: chat.md has the five newest, the rest is the chat's history
+        await using var source = await StartAsync(fake, newest: 5, pageSize: 5);
+        CollectionAssert.AreEqual(new[] { "chat.md", "earlier" }, await NamesAsync(source, "Chats/Long chat"));
+        var md = await TextAsync(source, "Chats/Long chat/chat.md");
+        StringAssert.Contains(md, $"- Earlier messages: in the earlier folder, a folder per month; this file has those since {Local(Mid(10, 11))}\n");
+        StringAssert.Contains(md, "Message 10-1");
+        Assert.IsFalse(md.Contains("Message 10-0", StringComparison.Ordinal), "the sixth newest is earlier");
+
+        // read when the earlier folder is opened, not before
+        var calls = fake.MessageCalls;
+        CollectionAssert.AreEqual(new[] { "2026-07", "2026-08", "2026-10" }, await NamesAsync(source, "Chats/Long chat/earlier"));
+        Assert.IsTrue(fake.MessageCalls > calls);
+        var august = await TextAsync(source, "Chats/Long chat/earlier/2026-08/chat.md");
+        StringAssert.StartsWith(august, $"https://teams.microsoft.com/l/chat/{Uri.EscapeDataString(chat.Id)}/conversations\n\n# Long chat, August 2026\n\n");
+        for (var i = 0; i < 4; i++)
+        {
+            StringAssert.Contains(august, $"Message 8-{i}");
+        }
+
+        Assert.IsFalse(august.Contains("Message 7-", StringComparison.Ordinal));
+
+        // the month chat.md starts in: what chat.md does not have
+        var october = await TextAsync(source, "Chats/Long chat/earlier/2026-10/chat.md");
+        StringAssert.Contains(october, "Message 10-0");
+        Assert.IsFalse(october.Contains("Message 10-1", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task AChannelsEarlierPostsAreInAFolderPerMonth()
+    {
+        var fake = new FakeTeams();
+        var general = FakeTeams.Channel("General", general: true);
+        fake.AddTeam("AnyFS Lab", general);
+        var july = fake.Post(general.Id, Jane, "Jane Doe", "<p>July plan</p>", Mid(7));
+        fake.Post(general.Id, John, "John Roe", "<p>Agreed</p>", Mid(7, 16), rootId: july.Id);
+        var august = fake.Post(general.Id, Jane, "Jane Doe", "<p>August review</p>", Mid(8));
+        for (var i = 0; i < 4; i++)
+        {
+            fake.Post(general.Id, Jane, "Jane Doe", $"<p>October {i}</p>", Mid(10, 10 + i));
+        }
+
+        // a late reply brings August's thread among the newest, though its opening message is not
+        fake.Post(general.Id, John, "John Roe", "<p>Late reply</p>", Mid(10, 20), rootId: august.Id);
+        await using var source = await StartAsync(fake, newest: 5, pageSize: 5);
+
+        var posts = await NamesAsync(source, "AnyFS Lab/General/posts");
+        Assert.AreEqual(6, posts.Count, string.Join(" | ", posts));
+        CollectionAssert.Contains(posts, "earlier");
+        Assert.IsTrue(posts.Any(p => p.Contains("Late reply", StringComparison.Ordinal)), "named by what was read of it");
+
+        CollectionAssert.AreEqual(new[] { "2026-07" }, await NamesAsync(source, "AnyFS Lab/General/posts/earlier"));
+        var thread = (await NamesAsync(source, "AnyFS Lab/General/posts/earlier/2026-07")).Single();
+        StringAssert.Contains(thread, "July plan");
+        var post = await TextAsync(source, $"AnyFS Lab/General/posts/earlier/2026-07/{thread}/post.md");
+        StringAssert.Contains(post, "July plan");
+        StringAssert.Contains(post, "Agreed");
+
+        // the history read, the posts folder is listed afresh: August's thread whole, named by its opening message
+        var whole = await UntilAsync(() => NamesAsync(source, "AnyFS Lab/General/posts"), n => n.Any(p => p.Contains("August review", StringComparison.Ordinal)));
+        Assert.IsTrue(whole.Any(p => p.Contains("August review", StringComparison.Ordinal)), string.Join(" | ", whole));
+    }
+
+    [TestMethod]
+    public async Task TheWindowEndsTheHistory()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var fake = new FakeTeams();
+        var chat = fake.AddChat(ChatKind.Group, "Windowed", [Jane], now);
+        foreach (var days in new[] { 120, 50, 40, 10, 9, 8, 7, 6 })
+        {
+            fake.Post(chat.Id, Jane, "Jane Doe", $"<p>{days} days ago</p>", now.AddDays(-days));
+        }
+
+        await using var source = await StartAsync(fake, s => s.WithinDays = 60, newest: 5, pageSize: 5);
+        var months = await NamesAsync(source, "Chats/Windowed/earlier");
+        CollectionAssert.AreEquivalent(new[] { Month.Of(now.AddDays(-50)).Name, Month.Of(now.AddDays(-40)).Name }.Distinct().ToArray(), months);
+        CollectionAssert.DoesNotContain(months, Month.Of(now.AddDays(-120)).Name, "past the window");
+    }
+
+    [TestMethod]
+    public async Task AMonthOpenedBeforeTheHistoryReachesItIsWaitedFor()
+    {
+        // as after a restart, when a kept listing names a month: opened at once, it is waited for as the history is read
+        var fake = new FakeTeams { OlderDelay = TimeSpan.FromMilliseconds(200) };
+        var chat = fake.AddChat(ChatKind.OneOnOne, null, [Jane], Mid(10, 20));
+        fake.AddPerson(Jane, "Jane Doe");
+        var newest = Mid(10, 20);
+        for (var i = 0; i < 130; i++)
+        {
+            fake.Post(chat.Id, Jane, "Jane Doe", $"<p>Day {i}</p>", newest.AddDays(-i));
+        }
+
+        await using var source = await StartAsync(fake, newest: 5, pageSize: 5);
+        var oldest = Month.Of(newest.AddDays(-129)).Name;
+        StringAssert.Contains(await TextAsync(source, $"Chats/Jane Doe/earlier/{oldest}/chat.md"), "Day 129");
     }
 
     [TestMethod]

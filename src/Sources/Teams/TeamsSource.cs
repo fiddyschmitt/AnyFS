@@ -224,6 +224,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             throw VfsException.NotADirectory(path);
         }
 
+        ShowsHistory(folder, VfsPath.Normalize(path));
         foreach (var child in await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false))
         {
             if (child is MarkdownFile markdown)
@@ -261,8 +262,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
                 throw VfsException.NotADirectory(path);
             }
 
-            var children = await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false);
-            node = children.FirstOrDefault(c => c.Name.Equals(segment, StringComparison.OrdinalIgnoreCase)) ?? throw VfsException.NotFound(path);
+            node = await Guard(() => folder.FindAsync(this, segment, ct)).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
         }
 
         return node;
@@ -349,44 +349,27 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     /// <summary>The oldest a conversation's last message may be to show ("within" days), or null for all.</summary>
     private DateTimeOffset? Cutoff => _settings.Within is { } within ? DateTimeOffset.UtcNow - within : null;
 
-    /// <summary>A channel's posts: its content messages grouped into threads (the root first, then its replies in time order), newest thread first; within the "within" window.</summary>
-    internal Task<IReadOnlyList<IReadOnlyList<TeamsMessage>>> ThreadsAsync(string channelId, CancellationToken ct)
-        => Cache.GetAsync($"threads:{channelId}", _settings.Refresh, async c =>
-        {
-            var version = (await StructureAsync(c).ConfigureAwait(false)).Teams.SelectMany(t => t.Channels).FirstOrDefault(ch => ch.Id == channelId)?.Version;
-            var messages = await ConversationAsync(channelId, version, c).ConfigureAwait(false);
-            await LearnNamesAsync(messages, c).ConfigureAwait(false);
-            var cutoff = Cutoff;
-            var threads = messages.Where(m => m.IsContent)
-                .GroupBy(m => m.ThreadId)
-                .Select(g => (IReadOnlyList<TeamsMessage>)g.OrderBy(m => m.Composed ?? DateTimeOffset.MinValue).ThenBy(m => m.Id, StringComparer.Ordinal).ToList())
-                .Where(t => t.Count > 0 && (cutoff is null || t[^1].Composed is null || t[^1].Composed >= cutoff))
-                .OrderByDescending(t => t[^1].Composed ?? DateTimeOffset.MinValue)
-                .ToList();
-            return (IReadOnlyList<IReadOnlyList<TeamsMessage>>)threads;
-        }, ct);
-
-    /// <summary>A chat as Markdown, with its attachments (the files it shares, its inline images).</summary>
-    internal async Task<(byte[] Markdown, IReadOnlyList<TmNode> Attachments)> ChatAsync(ChatInfo chat, CancellationToken ct)
+    /// <summary>
+    /// A chat as Markdown (its newest messages: the earlier ones are in its earlier folder, where it has one), with its
+    /// attachments (the files it shares, its inline images), and whether it goes back further than chat.md.
+    /// </summary>
+    internal async Task<(byte[] Markdown, IReadOnlyList<TmNode> Attachments, bool Earlier)> ChatAsync(ChatInfo chat, CancellationToken ct)
     {
-        var messages = await Cache.GetAsync($"chat:{chat.Id}", _settings.Refresh, async c =>
-        {
-            var version = (await StructureAsync(c).ConfigureAwait(false)).Chats.FirstOrDefault(ch => ch.Id == chat.Id)?.Version ?? chat.Version;
-            var all = await ConversationAsync(chat.Id, version, c).ConfigureAwait(false);
-            await LearnNamesAsync(all, c).ConfigureAwait(false);
-            return all;
-        }, ct).ConfigureAwait(false);
+        var store = await ChatConversationAsync(chat, ct).ConfigureAwait(false);
+        var messages = store.Newest();
         var (attachments, names) = await AttachmentsAsync(messages, ct).ConfigureAwait(false);
         var now = (await StructureAsync(ct).ConfigureAwait(false)).Chats.FirstOrDefault(ch => ch.Id == chat.Id) ?? chat;
-        return (TeamsText.Chat(messages, ChatName(chat), NameOf, names, DetailsOf(now, messages)), attachments);
+        var from = store.From;
+        return (TeamsText.Chat(messages, ChatName(chat), NameOf, names, DetailsOf(now, messages, from)), attachments, from is not null);
     }
 
     /// <summary>
     /// What chat.md says of its chat above the messages: its link, kind and members (the account as "you", then by name; a
     /// guest, a bot or another organisation's person marked), who started it and when, whether it is with other
-    /// organisations, muted or hidden, and its pinned messages among those read.
+    /// organisations, muted or hidden, its pinned messages among those read, and where its earlier messages are (those
+    /// before <paramref name="earlierThan"/>, where it has any).
     /// </summary>
-    private ChatDetails DetailsOf(ChatInfo chat, IReadOnlyList<TeamsMessage> messages)
+    private ChatDetails DetailsOf(ChatInfo chat, IReadOnlyList<TeamsMessage> messages, DateTimeOffset? earlierThan)
     {
         var home = _people.Values.FirstOrDefault(p => IsMe(p.Mri))?.Organisation;
         var members = chat.MemberMris.Distinct(StringComparer.OrdinalIgnoreCase)
@@ -397,7 +380,8 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         var pinned = messages.Where(m => m.IsContent && m.Deleted is null && (m.Pinned || pinnedIds.Contains(m.Id)))
             .OrderBy(m => m.Composed ?? DateTimeOffset.MinValue).ThenBy(m => m.Id, StringComparer.Ordinal).ToList();
         return new ChatDetails(TeamsLinks.Chat(LinkHost, chat), chat.Kind, members.Take(TeamsText.MembersShown).ToList(), members.Count, chat.Created,
-            chat.CreatorMri is { } creator ? (IsMe(creator) ? "you" : NameOf(creator)) : null, chat.External, chat.Muted, chat.Hidden, pinned);
+            chat.CreatorMri is { } creator ? (IsMe(creator) ? "you" : NameOf(creator)) : null, chat.External, chat.Muted, chat.Hidden, pinned,
+            earlierThan is { } from ? $"in the {EarlierFolderName} folder, a folder per month; this file has those since {from.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)}" : null);
     }
 
     /// <summary>A chat member as chat.md names them: "you", else their name, marked where a guest, a bot or of an organisation other than the account's.</summary>
@@ -972,84 +956,6 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }, maxStreams: Math.Clamp(_settings.Concurrency, 1, 8), maxSkipBytes: 1 << 20);
     }
 
-    /// <summary>A conversation's messages, newest page first and back as far as the "within" window (or 2,000 messages) reaches.</summary>
-    // a conversation's messages as last read, with the version Teams gave it then and when it was last read whole
-    private readonly ConcurrentDictionary<string, KeptConversation> _conversations = new(StringComparer.Ordinal);
-
-    private sealed record KeptConversation(string? Version, IReadOnlyList<TeamsMessage> Messages, DateTimeOffset ReadWhole);
-
-    /// <summary>How long a conversation goes without being read whole: an edit or reaction on an older message shows by then.</summary>
-    private TimeSpan ReadWholeEvery => _settings.WalkEvery > TimeSpan.Zero ? _settings.WalkEvery : TimeSpan.FromMinutes(30);
-
-    /// <summary>
-    /// A conversation's messages (spec 7.9), read no more than it must: as kept while Teams gives it the same version; its
-    /// newest page merged over what is kept when the version has moved on (changed messages replaced, new ones added); read
-    /// whole the first time, when the newest page does not reach back to what is kept, and once each walk interval, so an
-    /// edit or a reaction on an older message shows too.
-    /// </summary>
-    private async Task<IReadOnlyList<TeamsMessage>> ConversationAsync(string threadId, string? version, CancellationToken ct)
-    {
-        var now = DateTimeOffset.UtcNow;
-        if (_conversations.TryGetValue(threadId, out var kept) && now - kept.ReadWhole < ReadWholeEvery)
-        {
-            if (version is not null && version == kept.Version)
-            {
-                return kept.Messages;
-            }
-
-            var newest = await Api.MessagesAsync(threadId, 50, ct).ConfigureAwait(false);
-            var known = kept.Messages.Select(m => m.Id).ToHashSet(StringComparer.Ordinal);
-            if (newest.OlderLink is null || newest.Messages.Any(m => known.Contains(m.Id)))
-            {
-                var merged = kept.Messages.ToDictionary(m => m.Id, StringComparer.Ordinal);
-                foreach (var message in newest.Messages)
-                {
-                    merged[message.Id] = message;
-                }
-
-                var messages = merged.Values.ToList();
-                _conversations[threadId] = kept with { Version = version, Messages = messages };
-                return messages;
-            }
-        }
-
-        var whole = await ReadWholeAsync(threadId, ct).ConfigureAwait(false);
-        if (_conversations.Count > 5_000)
-        {
-            _conversations.Clear();
-        }
-
-        _conversations[threadId] = new KeptConversation(version, whole, now);
-        return whole;
-    }
-
-    /// <summary>A conversation's messages read whole: newest page first, back as far as the "within" window (or 2,000 messages) reaches.</summary>
-    private async Task<IReadOnlyList<TeamsMessage>> ReadWholeAsync(string threadId, CancellationToken ct)
-    {
-        var messages = new List<TeamsMessage>();
-        var page = await Api.MessagesAsync(threadId, 50, ct).ConfigureAwait(false);
-        messages.AddRange(page.Messages);
-        var cutoff = Cutoff;
-        while (page.OlderLink is { } link && messages.Count < 2000)
-        {
-            // past the window once the oldest message read is older than it (an empty newest page reads on)
-            if (cutoff is { } since && messages.Count > 0 && messages.Min(m => m.Composed ?? DateTimeOffset.MaxValue) < since)
-            {
-                break;
-            }
-
-            page = await Api.OlderAsync(link, ct).ConfigureAwait(false);
-            if (page.Messages.Count == 0)
-            {
-                break;
-            }
-
-            messages.AddRange(page.Messages);
-        }
-
-        return messages;
-    }
-
     // --- names ---------------------------------------------------------------------------------------------------------
 
     /// <summary>A person's display name for the Markdown: what is known, else a short form of the mri.</summary>
@@ -1146,7 +1052,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         Task[] behind;
         lock (_behind)
         {
-            behind = [_seek, _myGroups.Building, _allGroups.Building, _sitesReading, _calls.Building, _activity.Building];
+            behind = [_seek, _myGroups.Building, _allGroups.Building, _sitesReading, _calls.Building, _activity.Building, .. HistoryReads];
         }
 
         try
@@ -1168,6 +1074,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
 
         _stopping.Dispose();
+        _historyGate.Dispose();
         await base.DisposeAsync().ConfigureAwait(false);
     }
 }

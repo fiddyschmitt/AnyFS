@@ -62,6 +62,18 @@ internal static class TeamsText
         return Encoding.UTF8.GetBytes(text.ToString());
     }
 
+    /// <summary>
+    /// A month of a chat's earlier messages (<c>earlier\2024-03\chat.md</c>): the chat's address in Teams on the first line,
+    /// its title and the month, then that month's messages, oldest first.
+    /// </summary>
+    public static byte[] ChatMonth(IReadOnlyList<TeamsMessage> messages, string title, Month month, Func<string?, string> nameOf, AttachmentNames? attachments, string? link)
+    {
+        var text = Start(link);
+        text.Append("# ").Append(Clean(title)).Append(", ").Append(month.Label).Append("\n\n");
+        Conversation(text, messages, nameOf, attachments ?? AttachmentNames.None);
+        return Encoding.UTF8.GetBytes(text.ToString());
+    }
+
     /// <summary>How many of a chat's members chat.md names (a meeting's chat can have hundreds).</summary>
     public const int MembersShown = 50;
 
