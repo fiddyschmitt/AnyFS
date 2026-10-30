@@ -261,13 +261,38 @@ internal static class TeamsText
     private static string Duration(TimeSpan span) => span.TotalHours >= 1 ? span.ToString(@"h\:mm\:ss", CultureInfo.InvariantCulture) : span.ToString(@"m\:ss", CultureInfo.InvariantCulture);
 
     /// <summary>
-    /// <c>meeting.md</c>: a meeting chat's meetings as Teams recorded them, newest first: each time it was held (from its
-    /// start to its end), what for, its organiser, its kind, when it was scheduled for, and who came and for how long
-    /// (longest first); then its recordings, each linked to its file in the recordings folder.
+    /// <c>meeting.md</c>: a meeting as its chat names it (<paramref name="info"/>: its subject, when it is scheduled for, how
+    /// it repeats, where, its organiser, its kind, the account's answer, whether it was cancelled, the address to join it);
+    /// then each time it was held as Teams recorded it, newest first (from its start to its end, and who came and for how
+    /// long, longest first; what its call says of it besides); then its recordings, each linked to its file in the
+    /// recordings folder.
     /// </summary>
-    public static byte[] Meeting(string title, IReadOnlyList<MeetingCall> calls, IReadOnlyList<MeetingRecording> recordings, IReadOnlyDictionary<string, string> files, string? link)
+    public static byte[] Meeting(string title, MeetingInfo? info, string? organiser, IReadOnlyList<MeetingCall> calls, IReadOnlyList<MeetingRecording> recordings,
+        IReadOnlyDictionary<string, string> files, string? link)
     {
         var text = Start(link).Append("# ").Append(Clean(title)).Append("\n\n");
+        if (info is not null)
+        {
+            void Detail(string name, string? value)
+            {
+                if (!string.IsNullOrWhiteSpace(value))
+                {
+                    text.Append("- ").Append(name).Append(": ").Append(Clean(value)).Append('\n');
+                }
+            }
+
+            Detail("Subject", info.Subject);
+            Detail("Scheduled", info.Start is null && info.End is null ? null : Span(info.Start, info.End));
+            Detail("Repeats", info.Recurrence);
+            Detail("Location", info.Location);
+            Detail("Organiser", organiser);
+            Detail("Kind", Words(info.Kind));
+            Detail("Your answer", Words(info.Response));
+            Detail("Cancelled", info.Cancelled ? "yes" : null);
+            Detail("Join", info.JoinUrl is { } join ? $"<{join}>" : null);
+            text.Append('\n');
+        }
+
         text.Append(CultureInfo.InvariantCulture, $"Held {calls.Count:N0} time{(calls.Count == 1 ? "" : "s")} as Teams recorded it, newest first; {recordings.Count:N0} recording{(recordings.Count == 1 ? "" : "s")}.\n");
         foreach (var call in calls)
         {

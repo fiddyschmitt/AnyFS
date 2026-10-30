@@ -99,10 +99,45 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
                 External = Bool(c, "isExternal"),
                 Muted = Arr(c, "members").Any(m => Bool(m, "isMuted") && Mri is { } me && SameMri(Str(m, "mri"), me)),
                 PinnedIds = PinnedIdsOf(c),
+                Meeting = MeetingOf(c),
             });
         }
 
         return new TeamsStructure(teams, chats);
+    }
+
+    /// <summary>
+    /// What a meeting's chat says of its meeting, as a GCC High tenant's chats carry it (the work probe, 30-Oct-2026): its
+    /// <c>meetingInformation</c> (subject, location, start and end, cancelled, join address, organiser, recurrence, kind)
+    /// and the account's answer (<c>userMeetingInfo.rsvpStatus</c>); each an object or a JSON string of one. Null for a chat
+    /// with none.
+    /// </summary>
+    internal static MeetingInfo? MeetingOf(JsonElement chat)
+    {
+        if (JsonValues(chat, "meetingInformation").FirstOrDefault() is not { ValueKind: JsonValueKind.Object } info)
+        {
+            return null;
+        }
+
+        var join = NullIfEmpty(Str(info, "meetingJoinUrl"));
+        return new MeetingInfo(NullIfEmpty(Str(info, "subject")), NullIfEmpty(Str(info, "location")), Time(Str(info, "startTime")), Time(Str(info, "endTime")),
+            Bool(info, "isCancelled"), join is not null && Uri.TryCreate(join, UriKind.Absolute, out var address) && address.Scheme == Uri.UriSchemeHttps ? join : null,
+            NullIfEmpty(Str(info, "organizerId")), Recurrence(Obj(info, "eventRecurrencePattern"), Obj(info, "eventRecurrenceRange")),
+            NullIfEmpty(Str(info, "meetingType")) ?? NullIfEmpty(Str(info, "appointmentType")),
+            NullIfEmpty(Str(JsonValues(chat, "userMeetingInfo").FirstOrDefault(), "rsvpStatus")));
+    }
+
+    /// <summary>A meeting's recurrence in words, from its pattern (<c>patternType</c>; weekly's <c>interval</c> and <c>daysOfTheWeek</c>) and range (<c>startDate</c>, <c>endDate</c>); null where it has none.</summary>
+    private static string? Recurrence(JsonElement pattern, JsonElement range)
+    {
+        var type = NullIfEmpty(Str(pattern, "patternType"));
+        var weekly = Obj(pattern, "weekly");
+        var interval = Str(weekly, "interval") is { } every && every != "1" && every != "0" ? $"every {every}" : null;
+        var days = string.Join(", ", Arr(weekly, "daysOfTheWeek").Select(d => d.ValueKind == JsonValueKind.String ? d.GetString() : d.ToString()).OfType<string>().Where(d => d.Length > 0));
+        var from = NullIfEmpty(Str(range, "startDate"));
+        var to = NullIfEmpty(Str(range, "endDate"));
+        var parts = new[] { type, interval, days.Length > 0 ? $"on {days}" : null, from is null ? null : $"from {from}", to is null ? null : $"to {to}" }.OfType<string>().ToList();
+        return parts.Count == 0 ? null : string.Join(", ", parts);
     }
 
     /// <summary>Whether two mris are one person's: by the object id they end with, whatever prefix a cloud's chats carry.</summary>
@@ -111,9 +146,9 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
     private static string Tail(string mri) => mri[(mri.LastIndexOf(':') + 1)..];
 
     /// <summary>
-    /// The messages a chat has pinned, as its <c>pinnedItems</c> names them: an array (or a JSON string of one) of ids, or of
-    /// objects naming the message (<c>messageId</c>, <c>id</c>, <c>clientMessageId</c>). Seen at a GCC High tenant, by name
-    /// alone (the probe records no values), so read leniently: none where it names none.
+    /// The messages a chat has pinned, as its <c>pinnedItems</c> names them: an array (or a JSON string of one) of objects
+    /// naming the message (<c>itemId</c>, as a GCC High tenant's are <c>{itemType, itemId}</c>; else <c>messageId</c>,
+    /// <c>id</c>, <c>clientMessageId</c>) or of ids; none where it names none.
     /// </summary>
     internal static IReadOnlyList<string> PinnedIdsOf(JsonElement chat)
     {
@@ -137,7 +172,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
 
         return items.EnumerateArray()
-            .Select(i => i.ValueKind == JsonValueKind.String ? i.GetString() : Str(i, "messageId") ?? Str(i, "messageid") ?? Str(i, "id") ?? Str(i, "clientMessageId") ?? Str(i, "clientmessageid"))
+            .Select(i => i.ValueKind == JsonValueKind.String ? i.GetString() : Str(i, "itemId") ?? Str(i, "messageId") ?? Str(i, "messageid") ?? Str(i, "id") ?? Str(i, "clientMessageId") ?? Str(i, "clientmessageid"))
             .OfType<string>().Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).ToList();
     }
 

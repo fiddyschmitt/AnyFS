@@ -370,9 +370,9 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     private readonly ConcurrentDictionary<string, long> _mediaLengths = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// A chat's meetings (spec 7.9), from its newest messages: a meeting chat's meeting.md, where it has held a meeting or
-    /// has a recording (null else); and its recordings, each a file of the length the media service gives (one it does not
-    /// serve is left out), with their names by their videos' addresses.
+    /// A chat's meetings (spec 7.9), from the chat and its newest messages: a meeting chat's meeting.md, where it names its
+    /// meeting, has held it or has a recording (null else); and its recordings, each a file of the length the media
+    /// service gives (one it does not serve is left out), with their names by their videos' addresses.
     /// </summary>
     private async Task<(byte[]? Meeting, IReadOnlyList<TmNode> Recordings, IReadOnlyDictionary<string, string> Names)> MeetingsAsync(
         ChatInfo chat, IReadOnlyList<TeamsMessage> messages, CancellationToken ct)
@@ -384,7 +384,31 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
 
         var calls = TeamsMeetings.Calls(messages);
-        return (calls.Count > 0 || recordings.Count > 0 ? TeamsText.Meeting(ChatName(chat), calls, recordings, files, TeamsLinks.Chat(LinkHost, chat)) : null, nodes, files);
+        if (chat.Meeting is null && calls.Count == 0 && recordings.Count == 0)
+        {
+            return (null, nodes, files);
+        }
+
+        var organiser = await OrganiserAsync(chat.Meeting?.OrganizerId, ct).ConfigureAwait(false);
+        return (TeamsText.Meeting(ChatName(chat), chat.Meeting, organiser, calls, recordings, files, TeamsLinks.Chat(LinkHost, chat)), nodes, files);
+    }
+
+    /// <summary>A meeting's organiser by name: their object id as an mri, looked up once ("you" for the account; an id where the lookup names no one).</summary>
+    private async Task<string?> OrganiserAsync(string? id, CancellationToken ct)
+    {
+        if (id is null)
+        {
+            return null;
+        }
+
+        var mri = id.Contains(':', StringComparison.Ordinal) ? id : $"8:orgid:{id}";
+        if (IsMe(mri))
+        {
+            return "you";
+        }
+
+        await LearnPeopleAsync([mri], "a meeting's organiser shows as an id", ct).ConfigureAwait(false);
+        return NameOf(mri);
     }
 
     /// <summary>

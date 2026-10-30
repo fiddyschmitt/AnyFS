@@ -454,8 +454,13 @@ public class TeamsRestTests
                     {"name":"Planner","tabType":"extension","settings":{}},{"name":"","tabType":"website"},{"name":"Odd","tabType":"website","settings":{"websiteUrl":"javascript:alert(1)"}}]}]}],
          "chats":[{"id":"19:old","title":"Old","hidden":true,"createdAt":"2026-10-01T09:00:00.000Z","creator":"8:orgid:jane","isExternal":true,
                    "members":[{"mri":"8:orgid:me","objectId":"me","role":"Admin","isMuted":true},{"mri":"8:orgid:jane","objectId":"jane","role":"Admin","isMuted":false}],
-                   "pinnedItems":[{"messageId":"1001"},"1002",{"other":"x"}]},
-                  {"id":"19:new","title":"New","members":[{"mri":"8:orgid:me","isMuted":false},{"mri":"8:orgid:ann","isMuted":true}],"pinnedItems":"[{\"id\":\"2001\"}]"}]}
+                   "pinnedItems":[{"messageId":"1001"},"1002",{"other":"x"},{"itemType":0,"itemId":"1003"}]},
+                  {"id":"19:new","title":"New","members":[{"mri":"8:orgid:me","isMuted":false},{"mri":"8:orgid:ann","isMuted":true}],"pinnedItems":"[{\"id\":\"2001\"}]",
+                   "meetingInformation":{"subject":"Weekly sync","location":"Room 1","startTime":"2026-10-30T10:00:00Z","endTime":"2026-10-30T11:00:00Z","exchangeId":"x","iCalUid":"x",
+                     "isCancelled":false,"meetingJoinUrl":"https://teams.microsoft.us/l/meetup-join/x","organizerId":"jane-oid","coOrganizerIds":[],"tenantId":"t",
+                     "eventRecurrenceRange":{"startDate":"2026-10-01","endDate":"2026-12-31"},"eventRecurrencePattern":{"patternType":"weekly","weekly":{"interval":1,"daysOfTheWeek":["monday","thursday"]}},
+                     "appointmentType":"occurrence","meetingType":"Recurring","scenario":"x"},
+                   "userMeetingInfo":{"rsvpStatus":"accepted"}}]}
         """;
 
     /// <summary>The chat service's special conversations and threads, and the aggregator: an account with no 48:mentions where <paramref name="noMentions"/>.</summary>
@@ -579,10 +584,15 @@ public class TeamsRestTests
         // a chat's start, its maker, other organisations, the account's own mute (not another member's), its pinned messages
         var old = structure.Chats[0];
         Assert.AreEqual((DateTimeOffset.Parse("2026-10-01T09:00:00Z"), "8:orgid:jane", true, true), (old.Created, old.CreatorMri, old.External, old.Muted));
-        CollectionAssert.AreEqual(new[] { "1001", "1002" }, old.PinnedIds.ToArray(), "objects naming the message or ids; one naming none left out");
+        CollectionAssert.AreEqual(new[] { "1001", "1002", "1003" }, old.PinnedIds.ToArray(), "objects naming the message ({itemType, itemId} as at work) or ids; one naming none left out");
+        Assert.IsNull(old.Meeting, "no meeting named");
         var fresh = structure.Chats[1];
         Assert.IsFalse(fresh.Muted, "another member muted it, not the account");
         CollectionAssert.AreEqual(new[] { "2001" }, fresh.PinnedIds.ToArray(), "pinnedItems held as a JSON string");
+
+        // a meeting's chat's meeting, as a GCC High tenant's chats name it, with the account's answer
+        Assert.AreEqual(new MeetingInfo("Weekly sync", "Room 1", DateTimeOffset.Parse("2026-10-30T10:00:00Z"), DateTimeOffset.Parse("2026-10-30T11:00:00Z"), false,
+            "https://teams.microsoft.us/l/meetup-join/x", "jane-oid", "weekly, on monday, thursday, from 2026-10-01, to 2026-12-31", "Recurring", "accepted"), fresh.Meeting);
     }
 
     [TestMethod]

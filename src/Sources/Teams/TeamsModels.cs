@@ -201,7 +201,19 @@ internal sealed record ChatInfo(string Id, string? Title, ChatKind Kind, IReadOn
 
     /// <summary>The ids of the messages pinned in it (<c>pinnedItems</c>, where it names them).</summary>
     public IReadOnlyList<string> PinnedIds { get; init; } = [];
+
+    /// <summary>A meeting's chat's meeting, as the chat names it; null for another chat.</summary>
+    public MeetingInfo? Meeting { get; init; }
 }
+
+/// <summary>A meeting as its chat names it (the aggregator's <c>meetingInformation</c>), with the account's answer to it.</summary>
+/// <param name="Start">When it is scheduled for (a recurring meeting's: as Teams gives it), and <paramref name="End"/>.</param>
+/// <param name="OrganizerId">The organiser, by object id (or mri).</param>
+/// <param name="Recurrence">How it repeats, in words (its pattern and range as Teams gives them).</param>
+/// <param name="Kind">Teams' kind of meeting (<c>meetingType</c>, else <c>appointmentType</c>).</param>
+/// <param name="Response">The account's answer (<c>userMeetingInfo.rsvpStatus</c>).</param>
+internal sealed record MeetingInfo(string? Subject, string? Location, DateTimeOffset? Start, DateTimeOffset? End, bool Cancelled, string? JoinUrl,
+    string? OrganizerId, string? Recurrence, string? Kind, string? Response);
 
 /// <summary>A call in the account's call history (the chat service's <c>48:calllogs</c>, each message's <c>call-log</c>).</summary>
 /// <param name="Direction">incoming or outgoing, as Teams writes it.</param>

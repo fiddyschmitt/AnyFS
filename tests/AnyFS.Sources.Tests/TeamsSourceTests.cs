@@ -960,14 +960,21 @@ public class TeamsSourceTests
         StringAssert.Contains(await TextAsync(source, $"Chats/Jane Doe/earlier/{oldest}/chat.md"), "Day 129");
     }
 
-    /// <summary>A "call ended" message as a GCC High tenant's are shaped (the work probe, 30-Oct-2026): who came for how long, and the meeting's details.</summary>
-    private static string CallEnded(DateTimeOffset started, string callId, params (string Mri, string Name, int Seconds)[] parts)
+    /// <summary>
+    /// A "call ended" message as a GCC High tenant's are shaped (the work probe, 30-Oct-2026): who came for how long, and
+    /// the meeting's details. <paramref name="asAtWork"/>: those details empty and the start in a form not read, as at work.
+    /// </summary>
+    private static string CallEnded(DateTimeOffset started, string callId, bool asAtWork, params (string Mri, string Name, int Seconds)[] parts)
         => $"<ended/><partlist type=\"ended\" alt=\"\" count=\"{parts.Length}\">"
             + string.Concat(parts.Select(p => $"<part identity=\"{p.Mri}\"><name>{p.Mri}</name><displayName>{p.Name}</displayName><duration>{p.Seconds}</duration></part>"))
-            + "</partlist><meetingDetails><organizerUpn>jane@contoso.com</organizerUpn><meetingType>Scheduled</meetingType>"
-            + $"<startTime>{started:O}</startTime><endTime>{started.AddHours(1):O}</endTime><iCalUid>ical-1</iCalUid><hasEphemeralTranscript>False</hasEphemeralTranscript>"
-            + "<isRecapEnabled>False</isRecapEnabled><subject>Weekly sync</subject><type>Recurring</type></meetingDetails>"
-            + $"<callEventType>callEnded</callEventType><conversationStartTime>{started:O}</conversationStartTime><conversationUrl>https://x/c</conversationUrl><callId>{callId}</callId>";
+            + (asAtWork
+                ? "</partlist><meetingDetails><organizerUpn></organizerUpn><meetingType></meetingType><startTime></startTime><endTime></endTime><iCalUid>ical-1</iCalUid>"
+                    + "<hasEphemeralTranscript>False</hasEphemeralTranscript><isRecapEnabled>False</isRecapEnabled><subject></subject></meetingDetails>"
+                    + $"<callEventType>callEnded</callEventType><conversationStartTime>soon after noon</conversationStartTime><conversationUrl>https://x/c</conversationUrl><callId>{callId}</callId>"
+                : "</partlist><meetingDetails><organizerUpn>jane@contoso.com</organizerUpn><meetingType>Scheduled</meetingType>"
+                    + $"<startTime>{started:O}</startTime><endTime>{started.AddHours(1):O}</endTime><iCalUid>ical-1</iCalUid><hasEphemeralTranscript>False</hasEphemeralTranscript>"
+                    + "<isRecapEnabled>False</isRecapEnabled><subject>Weekly sync</subject><type>Recurring</type></meetingDetails>"
+                    + $"<callEventType>callEnded</callEventType><conversationStartTime>{started:O}</conversationStartTime><conversationUrl>https://x/c</conversationUrl><callId>{callId}</callId>");
 
     /// <summary>A recording's message as such a tenant's are shaped: its title, file name, length and its video in the media service.</summary>
     private static string Recording(string video, DateTimeOffset at, double seconds, string callId)
@@ -991,8 +998,16 @@ public class TeamsSourceTests
         fake.AddPerson(Jane, "Jane Doe");
         var started = Mid(10, 30);
         var meeting = fake.AddChat(ChatKind.Meeting, "Weekly sync", [Jane, John], started);
+
+        // as at work: the chat names its meeting (meetingInformation); its call's own details are empty
+        meeting = meeting with
+        {
+            Meeting = new MeetingInfo("Weekly sync", "Room 1", started, started.AddHours(1), false, "https://teams.microsoft.com/l/meetup-join/x",
+                Jane["8:orgid:".Length..], "weekly, on Monday", "Recurring", "accepted"),
+        };
+        fake.SetChat(meeting);
         fake.Post(meeting.Id, Jane, "Jane Doe", "<p>Agenda in the deck</p>", started.AddMinutes(-5));
-        fake.Post(meeting.Id, Jane, null, CallEnded(started, "call-1", (Jane, "Jane Doe", 3730), (John, "John Roe", 3480)), started.AddSeconds(3735), messageType: "Event/Call");
+        fake.Post(meeting.Id, Jane, null, CallEnded(started, "call-1", asAtWork: true, (Jane, "Jane Doe", 3730), (John, "John Roe", 3480)), started.AddSeconds(3735), messageType: "Event/Call");
         fake.Post(meeting.Id, Jane, null, Recording(Video, started.AddSeconds(31), 3555.2, "call-1"), started.AddSeconds(3800), messageType: "RichText/Media_CallRecording");
         return (fake, meeting, started);
     }
@@ -1007,10 +1022,15 @@ public class TeamsSourceTests
 
         CollectionAssert.AreEqual(new[] { "chat.md", "meeting.md", "recordings" }, await NamesAsync(source, "Chats/Weekly sync"));
         var md = await TextAsync(source, "Chats/Weekly sync/meeting.md");
-        StringAssert.StartsWith(md, $"https://teams.microsoft.com/l/chat/{Uri.EscapeDataString(meeting.Id)}/conversations\n\n# Weekly sync\n\nHeld 1 time as Teams recorded it, newest first; 1 recording.\n");
+        StringAssert.StartsWith(md, $"https://teams.microsoft.com/l/chat/{Uri.EscapeDataString(meeting.Id)}/conversations\n\n# Weekly sync\n\n"
+            + $"- Subject: Weekly sync\n- Scheduled: {Local(started)} – {End(started, started.AddHours(1))} (1:00:00)\n- Repeats: weekly, on Monday\n- Location: Room 1\n"
+            + "- Organiser: Jane Doe\n- Kind: Recurring\n- Your answer: Accepted\n- Join: <https://teams.microsoft.com/l/meetup-join/x>\n\n"
+            + "Held 1 time as Teams recorded it, newest first; 1 recording.\n");
+
+        // its start in a form not read: its end less the longest anyone stayed
         var ended = started.AddSeconds(3735);
-        StringAssert.Contains(md, $"\n## {Local(started)} – {End(started, ended)} (1:02:15)\n\n- Subject: Weekly sync\n- Organiser: jane@contoso.com\n- Kind: Scheduled\n"
-            + $"- Scheduled: {Local(started)} – {End(started, started.AddHours(1))} (1:00:00)\n- Attended (2): Jane Doe (1:02:10), John Roe (58:00)\n");
+        var began = ended.AddSeconds(-3730);
+        StringAssert.Contains(md, $"\n## {Local(began)} – {End(began, ended)} (1:02:10)\n\n- Attended (2): Jane Doe (1:02:10), John Roe (58:00)\n");
         StringAssert.Contains(md, $"## Recordings\n\n- {Local(started.AddSeconds(31))}: Weekly sync (59:15), [{RecordingFile}](<recordings/{RecordingFile}>)\n");
 
         // the recording: its length as the media service gives it, read in ranges as it is read
@@ -1064,6 +1084,32 @@ public class TeamsSourceTests
         CollectionAssert.AreEqual(new[] { "post.md", "recordings" }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}"));
         CollectionAssert.AreEqual(new[] { RecordingFile }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}/recordings"));
         StringAssert.Contains(await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/post.md"), $"*🎥 Meeting recording: Weekly sync (30:00)* — [{RecordingFile}](<recordings/{RecordingFile}>)");
+    }
+
+    [TestMethod]
+    public void ACallsOwnDetailsAreReadWhereItHasThem()
+    {
+        var started = Mid(10, 30);
+        var message = new TeamsMessage("1", null, null, Jane, started.AddSeconds(3735), "Event/Call", CallEnded(started, "call-1", asAtWork: false, (Jane, "Jane Doe", 3730)), null);
+        var call = TeamsMeetings.Calls([message]).Single();
+        Assert.AreEqual((started, started.AddSeconds(3735), "Weekly sync", "jane@contoso.com", "Scheduled"), (call.Started, call.Ended, call.Subject, call.Organiser, call.Kind));
+        Assert.AreEqual((started, started.AddHours(1)), (call.ScheduledStart, call.ScheduledEnd));
+    }
+
+    [TestMethod]
+    public async Task AMeetingsChatHasItsMeetingMdBeforeItIsHeld()
+    {
+        var fake = new FakeTeams();
+        fake.AddPerson(Jane, "Jane Doe");
+        var at = Mid(11, 5);
+        var chat = fake.AddChat(ChatKind.Meeting, "Planning", [Jane], Mid(10, 29));
+        fake.SetChat(chat with { Meeting = new MeetingInfo("Planning", null, at, at.AddMinutes(30), true, null, null, null, null, null) });
+        fake.Post(chat.Id, Jane, "Jane Doe", "<p>See you there</p>", Mid(10, 29));
+        await using var source = await StartAsync(fake);
+
+        CollectionAssert.AreEqual(new[] { "chat.md", "meeting.md" }, await NamesAsync(source, "Chats/Planning"));
+        StringAssert.Contains(await TextAsync(source, "Chats/Planning/meeting.md"),
+            $"# Planning\n\n- Subject: Planning\n- Scheduled: {Local(at)} – {End(at, at.AddMinutes(30))} (30:00)\n- Cancelled: yes\n\nHeld 0 times as Teams recorded it, newest first; 0 recordings.\n");
     }
 
     [TestMethod]

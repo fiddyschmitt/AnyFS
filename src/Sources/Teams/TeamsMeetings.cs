@@ -42,7 +42,10 @@ internal static class TeamsMeetings
             var attended = Children(Child(root, "partlist"), "part")
                 .Select(p => new Attendee(Text(p, "displayName") ?? Text(p, "name") ?? p.Attribute("identity")?.Value ?? "?", Length(Text(p, "duration"))))
                 .ToList();
-            var call = new MeetingCall(Time(Text(root, "conversationStartTime")), message.Composed, Text(details, "subject"), Text(details, "organizerUpn"),
+            // its start as Teams wrote it, else (a form it does not read) its end less the longest anyone stayed
+            var longest = attended.Select(a => a.Time).Max();
+            var started = Time(Text(root, "conversationStartTime")) ?? (message.Composed is { } end && longest is { } span ? end - span : null);
+            var call = new MeetingCall(started, message.Composed, Text(details, "subject"), Text(details, "organizerUpn"),
                 Text(details, "meetingType"), Time(Text(details, "startTime")), Time(Text(details, "endTime")), attended, Text(root, "callId"));
             calls[call.CallId ?? message.Id] = call;
         }
