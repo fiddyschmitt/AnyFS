@@ -307,8 +307,15 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
     // path in the site's default library, so what one listed the other opens.
     private bool ViaGraph => !SharePointReady && GraphReady;
 
-    public async Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, CancellationToken ct)
+    public async Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, ThreadDetails? thread, CancellationToken ct)
     {
+        // as the channel's thread names them, whichever reads them: a private or shared channel's own site, which the
+        // team's site and the aggregator's path can miss (and Graph's filesFolder misses for a channel shared from another team)
+        if (ThreadFolder(thread) is { } named)
+        {
+            return named;
+        }
+
         if (ViaGraph)
         {
             return team.GroupId is { } group ? await GraphChannelFilesAsync(group, channel, ct).ConfigureAwait(false) : null;
@@ -329,6 +336,12 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
 
         return await GroupSiteAsync(host, team.GroupId).ConfigureAwait(false) is { } site ? (site.Url, channel.DisplayName) : null;
     }
+
+    /// <summary>The channel's folder as its thread names it: its site, and the folder's path within the site's default library; null where it names none.</summary>
+    internal static (string SiteUrl, string Path)? ThreadFolder(ThreadDetails? thread)
+        => thread?.SiteUrl is { } site && thread.FolderPath is { } folder && Uri.TryCreate(site, UriKind.Absolute, out var root)
+            ? TeamsFiles.Locate($"{root.Scheme}://{root.Host}{(folder.StartsWith('/') ? "" : "/")}{folder}", site)
+            : null;
 
     /// <summary>A group's site from SharePoint, kept once it has one (none yet, or a failure, is asked again).</summary>
     private async Task<TeamSite?> GroupSiteAsync(string host, string groupId)

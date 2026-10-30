@@ -175,12 +175,16 @@ internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string n
     }
 }
 
-/// <summary>A channel's files: its folder of its team's SharePoint library (or of a private channel's own site); empty while the team has no site.</summary>
+/// <summary>
+/// A channel's files: its folder of its team's SharePoint library, or of a private or shared channel's own site, as the
+/// channel's thread names it; empty while the team has no site.
+/// </summary>
 internal sealed class ChannelFilesFolder(TeamInfo team, ChannelInfo channel) : TmFolder("files")
 {
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
-        if (await source.Api.ChannelFilesAsync(team, channel, ct).ConfigureAwait(false) is not { } where)
+        var thread = await source.ThreadDetailsAsync(channel.Id, ct).ConfigureAwait(false);
+        if (await source.Api.ChannelFilesAsync(team, channel, thread, ct).ConfigureAwait(false) is not { } where)
         {
             return [];
         }

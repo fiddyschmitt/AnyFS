@@ -101,6 +101,24 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task ASharedChannelsFilesAreTheFolderItsThreadNames()
+    {
+        // a shared or private channel keeps its files in a site of its own, which its thread names
+        const string DesignSite = "https://contoso.sharepoint.com/sites/lab-Design";
+        var fake = new FakeTeams();
+        var design = FakeTeams.Channel("Design", priv: true) with { Shared = true };
+        var team = fake.AddTeam("AnyFS Lab", FakeTeams.Channel("General", general: true), design);
+        fake.AddSite(team, Site);
+        fake.AddLibraryFile(Site, "Design/not-this.txt", [1], When);
+        fake.AddLibraryFile(DesignSite, "Design/spec.md", Encoding.UTF8.GetBytes("# Spec"), When);
+        fake.Threads[design.Id] = new ThreadDetails(DesignSite, "/sites/lab-Design/Shared Documents/Design", 3, 1, 1, null);
+        await using var source = await StartAsync(fake);
+
+        CollectionAssert.AreEqual(new[] { "spec.md" }, await NamesAsync(source, "AnyFS Lab/Design/files"), "not the team site's folder of the same name");
+        Assert.AreEqual("# Spec", await TextAsync(source, "AnyFS Lab/Design/files/spec.md"));
+    }
+
+    [TestMethod]
     public async Task AThreadsSharedFilesAndImagesAreItsAttachmentsAndTheMarkdownLinksThem()
     {
         const string ImageSrc = "https://as-prod.asyncgw.teams.microsoft.com/v1/objects/0-sa-d1-abc/views/imgo";

@@ -251,10 +251,12 @@ internal sealed class FakeTeams : ITeamsApi
         return Task.FromResult(_sites.TryGetValue(groupId, out var site) ? site : _groupSites.FirstOrDefault(s => s.GroupId == groupId)?.SiteUrl);
     }
 
-    public Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, CancellationToken ct)
+    /// <summary>As the live seam: the folder the channel's thread names (a private or shared channel's own site), else the channel's name in its team's site.</summary>
+    public Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, ThreadDetails? thread, CancellationToken ct)
     {
         SharePoint();
-        return Task.FromResult(team.GroupId is { } group && _sites.TryGetValue(group, out var site) ? ((string, string)?)(site, channel.DisplayName) : null);
+        return Task.FromResult(TeamsRest.ThreadFolder(thread)
+            ?? (team.GroupId is { } group && _sites.TryGetValue(group, out var site) ? ((string, string)?)(site, channel.DisplayName) : null));
     }
 
     public Task<IReadOnlyList<DriveEntry>> FolderAsync(string siteUrl, string path, CancellationToken ct)

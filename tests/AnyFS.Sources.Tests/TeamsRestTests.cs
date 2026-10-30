@@ -301,8 +301,14 @@ public class TeamsRestTests
         var none = CancellationToken.None;
 
         // a channel's folder, from filesFolder; a team with no site has none
-        Assert.AreEqual(("https://t.sharepoint.com/sites/lab", "General"), await rest.ChannelFilesAsync(lab, new ChannelInfo("19:general@thread.tacv2", "General", true, false), none));
-        Assert.IsNull(await rest.ChannelFilesAsync(lab with { GroupId = "g-nosite" }, new ChannelInfo("19:x@thread.tacv2", "General", true, false), none));
+        Assert.AreEqual(("https://t.sharepoint.com/sites/lab", "General"), await rest.ChannelFilesAsync(lab, new ChannelInfo("19:general@thread.tacv2", "General", true, false), null, none));
+        Assert.IsNull(await rest.ChannelFilesAsync(lab with { GroupId = "g-nosite" }, new ChannelInfo("19:x@thread.tacv2", "General", true, false), null, none));
+
+        // a shared channel's: the folder its thread names, in a site of its own, with nothing asked of Graph
+        var asked = graph.Asked.Count;
+        var shared = new ThreadDetails("https://t.sharepoint.com/sites/lab-Design", "/sites/lab-Design/Shared Documents/Design", 3, 1, 1, null);
+        Assert.AreEqual(("https://t.sharepoint.com/sites/lab-Design", "Design"), await rest.ChannelFilesAsync(lab, new ChannelInfo("19:design@thread.tacv2", "Design", false, false) { Shared = true }, shared, none));
+        Assert.AreEqual(asked, graph.Asked.Count);
 
         // its children, both pages on Graph and not the one off it; the drive filesFolder named, not looked up again
         var files = await rest.FolderAsync("https://t.sharepoint.com/sites/lab", "General", none);

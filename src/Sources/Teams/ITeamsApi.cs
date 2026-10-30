@@ -40,11 +40,12 @@ internal interface ITeamsApi : IAsyncDisposable
     Task<ThreadDetails?> ThreadDetailsAsync(string threadId, CancellationToken ct);
 
     /// <summary>
-    /// Where a channel's files are: its site and the folder's path within the site's default library (the channel's
-    /// <see cref="ChannelInfo.FilesPath"/> where Teams gives one, else the channel's name in its team's site, found from the
-    /// team's Microsoft 365 group); null when the team has no site (yet).
+    /// Where a channel's files are: its site and the folder's path within the site's default library. As the channel's
+    /// thread names them (<paramref name="thread"/>: a private or shared channel keeps its files in a site of its own);
+    /// else the channel's <see cref="ChannelInfo.FilesPath"/> where Teams gives one, else the channel's name in its team's
+    /// site, found from the team's Microsoft 365 group; null when the team has no site (yet).
     /// </summary>
-    Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, CancellationToken ct);
+    Task<(string SiteUrl, string Path)?> ChannelFilesAsync(TeamInfo team, ChannelInfo channel, ThreadDetails? thread, CancellationToken ct);
 
     /// <summary>A folder of a site's default library, by its path within the library (<c>General/Specs</c>): its folders and files; empty when it does not exist.</summary>
     Task<IReadOnlyList<DriveEntry>> FolderAsync(string siteUrl, string path, CancellationToken ct);
