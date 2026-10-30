@@ -617,4 +617,51 @@ public class TeamsRestTests
         Assert.AreEqual((true, null), (people["28:polly"].Bot, people["28:polly"].Organisation));
         Assert.AreEqual("Fabrikam", people["8:orgid:kim"].Organisation);
     }
+
+    /// <summary>Teams' media service, named by the authz call with the skype token it hands out: a recording of 100 bytes, read in ranges.</summary>
+    private sealed class Media : HttpMessageHandler
+    {
+        public List<(Uri Uri, string? Authorization, string? Range)> Asked { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var uri = request.RequestUri!;
+            lock (Asked)
+            {
+                Asked.Add((uri, request.Headers.TryGetValues("Authorization", out var auth) ? auth.Single() : null, request.Headers.Range?.ToString()));
+            }
+
+            if (uri.AbsolutePath == "/api/authsvc/v1.0/authz")
+            {
+                const string Authz = """{"tokens":{"skypeToken":"skype-1","expiresIn":86400},"regionGtms":{"chatServiceAggregator":"https://agg.test","chatService":"https://chat.test","middleTier":"https://mt.test","amsV2":"https://ams.test"}}""";
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Authz, Encoding.UTF8, "application/json") });
+            }
+
+            var bytes = Enumerable.Range(0, 100).Select(i => (byte)i).ToArray();
+            var from = (int)(request.Headers.Range?.Ranges.Single().From ?? 0);
+            var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(bytes[from..]) };
+            response.Content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(from, 99, 100);
+            return Task.FromResult(response);
+        }
+    }
+
+    [TestMethod]
+    public async Task ARecordingIsReadInRangesWithTheSkypeTokenFromTheMediaServiceAlone()
+    {
+        var media = new Media();
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, media);
+        using (var response = await rest.MediaAsync("https://ams.test/v1/objects/0-rec/views/video", 40, CancellationToken.None))
+        {
+            Assert.AreEqual(100L, response.Content.Headers.ContentRange?.Length);
+            CollectionAssert.AreEqual(Enumerable.Range(40, 60).Select(i => (byte)i).ToArray(), await response.Content.ReadAsByteArrayAsync());
+        }
+
+        var asked = media.Asked.Single(a => a.Uri.Host == "ams.test");
+        Assert.AreEqual(("skype_token skype-1", "bytes=40-"), (asked.Authorization, asked.Range));
+
+        // nowhere else, whatever a message names
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => rest.MediaAsync("https://evil.example/v1/objects/0-rec/views/video", 0, CancellationToken.None));
+        Assert.AreEqual(VfsError.AccessDenied, ex.Error);
+        Assert.IsFalse(media.Asked.Any(a => a.Uri.Host == "evil.example"));
+    }
 }

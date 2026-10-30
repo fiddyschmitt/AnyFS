@@ -126,32 +126,36 @@ public sealed class TeamsSettings
         Hint = "At the top: calls.md, your call history (when, which way, with whom, how it went, how long), and activity.md, your activity feed (mentions, replies, reactions…), as Teams keeps them.")]
     public bool CallsAndActivity { get; set; } = true;
 
-    [Setting("Cloud", Advanced = true, Order = 10, Kind = SettingKind.Choice,
+    [Setting("Meetings", Order = 10,
+        Hint = "In each meeting's chat: meeting.md (each time it was held: when, what for, who organised it, who came and for how long) and a recordings folder with its recordings, played from Teams' own media service as they are read (a recording runs to hundreds of megabytes; nothing is copied until it is opened).")]
+    public bool Meetings { get; set; } = true;
+
+    [Setting("Cloud", Advanced = true, Order = 11, Kind = SettingKind.Choice,
         Choices = [AutomaticCloud, "Microsoft 365 (global)", "US Gov (GCC High)", "US Gov (DoD)"],
         Hint = "Which Microsoft cloud the account is in: the US Government clouds have Teams hosts of their own. Automatic finds it from the account's domain, from what Microsoft publishes for every organisation (no sign-in needed), at each start, and keeps the last answer for a start that cannot look it up. Choose one to set it yourself.")]
     public string Cloud { get; set; } = AutomaticCloud;
 
-    [Setting("Browser", Advanced = true, Order = 11, Kind = SettingKind.FilePath,
+    [Setting("Browser", Advanced = true, Order = 12, Kind = SettingKind.FilePath,
         Hint = "The Edge, Chrome, Chromium or Firefox to open for the web session's sign-in. Leave empty to find one automatically: Edge, Chrome or Chromium, and Firefox (through its WebDriver) where an organisation's policy keeps AnyFS out of those. AnyFS opens it with a profile of its own, never your everyday browser's.")]
     public string? BrowserPath { get; set; }
 
-    [Setting("Conversations active in the last (days)", Advanced = true, Order = 12,
+    [Setting("Conversations active in the last (days)", Advanced = true, Order = 13,
         Hint = "Chats and channel posts whose last message is older than this are left out, and a conversation is read back no further than this, its earlier folder too (a busy account has thousands). 0 shows everything, back to each conversation's start.")]
     public int WithinDays { get; set; }
 
-    [Setting("Check for changes every (seconds)", Advanced = true, Order = 13,
+    [Setting("Check for changes every (seconds)", Advanced = true, Order = 14,
         Hint = "How old a listing of something that changes (the teams and chats, a conversation's messages) may be before it is asked for again. 0 asks every time, and keeps no folder listings.")]
     public int RefreshSeconds { get; set; } = 60;
 
-    [Setting(KeptListings.KeepSetting, Advanced = true, Order = 14,
+    [Setting(KeptListings.KeepSetting, Advanced = true, Order = 15,
         Hint = "Answer from what AnyFS last saw of each folder, so folders open at once; a listing older than 'Check for changes every' is asked for again behind the answer. With 'Count files on start', the count walks the teams, channels and chats first and keeps what it finds (below). Off: each folder is asked for as it is opened.")]
     public bool KeepListings { get; set; } = true;
 
-    [Setting(KeptListings.WalkSetting, Advanced = true, Order = 15,
+    [Setting(KeptListings.WalkSetting, Advanced = true, Order = 16,
         Hint = "With folder listings kept and 'Count files on start': how long after one walk the next begins (the count's is the first). 0 walks for the count only. A walk lists the teams, channels and chats, but not each conversation's messages, which are read when the conversation is opened.")]
     public int WalkMinutes { get; set; } = 30;
 
-    [Setting("Requests at a time", Advanced = true, Order = 16, Hint = "How many requests AnyFS has open with Teams at once.")]
+    [Setting("Requests at a time", Advanced = true, Order = 17, Hint = "How many requests AnyFS has open with Teams at once.")]
     public int Concurrency { get; set; } = 8;
 
     internal TeamsSignIn EffectiveSignIn => TeamsSignIn.WebSession;

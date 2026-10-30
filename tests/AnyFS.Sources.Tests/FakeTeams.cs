@@ -353,6 +353,28 @@ internal sealed class FakeTeams : ITeamsApi
         return Task.FromResult(_images.TryGetValue(src, out var bytes) ? new TeamsImage(bytes, TeamsFiles.ExtensionOf(bytes, null)) : null);
     }
 
+    private readonly Dictionary<string, byte[]> _media = new(StringComparer.Ordinal);
+
+    /// <summary>A recording's video in Teams' media service, by its address (amsVideo).</summary>
+    public void AddMedia(string address, byte[] bytes) => _media[address] = bytes;
+
+    /// <summary>How many reads of the media service there were.</summary>
+    public int MediaCalls { get; private set; }
+
+    /// <summary>As the media service: the object from the offset, as a range; one it does not have, not found.</summary>
+    public Task<HttpResponseMessage> MediaAsync(string address, long offset, CancellationToken ct)
+    {
+        MediaCalls++;
+        if (!_media.TryGetValue(address, out var bytes))
+        {
+            throw new VfsException(VfsError.NotFound, "Teams (fake) has no such recording");
+        }
+
+        var response = new HttpResponseMessage(System.Net.HttpStatusCode.PartialContent) { Content = new ByteArrayContent(bytes[(int)Math.Min(offset, bytes.Length)..]) };
+        response.Content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(offset, bytes.Length - 1, bytes.Length);
+        return Task.FromResult(response);
+    }
+
     private static string Download(string site, string path) => "https://download.test/" + Uri.EscapeDataString($"{site}|{path}");
 
     // --- groups --------------------------------------------------------------------------------------------------------

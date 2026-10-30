@@ -351,17 +351,117 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     /// <summary>
     /// A chat as Markdown (its newest messages: the earlier ones are in its earlier folder, where it has one), with its
-    /// attachments (the files it shares, its inline images), and whether it goes back further than chat.md.
+    /// attachments (the files it shares, its inline images), whether it goes back further than chat.md, and its meetings:
+    /// a meeting chat's meeting.md, and its recordings.
     /// </summary>
-    internal async Task<(byte[] Markdown, IReadOnlyList<TmNode> Attachments, bool Earlier)> ChatAsync(ChatInfo chat, CancellationToken ct)
+    internal async Task<ChatParts> ChatAsync(ChatInfo chat, CancellationToken ct)
     {
         var store = await ChatConversationAsync(chat, ct).ConfigureAwait(false);
         var messages = store.Newest();
         var (attachments, names) = await AttachmentsAsync(messages, ct).ConfigureAwait(false);
         var now = (await StructureAsync(ct).ConfigureAwait(false)).Chats.FirstOrDefault(ch => ch.Id == chat.Id) ?? chat;
+        var (meeting, recordings, recorded) = await MeetingsAsync(now, messages, ct).ConfigureAwait(false);
         var from = store.From;
-        return (TeamsText.Chat(messages, ChatName(chat), NameOf, names, DetailsOf(now, messages, from)), attachments, from is not null);
+        var markdown = TeamsText.Chat(messages, ChatName(chat), NameOf, names with { Recordings = recorded }, DetailsOf(now, messages, from));
+        return new ChatParts(markdown, attachments, from is not null, meeting, recordings);
     }
+
+    // a meeting recording's length, by its video's address (-1: the media service does not serve it), once asked
+    private readonly ConcurrentDictionary<string, long> _mediaLengths = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// A chat's meetings (spec 7.9), from its newest messages: a meeting chat's meeting.md, where it has held a meeting or
+    /// has a recording (null else); and its recordings, each a file of the length the media service gives (one it does not
+    /// serve is left out), with their names by their videos' addresses.
+    /// </summary>
+    private async Task<(byte[]? Meeting, IReadOnlyList<TmNode> Recordings, IReadOnlyDictionary<string, string> Names)> MeetingsAsync(
+        ChatInfo chat, IReadOnlyList<TeamsMessage> messages, CancellationToken ct)
+    {
+        var (recordings, nodes, files) = await RecordingsAsync(messages, ct).ConfigureAwait(false);
+        if (chat.Kind != ChatKind.Meeting || !_settings.Meetings)
+        {
+            return (null, nodes, files);
+        }
+
+        var calls = TeamsMeetings.Calls(messages);
+        return (calls.Count > 0 || recordings.Count > 0 ? TeamsText.Meeting(ChatName(chat), calls, recordings, files, TeamsLinks.Chat(LinkHost, chat)) : null, nodes, files);
+    }
+
+    /// <summary>
+    /// A conversation's meeting recordings (a chat's, or a channel post's): each a file of the length the media service
+    /// gives (one it does not serve is left out), with their names by their videos' addresses; none with Meetings off.
+    /// </summary>
+    internal async Task<(IReadOnlyList<MeetingRecording> All, IReadOnlyList<TmNode> Files, IReadOnlyDictionary<string, string> Names)> RecordingsAsync(
+        IReadOnlyList<TeamsMessage> messages, CancellationToken ct)
+    {
+        if (!_settings.Meetings)
+        {
+            return ([], [], new Dictionary<string, string>());
+        }
+
+        var recordings = TeamsMeetings.Recordings(messages);
+        var served = new List<(MeetingRecording Recording, long Length)>();
+        foreach (var recording in recordings)
+        {
+            if (await MediaLengthAsync(recording.Video, ct).ConfigureAwait(false) is { } length)
+            {
+                served.Add((recording, length));
+            }
+        }
+
+        var names = TeamsNames.Unique(served.Select(s => RecordingName(s.Recording)).ToList());
+        var files = served.Select((s, i) => (s.Recording.Video, Name: names[i])).ToDictionary(f => f.Video, f => f.Name, StringComparer.Ordinal);
+        return (recordings, served.Select((s, i) => (TmNode)new RecordingFile(names[i], s.Recording.Video, s.Length, s.Recording.At)).ToList(), files);
+    }
+
+    /// <summary>A recording's file name: as Teams named it, else its time and title; an MP4's, as the media service serves it.</summary>
+    private static string RecordingName(MeetingRecording recording)
+    {
+        var name = recording.FileName
+            ?? string.Join(' ', new[] { recording.At?.ToLocalTime().ToString("yyyy-MM-dd HHmm", CultureInfo.InvariantCulture), recording.Title ?? "Meeting recording" }.OfType<string>());
+        return name.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase) ? name : name + ".mp4";
+    }
+
+    /// <summary>A recording's length, from the media service's answer to a read from its start, kept; null where it does not serve it (kept so too, unless it could not be reached).</summary>
+    private async Task<long?> MediaLengthAsync(string address, CancellationToken ct)
+    {
+        if (_mediaLengths.TryGetValue(address, out var known))
+        {
+            return known > 0 ? known : null;
+        }
+
+        try
+        {
+            using var response = await Api.MediaAsync(address, 0, ct).ConfigureAwait(false);
+            var length = response.Content.Headers.ContentRange?.Length ?? response.Content.Headers.ContentLength;
+            _mediaLengths[address] = length is > 0 ? length.Value : -1;
+            return length is > 0 ? length : null;
+        }
+        catch (VfsException ex)
+        {
+            Logger.LogInformation("teams: a meeting recording is left out ({Error})", ex.Message);
+            if (ex.Error is VfsError.NotFound or VfsError.AccessDenied)
+            {
+                _mediaLengths[address] = -1;
+            }
+
+            return null;
+        }
+    }
+
+    /// <summary>A meeting recording, read in ranges from Teams' media service as it is read: nothing is copied until it is.</summary>
+    internal IVfsFile OpenMedia(string address, string name, long length)
+        => new RandomAccessOverStream(length, async (offset, ct) =>
+        {
+            var response = await Api.MediaAsync(address, offset, ct).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+            {
+                response.Dispose();
+                return Stream.Null;
+            }
+
+            return await ResponseStream.FromOffsetAsync(response, offset, name, null, ct).ConfigureAwait(false);
+        }, maxStreams: Math.Clamp(_settings.Concurrency, 1, 8), maxSkipBytes: 1 << 20);
 
     /// <summary>
     /// What chat.md says of its chat above the messages: its link, kind and members (the account as "you", then by name; a

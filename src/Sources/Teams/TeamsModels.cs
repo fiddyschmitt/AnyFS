@@ -319,3 +319,6 @@ internal readonly record struct Month(int Year, int Number)
         return true;
     }
 }
+
+/// <summary>What a chat's folder holds: chat.md, its attachments, whether it has earlier messages, its meeting.md (a meeting chat's) and its recordings.</summary>
+internal sealed record ChatParts(byte[] Markdown, IReadOnlyList<TmNode> Attachments, bool Earlier, byte[]? Meeting, IReadOnlyList<TmNode> Recordings);

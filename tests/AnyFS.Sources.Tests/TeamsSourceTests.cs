@@ -960,6 +960,126 @@ public class TeamsSourceTests
         StringAssert.Contains(await TextAsync(source, $"Chats/Jane Doe/earlier/{oldest}/chat.md"), "Day 129");
     }
 
+    /// <summary>A "call ended" message as a GCC High tenant's are shaped (the work probe, 30-Oct-2026): who came for how long, and the meeting's details.</summary>
+    private static string CallEnded(DateTimeOffset started, string callId, params (string Mri, string Name, int Seconds)[] parts)
+        => $"<ended/><partlist type=\"ended\" alt=\"\" count=\"{parts.Length}\">"
+            + string.Concat(parts.Select(p => $"<part identity=\"{p.Mri}\"><name>{p.Mri}</name><displayName>{p.Name}</displayName><duration>{p.Seconds}</duration></part>"))
+            + "</partlist><meetingDetails><organizerUpn>jane@contoso.com</organizerUpn><meetingType>Scheduled</meetingType>"
+            + $"<startTime>{started:O}</startTime><endTime>{started.AddHours(1):O}</endTime><iCalUid>ical-1</iCalUid><hasEphemeralTranscript>False</hasEphemeralTranscript>"
+            + "<isRecapEnabled>False</isRecapEnabled><subject>Weekly sync</subject><type>Recurring</type></meetingDetails>"
+            + $"<callEventType>callEnded</callEventType><conversationStartTime>{started:O}</conversationStartTime><conversationUrl>https://x/c</conversationUrl><callId>{callId}</callId>";
+
+    /// <summary>A recording's message as such a tenant's are shaped: its title, file name, length and its video in the media service.</summary>
+    private static string Recording(string video, DateTimeOffset at, double seconds, string callId)
+        => "<URIObject type=\"Video.2/CallRecording.1\" uri=\"https://x/objects/0-rec\" url_thumbnail=\"https://x/t\" version=\"1\"><RecordingStatus status=\"Success\" code=\"200\"/>"
+            + "<Title>Weekly sync</Title><a href=\"https://x/play\">Play</a><OriginalName v=\"Weekly sync-20261030_100231-Meeting Recording.mp4\"/>"
+            + $"<RecordingStorage type=\"MeetingOrganizerOneDrive\" userId=\"u\"/><Identifiers><Id type=\"callId\" value=\"{callId}\"/><Id type=\"AMSDocumentID\" value=\"0-rec\"/></Identifiers>"
+            + $"<RecordingContent contentTypes=\"video,transcript\" timestamp=\"{at:O}\" duration=\"{seconds.ToString(System.Globalization.CultureInfo.InvariantCulture)}\">"
+            + $"<item type=\"video\" uri=\"x\"/><item type=\"amsVideo\" uri=\"{video}\"/><item type=\"amsTranscript\" uri=\"{video}t\"/></RecordingContent></URIObject>";
+
+    /// <summary>A span's end as the Markdown writes it: the time alone on its start's day.</summary>
+    private static string End(DateTimeOffset from, DateTimeOffset to)
+        => to.ToLocalTime().Date == from.ToLocalTime().Date ? to.ToLocalTime().ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture) : Local(to);
+
+    private const string Video = "https://as-prod.asyncgw.teams.microsoft.com/v1/objects/0-rec/views/video";
+    private const string RecordingFile = "Weekly sync-20261030_100231-Meeting Recording.mp4";
+
+    /// <summary>A meeting's chat that held a meeting, recorded: a message, its call's end, and its recording.</summary>
+    private static (FakeTeams Fake, ChatInfo Meeting, DateTimeOffset Started) Meeting()
+    {
+        var fake = new FakeTeams();
+        fake.AddPerson(Jane, "Jane Doe");
+        var started = Mid(10, 30);
+        var meeting = fake.AddChat(ChatKind.Meeting, "Weekly sync", [Jane, John], started);
+        fake.Post(meeting.Id, Jane, "Jane Doe", "<p>Agenda in the deck</p>", started.AddMinutes(-5));
+        fake.Post(meeting.Id, Jane, null, CallEnded(started, "call-1", (Jane, "Jane Doe", 3730), (John, "John Roe", 3480)), started.AddSeconds(3735), messageType: "Event/Call");
+        fake.Post(meeting.Id, Jane, null, Recording(Video, started.AddSeconds(31), 3555.2, "call-1"), started.AddSeconds(3800), messageType: "RichText/Media_CallRecording");
+        return (fake, meeting, started);
+    }
+
+    [TestMethod]
+    public async Task AMeetingsChatHasItsMeetingMdAndItsRecordings()
+    {
+        var (fake, meeting, started) = Meeting();
+        var video = Enumerable.Range(0, 300_000).Select(i => (byte)(i % 251)).ToArray();
+        fake.AddMedia(Video, video);
+        await using var source = await StartAsync(fake);
+
+        CollectionAssert.AreEqual(new[] { "chat.md", "meeting.md", "recordings" }, await NamesAsync(source, "Chats/Weekly sync"));
+        var md = await TextAsync(source, "Chats/Weekly sync/meeting.md");
+        StringAssert.StartsWith(md, $"https://teams.microsoft.com/l/chat/{Uri.EscapeDataString(meeting.Id)}/conversations\n\n# Weekly sync\n\nHeld 1 time as Teams recorded it, newest first; 1 recording.\n");
+        var ended = started.AddSeconds(3735);
+        StringAssert.Contains(md, $"\n## {Local(started)} – {End(started, ended)} (1:02:15)\n\n- Subject: Weekly sync\n- Organiser: jane@contoso.com\n- Kind: Scheduled\n"
+            + $"- Scheduled: {Local(started)} – {End(started, started.AddHours(1))} (1:00:00)\n- Attended (2): Jane Doe (1:02:10), John Roe (58:00)\n");
+        StringAssert.Contains(md, $"## Recordings\n\n- {Local(started.AddSeconds(31))}: Weekly sync (59:15), [{RecordingFile}](<recordings/{RecordingFile}>)\n");
+
+        // the recording: its length as the media service gives it, read in ranges as it is read
+        var entry = (await ListEntriesAsync(source, "Chats/Weekly sync/recordings")).Single();
+        Assert.AreEqual((RecordingFile, (long)video.Length), (entry.Name, entry.Length));
+        await using (var file = await source.OpenAsync($"Chats/Weekly sync/recordings/{RecordingFile}", VfsOpenMode.Read, CancellationToken.None))
+        {
+            var tail = new byte[1000];
+            await file.ReadFullyAsync(video.Length - 1000, tail, CancellationToken.None);
+            CollectionAssert.AreEqual(video[^1000..], tail);
+        }
+
+        // chat.md shows the recording as what it is, linked to its file, and no call markup
+        var chat = await TextAsync(source, "Chats/Weekly sync/chat.md");
+        StringAssert.Contains(chat, $"*🎥 Meeting recording: Weekly sync (59:15)* — [{RecordingFile}](<recordings/{RecordingFile}>)");
+        Assert.IsFalse(chat.Contains("partlist", StringComparison.OrdinalIgnoreCase) || chat.Contains("URIObject", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public async Task ARecordingTheMediaServiceDoesNotServeIsLeftOutAndMeetingsOffShowsNeither()
+    {
+        var (fake, _, _) = Meeting();
+        await using (var source = await StartAsync(fake))
+        {
+            CollectionAssert.AreEqual(new[] { "chat.md", "meeting.md" }, await NamesAsync(source, "Chats/Weekly sync"));
+            StringAssert.Contains(await TextAsync(source, "Chats/Weekly sync/meeting.md"), ": Weekly sync (59:15), not served by Teams' media service now\n");
+        }
+
+        fake.AddMedia(Video, [1, 2, 3]);
+        var asked = fake.MediaCalls;
+        await using (var off = await StartAsync(fake, s => s.Meetings = false))
+        {
+            CollectionAssert.AreEqual(new[] { "chat.md" }, await NamesAsync(off, "Chats/Weekly sync"));
+            StringAssert.Contains(await TextAsync(off, "Chats/Weekly sync/chat.md"), "*🎥 Meeting recording: Weekly sync (59:15)*");
+            Assert.AreEqual(asked, fake.MediaCalls, "nothing asked of the media service");
+        }
+    }
+
+    [TestMethod]
+    public async Task AChannelMeetingsRecordingIsInItsPost()
+    {
+        var fake = new FakeTeams();
+        var general = FakeTeams.Channel("General", general: true);
+        fake.AddTeam("AnyFS Lab", general);
+        var root = fake.Post(general.Id, Jane, "Jane Doe", "<p>Design review</p>", Mid(10, 29));
+        fake.Post(general.Id, Jane, null, Recording(Video, Mid(10, 29).AddMinutes(1), 1800, "call-2"), Mid(10, 29).AddHours(1), rootId: root.Id, messageType: "RichText/Media_CallRecording");
+        fake.AddMedia(Video, new byte[4096]);
+        await using var source = await StartAsync(fake);
+
+        var thread = (await NamesAsync(source, "AnyFS Lab/General/posts")).Single();
+        CollectionAssert.AreEqual(new[] { "post.md", "recordings" }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}"));
+        CollectionAssert.AreEqual(new[] { RecordingFile }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}/recordings"));
+        StringAssert.Contains(await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/post.md"), $"*🎥 Meeting recording: Weekly sync (30:00)* — [{RecordingFile}](<recordings/{RecordingFile}>)");
+    }
+
+    [TestMethod]
+    public void ALengthIsReadAsTeamsWritesIt()
+    {
+        Assert.AreEqual(TimeSpan.FromSeconds(3730), TeamsMeetings.Length("3730"));
+        Assert.AreEqual(TimeSpan.FromSeconds(3555.2), TeamsMeetings.Length("3555.2"));
+        Assert.AreEqual(new TimeSpan(1, 2, 10), TeamsMeetings.Length("01:02:10"));
+        Assert.AreEqual(new TimeSpan(1, 2, 10), TeamsMeetings.Length("PT1H2M10S"));
+        Assert.IsNull(TeamsMeetings.Length("soon"));
+        Assert.IsNull(TeamsMeetings.Length(null));
+
+        // markup that does not parse is no call
+        Assert.AreEqual(0, TeamsMeetings.Calls([new TeamsMessage("1", null, null, Jane, When, "Event/Call", "<ended/><partlist><part>", null)]).Count);
+    }
+
     [TestMethod]
     public async Task ATeamNamedAsOneOfTheRootsOwnIsNumbered()
     {

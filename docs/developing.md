@@ -122,7 +122,9 @@ true)` makes a chat one hidden in Teams. `Threads` holds what the chat service t
 folder and roster, for channel.md and team.md), and `SetTeam` gives a team its details; `AddPerson` can make someone a
 guest, a bot or of another organisation, and `SetChat` gives a chat its details (who started it, pinned messages).
 `StandIn(newest, pageSize)` makes a conversation's newest read and its pages small, so a few messages have a history (its
-earlier folder), and `OlderDelay` slows the older pages, so a month can be opened before the history reaches it. `TeamsRestTests` read the
+earlier folder), and `OlderDelay` slows the older pages, so a month can be opened before the history reaches it.
+`AddMedia` puts a meeting recording's video in its stand-in for Teams' media service, served in ranges (`MediaCalls`
+counts the reads); the tests' meeting messages (`Event/Call`, `Media_CallRecording`) are shaped as a GCC High tenant's are. `TeamsRestTests` read the
 services' answers through a fake handler (the call history's, activity feed's and threads' shapes as a GCC High account's
 are), and
 `TeamsFilesTests` check where its tokens may go. `TeamsLiveTests` read the sandbox when `ANYFS_TEST_TEAMS_ACCOUNT` (the tester,

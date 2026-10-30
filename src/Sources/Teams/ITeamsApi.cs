@@ -70,6 +70,12 @@ internal interface ITeamsApi : IAsyncDisposable
     Task<TeamsImage?> ImageAsync(string src, CancellationToken ct);
 
     /// <summary>
+    /// A meeting recording's video (or another of Teams' media service's objects) from an offset, read in ranges with the
+    /// skype token; refused for a host other than the media service's own.
+    /// </summary>
+    Task<HttpResponseMessage> MediaAsync(string address, long offset, CancellationToken ct);
+
+    /// <summary>
     /// Whether SharePoint's token (and the tenant's host) is in hand now: what the files, the attachments and Other groups
     /// are read with first. Never a wait: the page mints that token only as it gets round to it, and no listing waits on it.
     /// </summary>

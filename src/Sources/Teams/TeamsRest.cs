@@ -991,6 +991,44 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
     }
 
+    public async Task<HttpResponseMessage> MediaAsync(string address, long offset, CancellationToken ct)
+    {
+        var services = await DiscoverAsync(ct).ConfigureAwait(false);
+        if (services.SkypeToken is not { } skype || !TeamsFiles.IsMediaService(address, services.Ams))
+        {
+            throw new VfsException(VfsError.AccessDenied, "a recording off Teams' media service, or no skype token to read it with");
+        }
+
+        await _pace.WaitAsync(ct).ConfigureAwait(false);
+        using var request = new HttpRequestMessage(HttpMethod.Get, address);
+        request.Headers.TryAddWithoutValidation("Authorization", $"skype_token {skype}");
+        request.Headers.TryAddWithoutValidation("x-ms-client-version", ClientVersion);
+        request.Headers.Range = new RangeHeaderValue(offset, null);
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        }
+        catch (HttpRequestException ex)
+        {
+            throw VfsException.Unavailable($"Teams' media service could not be reached: {ex.Message}");
+        }
+
+        if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
+        {
+            return response;
+        }
+
+        var status = response.StatusCode;
+        response.Dispose();
+        throw status switch
+        {
+            HttpStatusCode.NotFound or HttpStatusCode.Gone => new VfsException(VfsError.NotFound, "Teams' media service has no such recording (any more)"),
+            HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => new VfsException(VfsError.AccessDenied, $"Teams' media service refused the recording ({(int)status})"),
+            _ => VfsException.Unavailable($"Teams' media service answered {(int)status}"),
+        };
+    }
+
     // --- the messages page ---------------------------------------------------------------------------------------------
 
     private async Task<MessagePage> PageAsync(string url, CancellationToken ct)
