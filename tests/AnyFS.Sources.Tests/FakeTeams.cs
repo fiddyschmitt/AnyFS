@@ -29,6 +29,33 @@ internal sealed class FakeTeams : ITeamsApi
     /// <summary>How many conversation-message pages have been asked for: tests check a folder that is not re-read has not been fetched.</summary>
     public int MessageCalls { get; private set; }
 
+    /// <summary>The most conversation-message pages in flight at once (a walk takes half the requests).</summary>
+    public int MostMessageCallsAtOnce => _mostAtOnce;
+
+    private int _inFlight;
+    private int _mostAtOnce;
+
+    /// <summary>Counts a message page in flight for the length of <paramref name="work"/>.</summary>
+    private async Task<MessagePage> InFlightAsync(Func<Task<MessagePage>> work)
+    {
+        var now = Interlocked.Increment(ref _inFlight);
+        int most;
+        while ((most = Volatile.Read(ref _mostAtOnce)) < now && Interlocked.CompareExchange(ref _mostAtOnce, now, most) != most)
+        {
+        }
+
+        try
+        {
+            // a moment in flight, so pages asked for together overlap
+            await Task.Delay(20);
+            return await work();
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _inFlight);
+        }
+    }
+
     /// <summary>How many times the aggregator's structure (teams and chats together) has been asked for.</summary>
     public int StructureCalls => _structureCalls;
 
@@ -126,15 +153,18 @@ internal sealed class FakeTeams : ITeamsApi
     public Task<MessagePage> MessagesAsync(string threadId, int max, CancellationToken ct)
     {
         MessageCalls++;
-        var all = Ordered(threadId);
-        if (EmptyNewestPage)
+        return InFlightAsync(() =>
         {
-            return Task.FromResult(new MessagePage([], all.Count > 0 ? $"{threadId}|{all.Count}" : null));
-        }
+            var all = Ordered(threadId);
+            if (EmptyNewestPage)
+            {
+                return Task.FromResult(new MessagePage([], all.Count > 0 ? $"{threadId}|{all.Count}" : null));
+            }
 
-        var page = all.TakeLast(max).ToList();
-        var older = all.Count > max ? $"{threadId}|{all.Count - max}" : null;
-        return Task.FromResult(new MessagePage(page, older));
+            var page = all.TakeLast(max).ToList();
+            var older = all.Count > max ? $"{threadId}|{all.Count - max}" : null;
+            return Task.FromResult(new MessagePage(page, older));
+        });
     }
 
     /// <summary>A delay on each older page, so a test can read a chat.md or open an old post before the history has reached it.</summary>

@@ -21,9 +21,6 @@ internal abstract class TmFolder(string name, DateTimeOffset? modified = null) :
 
     public override VfsEntry Entry => VfsEntry.Directory(Name, Modified);
 
-    /// <summary>Whether "Count files on start" walks into it. A conversation's messages cost their own calls, so those folders are not walked (listed when opened).</summary>
-    public virtual bool Walked => true;
-
     public abstract Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct);
 
     /// <summary>A child by name, for finding a path: listed and looked up (a chat finds its attachments without building its chat.md).</summary>
@@ -230,22 +227,18 @@ internal sealed class ImageFile(string name, string src, long length, DateTimeOf
         => new MemoryFile(await source.ImageBytesAsync(src, ct).ConfigureAwait(false), "an inline image from Teams");
 }
 
-/// <summary>A conversation's attachments: the files its messages share and its inline images. Not walked: read with the conversation.</summary>
+/// <summary>A conversation's attachments: the files its messages share and its inline images, read with the conversation.</summary>
 internal sealed class AttachmentsFolder(IReadOnlyList<TmNode> attachments, DateTimeOffset? modified) : TmFolder(FolderName, modified)
 {
     public const string FolderName = "attachments";
 
-    public override bool Walked => false;
-
     public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct) => Task.FromResult(attachments);
 }
 
-/// <summary>A chat's meeting recordings: a file each. Not walked: read with the chat.</summary>
+/// <summary>A chat's meeting recordings: a file each, read with the chat.</summary>
 internal sealed class RecordingsFolder(IReadOnlyList<TmNode> recordings, DateTimeOffset? modified) : TmFolder(FolderName, modified)
 {
     public const string FolderName = "recordings";
-
-    public override bool Walked => false;
 
     public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct) => Task.FromResult(recordings);
 }
@@ -259,13 +252,12 @@ internal sealed class RecordingFile(string name, string video, long length, Date
 /// <summary>
 /// A channel's posts: a folder per thread (the opening message and its replies), back to the channel's start or the window.
 /// A busy channel's latest 2,000 messages are read when it is listed and the rest behind the listings, the folder listed
-/// afresh as they land (an opening message read brings its thread's name). Not walked: the messages are a call.
+/// afresh as they land (an opening message read brings its thread's name). Its stamp for the walks is the channel's
+/// version, once its history is whole (<see cref="TeamsSource.StampAsync"/>).
 /// </summary>
 internal sealed class PostsFolder(TeamInfo team, ChannelInfo channel) : TmFolder("posts", null), IHistoryFolder
 {
     public string ThreadId => channel.Id;
-
-    public override bool Walked => false;
 
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
         => ThreadFolder.Of(source, team, channel, await source.ThreadsAsync(channel.Id, ct).ConfigureAwait(false));
@@ -274,10 +266,12 @@ internal sealed class PostsFolder(TeamInfo team, ChannelInfo channel) : TmFolder
 /// <summary>
 /// One channel post: <c>post.md</c>, the opening message and its replies, its <c>attachments</c> (the files they share,
 /// their inline images) where it has any, and a channel meeting's <c>recordings</c>; built when the post itself is listed
-/// (not when its posts folder is).
+/// (not when its posts folder is). Its stamp for the walks is made of its messages (<see cref="TeamsStamps.Of"/>).
 /// </summary>
 internal sealed class ThreadFolder(TeamInfo team, ChannelInfo channel, string name, IReadOnlyList<TeamsMessage> thread) : TmFolder(name, thread[0].Composed)
 {
+    public IReadOnlyList<TeamsMessage> Thread { get; } = thread;
+
     /// <summary>A folder per thread, named by its time, its author and its first line, twins numbered.</summary>
     public static List<TmNode> Of(TeamsSource source, TeamInfo team, ChannelInfo channel, IReadOnlyList<IReadOnlyList<TeamsMessage>> threads)
     {
@@ -285,24 +279,22 @@ internal sealed class ThreadFolder(TeamInfo team, ChannelInfo channel, string na
         return threads.Select((t, i) => (TmNode)new ThreadFolder(team, channel, names[i], t)).ToList();
     }
 
-    public override bool Walked => false;
-
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
-        var (attachments, names) = await source.AttachmentsAsync(thread, ct).ConfigureAwait(false);
-        var (_, recordings, recorded) = await source.RecordingsAsync(thread, ct).ConfigureAwait(false);
+        var (attachments, names) = await source.AttachmentsAsync(Thread, ct).ConfigureAwait(false);
+        var (_, recordings, recorded) = await source.RecordingsAsync(Thread, ct).ConfigureAwait(false);
         var children = new List<TmNode>
         {
-            new MarkdownFile("post.md", TeamsText.Post(thread, source.NameOf, names with { Recordings = recorded }, TeamsLinks.Post(source.LinkHost, team, channel, thread)), thread[0].Composed),
+            new MarkdownFile("post.md", TeamsText.Post(Thread, source.NameOf, names with { Recordings = recorded }, TeamsLinks.Post(source.LinkHost, team, channel, Thread)), Thread[0].Composed),
         };
         if (attachments.Count > 0)
         {
-            children.Add(new AttachmentsFolder(attachments, thread[^1].Composed));
+            children.Add(new AttachmentsFolder(attachments, Thread[^1].Composed));
         }
 
         if (recordings.Count > 0)
         {
-            children.Add(new RecordingsFolder(recordings, thread[^1].Composed));
+            children.Add(new RecordingsFolder(recordings, Thread[^1].Composed));
         }
 
         return children;
@@ -325,15 +317,14 @@ internal sealed class ChatsFolder() : TmFolder(FolderName)
 /// <summary>
 /// One chat: <c>chat.md</c>, the whole conversation, its <c>attachments</c> where it has any, a meeting's chat its
 /// <c>meeting.md</c>, and a chat with recordings its <c>recordings</c>. A long chat's latest 2,000 messages are read when it
-/// is listed and the rest behind the listings, the folder listed afresh as they land. Not walked: the messages are a call.
+/// is listed and the rest behind the listings, the folder listed afresh as they land. Its stamp for the walks is the
+/// chat's version, once its history is whole (<see cref="TeamsSource.StampAsync"/>).
 /// </summary>
 internal sealed class ChatFolder(ChatInfo chat, string name) : TmFolder(name, chat.LastUpdated), IHistoryFolder
 {
     public ChatInfo Chat { get; } = chat;
 
     public string ThreadId => Chat.Id;
-
-    public override bool Walked => false;
 
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {

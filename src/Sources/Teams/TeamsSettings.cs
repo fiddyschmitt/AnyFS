@@ -152,7 +152,7 @@ public sealed class TeamsSettings
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 16,
-        Hint = "With folder listings kept and 'Count files on start': how long after one walk the next begins (the count's is the first). 0 walks for the count only. A walk lists the teams, channels and chats, but not each conversation's messages, which are read when the conversation is opened.")]
+        Hint = "With folder listings kept and 'Count files on start': how long after one walk the next begins (the count's is the first). 0 walks for the count only. A walk goes through the teams, channels and chats and reads the conversations that have changed since the last (Teams says which), taking half the requests so browsing meanwhile has the rest; once a day it reads everything, so edits and reactions on older messages show by then.")]
     public int WalkMinutes { get; set; } = 30;
 
     [Setting("Requests at a time", Advanced = true, Order = 17, Hint = "How many requests AnyFS has open with Teams at once.")]
@@ -172,6 +172,9 @@ public sealed class TeamsSettings
     internal string? Browser => string.IsNullOrWhiteSpace(BrowserPath) ? null : BrowserPath.Trim();
 
     internal string AccountHint => Account.Trim();
+
+    /// <summary>The settings that shape the tree, as one string: listings saved under another are not read back.</summary>
+    internal string Shape => $"{ChannelMessages}|{Chats}|{Files}|{Groups}|{CallsAndActivity}|{Meetings}|{WithinDays}";
 
     internal bool Keeps => KeepListings && RefreshSeconds > 0;
 

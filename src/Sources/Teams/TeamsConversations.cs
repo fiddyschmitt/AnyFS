@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 
@@ -47,8 +49,8 @@ public sealed partial class TeamsSource
     // its history lands
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _historyFolders = new(StringComparer.Ordinal);
 
-    /// <summary>How long a conversation goes without being read whole: an edit or reaction on an older message shows by then.</summary>
-    private TimeSpan ReadWholeEvery => _settings.WalkEvery > TimeSpan.Zero ? _settings.WalkEvery : TimeSpan.FromMinutes(30);
+    /// <summary>How long a conversation goes without its newest messages being read whole: an edit or reaction on an older message among them shows by then (the daily walk).</summary>
+    private static readonly TimeSpan ReadWholeEvery = TimeSpan.FromDays(1);
 
     private sealed class Conversation(string threadId)
     {
@@ -274,6 +276,24 @@ public sealed partial class TeamsSource
     }
 
     /// <summary>
+    /// Whether a conversation's messages are all read, back to its start or the window, so a listing made of them now is
+    /// whole: not while its history is still being read, failed, or was let go (<see cref="LetGo"/>). A folder listed
+    /// otherwise carries no stamp (<see cref="ListingCache.Unstamp"/>), so it is listed afresh rather than kept.
+    /// </summary>
+    internal bool ConversationWhole(string threadId)
+    {
+        if (!_conversations.TryGetValue(threadId, out var store))
+        {
+            return false;
+        }
+
+        lock (store.Gate)
+        {
+            return store.Next is null && !store.Failed;
+        }
+    }
+
+    /// <summary>
     /// What chat.md says of a conversation's history while it does not reach back to its start or the window: how far back
     /// it goes, and whether the rest is still being read; null once it does.
     /// </summary>
@@ -297,23 +317,20 @@ public sealed partial class TeamsSource
 
     /// <summary>
     /// Begins reading a conversation's history behind the listings, unless it has none left, is being read, or failed a
-    /// moment ago; the listing that begins it waits for it a moment (<see cref="FirstHistoryWait"/>), so a short history is
-    /// whole in that listing. The rest lands behind it, the folders that show it listed afresh.
+    /// moment ago; a listing made while it is being read waits for it a moment (<see cref="FirstHistoryWait"/>), so a short
+    /// history is whole in the listing that begins it, and in one that joins it (an open while a walk reads it). The rest
+    /// lands behind, the folders that show it listed afresh.
     /// </summary>
     private async Task HistoryAsync(Conversation store, CancellationToken ct)
     {
-        if (!BeginHistory(store))
-        {
-            return;
-        }
-
+        BeginHistory(store);
         var deadline = DateTimeOffset.UtcNow + FirstHistoryWait;
         while (true)
         {
             Task landed;
             lock (store.Gate)
             {
-                if (store.Next is null || store.Failed)
+                if (store.Next is null || store.Failed || store.Reading.IsCompleted)
                 {
                     return;
                 }
@@ -620,4 +637,31 @@ public sealed partial class TeamsSource
 internal interface IHistoryFolder
 {
     string ThreadId { get; }
+}
+
+/// <summary>The stamps the walks keep a folder by where Teams gives no version of its own (<see cref="KeptListingsOptions.StampOf"/>).</summary>
+internal static class TeamsStamps
+{
+    /// <summary>
+    /// A thread's stamp: made of what its folder shows of its messages (each one's id, edit and deletion, reactions, files,
+    /// images and pin), so a thread a channel's walk reaches again is kept unless one of those changed; a hash, so it stays
+    /// short however long the thread.
+    /// </summary>
+    public static string Of(IReadOnlyList<TeamsMessage> thread)
+    {
+        var text = new StringBuilder();
+        foreach (var message in thread.OrderBy(m => m.Id, StringComparer.Ordinal))
+        {
+            text.Append(message.Id).Append('|').Append(message.Edited?.UtcTicks ?? 0).Append('|').Append(message.Deleted?.UtcTicks ?? 0).Append('|')
+                .Append(message.Files.Count).Append('|').Append(message.Images.Count).Append('|').Append(message.Pinned ? '1' : '0').Append('|');
+            foreach (var reaction in message.Reactions.OrderBy(r => r.Key, StringComparer.Ordinal))
+            {
+                text.Append(reaction.Key).Append(':').Append(reaction.Mris.Count).Append(',');
+            }
+
+            text.Append('\n');
+        }
+
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(text.ToString())).AsSpan(0, 16));
+    }
 }

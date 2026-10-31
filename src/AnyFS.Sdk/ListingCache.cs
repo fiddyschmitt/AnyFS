@@ -136,6 +136,27 @@ public sealed class ListingCache
         }
     }
 
+    /// <summary>
+    /// Takes the stamp off the listing of <paramref name="path"/>, the one on its way (kept without a stamp when it lands)
+    /// and the one held: for a lister that finds what it listed is not yet all there is (a conversation whose older
+    /// messages are still being read), so the listing is listed afresh whenever asked, not kept by its stamp.
+    /// </summary>
+    public void Unstamp(string path)
+    {
+        lock (_gate)
+        {
+            if (_fetches.TryGetValue(path, out var fetch))
+            {
+                fetch.Unstamped = true;
+            }
+
+            if (_entries.TryGetValue(path, out var held) && held.Stamp is not null)
+            {
+                _entries[path] = held with { Stamp = null };
+            }
+        }
+    }
+
     /// <summary>Counts the listing held of <paramref name="path"/> as listed afresh now (a walk found its stamp unchanged); nothing where none is held.</summary>
     public void Touch(string path)
     {
@@ -417,7 +438,7 @@ public sealed class ListingCache
                 {
                     // good for its time from when it arrived: a folder slower to list than that would otherwise be stale
                     // on arrival, and every stat in it would list it again
-                    _entries[path] = new Entry(_time.GetTimestamp(), result) { Stamp = stamp };
+                    _entries[path] = new Entry(_time.GetTimestamp(), result) { Stamp = fetch.Unstamped ? null : stamp };
                     TrimIfNeededLocked();
                 }
             }
@@ -512,5 +533,7 @@ public sealed class ListingCache
         public bool Invalidated { get; set; }
 
         public (bool Read, string? Value)? Stamp { get; set; }
+
+        public bool Unstamped { get; set; }
     }
 }

@@ -22,6 +22,12 @@ internal sealed record AttachmentNames(IReadOnlyDictionary<string, string> Image
 
 internal static class TeamsText
 {
+    /// <summary>
+    /// Bumped when what the Markdown files hold, or what the tree's folders are named, changes: the sizes in the listings
+    /// a run before saved would no longer be the files', so they are not read back.
+    /// </summary>
+    public const int Format = 1;
+
     private static readonly Lock ConverterGate = new();
     private static readonly Converter Markdown = new(new Config
     {

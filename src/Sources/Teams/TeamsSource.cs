@@ -68,21 +68,24 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         _cache = new TeamsCache(_stopping.Token);
         _root = new RootFolder();
 
+        // the walks take half the requests, so whoever browses meanwhile has the other half
         var requests = Math.Clamp(_settings.Concurrency, 1, 32);
+        var walking = Math.Max(1, requests / 2);
         _kept = new KeptListings(ListFolderAsync, Counters, Logger, new KeptListingsOptions
         {
             Keep = _settings.Keeps,
             UnkeptFor = TimeSpan.Zero,
             RefreshAfter = _settings.Refresh,
             WalkEvery = _settings.WalkEvery,
-            Parallelism = requests,
-            MaxInFlight = requests,
-            LeftOut = LeftOutAsync,
+            Parallelism = walking,
+            MaxInFlight = walking,
+            StampOf = StampAsync,
             Name = "teams",
 
-            // the listings last run saw open at once at the next start, for the same account and cloud
+            // the listings last run saw open at once at the next start: for the same account and cloud, the same settings
+            // that shape the tree, and the same Markdown (a file's size is a fact about how it is written)
             SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
-            SaveKey = $"{_api.Account}|{_cloud.Name}",
+            SaveKey = $"{_api.Account}|{_cloud.Name}|{_settings.Shape}|md{TeamsText.Format}",
         });
         _kept.StartWalks();
         Logger.LogInformation("teams: serving {Account}", _api.Account);
@@ -212,6 +215,16 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
 
         var node = await ResolveAsync(path, ct).ConfigureAwait(false);
+        if (node is MarkdownFile markdown)
+        {
+            // built now (the last run's listing named it): served as built, and the listing put right where its length differs
+            Serve(normalized, markdown.Content);
+            if ((await Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false))?.Length is { } told && told != markdown.Content.Length)
+            {
+                Kept.Cache.Update(normalized, markdown.Entry, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
         return node is TmFile file ? await Guard(() => file.OpenAsync(this, ct)).ConfigureAwait(false) : throw VfsException.IsADirectory(path);
     }
 
@@ -225,7 +238,15 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
 
         ShowsHistory(folder, VfsPath.Normalize(path));
-        foreach (var child in await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false))
+        var children = await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false);
+
+        // a conversation listed while its history is still being read is not whole: not kept by its stamp
+        if (folder is IHistoryFolder shows && !ConversationWhole(shows.ThreadId))
+        {
+            Kept.Cache.Unstamp(VfsPath.Normalize(path));
+        }
+
+        foreach (var child in children)
         {
             if (child is MarkdownFile markdown)
             {
@@ -1219,19 +1240,32 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     // --- counting ------------------------------------------------------------------------------------------------------
 
+    /// <summary>"Count files on start": the first walk of the whole tree, conversations and all (<see cref="KeptListings"/>).</summary>
     public Task CountFilesAsync(CancellationToken ct) => Kept.CountAsync(ct);
 
-    /// <summary>For a walk: of the folders in a folder, those not worth a walk (a conversation's messages), listed when opened.</summary>
-    private async ValueTask<IReadOnlySet<string>?> LeftOutAsync(string path, CancellationToken ct)
-    {
-        if (await ResolveAsync(path, ct).ConfigureAwait(false) is not TmFolder folder)
-        {
-            return null;
-        }
+    /// <summary>The listings as kept, for tests.</summary>
+    internal ListingCache Listings => Kept.Cache;
 
-        var left = (await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false))
-            .OfType<TmFolder>().Where(f => !f.Walked).Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
-        return left.Count == 0 ? null : left;
+    /// <summary>
+    /// A folder's stamp for the walks (<see cref="KeptListingsOptions.StampOf"/>): a chat's folder and a channel's posts have
+    /// their conversation's version as the aggregator gives it now (it moves on with every message; a listing made while
+    /// the conversation's history was still being read carries none, <see cref="ConversationWhole"/>), a thread's folder
+    /// its messages' (<see cref="TeamsStamps.Of"/>); any other folder none, being cheap to list. The structure is the one
+    /// call every stamp shares, kept a refresh interval.
+    /// </summary>
+    internal async ValueTask<string?> StampAsync(string path, string? held, CancellationToken ct)
+    {
+        switch (await ResolveAsync(path, ct).ConfigureAwait(false))
+        {
+            case ChatFolder chat:
+                return (await StructureAsync(ct).ConfigureAwait(false)).Chats.FirstOrDefault(c => c.Id == chat.Chat.Id)?.Version;
+            case PostsFolder posts:
+                return (await StructureAsync(ct).ConfigureAwait(false)).Teams.SelectMany(t => t.Channels).FirstOrDefault(c => c.Id == posts.ThreadId)?.Version;
+            case ThreadFolder thread:
+                return TeamsStamps.Of(thread.Thread);
+            default:
+                return null;
+        }
     }
 
     // --- health --------------------------------------------------------------------------------------------------------

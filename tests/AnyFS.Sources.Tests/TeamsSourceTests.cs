@@ -411,19 +411,22 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
-    public async Task CountFilesWalksTheStructureButNotTheConversations()
+    public async Task CountFilesWalksTheConversationsTooAndTakesHalfTheRequests()
     {
         var fake = Seed();
-        await using var source = await StartAsync(fake);
+        await using var source = await StartAsync(fake, s => s.Concurrency = 6);
         await source.CountFilesAsync(CancellationToken.None);
 
-        // the walk lists the team, its channels and the chats; it does not open posts or a chat (those are messages calls)
-        Assert.AreEqual(0, fake.MessageCalls, "a walk reads no conversation");
-        Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "the conversations left out make it a lower bound");
+        // the walk lists the team, its channels and the chats, and reads each conversation, so the count is exact
+        Assert.IsTrue(fake.MessageCalls > 0, "the conversations read");
+        Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+        Assert.IsTrue(fake.MostMessageCallsAtOnce <= 3, $"half of six requests at most to the walk: {fake.MostMessageCallsAtOnce}");
 
-        // a post is listed when opened, then the messages are fetched
+        // a conversation walked is not read again when opened
+        var calls = fake.MessageCalls;
         await NamesAsync(source, "AnyFS Lab/General/posts");
-        Assert.IsTrue(fake.MessageCalls > 0);
+        await NamesAsync(source, "Chats/Project Axle");
+        Assert.AreEqual(calls, fake.MessageCalls);
     }
 
     [TestMethod]
@@ -636,6 +639,87 @@ public class TeamsSourceTests
         var md = await TextAsync(source, "Chats/Project Axle/chat.md");
         StringAssert.Contains(md, "Kickoff Monday");
         StringAssert.Contains(md, "Agenda attached");
+    }
+
+    [TestMethod]
+    public async Task TheWalkReadsEveryConversationAndKeepsThoseWhoseVersionsHoldAcrossARestart()
+    {
+        var fake = Seed();
+        var structure = await fake.StructureAsync(CancellationToken.None);
+        var random = structure.Teams.Single().Channels.Single(c => c.DisplayName == "Random");
+        fake.Post(random.Id, John, "John Roe", "<p>Anyone for lunch?</p>", When); // every conversation has a version
+        var axle = structure.Chats.Single(c => c.Title == "Project Axle");
+        var context = new TestSourceContext();
+        int calls;
+        await using (var first = new TeamsSource(new TeamsSettings { Account = fake.Account }, fake.StandIn()))
+        {
+            await first.InitialiseAsync(context, CancellationToken.None);
+            await first.CountFilesAsync(CancellationToken.None);
+            Assert.AreEqual(EnumerationState.Complete, first.Counters.State, "every folder walked, the conversations too");
+            Assert.IsTrue(first.Counters.FilesKnown >= 10, $"team.md, two channel.md, three post.md, two chat.md, groups.md and all-groups.md at the least: {first.Counters.FilesKnown}");
+            calls = fake.MessageCalls;
+            Assert.IsTrue(calls > 0, "the conversations read");
+            Assert.AreEqual(axle.Version, first.Listings.StampHeld("Chats/Project Axle"), "kept by its version");
+        }
+
+        // the next run, nothing changed: every conversation kept by its version, none read
+        await using (var next = new TeamsSource(new TeamsSettings { Account = fake.Account }, fake.StandIn()))
+        {
+            await next.InitialiseAsync(context, CancellationToken.None);
+            await next.CountFilesAsync(CancellationToken.None);
+            Assert.AreEqual(EnumerationState.Complete, next.Counters.State);
+            Assert.AreEqual(calls, fake.MessageCalls, "no conversation read again");
+        }
+
+        // a message in one chat: the next run reads that chat, its newest page, and no other
+        fake.Post(axle.Id, Jane, "Jane Doe", "<p>Agenda attached</p>", When.AddHours(1));
+        await using var third = new TeamsSource(new TeamsSettings { Account = fake.Account }, fake.StandIn());
+        await third.InitialiseAsync(context, CancellationToken.None);
+        await third.CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(calls + 1, fake.MessageCalls, "the changed chat alone");
+        StringAssert.Contains(await TextAsync(third, "Chats/Project Axle/chat.md"), "Agenda attached");
+    }
+
+    [TestMethod]
+    public async Task AConversationListedBeforeItsHistoryIsWholeCarriesNoStampUntilItIs()
+    {
+        var fake = new FakeTeams { OlderDelay = TimeSpan.FromMilliseconds(200) };
+        fake.AddPerson(Jane, "Jane Doe");
+        var newest = Mid(10, 20);
+        var chat = fake.AddChat(ChatKind.OneOnOne, null, [Jane], newest);
+        for (var i = 0; i < 130; i++)
+        {
+            fake.Post(chat.Id, Jane, "Jane Doe", $"<p>Day {i}</p>", newest.AddDays(-i));
+        }
+
+        await using var source = await StartAsync(fake, newest: 5, pageSize: 5, historyWait: TimeSpan.Zero);
+        await NamesAsync(source, "Chats/Jane Doe");
+        Assert.IsNull(source.Listings.StampHeld("Chats/Jane Doe"), "listed while its history was still being read: not kept by its version");
+
+        // read whole, the folder is listed afresh, and that listing carries the version
+        var version = (await fake.StructureAsync(CancellationToken.None)).Chats.Single().Version;
+        var stamp = await UntilAsync(() => Task.FromResult(source.Listings.StampHeld("Chats/Jane Doe")), s => s is not null);
+        Assert.AreEqual(version, stamp);
+        StringAssert.Contains(await TextAsync(source, "Chats/Jane Doe/chat.md"), "Day 129\n");
+    }
+
+    [TestMethod]
+    public void AThreadsStampChangesWithAnEditAReactionADeletionOrAReply()
+    {
+        var root = new TeamsMessage("1", null, null, Jane, When, "RichText/Html", "<p>Hi</p>", "Jane Doe");
+        var reply = new TeamsMessage("2", "1", "1", John, When.AddMinutes(1), "RichText/Html", "<p>Hello</p>", "John Roe");
+        var stamp = TeamsStamps.Of([root, reply]);
+        Assert.AreEqual(stamp, TeamsStamps.Of([reply, root]), "the same thread in any order");
+        Assert.AreEqual(32, stamp.Length);
+        var changed = new[]
+        {
+            TeamsStamps.Of([root, reply with { Edited = When.AddMinutes(2) }]),
+            TeamsStamps.Of([root with { Reactions = [new Reaction("like", [John])] }, reply]),
+            TeamsStamps.Of([root, reply with { Deleted = When.AddMinutes(3) }]),
+            TeamsStamps.Of([root, reply, new TeamsMessage("3", "1", "1", Jane, When.AddMinutes(4), "RichText/Html", "<p>Bye</p>", "Jane Doe")]),
+            TeamsStamps.Of([root with { Pinned = true }, reply]),
+        };
+        CollectionAssert.AllItemsAreUnique(changed.Append(stamp).ToArray());
     }
 
     [TestMethod]
@@ -928,7 +1012,8 @@ public class TeamsSourceTests
         }
 
         // the first chat's history under way, a second chat opened: its pages are read one after another, the first's after
-        await using var source = await StartAsync(fake, newest: 5, pageSize: 5, historyWait: TimeSpan.Zero);
+        // (no walk, which would begin both on its own)
+        await using var source = await StartAsync(fake, s => s.KeepListings = false, newest: 5, pageSize: 5, historyWait: TimeSpan.Zero);
         await NamesAsync(source, "Chats/First");
         await UntilAsync(() => Task.FromResult(fake.OlderAsked.Count), n => n > 0);
         await NamesAsync(source, "Chats/Second");
