@@ -453,14 +453,17 @@ internal sealed class FakeTeams : ITeamsApi
     public void AddGroupSite(GroupSite site) => _groupSites.Add(site);
 
     /// <summary>As the live seam: SharePoint's search with its token; else Graph's list of groups (named without their sites), or Microsoft Search's sites (without their groups) where Graph refuses that list.</summary>
-    public Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct)
+    public async Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct)
     {
         SharePoint();
-        return Task.FromResult<IReadOnlyList<GroupSite>>(
-            SharePointReady ? _groupSites.ToList()
+        await SitesHold.WaitAsync(ct);
+        return SharePointReady ? _groupSites.ToList()
             : GraphListsNoGroups ? _groupSites.Select(s => s with { GroupId = null }).ToList()
-            : _groupSites.Select(s => s with { SiteUrl = null }).ToList());
+            : _groupSites.Select(s => s with { SiteUrl = null }).ToList();
     }
+
+    /// <summary>What the group sites' read waits on before it answers: a test's say-so (a large organisation's takes many requests).</summary>
+    public Task SitesHold { get; set; } = Task.CompletedTask;
 
     /// <summary>As the live seam: Graph's every group with its token in hand, else the group sites SharePoint's search gave, else none.</summary>
     public Task<GroupsDirectory?> AllGroupsAsync(IReadOnlyList<TeamInfo> joined, IReadOnlyList<GroupSite>? sites, CancellationToken ct)

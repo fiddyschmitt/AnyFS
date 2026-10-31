@@ -327,7 +327,8 @@ public class TeamsSourceTests
 
         CollectionAssert.AreEqual(new[] { "Mark 8 Project Team" }, await NamesAsync(source, "Other groups"));
         Assert.AreEqual("the plan", await TextAsync(source, "Other groups/Mark 8 Project Team/Plan.docx"));
-        CollectionAssert.DoesNotContain(await UntilAsync(() => NamesAsync(source, ""), n => !n.Contains("all-groups.md")), "all-groups.md", "no list of every group to show: Graph refused it and SharePoint's token is not in hand");
+        StringAssert.Contains(await UntilAsync(() => TextAsync(source, "all-groups.md"), m => m.Contains("could not be read", StringComparison.Ordinal)),
+            "The groups could not be read: no token in hand lists more groups than groups.md shows", "no list of every group to show: Graph refused it and SharePoint's token is not in hand, and the file says so");
     }
 
     /// <summary>What <paramref name="read"/> gives once <paramref name="done"/> holds (work behind the listings lands), or after five seconds.</summary>
@@ -347,11 +348,12 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
-    public async Task WithoutSharePointsTokenNothingWaitsAndOnlyWhatOpensIsServed()
+    public async Task WithoutSharePointsTokenTheFoldersThatNeedItWaitForTheAskAndThenFail()
     {
-        // the page has not handed out SharePoint's token (as at work, often): Other groups and the files folders are not
-        // served, a shared file is left out of the attachments and groups.md holds the teams' own groups; nothing waits for
-        // the token, nothing asks SharePoint without it, and the source stays healthy while the token is asked for behind
+        // the page has not handed out SharePoint's token and the ask behind the listings brings none (as at work, often):
+        // Other groups and a channel's files are listed, and each fails once the ask ends (answered so for a while); a
+        // shared file is left out of the attachments, all-groups.md says why, groups.md holds the teams' own groups; nothing
+        // asks SharePoint without the token, and the source stays healthy
         var fake = new FakeTeams { SharePointReady = false };
         var general = FakeTeams.Channel("General", general: true);
         var team = fake.AddTeam("AnyFS Lab", general);
@@ -363,22 +365,25 @@ public class TeamsSourceTests
         await using var source = new TeamsSource(new TeamsSettings { Account = fake.Account }, fake.StandIn());
         await source.InitialiseAsync(context, CancellationToken.None);
 
-        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "groups.md" }, await NamesAsync(source, ""));
-        Assert.AreEqual(VfsError.NotFound, (await Assert.ThrowsExactlyAsync<VfsException>(() => NamesAsync(source, "Other groups"))).Error);
-        CollectionAssert.AreEqual(new[] { "posts", "channel.md" }, await NamesAsync(source, "AnyFS Lab/General"));
+        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "all-groups.md", "groups.md" }, await NamesAsync(source, ""));
+        Assert.AreEqual(VfsError.Unavailable, (await Assert.ThrowsExactlyAsync<VfsException>(() => NamesAsync(source, "Other groups"))).Error);
+        CollectionAssert.AreEqual(new[] { "posts", "files", "channel.md" }, await NamesAsync(source, "AnyFS Lab/General"));
+        Assert.AreEqual(VfsError.Unavailable, (await Assert.ThrowsExactlyAsync<VfsException>(() => NamesAsync(source, "AnyFS Lab/General/files"))).Error);
         var thread = (await NamesAsync(source, "AnyFS Lab/General/posts")).Single();
-        CollectionAssert.AreEqual(new[] { "post.md" }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}"), "the shared file is left out, not waited for");
+        CollectionAssert.AreEqual(new[] { "post.md" }, await NamesAsync(source, $"AnyFS Lab/General/posts/{thread}"), "the shared file is left out");
         StringAssert.Contains(await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/post.md"), "- 📎 report.docx");
         var md = await UntilAsync(() => TextAsync(source, "groups.md"), m => !m.Contains("being read", StringComparison.Ordinal));
         StringAssert.Contains(md, "The groups of tester@contoso.com's own teams, from Teams: 1.");
+        var all = await UntilAsync(() => TextAsync(source, "all-groups.md"), m => !m.Contains("being read", StringComparison.Ordinal));
+        StringAssert.Contains(all, "The groups could not be read: Teams on the web has not handed out its SharePoint token yet");
 
         Assert.AreEqual(0, fake.SharePointCalls, "nothing asks for a file without a token to read it");
-        Assert.IsTrue(await UntilAsync(() => Task.FromResult(fake.SeekCalls), n => n > 0) > 0, "the token is asked for behind the listings");
+        Assert.IsTrue(fake.SeekCalls > 0, "the token was asked for");
         Assert.IsFalse(context.HealthReports.Any(h => h.Health == ComponentHealth.Degraded), "a token not handed out is not the source's health");
     }
 
     [TestMethod]
-    public async Task WhenSharePointsTokenComesOtherGroupsTheFilesAndGroupsMdFollow()
+    public async Task AFolderThatNeedsSharePointsTokenWaitsForTheAskThatBringsIt()
     {
         var hold = new TaskCompletionSource();
         var fake = new FakeTeams { SharePointReady = false, SharePointComesWhenAsked = true, SeekHold = hold.Task };
@@ -389,17 +394,41 @@ public class TeamsSourceTests
         fake.AddGroupSite(new GroupSite("g-retail", "Retail", "https://contoso.sharepoint.com/sites/Retail", null, When));
         await using var source = await StartAsync(fake);
 
-        // answered at once without the token, which is asked for behind the listings
-        CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "groups.md" }, await NamesAsync(source, ""));
-        CollectionAssert.AreEqual(new[] { "posts", "channel.md" }, await NamesAsync(source, "AnyFS Lab/General"));
-
-        // it comes: the kept listings of the root and the channel are listed afresh, all-groups.md read from SharePoint
-        hold.SetResult();
-        CollectionAssert.AreEqual(new[] { "posts", "files", "channel.md" }, await UntilAsync(() => NamesAsync(source, "AnyFS Lab/General"), n => n.Contains("files")));
+        // the root and the channel name what the token opens from the start; a listing of the files, or of Other groups,
+        // waits for the ask that brings the token (so a search finds the same files the first time as the tenth)
         CollectionAssert.AreEqual(new[] { "AnyFS Lab", "Chats", "Other groups", "all-groups.md", "groups.md" }, await NamesAsync(source, ""));
-        CollectionAssert.AreEqual(new[] { "plan.txt" }, await NamesAsync(source, "AnyFS Lab/General/files"));
-        CollectionAssert.AreEqual(new[] { "Retail" }, await NamesAsync(source, "Other groups"));
+        CollectionAssert.AreEqual(new[] { "posts", "files", "channel.md" }, await NamesAsync(source, "AnyFS Lab/General"));
+        var files = NamesAsync(source, "AnyFS Lab/General/files");
+        var groups = NamesAsync(source, "Other groups");
+        await Task.Delay(200);
+        Assert.IsFalse(files.IsCompleted || groups.IsCompleted, "waiting for the token");
+
+        // it comes: both answer whole, and all-groups.md is read from SharePoint
+        hold.SetResult();
+        CollectionAssert.AreEqual(new[] { "plan.txt" }, await files);
+        CollectionAssert.AreEqual(new[] { "Retail" }, await groups);
         StringAssert.Contains(await UntilAsync(() => TextAsync(source, "all-groups.md"), m => m.Contains("from SharePoint", StringComparison.Ordinal)), "The groups tester@contoso.com can see, from SharePoint: 1,");
+    }
+
+    [TestMethod]
+    public async Task OtherGroupsWaitsForTheGroupSitesToBeRead()
+    {
+        // a large organisation's group sites take many requests: the first listing waits for them all (the same names the
+        // first time as the tenth), the next answers from the read
+        var hold = new TaskCompletionSource();
+        var fake = new FakeTeams { SitesHold = hold.Task };
+        fake.AddTeam("AnyFS Lab", FakeTeams.Channel("General", general: true));
+        fake.AddGroupSite(new GroupSite("g-retail", "Retail", "https://contoso.sharepoint.com/sites/Retail", null, When));
+        await using var source = await StartAsync(fake);
+
+        var listing = NamesAsync(source, "Other groups");
+        await Task.Delay(200);
+        Assert.IsFalse(listing.IsCompleted, "waiting for the group sites");
+        hold.SetResult();
+        CollectionAssert.AreEqual(new[] { "Retail" }, await listing);
+        var asked = fake.SharePointCalls;
+        CollectionAssert.AreEqual(new[] { "Retail" }, await NamesAsync(source, "Other groups"));
+        Assert.AreEqual(asked, fake.SharePointCalls, "the read answers");
     }
 
     [TestMethod]
@@ -861,7 +890,7 @@ public class TeamsSourceTests
         ];
         await using var source = await StartAsync(fake);
 
-        CollectionAssert.IsSubsetOf(new[] { "calls.md", "activity.md" }, await UntilAsync(() => NamesAsync(source, ""), n => n.Contains("calls.md") && n.Contains("activity.md")));
+        CollectionAssert.IsSubsetOf(new[] { "calls.md", "activity.md" }, await NamesAsync(source, ""), "built before the root's first listing answers");
         var calls = await TextAsync(source, "calls.md");
         StringAssert.StartsWith(calls, "# Calls\n\nThe account's call history as Teams keeps it: 3 calls, newest first.\n");
         StringAssert.Contains(calls, $"| {Local(When.AddHours(2))} | Out | Jane Doe | 1:1 | Answered | 12:00 |");
@@ -884,7 +913,8 @@ public class TeamsSourceTests
         await using (var source = await StartAsync(fake))
         {
             // no call history (the chat service's 404, as the sandbox's): no calls.md; an empty feed is still activity.md
-            var root = await UntilAsync(() => NamesAsync(source, ""), n => n.Contains("activity.md"));
+            var root = await NamesAsync(source, "");
+            CollectionAssert.Contains(root, "activity.md");
             CollectionAssert.DoesNotContain(root, "calls.md");
             StringAssert.Contains(await TextAsync(source, "activity.md"), "## Mentions\n\nNone.\n");
         }
@@ -892,7 +922,7 @@ public class TeamsSourceTests
         fake.CallsFail = true;
         await using (var source = await StartAsync(fake))
         {
-            await UntilAsync(() => NamesAsync(source, ""), n => n.Contains("calls.md"));
+            CollectionAssert.Contains(await NamesAsync(source, ""), "calls.md");
             StringAssert.Contains(await TextAsync(source, "calls.md"), "The call history could not be read: Teams (fake) answered 403");
         }
 

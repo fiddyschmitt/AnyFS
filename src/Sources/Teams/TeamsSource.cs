@@ -293,6 +293,10 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     // serves the file the listing named (as _served does the Markdown) without finding it from the root again
     private readonly ConcurrentDictionary<string, IReadOnlyList<TmFile>> _files = new(StringComparer.OrdinalIgnoreCase);
 
+    // the conversations listed while nothing read their shared files (no SharePoint or Graph token in hand), by path: listed
+    // afresh when a token comes (RelistAsync)
+    private readonly ConcurrentDictionary<string, byte> _lackingFiles = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>A folder's listing (what <see cref="KeptListings"/> keeps); the Markdown files' bytes and the other files are kept beside it, for the opens.</summary>
     private async IAsyncEnumerable<VfsEntry> ListFolderAsync(string path, [EnumeratorCancellation] CancellationToken ct)
     {
@@ -319,6 +323,20 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         if (folder is IHistoryFolder shows && !ConversationWhole(shows.ThreadId))
         {
             Kept.Cache.Unstamp(normalized);
+        }
+
+        // a conversation listed while nothing read its shared files (no token handed out) may lack them: not kept by its
+        // stamp, and listed afresh when a token comes
+        var mayLackFiles = folder switch
+        {
+            ChatFolder => true,
+            ThreadFolder thread => thread.Thread.Any(m => m.Files.Count > 0),
+            _ => false,
+        };
+        if (_settings.Files && mayLackFiles && !Api.SharePointReady && !Api.GraphReady)
+        {
+            Kept.Cache.Unstamp(normalized);
+            _lackingFiles.TryAdd(normalized, 0);
         }
 
         var files = children.OfType<TmFile>().Where(f => f is not MarkdownFile).ToList();
@@ -650,9 +668,8 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     // --- groups --------------------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Whether what reads the files is in hand (never waited for): SharePoint's token, or Microsoft Graph's where the client
-    /// mints one (GCC High's). Other groups, the files folders and the shared files are served only while it is; when it is
-    /// not, it is asked for behind the listings.
+    /// Whether what reads the files is in hand now: SharePoint's token, or Microsoft Graph's where the client mints one (GCC
+    /// High's). When it is not, it is asked for behind the listings (<see cref="FilesReadyAsync"/> waits for that ask).
     /// </summary>
     internal bool FilesReady()
     {
@@ -666,14 +683,48 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     }
 
     /// <summary>
-    /// The group sites the account can open other than its teams' (Other groups); none while nothing that reads them is in
-    /// hand. A site found without its group (Microsoft Search names none) is told from a team's by the team's own site.
+    /// Whether what reads the files is in hand, asked for where it is not (one headless load, as the session's back-off
+    /// allows) and waited for: a listing that needs the token (Other groups, a channel's files, a conversation's shared files)
+    /// is then whole when the token comes, and fails, or leaves the shared files out, when it does not — rather than
+    /// answering without them, which a search made while the token was on its way showed as fewer files. False at once while
+    /// the ask is backed off (a load that gave none), or the source is stopping.
+    /// </summary>
+    internal async Task<bool> FilesReadyAsync(CancellationToken ct)
+    {
+        if (FilesReady())
+        {
+            return true;
+        }
+
+        Task seek;
+        lock (_behind)
+        {
+            seek = _seek;
+        }
+
+        await seek.WaitAsync(ct).ConfigureAwait(false);
+        return Api.SharePointReady || Api.GraphReady;
+    }
+
+    /// <summary>Waits for what reads the files (<see cref="FilesReadyAsync"/>), and refuses as a request without the token is refused (unavailable for now, not the source's health) where none comes.</summary>
+    internal async Task RequireFilesAsync(CancellationToken ct)
+    {
+        if (!await FilesReadyAsync(ct).ConfigureAwait(false))
+        {
+            throw TokenNotHandedOutException.Refusal(TeamsService.SharePoint);
+        }
+    }
+
+    /// <summary>
+    /// The group sites the account can open other than its teams' (Other groups), waited for: what reads them, and the read
+    /// itself (<see cref="GroupSitesAsync"/>). A site found without its group (Microsoft Search names none) is told from a
+    /// team's by the team's own site.
     /// </summary>
     internal async Task<IReadOnlyList<GroupSite>> OtherGroupsAsync(CancellationToken ct)
     {
         var teams = (await StructureAsync(ct).ConfigureAwait(false)).Teams;
         var groups = teams.Select(t => t.GroupId).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var sites = await GroupSitesAsync(FirstSitesWait, ct).ConfigureAwait(false) ?? [];
+        var sites = await GroupSitesAsync(ct).ConfigureAwait(false);
         var teamSites = sites.Any(s => s.GroupId is null) ? await TeamSitesAsync(teams, ct).ConfigureAwait(false) : [];
         return sites.Where(s => s.GroupId is { } group ? !groups.Contains(group) : s.SiteUrl is not { } url || !teamSites.Contains(TeamsFiles.SiteKey(url)))
             .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ToList();
@@ -698,85 +749,99 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             return sites.OfType<string>().Select(TeamsFiles.SiteKey).ToHashSet(StringComparer.Ordinal);
         }, ct);
 
-    // the group sites as last read, and when; one older than a walk interval is answered and read again behind (a group list
-    // changes seldom, and a large organisation's takes many requests)
-    private sealed record SitesRead(IReadOnlyList<GroupSite>? Sites, DateTimeOffset At);
+    // the group sites as last read, and when (a read that failed: its failure, with the sites of the read before where there
+    // was one); one older than a walk interval is answered and read again behind (a group list changes seldom, and a large
+    // organisation's takes many requests)
+    private sealed record SitesRead(IReadOnlyList<GroupSite>? Sites, DateTimeOffset At, VfsException? Error);
 
     private SitesRead? _sitesRead;
     private Task _sitesReading = Task.CompletedTask;
 
-    // how long Other groups' first listing waits for the first read before answering with none (it is listed again when the
-    // read lands)
-    private static readonly TimeSpan FirstSitesWait = TimeSpan.FromSeconds(5);
+    // completed as a read of the group sites ends (the listings waiting on it answer then), and replaced for the next; read
+    // and replaced under _behind, as the read is started, so a listing never waits on a read that ended before it looked
+    private TaskCompletionSource _sitesLanded = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     /// <summary>
-    /// The group sites the account can open (<see cref="ITeamsApi.GroupSitesAsync"/>): null while nothing that reads them is
-    /// in hand (asked for behind the listings, never waited for). Read behind the listings: the first read is waited for up to
-    /// <paramref name="firstWait"/> (a large organisation's takes longer: Other groups is listed again when it lands); after
-    /// it, the last read answers at once and one older than a walk interval is read again behind. A read that fails keeps
-    /// the last one.
+    /// The group sites the account can open (<see cref="ITeamsApi.GroupSitesAsync"/>): read behind the listings, the first
+    /// read waited for however long it takes (a large organisation's takes many requests), the last read answering after
+    /// it, and one older than a walk interval read again behind the answer. A read that fails keeps the last one, and where
+    /// there is none fails the listing with its failure (which the listings keep a while), the read tried again after five
+    /// minutes. Nothing to read them with: waited for, and a refusal where none comes (<see cref="RequireFilesAsync"/>).
     /// </summary>
-    private async Task<IReadOnlyList<GroupSite>?> GroupSitesAsync(TimeSpan firstWait, CancellationToken ct)
+    private async Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct)
     {
-        if (!FilesReady())
-        {
-            return null;
-        }
-
-        if (_sitesRead is { } read)
+        await RequireFilesAsync(ct).ConfigureAwait(false);
+        var read = _sitesRead;
+        if (read is { Sites: { } sites })
         {
             if (DateTimeOffset.UtcNow - read.At > ReadWholeEvery)
             {
                 Behind(ref _sitesReading, "reading the group sites", ReadSitesAsync);
             }
 
-            return read.Sites;
+            return sites;
         }
 
-        Behind(ref _sitesReading, "reading the group sites", ReadSitesAsync);
-        Task reading;
+        Task? landed = null;
         lock (_behind)
         {
-            reading = _sitesReading;
+            read = _sitesRead;
+            if (read is not { Sites: not null } && (read is null || DateTimeOffset.UtcNow - read.At > RetryAfterFailure))
+            {
+                Behind(ref _sitesReading, "reading the group sites", ReadSitesAsync);
+                landed = _sitesLanded.Task;
+            }
         }
 
-        try
+        if (landed is not null)
         {
-            await reading.WaitAsync(firstWait, ct).ConfigureAwait(false);
-        }
-        catch (TimeoutException)
-        {
-            // answered with none for now
+            await landed.WaitAsync(ct).ConfigureAwait(false);
+            read = _sitesRead;
         }
 
-        return _sitesRead?.Sites;
+        return read?.Sites ?? throw (read?.Error is { } why ? new VfsException(why.Error, why.Message, why.InnerException) : VfsException.Unavailable("the group sites could not be read"));
     }
 
     private async Task ReadSitesAsync(CancellationToken ct)
     {
+        var again = _sitesRead is { Sites: not null };
         IReadOnlyList<GroupSite>? sites = null;
+        VfsException? error = null;
         try
         {
             sites = await Api.GroupSitesAsync(ct).ConfigureAwait(false);
         }
         catch (VfsException ex)
         {
+            error = ex;
             Logger.LogInformation("teams: the group sites could not be listed ({Error})", ex.Message);
         }
-
-        _sitesRead = new SitesRead(sites ?? _sitesRead?.Sites, DateTimeOffset.UtcNow);
-
-        // Other groups' listing shows what came
-        try
+        finally
         {
-            if (_settings.Groups && FilesReady())
+            lock (_behind)
+            {
+                if (sites is not null || error is not null)
+                {
+                    _sitesRead = new SitesRead(sites ?? _sitesRead?.Sites, DateTimeOffset.UtcNow, error);
+                }
+
+                var landed = _sitesLanded;
+                _sitesLanded = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                landed.TrySetResult();
+            }
+        }
+
+        // a read behind the answer: Other groups' listing shows what came (the first read's listing waited for it)
+        if (again && sites is not null && _settings.Groups)
+        {
+            try
             {
                 await Kept.Cache.RefreshAsync("Other groups", ct).ConfigureAwait(false);
             }
-        }
-        catch (VfsException ex)
-        {
-            Logger.LogInformation("teams: Other groups could not be listed afresh ({Error})", ex.Message);
+            catch (VfsException ex)
+            {
+                Logger.LogInformation("teams: Other groups could not be listed afresh ({Error})", ex.Message);
+            }
         }
     }
 
@@ -786,16 +851,22 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     // teams'; calls.md and activity.md: 0; -1 unread); when
     private sealed record Built(byte[]? Bytes, int Reached, int Tried, DateTimeOffset At);
 
-    private sealed class BuiltFile(string name, Func<string, byte[]> unread)
+    private sealed class BuiltFile(string name, Func<string, byte[]> unread, bool waitedFor = false)
     {
         public string Name { get; } = name;
 
         /// <summary>What the file says when it could not be built and none was before: why.</summary>
         public Func<string, byte[]> Unread { get; } = unread;
 
+        /// <summary>Whether the root's listing waits for the first build (calls.md, activity.md: shown only where the account has them, so the first listing must know), rather than listing the file as being read.</summary>
+        public bool WaitedFor { get; } = waitedFor;
+
         public Built? Last;
 
         public Task Building = Task.CompletedTask;
+
+        /// <summary>Completed once the first build has landed (or was given up): what a root listing waits on.</summary>
+        public TaskCompletionSource FirstBuilt { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
     private readonly BuiltFile _myGroups = new("groups.md", TeamsText.GroupsUnread);
@@ -813,22 +884,17 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     /// <summary>
     /// <c>all-groups.md</c> (spec 7.9): every group there is, with its details: the organisation's every group from Microsoft
     /// Graph, else those SharePoint's search shows. Built behind the listings (Graph lists a large organisation's groups a
-    /// page at a time, tens of megabytes of them); null, so not shown, while there is no token that lists more than
-    /// groups.md does and none was built.
+    /// page at a time, tens of megabytes of them); until the first build lands the file says it is being read, and where no
+    /// token lists more than groups.md does it says so (tried again in five minutes, and as soon as a token comes).
     /// </summary>
-    internal byte[]? AllGroupsMarkdown()
+    internal byte[] AllGroupsMarkdown()
     {
         var reach = Api.GraphReady ? 2 : Api.SharePointReady ? 1 : 0;
-        if (reach == 0 && _allGroups.Last is null)
-        {
-            return null;
-        }
-
-        return Markdown(_allGroups, reach, BuildAllGroupsAsync) ?? (_allGroups.Last is null ? TeamsText.GroupsBeingRead() : null);
+        return Markdown(_allGroups, reach, BuildAllGroupsAsync) ?? TeamsText.GroupsBeingRead();
     }
 
-    private readonly BuiltFile _calls = new("calls.md", why => TeamsText.Unread("Calls", "The call history", why));
-    private readonly BuiltFile _activity = new("activity.md", why => TeamsText.Unread("Activity", "The activity feed", why));
+    private readonly BuiltFile _calls = new("calls.md", why => TeamsText.Unread("Calls", "The call history", why), waitedFor: true);
+    private readonly BuiltFile _activity = new("activity.md", why => TeamsText.Unread("Activity", "The activity feed", why), waitedFor: true);
 
     // how far back calls.md and activity.md read
     private const int MaxCalls = 1000;
@@ -839,12 +905,26 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     /// <summary>
     /// <c>calls.md</c> (spec 7.9): the account's call history (within the "within" window), built behind the listings and
-    /// again each refresh interval; null, so not shown, where the account has none or before the first build lands.
+    /// again each refresh interval, the first build waited for (so the root's first listing has the file where the account
+    /// has it, as its tenth does); null, so not shown, where the account has none.
     /// </summary>
-    internal byte[]? CallsMarkdown() => Markdown(_calls, 0, BuildCallsAsync, FeedsEvery);
+    internal Task<byte[]?> CallsMarkdownAsync(CancellationToken ct) => MarkdownAsync(_calls, BuildCallsAsync, ct);
 
-    /// <summary><c>activity.md</c> (spec 7.9): the account's activity feed and mentions, as <see cref="CallsMarkdown"/> is built.</summary>
-    internal byte[]? ActivityMarkdown() => Markdown(_activity, 0, BuildActivityAsync, FeedsEvery);
+    /// <summary><c>activity.md</c> (spec 7.9): the account's activity feed and mentions, as <see cref="CallsMarkdownAsync"/> is built.</summary>
+    internal Task<byte[]?> ActivityMarkdownAsync(CancellationToken ct) => MarkdownAsync(_activity, BuildActivityAsync, ct);
+
+    /// <summary>A file built behind the listings (<see cref="Markdown"/>) whose first build the listing waits for (<see cref="BuiltFile.WaitedFor"/>).</summary>
+    private async Task<byte[]?> MarkdownAsync(BuiltFile file, Func<CancellationToken, Task<(byte[]? Bytes, int Reached)>> build, CancellationToken ct)
+    {
+        var bytes = Markdown(file, 0, build, FeedsEvery);
+        if (file.Last is null && !_stopping.IsCancellationRequested)
+        {
+            await file.FirstBuilt.Task.WaitAsync(ct).ConfigureAwait(false);
+            bytes = file.Last?.Bytes;
+        }
+
+        return bytes;
+    }
 
     private async Task<(byte[]? Bytes, int Reached)> BuildCallsAsync(CancellationToken ct)
     {
@@ -938,7 +1018,8 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     /// <summary>
     /// Builds a file: kept, unless it reached less than the one before (a token gone, a list refused or throttled part way),
     /// which then stays and is tried again soon; a failure keeps the one before, else the file says why. The root is listed
-    /// afresh after the first build and whenever the file changed, so its listing measures it.
+    /// afresh after the first build (unless the listing waited for it) and whenever the file changed, so its listing
+    /// measures it.
     /// </summary>
     private async Task BuildAsync(BuiltFile file, int tried, Func<CancellationToken, Task<(byte[]? Bytes, int Reached)>> build, TimeSpan every, CancellationToken ct)
     {
@@ -958,9 +1039,13 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             Logger.LogInformation("teams: {File} could not be read ({Error})", file.Name, ex.Message);
             file.Last = file.Last is { Reached: >= 0 } kept ? kept with { At = retry } : new Built(file.Unread(ex.Message), -1, tried, retry);
         }
+        finally
+        {
+            file.FirstBuilt.TrySetResult();
+        }
 
         var after = file.Last?.Bytes;
-        if (first || (before is null ? after is not null : after is null || !before.AsSpan().SequenceEqual(after)))
+        if ((first && !file.WaitedFor) || (before is null ? after is not null : after is null || !before.AsSpan().SequenceEqual(after)))
         {
             // a refresh joins a listing of the root already on its way, which may have measured the file before this build
             // landed (the files build at once at the start): then once more, begun after it
@@ -994,15 +1079,17 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         var teams = (await StructureAsync(ct).ConfigureAwait(false)).Teams;
 
         // Graph lists every group with no search: the sites a search has already found fill in where each group's site is;
-        // without Graph, SharePoint's search is the list, waited for whole
-        var sites = Api.GraphReady ? _sitesRead?.Sites : await GroupSitesAsync(Timeout.InfiniteTimeSpan, ct).ConfigureAwait(false);
+        // without Graph, SharePoint's search is the list, waited for whole (and its token waited for, or refused)
+        var sites = Api.GraphReady ? _sitesRead?.Sites : await GroupSitesAsync(ct).ConfigureAwait(false);
         var directory = await Api.AllGroupsAsync(teams, sites, ct).ConfigureAwait(false);
         if (directory is not { Scope: GroupsScope.Organisation })
         {
             SeekTokens();
         }
 
-        return directory is null ? (null, 0) : (TeamsText.Groups(directory, Api.Account), directory.Scope == GroupsScope.Organisation ? 2 : 1);
+        return directory is null
+            ? throw VfsException.Unavailable("no token in hand lists more groups than groups.md shows (Microsoft Graph refused its list of every group, and SharePoint's token is not in hand)")
+            : (TeamsText.Groups(directory, Api.Account), directory.Scope == GroupsScope.Organisation ? 2 : 1);
     }
 
     // --- behind the listings -------------------------------------------------------------------------------------------
@@ -1043,8 +1130,10 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     /// <summary>
     /// Asks behind the listings for the tokens the page has not handed out (SharePoint's; Graph's in the US Gov clouds), one ask
     /// at a time and as the session's back-off allows: by a load of a team's SharePoint site where one is known (its own
-    /// page hands both out), else of Teams' page. When one comes, the root and the channels are listed afresh, so Other
-    /// groups, the files folders and groups.md show what it opens.
+    /// page hands both out), else of Teams' page. The listings that need a token wait for the ask
+    /// (<see cref="FilesReadyAsync"/>). When one comes, the folders that failed for want of it are asked again when next
+    /// listed, and the root and the conversations listed without it are listed afresh, so all-groups.md, groups.md and the
+    /// shared files show what it opens.
     /// </summary>
     private void SeekTokens() => Behind(ref _seek, "asking for the tokens", async ct =>
     {
@@ -1085,20 +1174,20 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
     }
 
-    /// <summary>The root and every channel listed afresh behind their answers: what a token that came since opens shows.</summary>
+    /// <summary>The root, and the conversations listed while no token read their shared files, listed afresh behind their answers: what a token that came since opens shows.</summary>
     private async Task RelistAsync(CancellationToken ct)
     {
         await Kept.Cache.RefreshAsync("", ct).ConfigureAwait(false);
-        if (!_settings.Files || _root is not { } root)
+        foreach (var path in _lackingFiles.Keys)
         {
-            return;
-        }
-
-        foreach (var team in (await root.ListAsync(this, ct).ConfigureAwait(false)).OfType<TeamFolder>())
-        {
-            foreach (var channel in (await team.ListAsync(this, ct).ConfigureAwait(false)).OfType<ChannelFolder>())
+            _lackingFiles.TryRemove(path, out _);
+            try
             {
-                await Kept.Cache.RefreshAsync(VfsPath.Join(team.Name, channel.Name), ct).ConfigureAwait(false);
+                await Kept.Cache.RefreshAsync(path, ct).ConfigureAwait(false);
+            }
+            catch (VfsException ex)
+            {
+                Logger.LogDebug("teams: {Path} could not be listed afresh ({Error})", path, ex.Message);
             }
         }
     }
@@ -1125,8 +1214,9 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             return ([], AttachmentNames.None);
         }
 
-        // the shared files only while what reads them is in hand (never waited for); the images are Teams' own
-        var shared = messages.Any(m => m.Files.Count > 0) && FilesReady();
+        // the shared files once what reads them is in hand (asked for and waited for; left out where none comes, the folder
+        // listed afresh when one does); the images are Teams' own
+        var shared = messages.Any(m => m.Files.Count > 0) && await FilesReadyAsync(ct).ConfigureAwait(false);
         var found = new List<(string Name, Func<string, TmNode> Make, string? Image, string? File)>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var message in messages.Where(m => m.IsContent && m.Deleted is null).OrderBy(m => m.Composed ?? DateTimeOffset.MinValue).ThenBy(m => m.Id, StringComparer.Ordinal))

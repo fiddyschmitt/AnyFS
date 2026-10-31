@@ -72,32 +72,26 @@ internal sealed class RootFolder : TmFolder
 
         if (source.Settings.Groups)
         {
-            // Other groups only while what opens it is in hand: nothing waits for SharePoint's token or Graph's
-            if (source.FilesReady())
-            {
-                children.Add(new OtherGroupsFolder());
-            }
-
-            // every group, while a token lists more than the account's own (or once it has been built)
-            if (source.AllGroupsMarkdown() is { } all)
-            {
-                children.Add(new MarkdownFile("all-groups.md", all, null));
-            }
-
+            // Other groups and all-groups.md whatever token is in hand: the one waits for what opens it when listed, the other
+            // says what it is waiting on, so a listing has the same names the first time as the tenth
+            children.Add(new OtherGroupsFolder());
+            children.Add(new MarkdownFile("all-groups.md", source.AllGroupsMarkdown(), null));
             children.Add(new MarkdownFile("groups.md", source.GroupsMarkdown(), null));
         }
 
-        // built behind the listings: shown once built, where the account has them
+        // built behind the listings, the first build waited for: shown where the account has them
         if (source.Settings.CallsAndActivity)
         {
-            if (source.CallsMarkdown() is { } calls)
+            var calls = source.CallsMarkdownAsync(ct);
+            var activity = source.ActivityMarkdownAsync(ct);
+            if (await calls.ConfigureAwait(false) is { } callHistory)
             {
-                children.Add(new MarkdownFile("calls.md", calls, null));
+                children.Add(new MarkdownFile("calls.md", callHistory, null));
             }
 
-            if (source.ActivityMarkdown() is { } activity)
+            if (await activity.ConfigureAwait(false) is { } feed)
             {
-                children.Add(new MarkdownFile("activity.md", activity, null));
+                children.Add(new MarkdownFile("activity.md", feed, null));
             }
         }
 
@@ -107,7 +101,8 @@ internal sealed class RootFolder : TmFolder
 
 /// <summary>
 /// Every group site the account can open beyond its teams above (public groups it has not joined among them): a folder
-/// each, of the group's library. Listed while SharePoint's token or Graph's is in hand; walked as the others are.
+/// each, of the group's library. Its listing waits for what opens it (SharePoint's token or Graph's, asked for behind the
+/// listings) and for the group sites to be read; walked as the others are.
 /// </summary>
 internal sealed class OtherGroupsFolder() : TmFolder(FolderName)
 {
@@ -125,9 +120,12 @@ internal sealed class OtherGroupsFolder() : TmFolder(FolderName)
 internal sealed class GroupFolder(GroupSite group, string name) : TmFolder(name, group.Created)
 {
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
-        => (group.SiteUrl ?? (group.GroupId is { } id ? await source.Api.SiteOfGroupAsync(id, ct).ConfigureAwait(false) : null)) is { } site
+    {
+        await source.RequireFilesAsync(ct).ConfigureAwait(false);
+        return (group.SiteUrl ?? (group.GroupId is { } id ? await source.Api.SiteOfGroupAsync(id, ct).ConfigureAwait(false) : null)) is { } site
             ? await LibraryFolder.ChildrenAsync(source, site, "", ct).ConfigureAwait(false)
             : [];
+    }
 }
 
 /// <summary>A team: a folder per channel, and <c>team.md</c>, the team's details.</summary>
@@ -148,8 +146,8 @@ internal sealed class TeamFolder(TeamInfo team, string name) : TmFolder(name)
 }
 
 /// <summary>
-/// A channel: its posts, its files (the channel's folder of its team's SharePoint library) while SharePoint's token or
-/// Graph's is in hand, and <c>channel.md</c>, the channel's details.
+/// A channel: its posts, its files (the channel's folder of its team's SharePoint library, whose listing waits for
+/// SharePoint's token or Graph's), and <c>channel.md</c>, the channel's details.
 /// </summary>
 internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string name) : TmFolder(name)
 {
@@ -165,8 +163,7 @@ internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string n
             children.Add(new PostsFolder(Team, Channel));
         }
 
-        // the files only while what reads them is in hand: nothing waits for SharePoint's token or Graph's
-        if (source.Settings.Files && source.FilesReady())
+        if (source.Settings.Files)
         {
             children.Add(new ChannelFilesFolder(Team, Channel));
         }
@@ -179,12 +176,14 @@ internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string n
 
 /// <summary>
 /// A channel's files: its folder of its team's SharePoint library, or of a private or shared channel's own site, as the
-/// channel's thread names it; empty while the team has no site.
+/// channel's thread names it; empty while the team has no site. Its listing waits for what reads it (SharePoint's token
+/// or Graph's), and fails where none comes.
 /// </summary>
 internal sealed class ChannelFilesFolder(TeamInfo team, ChannelInfo channel) : TmFolder("files")
 {
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
+        await source.RequireFilesAsync(ct).ConfigureAwait(false);
         var thread = await source.ThreadDetailsAsync(channel.Id, ct).ConfigureAwait(false);
         if (await source.Api.ChannelFilesAsync(team, channel, thread, ct).ConfigureAwait(false) is not { } where)
         {
@@ -202,6 +201,7 @@ internal sealed class LibraryFolder(string siteUrl, string path, string name, Da
 
     public static async Task<IReadOnlyList<TmNode>> ChildrenAsync(TeamsSource source, string siteUrl, string path, CancellationToken ct)
     {
+        await source.RequireFilesAsync(ct).ConfigureAwait(false);
         var entries = await source.Api.FolderAsync(siteUrl, path, ct).ConfigureAwait(false);
         return entries.Select(e =>
         {

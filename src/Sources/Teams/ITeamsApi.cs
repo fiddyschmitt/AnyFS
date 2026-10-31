@@ -77,7 +77,8 @@ internal interface ITeamsApi : IAsyncDisposable
 
     /// <summary>
     /// Whether SharePoint's token (and the tenant's host) is in hand now: what the files, the attachments and Other groups
-    /// are read with first. Never a wait: the page mints that token only as it gets round to it, and no listing waits on it.
+    /// are read with first. Never a wait here: the page mints that token only as it gets round to it; a listing that needs
+    /// it waits for the background ask (<see cref="SeekTokensAsync"/>) instead.
     /// </summary>
     bool SharePointReady { get; }
 
@@ -88,9 +89,9 @@ internal interface ITeamsApi : IAsyncDisposable
     bool GraphReady { get; }
 
     /// <summary>
-    /// For the background alone (nothing waits on it): asks the page for the tokens it has not handed out — SharePoint's,
-    /// and Graph's where the cloud's client mints one — in one headless load at most, backed off when none comes; true
-    /// when one came.
+    /// Run behind the listings (those that need a token wait for it to end): asks the page for the tokens it has not handed
+    /// out — SharePoint's, and Graph's where the cloud's client mints one — in one headless load at most, backed off when
+    /// none comes (then at once, with none); true when one came.
     /// </summary>
     Task<bool> SeekTokensAsync(CancellationToken ct);
 
