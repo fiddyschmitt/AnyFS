@@ -74,7 +74,7 @@ public sealed class OutlookSettings
     public bool ShowHidden { get; set; }
 
     [Setting("Look for changes every (minutes)", Advanced = true, Order = 12,
-        Hint = "A mailbox: how often each folder is asked for what changed (new mail shows up within this). A file: how often it is read again when another program writes to it (Outlook's OST). 0 reads at the start only.")]
+        Hint = "A mailbox: how often the folders are looked at for changes (new mail shows up within this); only a folder something happened in is asked for what changed, by Exchange's own change marks, and every folder once a day. A file: how often it is read again when another program writes to it (Outlook's OST). 0 reads at the start only.")]
     public int RefreshMinutes { get; set; } = 5;
 
     [Setting("Calendar: months back", Advanced = true, Order = 13,

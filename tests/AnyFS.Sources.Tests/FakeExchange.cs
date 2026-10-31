@@ -49,6 +49,9 @@ internal sealed partial class FakeExchange
     /// <summary>How many times a folder's items were asked for whole (a sync with no state, a delta with no token): what a listing kept between starts spares.</summary>
     public int FullSyncs { get; private set; }
 
+    /// <summary>How many SyncFolderItems calls there were in all, whole or from a sync state: a refresh of a quiet mailbox makes none.</summary>
+    public int Syncs { get; private set; }
+
     /// <summary>How many items GetItem was asked for, whatever the number of requests (several go in one).</summary>
     public int ItemsFetched { get; private set; }
 
@@ -469,6 +472,7 @@ internal sealed partial class FakeExchange
         }
 
         var state = body["SyncState"]?.GetValue<string>();
+        Syncs++;
         if (state is null)
         {
             FullSyncs++;
@@ -535,6 +539,9 @@ internal sealed partial class FakeExchange
             ["DisplayName"] = f.Name,
             ["TotalCount"] = f.Count,
             ["ChildFolderCount"] = 0,
+            ["ExtendedProperty"] = new JsonArray(
+                new JsonObject { ["__type"] = "ExtendedPropertyType:#Exchange", ["ExtendedFieldURI"] = new JsonObject { ["__type"] = "ExtendedPropertyUri:#Exchange", ["PropertyTag"] = "0x670a", ["PropertyType"] = "SystemTime" }, ["Value"] = f.LocalCommitTimeMax.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture) },
+                new JsonObject { ["__type"] = "ExtendedPropertyType:#Exchange", ["ExtendedFieldURI"] = new JsonObject { ["__type"] = "ExtendedPropertyUri:#Exchange", ["PropertyTag"] = "0x670b", ["PropertyType"] = "Integer" }, ["Value"] = f.DeletedCountTotal.ToString(System.Globalization.CultureInfo.InvariantCulture) }),
         };
         if (f.Type == "Folder")
         {
@@ -807,6 +814,7 @@ internal sealed partial class FakeExchange
         }
 
         var state = operation.Element(M + "SyncState")?.Value;
+        Syncs++;
         if (string.IsNullOrEmpty(state))
         {
             FullSyncs++;
@@ -866,7 +874,13 @@ internal sealed partial class FakeExchange
             new System.Xml.Linq.XElement(T + "FolderClass", f.FolderClass),
             new System.Xml.Linq.XElement(T + "DisplayName", f.Name),
             new System.Xml.Linq.XElement(T + "TotalCount", f.Count),
-            new System.Xml.Linq.XElement(T + "ChildFolderCount", 0));
+            new System.Xml.Linq.XElement(T + "ChildFolderCount", 0),
+            new System.Xml.Linq.XElement(T + "ExtendedProperty",
+                new System.Xml.Linq.XElement(T + "ExtendedFieldURI", new System.Xml.Linq.XAttribute("PropertyTag", "0x670a"), new System.Xml.Linq.XAttribute("PropertyType", "SystemTime")),
+                new System.Xml.Linq.XElement(T + "Value", f.LocalCommitTimeMax.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", System.Globalization.CultureInfo.InvariantCulture))),
+            new System.Xml.Linq.XElement(T + "ExtendedProperty",
+                new System.Xml.Linq.XElement(T + "ExtendedFieldURI", new System.Xml.Linq.XAttribute("PropertyTag", "0x670b"), new System.Xml.Linq.XAttribute("PropertyType", "Integer")),
+                new System.Xml.Linq.XElement(T + "Value", f.DeletedCountTotal.ToString(System.Globalization.CultureInfo.InvariantCulture))));
         if (f.Type == "Folder")
         {
             xml.Add(new System.Xml.Linq.XElement(T + "UnreadCount", 0));
@@ -976,6 +990,11 @@ internal sealed partial class FakeExchange
         public int Count => Changes.Count(c => c.Kind == "Create") - Changes.Count(c => c.Kind == "Delete");
 
         public void Log(string kind, string itemId) => Changes.Add((++_version, kind, itemId));
+
+        /// <summary>The folder's change marks as Exchange keeps them: when an item in it last changed (PidTagLocalCommitTimeMax, here a second per change) and how many were ever deleted (PidTagDeletedCountTotal).</summary>
+        public DateTimeOffset LocalCommitTimeMax => new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero).AddSeconds(Changes.Count == 0 ? 0 : Changes[^1].Version);
+
+        public int DeletedCountTotal => Changes.Count(c => c.Kind == "Delete");
     }
 
     internal sealed class Item(string id, string folderId, string type, string itemClass)

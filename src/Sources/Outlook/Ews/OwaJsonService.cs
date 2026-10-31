@@ -80,6 +80,10 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
         var offset = 0;
         while (true)
         {
+            // the folders' change marks too (EwsFolderStamp), so a refresh syncs only the folders something happened in
+            var shape = Properties("folder:FolderClass", "folder:ParentFolderId", "folder:TotalCount", "folder:UnreadCount", "folder:ChildFolderCount", "folder:DistinguishedFolderId");
+            shape.Add((JsonNode)ExtendedField(EwsFolderStamp.LocalCommitTimeMax, "SystemTime"));
+            shape.Add((JsonNode)ExtendedField(EwsFolderStamp.DeletedCountTotal, "Integer"));
             var message = await CallAsync("FindFolder", new JsonObject
             {
                 ["__type"] = "FindFolderRequest:#Exchange",
@@ -87,7 +91,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
                 {
                     ["__type"] = "FolderResponseShape:#Exchange",
                     ["BaseShape"] = "Default",
-                    ["AdditionalProperties"] = Properties("folder:FolderClass", "folder:ParentFolderId", "folder:TotalCount", "folder:UnreadCount", "folder:ChildFolderCount", "folder:DistinguishedFolderId"),
+                    ["AdditionalProperties"] = shape,
                 },
                 ["ParentFolderIds"] = new JsonArray(Distinguished("msgfolderroot")),
                 ["Traversal"] = "Deep",
@@ -108,7 +112,10 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
                         Int(f, "TotalCount"),
                         Int(f, "UnreadCount"),
                         Int(f, "ChildFolderCount"),
-                        Str(f, "DistinguishedFolderId")));
+                        Str(f, "DistinguishedFolderId"))
+                    {
+                        Stamp = StampOf(f),
+                    });
                 }
 
                 offset += list.GetArrayLength();
@@ -731,6 +738,21 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
     // --- request pieces ---------------------------------------------------------------------------------------------------
 
     private static JsonObject Property(string fieldUri) => new() { ["__type"] = "PropertyUri:#Exchange", ["FieldURI"] = fieldUri };
+
+    /// <summary>An extended (MAPI) property by its tag, for a shape's additional properties.</summary>
+    private static JsonObject ExtendedField(string propertyTag, string propertyType) => new() { ["__type"] = "ExtendedPropertyUri:#Exchange", ["PropertyTag"] = propertyTag, ["PropertyType"] = propertyType };
+
+    /// <summary>A folder's change marks from the extended properties it came with (<see cref="EwsFolderStamp"/>); null where it came with none.</summary>
+    private static string? StampOf(JsonElement folder)
+    {
+        if (!folder.TryGetProperty("ExtendedProperty", out var properties) || properties.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        return EwsFolderStamp.Of(properties.EnumerateArray()
+            .Select(p => (Tag: p.TryGetProperty("ExtendedFieldURI", out var uri) ? Str(uri, "PropertyTag") ?? "" : "", Value: Str(p, "Value") ?? "")));
+    }
 
     private static JsonArray Properties(params string[] fieldUris) => new(fieldUris.Select(f => (JsonNode)Property(f)).ToArray());
 

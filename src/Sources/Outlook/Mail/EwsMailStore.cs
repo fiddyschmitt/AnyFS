@@ -65,7 +65,7 @@ internal sealed class EwsMailStore : IMailStore
                 }
                 else if (!state.Folder.IsCalendar && state.Complete)
                 {
-                    states.Add(new FolderIndex(state.Folder.Id, state.SyncState, [.. state.Items.Values], IsCalendarView: false));
+                    states.Add(new FolderIndex(state.Folder.Id, state.SyncState, [.. state.Items.Values], IsCalendarView: false) { Stamp = state.Stamp });
                 }
             }
             finally
@@ -74,7 +74,7 @@ internal sealed class EwsMailStore : IMailStore
             }
         }
 
-        return new MailboxIndex(MailboxIndexFile.Version, Name, shape, DateTimeOffset.UtcNow, Folders, states);
+        return new MailboxIndex(MailboxIndexFile.Version, Name, shape, DateTimeOffset.UtcNow, Folders, states) { FullSyncAt = _fullSyncAt };
     }
 
     /// <summary>
@@ -103,7 +103,7 @@ internal sealed class EwsMailStore : IMailStore
             }
 
             var view = kept.IsCalendarView ? kept.Items : null;
-            var state = new FolderState(folder) { SyncState = kept.SyncState, Complete = !kept.IsCalendarView, Calendar = view, Kept = view };
+            var state = new FolderState(folder) { SyncState = kept.SyncState, Complete = !kept.IsCalendarView, Calendar = view, Kept = view, Stamp = kept.Stamp };
             if (!kept.IsCalendarView)
             {
                 foreach (var item in kept.Items)
@@ -114,8 +114,23 @@ internal sealed class EwsMailStore : IMailStore
 
             _states[folder.Id] = state;
         }
+
+        _fullSyncAt = index.FullSyncAt;
     }
 
+    /// <summary>How often a refresh syncs every folder whatever its change marks, for what they may not cover.</summary>
+    private static readonly TimeSpan FullSyncEvery = TimeSpan.FromDays(1);
+
+    // each folder's change marks as the last FindFolder gave them (null where the server gives none) with its item count,
+    // and when every folder was last synced regardless of them
+    private readonly ConcurrentDictionary<string, (string? Stamp, int Total)> _folderMarks = new(StringComparer.Ordinal);
+    private DateTimeOffset? _fullSyncAt;
+
+    /// <summary>
+    /// Reads the folders afresh and syncs the ones read before: only those whose change marks moved since their last sync
+    /// (<see cref="EwsFolderStamp"/>; every folder where the server gives none, and every folder once a day), so a refresh of
+    /// a quiet mailbox is the one FindFolder.
+    /// </summary>
     public async Task RefreshAsync(CancellationToken ct)
     {
         var all = await _ews.FindFoldersAsync(ct).ConfigureAwait(false);
@@ -128,13 +143,21 @@ internal sealed class EwsMailStore : IMailStore
         }
 
         Folders = folders;
+        foreach (var folder in all)
+        {
+            _folderMarks[folder.Id] = (folder.Stamp, folder.TotalCount);
+        }
 
         // folders that are gone take their state with them; the ones read before take in what changed
         foreach (var gone in _states.Keys.Where(k => !ids.Contains(k)).ToList())
         {
             _states.TryRemove(gone, out _);
+            _folderMarks.TryRemove(gone, out _);
         }
 
+        var now = DateTimeOffset.UtcNow;
+        var full = _fullSyncAt is not { } last || now - last >= FullSyncEvery;
+        var unchanged = 0;
         foreach (var state in _states.Values)
         {
             ct.ThrowIfCancellationRequested();
@@ -144,8 +167,24 @@ internal sealed class EwsMailStore : IMailStore
             }
             else if (state.Complete)
             {
+                if (!full && state.Stamp is { } stamp && _folderMarks.GetValueOrDefault(state.Folder.Id).Stamp == stamp)
+                {
+                    unchanged++;
+                    continue;
+                }
+
                 await SyncAsync(state, ct).ConfigureAwait(false);
             }
+        }
+
+        if (full)
+        {
+            _fullSyncAt = now;
+        }
+
+        if (unchanged > 0)
+        {
+            _logger.LogDebug("outlook: {Count} folders unchanged by their change marks since their last sync: not synced", unchanged);
         }
     }
 
@@ -316,6 +355,8 @@ internal sealed class EwsMailStore : IMailStore
         await state.Gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            // the folder's change marks as last read, before the sync: a change between the two shows as moved marks next time
+            var marks = _folderMarks.GetValueOrDefault(state.Folder.Id);
             var created = 0;
             var updated = 0;
             var deleted = 0;
@@ -386,6 +427,14 @@ internal sealed class EwsMailStore : IMailStore
             }
 
             state.Complete = true;
+
+            // stamped only where the sync has every item the folder says it holds: a sync that ended early (a server that
+            // says a page is the last when it is not) is synced again at the next refresh, not kept by its marks
+            state.Stamp = state.Items.Count == marks.Total ? marks.Stamp : null;
+            if (marks.Stamp is not null && state.Stamp is null)
+            {
+                _logger.LogDebug("outlook: '{Folder}' holds {Total:N0} items by its folder, {Synced:N0} by its sync: synced again at the next refresh", state.Folder.Name, marks.Total, state.Items.Count);
+            }
         }
         finally
         {
@@ -566,6 +615,9 @@ internal sealed class EwsMailStore : IMailStore
         public MailFolder Folder = folder;
         public string? SyncState;
         public bool Complete;
+
+        /// <summary>The folder's change marks as read before its last sync (<see cref="EwsFolderStamp"/>); null where the server gives none.</summary>
+        public string? Stamp;
         public IReadOnlyList<MailItemSummary>? Calendar;
 
         /// <summary>The calendar view last read (or kept from the last start), to tell a changed view from the same one.</summary>

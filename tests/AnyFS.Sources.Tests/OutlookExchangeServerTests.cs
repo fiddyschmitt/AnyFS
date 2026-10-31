@@ -91,6 +91,26 @@ public class OutlookExchangeServerTests
         CollectionAssert.AreEqual(new[] { "FindFolder" }, fake.Actions);
     }
 
+    /// <summary>Over SOAP too, a refresh syncs only the folders whose change marks (the two extended properties) moved.</summary>
+    [TestMethod]
+    public async Task ARefreshSyncsOnlyTheFoldersWhoseChangeMarksMoved()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            var syncs = fake.Syncs;
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(syncs, fake.Syncs, "nothing changed: no folder synced");
+
+            var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
+            fake.AddMessage(inbox, "Fresh news", ("Alex Wilber", "alexw@fake.test"), new DateTimeOffset(2026, 4, 21, 9, 0, 0, TimeSpan.Zero), "<p>News.</p>", []);
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(syncs + 1, fake.Syncs, "the Inbox alone: its marks moved");
+        }
+    }
+
     [TestMethod]
     public async Task TheMailboxIsServedOverSoapAsOverTheWebSession()
     {

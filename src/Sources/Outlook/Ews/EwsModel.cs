@@ -3,7 +3,53 @@ namespace AnyFS.Sources.Outlook.Ews;
 /// <summary>A folder as Exchange Web Services describes it.</summary>
 /// <param name="Type">Folder, CalendarFolder, ContactsFolder, TasksFolder, SearchFolder.</param>
 /// <param name="DistinguishedId">"inbox", "sentitems"... for the well-known ones; null for the rest.</param>
-internal sealed record EwsFolder(string Id, string? ChangeKey, string? ParentId, string Name, string? FolderClass, string Type, int TotalCount, int UnreadCount, int ChildFolderCount, string? DistinguishedId);
+internal sealed record EwsFolder(string Id, string? ChangeKey, string? ParentId, string Name, string? FolderClass, string Type, int TotalCount, int UnreadCount, int ChildFolderCount, string? DistinguishedId)
+{
+    /// <summary>The folder's change marks as one string (<see cref="EwsFolderStamp"/>); null where the server gave none (Graph, a server without them).</summary>
+    public string? Stamp { get; init; }
+}
+
+/// <summary>
+/// A folder's change marks, the two properties Exchange keeps for telling a changed folder from an unchanged one without
+/// syncing it (Outlook does the same): <c>PidTagLocalCommitTimeMax</c>, when an item in it was last added or changed, and
+/// <c>PidTagDeletedCountTotal</c>, how many have ever been deleted from it ([MS-OXCFOLD] 2.2.2.2.1.9, 2.2.2.2.1.7).
+/// Asked for as extended properties in FindFolder; a folder whose stamp is the one seen at its last sync has nothing new.
+/// </summary>
+internal static class EwsFolderStamp
+{
+    public const string LocalCommitTimeMax = "0x670a";
+
+    public const string DeletedCountTotal = "0x670b";
+
+    /// <summary>The stamp from a folder's extended properties (each a tag and a value); null unless the server gave the commit time.</summary>
+    public static string? Of(IEnumerable<(string Tag, string Value)> properties)
+    {
+        string? commit = null;
+        string? deleted = null;
+        foreach (var (tag, value) in properties)
+        {
+            if (Same(tag, LocalCommitTimeMax))
+            {
+                commit = value;
+            }
+            else if (Same(tag, DeletedCountTotal))
+            {
+                deleted = value;
+            }
+        }
+
+        return commit is null ? null : $"{commit}|{deleted}";
+    }
+
+    /// <summary>Whether two property tags name the same property, however the hex is written ("0x670A", "0x670a", "26378").</summary>
+    private static bool Same(string a, string b) => Number(a) is { } x && Number(b) is { } y && x == y;
+
+    private static int? Number(string tag)
+    {
+        var hex = tag.StartsWith("0x", StringComparison.OrdinalIgnoreCase);
+        return int.TryParse(hex ? tag.AsSpan(2) : tag, hex ? System.Globalization.NumberStyles.HexNumber : System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : null;
+    }
+}
 
 /// <summary>A mailbox as EWS names one: a name and an address, with its routing type ("SMTP", "EX").</summary>
 internal sealed record EwsMailbox(string? Name, string? Address, string? RoutingType)

@@ -4,7 +4,11 @@ namespace AnyFS.Sources.Outlook.Mail;
 
 /// <summary>A folder's part of a kept listing: its sync state and the items its server told of, or the calendar view last read.</summary>
 /// <param name="IsCalendarView">Whether <paramref name="Items"/> is a calendar's view over its window (read afresh on each refresh) rather than a folder's synced items.</param>
-internal sealed record FolderIndex(string FolderId, string? SyncState, IReadOnlyList<MailItemSummary> Items, bool IsCalendarView);
+internal sealed record FolderIndex(string FolderId, string? SyncState, IReadOnlyList<MailItemSummary> Items, bool IsCalendarView)
+{
+    /// <summary>The folder's change marks as the server gave them before the sync the items came from (<c>EwsFolderStamp</c>); a refresh that finds them the same syncs nothing.</summary>
+    public string? Stamp { get; init; }
+}
 
 /// <summary>
 /// A mailbox's listing kept between starts in its source's state folder (spec 7.7: the listing index, never a message;
@@ -13,7 +17,11 @@ internal sealed record FolderIndex(string FolderId, string? SyncState, IReadOnly
 /// is and the settings that shape the listing, so a source pointed elsewhere, or shaped otherwise, starts afresh.
 /// </summary>
 /// <param name="Shape">The settings the listing depends on (hidden items shown, the calendar window), as one string.</param>
-internal sealed record MailboxIndex(int Version, string Mailbox, string Shape, DateTimeOffset Taken, IReadOnlyList<MailFolder> Folders, IReadOnlyList<FolderIndex> States);
+internal sealed record MailboxIndex(int Version, string Mailbox, string Shape, DateTimeOffset Taken, IReadOnlyList<MailFolder> Folders, IReadOnlyList<FolderIndex> States)
+{
+    /// <summary>When every folder was last synced whatever its change marks (once a day); null before the first time.</summary>
+    public DateTimeOffset? FullSyncAt { get; init; }
+}
 
 internal static class MailboxIndexFile
 {

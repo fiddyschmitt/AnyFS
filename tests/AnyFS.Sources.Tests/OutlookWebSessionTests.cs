@@ -409,6 +409,31 @@ public class OutlookWebSessionTests
         }
     }
 
+    /// <summary>
+    /// A refresh syncs only the folders whose change marks moved (Exchange's PidTagLocalCommitTimeMax and
+    /// PidTagDeletedCountTotal, read with the folders): a quiet mailbox's refresh is the one FindFolder.
+    /// </summary>
+    [TestMethod]
+    public async Task ARefreshSyncsOnlyTheFoldersWhoseChangeMarksMoved()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            var syncs = fake.Syncs;
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(syncs, fake.Syncs, "nothing changed: no folder synced");
+
+            var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
+            fake.AddMessage(inbox, "Fresh news", ("Alex Wilber", "alexw@fake.test"), new DateTimeOffset(2026, 4, 21, 9, 0, 0, TimeSpan.Zero), "<p>News.</p>", []);
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(syncs + 1, fake.Syncs, "the Inbox alone: its marks moved");
+            var april = (await OutlookFixtures.ListAsync(source, "Inbox/2026/04")).Select(e => e.Name).ToList();
+            Assert.IsTrue(april.Any(n => n.EndsWith(" - Alex Wilber - Fresh news", StringComparison.Ordinal)), string.Join(", ", april));
+        }
+    }
+
     [TestMethod]
     public async Task ARefreshTakesInWhatChangedThroughTheFolderDelta()
     {
@@ -427,7 +452,7 @@ public class OutlookWebSessionTests
             var after = (await OutlookFixtures.ListAsync(source, "Inbox/2026/04")).Select(e => e.Name).ToList();
             Assert.AreEqual(2, after.Count, string.Join(", ", after));
             Assert.IsTrue(after.Any(n => n.EndsWith(" - Alex Wilber - New since the start", StringComparison.Ordinal)));
-            Assert.AreEqual(syncsBefore + 6, fake.Actions.Count(a => a == "SyncFolderItems"), "one delta call per synced folder (the calendar is a view), no full listing");
+            Assert.AreEqual(syncsBefore + 1, fake.Actions.Count(a => a == "SyncFolderItems"), "one delta call, for the folder whose change marks moved; the quiet ones are not synced, and nothing is listed whole");
             Assert.AreEqual(2, fake.Actions.Count(a => a == "FindFolder"));
 
             fake.Delete(added);

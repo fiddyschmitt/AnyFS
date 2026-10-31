@@ -72,8 +72,11 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
         var offset = 0;
         while (true)
         {
+            // the folders' change marks too (EwsFolderStamp), so a refresh syncs only the folders something happened in
+            var shape = Properties("folder:FolderClass", "folder:ParentFolderId", "folder:TotalCount", "folder:UnreadCount", "folder:ChildFolderCount", "folder:DistinguishedFolderId");
+            shape.Add(ExtendedField(EwsFolderStamp.LocalCommitTimeMax, "SystemTime"), ExtendedField(EwsFolderStamp.DeletedCountTotal, "Integer"));
             var message = await CallAsync("FindFolder", new XElement(M + "FindFolder", new XAttribute("Traversal", "Deep"),
-                new XElement(M + "FolderShape", new XElement(T + "BaseShape", "Default"), Properties("folder:FolderClass", "folder:ParentFolderId", "folder:TotalCount", "folder:UnreadCount", "folder:ChildFolderCount", "folder:DistinguishedFolderId")),
+                new XElement(M + "FolderShape", new XElement(T + "BaseShape", "Default"), shape),
                 new XElement(M + "IndexedPageFolderView", new XAttribute("MaxEntriesReturned", 1000), new XAttribute("Offset", offset), new XAttribute("BasePoint", "Beginning")),
                 new XElement(M + "ParentFolderIds", new XElement(T + "DistinguishedFolderId", new XAttribute("Id", "msgfolderroot")))), ct).ConfigureAwait(false);
             var root = message.Element(M + "RootFolder") ?? throw new EwsException("NoRootFolder", "FindFolder answered without a RootFolder");
@@ -90,7 +93,11 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
                     Int(f, "TotalCount"),
                     Int(f, "UnreadCount"),
                     Int(f, "ChildFolderCount"),
-                    Text(f, "DistinguishedFolderId")));
+                    Text(f, "DistinguishedFolderId"))
+                {
+                    Stamp = EwsFolderStamp.Of(f.Elements(T + "ExtendedProperty")
+                        .Select(p => (Tag: Attr(p.Element(T + "ExtendedFieldURI"), "PropertyTag") ?? "", Value: Text(p, "Value") ?? ""))),
+                });
             }
 
             offset += list.Count;
@@ -422,6 +429,9 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
     // --- request pieces ---------------------------------------------------------------------------------------------------
 
     private static XElement Properties(params string[] fieldUris) => new(T + "AdditionalProperties", fieldUris.Select(f => new XElement(T + "FieldURI", new XAttribute("FieldURI", f))));
+
+    /// <summary>An extended (MAPI) property by its tag, for a shape's additional properties.</summary>
+    private static XElement ExtendedField(string propertyTag, string propertyType) => new(T + "ExtendedFieldURI", new XAttribute("PropertyTag", propertyTag), new XAttribute("PropertyType", propertyType));
 
     private static XElement FolderIdNode(string folderId) => folderId.All(char.IsAsciiLetterLower)
         ? new XElement(T + "DistinguishedFolderId", new XAttribute("Id", folderId))
