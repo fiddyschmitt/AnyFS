@@ -43,6 +43,18 @@ public class KeptListingsTests
     private KeptListings Kept(SourceCounters counters, KeptListingsOptions? options = null, TimeProvider? time = null)
         => new(ListAsync, counters, NullLogger.Instance, options ?? new KeptListingsOptions { WalkEvery = TimeSpan.Zero }, time);
 
+    // the folders' stamps, as a source would give them (none for a folder not here), and how often each was asked for
+    private readonly ConcurrentDictionary<string, string> _stamps = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, int> _stamped = new(StringComparer.Ordinal);
+
+    private ValueTask<string?> StampOf(string path, string? held, CancellationToken ct)
+    {
+        _stamped.AddOrUpdate(path, 1, (_, n) => n + 1);
+        return ValueTask.FromResult(_stamps.GetValueOrDefault(path));
+    }
+
+    private static string TempFile() => Path.Combine(Path.GetTempPath(), $"anyfs-kept-{Guid.NewGuid():N}.json.gz");
+
     [TestMethod]
     public async Task TheCountWalksEveryFolderAndKeepsWhatItListed()
     {
@@ -285,6 +297,121 @@ public class KeptListingsTests
                 await other.Cache.GetAsync("docs", CancellationToken.None);
                 Assert.AreEqual(1, Listed("docs"), "listed, not answered from jane's");
             }
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [TestMethod]
+    public async Task AFolderWhoseStampHoldsIsKeptWithEverythingBelowItFromTheLastRun()
+    {
+        var file = TempFile();
+        try
+        {
+            _stamps["docs"] = "v1";
+            _stamps["photos"] = "v1";
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, SaveKey = "jane@contoso.com", StampOf = StampOf };
+            await using (var first = Kept(new SourceCounters(), options))
+            {
+                await first.CountAsync(CancellationToken.None);
+            }
+
+            // photos changed, and its stamp with it; docs/sub changed too but docs' stamp did not: the kept listing stands
+            _listed.Clear();
+            _tree["photos"].Add(VfsEntry.File("p3.jpg", 300));
+            _stamps["photos"] = "v2";
+            _tree["docs/sub"].Add(VfsEntry.File("d.txt", 4));
+            var counters = new SourceCounters();
+            await using var next = Kept(counters, options);
+            await next.CountAsync(CancellationToken.None);
+
+            Assert.AreEqual(1, Listed(""), "the root has no stamp: listed");
+            Assert.AreEqual(1, Listed("photos"), "its stamp moved: listed");
+            Assert.AreEqual(0, Listed("docs"), "its stamp holds: kept");
+            Assert.AreEqual(0, Listed("docs/sub"), "below a folder whose stamp holds: kept");
+            Assert.AreEqual((7L, 3L, EnumerationState.Complete), (counters.FilesKnown, counters.DirectoriesKnown, counters.State), "the kept folders counted with the listed");
+            CollectionAssert.AreEqual(new[] { "c.txt" }, (await next.Cache.GetAsync("docs/sub", CancellationToken.None)).Select(e => e.Name).ToArray(), "as the last run saw it");
+            Assert.AreEqual("v2", next.Cache.StampHeld("photos"), "the stamp read before the listing, kept with it");
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [TestMethod]
+    public async Task AFolderBelowAKeptOneWithNoListingHeldIsWalked()
+    {
+        var file = TempFile();
+        try
+        {
+            _stamps["docs"] = "v1";
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, SaveKey = "jane@contoso.com", StampOf = StampOf };
+            await using (var first = Kept(new SourceCounters(), options))
+            {
+                // docs listed by hand, never walked: nothing of docs/sub is held
+                await first.Cache.GetAsync("", CancellationToken.None);
+                await first.Cache.GetAsync("docs", CancellationToken.None);
+            }
+
+            _listed.Clear();
+            var counters = new SourceCounters();
+            await using var next = Kept(counters, options);
+            await next.CountAsync(CancellationToken.None);
+            Assert.AreEqual(0, Listed("docs"), "its stamp holds: kept");
+            Assert.AreEqual(1, Listed("docs/sub"), "not held: listed");
+            Assert.AreEqual((6L, 3L), (counters.FilesKnown, counters.DirectoriesKnown));
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [TestMethod]
+    public async Task OnceADayAWalkListsEveryFolderWhateverItsStamp()
+    {
+        var file = TempFile();
+        try
+        {
+            var time = new FakeTime();
+            _stamps["docs"] = "v1";
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.FromMilliseconds(50), SaveTo = file, SaveKey = "jane@contoso.com", StampOf = StampOf };
+            await using (var first = Kept(new SourceCounters(), options, time))
+            {
+                await first.CountAsync(CancellationToken.None);
+            }
+
+            // the same day: the walks keep docs by its stamp
+            _listed.Clear();
+            await using var next = Kept(new SourceCounters(), options, time);
+            await next.CountAsync(CancellationToken.None);
+            Assert.AreEqual(0, Listed("docs"));
+            for (var i = 0; i < 20 && Listed("photos") < 3; i++)
+            {
+                await Task.Delay(50);
+            }
+
+            Assert.IsTrue(Listed("photos") >= 3, "the walks go on");
+            Assert.AreEqual(0, Listed("docs"), "kept by every walk of the day");
+
+            // a day on: the next walk lists it whatever its stamp, and the one after keeps it again
+            time.Advance(TimeSpan.FromDays(1));
+            for (var i = 0; i < 100 && Listed("docs") == 0; i++)
+            {
+                await Task.Delay(20);
+            }
+
+            Assert.AreEqual(1, Listed("docs"), "the day's full walk");
+            var photos = Listed("photos");
+            for (var i = 0; i < 20 && Listed("photos") < photos + 2; i++)
+            {
+                await Task.Delay(50);
+            }
+
+            Assert.AreEqual(1, Listed("docs"), "kept again after it");
         }
         finally
         {

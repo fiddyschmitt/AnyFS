@@ -210,8 +210,20 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   `LeftOut` names folders not worth a walk, listed when opened (GitLab's issues, a request or more
   each), which makes the count a lower bound; `ListTree` hands it a whole subtree at once where you
   have a quicker way than folder by folder (GitLab lists a repository a hundred entries a request).
-  SharePoint and GitLab keep their listings so; their settings `KeptListings.KeepSetting` and
-  `KeptListings.WalkSetting` give the same names to the same choices.
+  `SaveTo` saves the listings to a file in your state folder when a walk ends and when the source
+  stops, and reads them back at the next start, so every folder opens at once from the first moment;
+  `SaveKey` says what they were saved for (the account, the server, the settings that shape the tree
+  and a version of your own that moves when what you list or how you measure files changes), and
+  another's are not read. `StampOf` gives a folder's stamp: what its listing and every listing below
+  it depend on, as the upstream tells it cheaply (a chat's version, a library's last change and item
+  count, a project's last activity), given the stamp held, the same string back when nothing changed.
+  A walk asks a stamped folder for its stamp first and, where it holds, keeps its listing and
+  everything held below it without listing any of it, so a walk over a tree that has not changed,
+  the first after a restart among them, asks for the stamps alone; a listing afresh behind an answer
+  (`RefreshAfter`) is spared the same way. Once a `FullWalkEvery` (a day), a walk lists every folder
+  whatever its stamp, for what a stamp does not cover. Teams, SharePoint and GitLab keep their
+  listings so; their settings `KeptListings.KeepSetting` and `KeptListings.WalkSetting` give the
+  same names to the same choices.
 - `SpoolCache`: for upstreams that only stream sequentially. The first open starts the download
   into `Context.CacheDirectory`; any sub-range is served as soon as the file has reached it;
   concurrent readers share one download; eviction by size and age. An upstream that sends

@@ -12,9 +12,14 @@ namespace AnyFS.Sdk;
 /// as it goes. "Count files on start" is the first walk (<see cref="CountAsync"/>, from <see cref="ICountable.CountFilesAsync"/>),
 /// so after the count every folder opens at once instead of being listed again one by one; a walk follows every
 /// <see cref="KeptListingsOptions.WalkEvery"/> after the last ends, and a source can start the walks without the count
-/// (<see cref="StartWalks"/>: SharePoint does, from its start). Answer listings and stats from <see cref="Cache"/>, and keep
-/// it right after a write as any <see cref="ListingCache"/>. Not kept (<see cref="KeptListingsOptions.Keep"/> off),
-/// listings last <see cref="KeptListingsOptions.UnkeptFor"/> (two seconds) and the count is one walk.
+/// (<see cref="StartWalks"/>: SharePoint does, from its start). Where the source stamps its folders
+/// (<see cref="KeptListingsOptions.StampOf"/>), a walk asks each stamped folder for its stamp first and, where it still
+/// holds, keeps the folder's listing and every listing below it as they are, so a walk over a tree that has not changed
+/// asks for the stamps alone, from one start to the next too (<see cref="KeptListingsOptions.SaveTo"/>); once a
+/// <see cref="KeptListingsOptions.FullWalkEvery"/>, a walk lists every folder whatever its stamp. Answer listings and stats
+/// from <see cref="Cache"/>, and keep it right after a write as any <see cref="ListingCache"/>. Not kept
+/// (<see cref="KeptListingsOptions.Keep"/> off), listings last <see cref="KeptListingsOptions.UnkeptFor"/> (two seconds)
+/// and the count is one walk.
 /// </summary>
 public sealed class KeptListings : IAsyncDisposable
 {
@@ -38,6 +43,9 @@ public sealed class KeptListings : IAsyncDisposable
     // the count's state after the last walk ended (an EnumerationState), -1 before the first has
     private volatile int _walked = -1;
 
+    // when the last walk that listed every folder whatever its stamp ended, or the first walk (saved with the listings); null before it
+    private DateTimeOffset? _fullWalkAt;
+
     /// <param name="lister">Lists one folder from the upstream ("" for the root), as for a <see cref="ListingCache"/>.</param>
     /// <param name="counters">The source's own counters: the first walk counts into them as it goes, and each walk sets its total there when done.</param>
     public KeptListings(Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> lister, SourceCounters counters, ILogger logger, KeptListingsOptions? options = null, TimeProvider? time = null)
@@ -52,17 +60,21 @@ public sealed class KeptListings : IAsyncDisposable
         _logger = logger;
         _time = time ?? TimeProvider.System;
         Cache = _options.Keep
-            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { RefreshAfter = _options.RefreshAfter }
-            : new ListingCache(_options.UnkeptFor, lister, time: _time);
+            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { RefreshAfter = _options.RefreshAfter, StampOf = _options.StampOf }
+            : new ListingCache(_options.UnkeptFor, lister, time: _time) { StampOf = _options.StampOf };
         if (_options.Keep && _options.SaveTo is { } saved)
         {
             Load(saved);
         }
     }
 
-    private const int SavedVersion = 1;
+    private const int SavedVersion = 2;
 
-    /// <summary>The listings an earlier run saved for the same <see cref="KeptListingsOptions.SaveKey"/>, kept as old (refreshed as they are opened).</summary>
+    /// <summary>
+    /// The listings an earlier run saved for the same <see cref="KeptListingsOptions.SaveKey"/>, kept as old (listed afresh
+    /// as they are opened, or by the first walk) with their stamps (a folder whose stamp holds is not), and when the last
+    /// walk that listed every folder was.
+    /// </summary>
     private void Load(string path)
     {
         try
@@ -76,10 +88,11 @@ public sealed class KeptListings : IAsyncDisposable
 
             foreach (var (folder, listing) in saved.Listings)
             {
-                Cache.Restore(folder, listing);
+                Cache.Restore(folder, listing, saved.Stamps?.GetValueOrDefault(folder));
             }
 
-            _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run answer at once, each listed afresh as it is opened", _options.Name, saved.Listings.Count);
+            _fullWalkAt = saved.FullWalkAt;
+            _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run answer at once, {Stamped:N0} of them stamped; the rest are listed afresh as they are opened", _options.Name, saved.Listings.Count, saved.Stamps?.Count ?? 0);
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
@@ -101,7 +114,11 @@ public sealed class KeptListings : IAsyncDisposable
 
         try
         {
-            var saved = new SavedListings(SavedVersion, _options.SaveKey ?? "", Cache.Snapshot().ToDictionary(p => p.Key, p => p.Value.ToList(), StringComparer.Ordinal));
+            var saved = new SavedListings(SavedVersion, _options.SaveKey ?? "", Cache.Snapshot().ToDictionary(p => p.Key, p => p.Value.ToList(), StringComparer.Ordinal))
+            {
+                Stamps = Cache.Stamps().ToDictionary(StringComparer.Ordinal),
+                FullWalkAt = _fullWalkAt,
+            };
             if (Path.GetDirectoryName(path) is { Length: > 0 } folder)
             {
                 Directory.CreateDirectory(folder);
@@ -191,15 +208,21 @@ public sealed class KeptListings : IAsyncDisposable
     /// One walk: every folder listed afresh into <see cref="Cache"/>, counting files and folders into
     /// <paramref name="counters"/> as it goes, <see cref="KeptListingsOptions.Parallelism"/> folders at a time (in each part,
     /// all parts at once, where <see cref="KeptListingsOptions.PartsBelow"/> makes parts) and at most
-    /// <see cref="KeptListingsOptions.MaxInFlight"/> in all. A folder that cannot be listed is left out, with what is below
-    /// it, and logged; anything else that fails ends the walk.
+    /// <see cref="KeptListingsOptions.MaxInFlight"/> in all, every folder whatever its stamp. A folder that cannot be listed
+    /// is left out, with what is below it, and logged; anything else that fails ends the walk.
     /// </summary>
     /// <returns>Whether it went into every folder: false where <see cref="KeptListingsOptions.LeftOut"/> kept it out of some.</returns>
-    public async Task<bool> WalkAsync(SourceCounters counters, CancellationToken ct)
+    public Task<bool> WalkAsync(SourceCounters counters, CancellationToken ct) => WalkAsync(counters, full: true, ct);
+
+    /// <summary>
+    /// As above; unless <paramref name="full"/>, a stamped folder whose stamp still holds (<see cref="KeptListingsOptions.StampOf"/>)
+    /// is kept with everything held below it, counted, and not listed.
+    /// </summary>
+    public async Task<bool> WalkAsync(SourceCounters counters, bool full, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(counters);
         using var inFlight = new SemaphoreSlim(_options.MaxInFlight, _options.MaxInFlight);
-        var walk = new Walk(counters, inFlight);
+        var walk = new Walk(counters, inFlight, full);
         void StartPart(string path)
         {
             lock (walk.Parts)
@@ -242,8 +265,18 @@ public sealed class KeptListings : IAsyncDisposable
             ExceptionDispatchInfo.Throw(failure);
         }
 
+        _lastWalk = (walk.Listed, walk.Kept);
         return !walk.LeftSomeOut;
     }
+
+    // how many folders the last walk listed afresh, and how many it kept as they were by their stamps (for the log)
+    private (long Listed, long Kept) _lastWalk;
+
+    /// <summary>
+    /// Whether a walk now lists every folder whatever its stamp: one each <see cref="KeptListingsOptions.FullWalkEvery"/>
+    /// from the first walk (which lists whatever is not held anyway, and keeps what a run before saved by its stamps).
+    /// </summary>
+    private bool FullWalkDue => _options.StampOf is null || _options.FullWalkEvery <= TimeSpan.Zero || (_fullWalkAt is { } last && _time.GetUtcNow() - last >= _options.FullWalkEvery);
 
     public async ValueTask DisposeAsync()
     {
@@ -276,18 +309,26 @@ public sealed class KeptListings : IAsyncDisposable
             var started = _time.GetTimestamp();
             try
             {
-                var whole = await WalkAsync(counters, ct).ConfigureAwait(false);
+                var full = FullWalkDue;
+                var whole = await WalkAsync(counters, full, ct).ConfigureAwait(false);
+                if (full || _fullWalkAt is null)
+                {
+                    _fullWalkAt = _time.GetUtcNow();
+                }
+
                 var state = whole ? EnumerationState.Complete : EnumerationState.Unknown;
                 _counters.Set(counters.FilesKnown, counters.DirectoriesKnown, state);
                 _walked = (int)state;
                 var seconds = _time.GetElapsedTime(started).TotalSeconds;
+                var (listed, kept) = _lastWalk;
+                var how = kept > 0 ? $"listed {listed:N0} folders afresh and kept {kept:N0} whose stamps hold" : "listed every folder";
                 if (whole)
                 {
-                    _logger.LogInformation("{Name}: walked every folder in {Seconds:F0} s: {Files:N0} files in {Folders:N0} folders", _options.Name, seconds, counters.FilesKnown, counters.DirectoriesKnown);
+                    _logger.LogInformation("{Name}: walked every folder in {Seconds:F0} s ({How}): {Files:N0} files in {Folders:N0} folders", _options.Name, seconds, how, counters.FilesKnown, counters.DirectoriesKnown);
                 }
                 else
                 {
-                    _logger.LogInformation("{Name}: walked in {Seconds:F0} s: {Files:N0} files in {Folders:N0} folders, and the folders it leaves out are listed when opened", _options.Name, seconds, counters.FilesKnown, counters.DirectoriesKnown);
+                    _logger.LogInformation("{Name}: walked in {Seconds:F0} s ({How}): {Files:N0} files in {Folders:N0} folders, and the folders it leaves out are listed when opened", _options.Name, seconds, how, counters.FilesKnown, counters.DirectoriesKnown);
                 }
 
                 Save();
@@ -334,12 +375,18 @@ public sealed class KeptListings : IAsyncDisposable
         _firstWalk.TrySetResult();
     }
 
-    /// <summary>One part's share of a walk (<see cref="WalkAsync"/>): its folders, <see cref="KeptListingsOptions.Parallelism"/> at a time; the parts below it start walks of their own.</summary>
+    /// <summary>One part's share of a walk (<see cref="WalkAsync(SourceCounters, bool, CancellationToken)"/>): its folders, <see cref="KeptListingsOptions.Parallelism"/> at a time; the parts below it start walks of their own.</summary>
     private async Task WalkPartAsync(string root, Walk walk, Action<string> startPart, CancellationToken ct)
     {
         var pending = Channel.CreateUnbounded<string>();
         var outstanding = 1;
         pending.Writer.TryWrite(root);
+
+        void Enqueue(string child)
+        {
+            Interlocked.Increment(ref outstanding);
+            pending.Writer.TryWrite(child);
+        }
 
         async Task WorkerAsync()
         {
@@ -352,23 +399,35 @@ public sealed class KeptListings : IAsyncDisposable
                     await walk.InFlight.WaitAsync(ct).ConfigureAwait(false);
                     try
                     {
+                        // the folder's stamp first: one whose stamp holds keeps its listing and every listing held below it
+                        var held = Cache.StampHeld(folder);
+                        var (read, stamp) = await StampAsync(folder, held, ct).ConfigureAwait(false);
+                        if (!walk.Full && read && held is not null && stamp == held)
+                        {
+                            await KeepHeldAsync(folder, walk, Enqueue, ct).ConfigureAwait(false);
+                            continue;
+                        }
+
                         tree = _options.ListTree is { } listTree ? await listTree(folder, ct).ConfigureAwait(false) : null;
-                        entries = tree is null ? await Cache.RefreshAsync(folder, ct).ConfigureAwait(false) : [];
+                        entries = tree is null ? await Cache.RefreshAsync(folder, stamp, ct).ConfigureAwait(false) : [];
+                        if (tree is not null)
+                        {
+                            // the folder and everything below it at once: all kept and counted, nothing left to go into
+                            foreach (var (path, listing) in tree)
+                            {
+                                Cache.Keep(path, listing, path == folder ? stamp : null);
+                                walk.Counters.Add(listing.Count(e => !e.IsDirectory), listing.Count(e => e.IsDirectory));
+                            }
+                        }
                     }
                     finally
                     {
                         walk.InFlight.Release();
                     }
 
+                    Interlocked.Increment(ref walk.Listed);
                     if (tree is not null)
                     {
-                        // the folder and everything below it at once: all kept and counted, nothing left to go into
-                        foreach (var (path, listing) in tree)
-                        {
-                            Cache.Keep(path, listing);
-                            walk.Counters.Add(listing.Count(e => !e.IsDirectory), listing.Count(e => e.IsDirectory));
-                        }
-
                         continue;
                     }
 
@@ -399,8 +458,7 @@ public sealed class KeptListings : IAsyncDisposable
                         }
                         else
                         {
-                            Interlocked.Increment(ref outstanding);
-                            pending.Writer.TryWrite(child);
+                            Enqueue(child);
                         }
                     }
 
@@ -427,16 +485,95 @@ public sealed class KeptListings : IAsyncDisposable
         await Task.WhenAll(Enumerable.Range(0, _options.Parallelism).Select(_ => Task.Run(WorkerAsync, CancellationToken.None))).ConfigureAwait(false);
     }
 
-    /// <summary>One walk's shared state: what it counts into, the listings in flight, its parts, and whether it left any folder out.</summary>
-    private sealed class Walk(SourceCounters counters, SemaphoreSlim inFlight)
+    /// <summary>A folder's stamp now (<see cref="KeptListingsOptions.StampOf"/>, given the one held): whether it could be read, and what it is. Nothing without stamps; one that cannot be read is logged and counts as none.</summary>
+    private async ValueTask<(bool Read, string? Stamp)> StampAsync(string folder, string? held, CancellationToken ct)
+    {
+        if (_options.StampOf is not { } stampOf)
+        {
+            return (false, null);
+        }
+
+        try
+        {
+            return (true, await stampOf(folder, held, ct).ConfigureAwait(false));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("{Name}: the stamp of '{Folder}' could not be read ({Error}); listed afresh", _options.Name, folder, ex.Message);
+            return (false, null);
+        }
+    }
+
+    /// <summary>
+    /// Keeps a folder's listing and every listing held below it as they are (a walk found its stamp holds), counting them;
+    /// a folder below it with no listing held (never listed, or let go) is walked as usual, unless it is one a walk leaves
+    /// out (<see cref="KeptListingsOptions.LeftOut"/>).
+    /// </summary>
+    private async Task KeepHeldAsync(string folder, Walk walk, Action<string> enqueue, CancellationToken ct)
+    {
+        var held = Cache.Under(folder);
+        foreach (var (path, listing) in held)
+        {
+            Cache.Touch(path);
+            Interlocked.Increment(ref walk.Kept);
+            long files = 0;
+            var folders = 0;
+            IReadOnlySet<string>? leftOut = null;
+            var asked = false;
+            foreach (var entry in listing)
+            {
+                if (!entry.IsDirectory)
+                {
+                    files++;
+                    continue;
+                }
+
+                folders++;
+                var child = VfsPath.Join(path, entry.Name);
+                if (held.ContainsKey(child))
+                {
+                    continue;
+                }
+
+                if (!asked)
+                {
+                    asked = true;
+                    leftOut = _options.LeftOut is { } left ? await left(path, ct).ConfigureAwait(false) : null;
+                }
+
+                if (leftOut?.Contains(entry.Name) == true)
+                {
+                    walk.LeftSomeOut = true;
+                    continue;
+                }
+
+                enqueue(child);
+            }
+
+            walk.Counters.Add(files, folders);
+        }
+    }
+
+    /// <summary>One walk's shared state: what it counts into, the listings in flight, its parts, whether it lists every folder whatever its stamp, and what it left out, listed and kept.</summary>
+    private sealed class Walk(SourceCounters counters, SemaphoreSlim inFlight, bool full)
     {
         public SourceCounters Counters { get; } = counters;
 
         public SemaphoreSlim InFlight { get; } = inFlight;
 
+        public bool Full { get; } = full;
+
         public List<Task> Parts { get; } = [];
 
         public volatile bool LeftSomeOut;
+
+        public long Listed;
+
+        public long Kept;
     }
 }
 
@@ -494,12 +631,36 @@ public sealed record KeptListingsOptions
     /// </summary>
     public string? SaveTo { get; init; }
 
-    /// <summary>What the saved listings must have been saved for to be read back (the account, the server): another's are not.</summary>
+    /// <summary>
+    /// What the saved listings must have been saved for to be read back (the account, the server), with whatever else the
+    /// listings depend on (the settings that shape the tree, a version of the source's own that moves when what it lists or
+    /// how it measures its files changes): another's are not.
+    /// </summary>
     public string? SaveKey { get; init; }
+
+    /// <summary>
+    /// A folder's stamp (<see cref="ListingCache.StampOf"/>): what its listing and every listing below it depend on, as the
+    /// upstream tells it cheaply. A walk keeps a stamped folder whose stamp holds, and everything held below it, as they
+    /// are, and a listing afresh behind an answer (<see cref="RefreshAfter"/>) is spared the same way. Null (the default)
+    /// stamps nothing: every walk lists every folder.
+    /// </summary>
+    public Func<string, string?, CancellationToken, ValueTask<string?>>? StampOf { get; init; }
+
+    /// <summary>
+    /// With <see cref="StampOf"/>: how often a walk lists every folder whatever its stamp, so what a stamp does not cover
+    /// (a reaction on an old message, a file changed deep in a library whose stamp was read a moment early) shows by then;
+    /// a day by default. Zero or less makes every walk such a walk.
+    /// </summary>
+    public TimeSpan FullWalkEvery { get; init; } = TimeSpan.FromDays(1);
 }
 
-/// <summary>The listings a run saved (<see cref="KeptListingsOptions.SaveTo"/>): what they are for, and each folder's.</summary>
-internal sealed record SavedListings(int Version, string Key, Dictionary<string, List<VfsEntry>> Listings);
+/// <summary>The listings a run saved (<see cref="KeptListingsOptions.SaveTo"/>): what they are for, each folder's, the stamps held with them, and when every folder was last listed.</summary>
+internal sealed record SavedListings(int Version, string Key, Dictionary<string, List<VfsEntry>> Listings)
+{
+    public Dictionary<string, string>? Stamps { get; init; }
+
+    public DateTimeOffset? FullWalkAt { get; init; }
+}
 
 [System.Text.Json.Serialization.JsonSerializable(typeof(SavedListings))]
 internal sealed partial class SavedListingsJson : System.Text.Json.Serialization.JsonSerializerContext;

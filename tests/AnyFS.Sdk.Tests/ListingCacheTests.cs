@@ -235,6 +235,44 @@ public class ListingCacheTests
     }
 
     [TestMethod]
+    public async Task AnOldListingWhoseStampHoldsIsNotListedAfreshBehindTheAnswer()
+    {
+        var stamps = new Dictionary<string, string>(StringComparer.Ordinal) { ["docs"] = "v1" };
+        var asked = new List<string?>();
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time)
+        {
+            RefreshAfter = TimeSpan.FromSeconds(10),
+            StampOf = (path, held, _) =>
+            {
+                asked.Add(held);
+                return ValueTask.FromResult(stamps.GetValueOrDefault(path));
+            },
+        };
+
+        // restored from a run before, with its stamp: answered at once, and the stamp holds, so not listed
+        cache.Restore("docs", [VfsEntry.File("old.txt", 1)], "v1");
+        Assert.AreEqual(1, (await cache.GetAsync("docs", CancellationToken.None)).Count);
+        await Task.Delay(100);
+        Assert.AreEqual(0, _calls, "the stamp holds: the held listing stands");
+        CollectionAssert.AreEqual(new[] { "v1" }, asked, "asked with the stamp held");
+        Assert.AreEqual("v1", cache.StampHeld("docs"));
+
+        // the stamp moved: listed afresh behind the next answer, the new stamp kept with the listing
+        stamps["docs"] = "v2";
+        _time.Advance(TimeSpan.FromSeconds(11));
+        Assert.AreEqual(1, (await cache.GetAsync("docs", CancellationToken.None)).Count, "answered from what was held");
+        await WaitForAsync(() => _calls == 1);
+        await WaitForAsync(async () => (await cache.GetAsync("docs", CancellationToken.None)).Count == 2);
+        Assert.AreEqual("v2", cache.StampHeld("docs"), "read before the listing, once");
+        Assert.AreEqual(2, asked.Count);
+
+        // a folder listed afresh on its own reads its stamp too
+        await cache.RefreshAsync("docs/sub", CancellationToken.None);
+        Assert.IsNull(cache.StampHeld("docs/sub"), "no stamp for it");
+        CollectionAssert.AreEquivalent(new[] { "docs" }, cache.Stamps().Keys.ToArray());
+    }
+
+    [TestMethod]
     public async Task AListingKeptFromElsewhereAnswersWithoutTheLister()
     {
         var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
