@@ -503,7 +503,7 @@ public sealed partial class TeamsSource
             }
             catch (VfsException ex)
             {
-                // gone since (a chat hidden or renamed): no longer listed afresh
+                // gone since (renamed, or past the window): no longer listed afresh
                 Logger.LogDebug("teams: {Path} is no longer listed afresh ({Error})", path, ex.Message);
                 folders.TryRemove(path, out _);
             }

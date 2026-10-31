@@ -109,24 +109,9 @@ public class TeamsLiveTests
         StringAssert.Contains(text, "you", "the account among its members");
     }
 
-    /// <summary>Every chat's folder, the hidden ones (Chats/Hidden chats) among them: the sandbox's seeded chat is hidden.</summary>
+    /// <summary>Every chat's folder, the hidden ones among them: the sandbox's seeded chat is hidden in Teams.</summary>
     private static async Task<List<string>> ChatFoldersAsync(ISource source)
-    {
-        var chats = new List<string>();
-        foreach (var entry in await ListAsync(source, "Chats"))
-        {
-            if (entry.Name == "Hidden chats")
-            {
-                chats.AddRange((await ListAsync(source, "Chats/Hidden chats")).Select(e => $"Chats/Hidden chats/{e.Name}"));
-            }
-            else
-            {
-                chats.Add($"Chats/{entry.Name}");
-            }
-        }
-
-        return chats;
-    }
+        => (await ListAsync(source, "Chats")).Select(e => $"Chats/{e.Name}").ToList();
 
     /// <summary>
     /// The team's and the channel's details (team.md, channel.md: the General channel's thread names the team's site), and

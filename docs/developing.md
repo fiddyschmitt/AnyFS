@@ -140,8 +140,8 @@ two to a page) and checks every post lands once, in posts or a month of earlier.
 Microsoft 365) with a load of the team's SharePoint site, as the source asks for its missing tokens. `TeamsSandboxSeed` seeds the sandbox for them, once, with `ANYFS_SEED_TEAMS=1` beside those two: the team "AnyFS
 Lab" with its SharePoint site, a thread in General with replies, reactions, an edit, a deletion, a shared file and an inline
 image, files in the channel's folder, and the same in the tester's first chat; a run skips what it finds seeded. That chat
-is hidden in Teams, so the live tests look in `Chats/Hidden chats` too. Teams is cloud only, so there is no lab machine
-or E2E row for it.
+is hidden in Teams; the source lists it in `Chats` with the others. Teams is cloud only, so there is no lab machine or
+E2E row for it.
 
 ## Publish
 

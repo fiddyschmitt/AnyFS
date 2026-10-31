@@ -645,17 +645,17 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
-    public async Task HiddenChatsAreInAHiddenChatsFolder()
+    public async Task HiddenChatsAreAmongTheOthers()
     {
         var fake = Seed();
         var hidden = fake.AddChat(ChatKind.Group, "Old project", [Jane], When, hidden: true);
         fake.Post(hidden.Id, Jane, "Jane Doe", "<p>Archived talk</p>", When);
-        fake.AddChat(ChatKind.Group, "Hidden chats", [John], When);
         await using var source = await StartAsync(fake);
 
-        CollectionAssert.AreEquivalent(new[] { "Jane Doe", "Project Axle", "Hidden chats (2)", "Hidden chats" }, await NamesAsync(source, "Chats"), "a chat named as the folder is numbered");
-        CollectionAssert.AreEqual(new[] { "Old project" }, await NamesAsync(source, "Chats/Hidden chats"));
-        StringAssert.Contains(await TextAsync(source, "Chats/Hidden chats/Old project/chat.md"), "Archived talk");
+        CollectionAssert.AreEquivalent(new[] { "Jane Doe", "Project Axle", "Old project" }, await NamesAsync(source, "Chats"));
+        var md = await TextAsync(source, "Chats/Old project/chat.md");
+        StringAssert.Contains(md, "- Hidden in Teams\n", "chat.md says so");
+        StringAssert.Contains(md, "Archived talk");
     }
 
     private static string Local(DateTimeOffset when) => when.ToLocalTime().ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);

@@ -352,7 +352,7 @@ internal sealed class ThreadFolder(TeamInfo team, ChannelInfo channel, string na
     }
 }
 
-/// <summary>The account's chats: a folder per chat, and the chats hidden in Teams in a Hidden chats folder (where there are any).</summary>
+/// <summary>The account's chats: a folder per chat, named for it (<see cref="TeamsSource.ChatName"/>), twins numbered; those hidden in Teams among them.</summary>
 internal sealed class ChatsFolder() : TmFolder(FolderName)
 {
     public const string FolderName = "Chats";
@@ -360,30 +360,9 @@ internal sealed class ChatsFolder() : TmFolder(FolderName)
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
         var chats = await source.ChatsAsync(ct).ConfigureAwait(false);
-        var children = Folders(source, chats.Where(c => !c.Hidden).ToList(), [HiddenChatsFolder.FolderName]);
-        if (chats.Any(c => c.Hidden))
-        {
-            children.Add(new HiddenChatsFolder());
-        }
-
-        return children;
-    }
-
-    /// <summary>A folder per chat, named for it (<see cref="TeamsSource.ChatName"/>), twins numbered.</summary>
-    public static List<TmNode> Folders(TeamsSource source, IReadOnlyList<ChatInfo> chats, IEnumerable<string>? reserved = null)
-    {
-        var names = TeamsNames.Unique(chats.Select(source.ChatName).ToList(), reserved);
+        var names = TeamsNames.Unique(chats.Select(source.ChatName).ToList());
         return chats.Select((c, i) => (TmNode)new ChatFolder(c, names[i])).ToList();
     }
-}
-
-/// <summary>The chats hidden in Teams (a new message in one shows it again, and it moves back to Chats): a folder per chat.</summary>
-internal sealed class HiddenChatsFolder() : TmFolder(FolderName)
-{
-    public const string FolderName = "Hidden chats";
-
-    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
-        => ChatsFolder.Folders(source, (await source.ChatsAsync(ct).ConfigureAwait(false)).Where(c => c.Hidden).ToList());
 }
 
 /// <summary>
