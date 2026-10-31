@@ -25,6 +25,7 @@ public sealed class ListingCache
     private readonly TimeProvider _time;
     private readonly object _gate = new();
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Failure> _failures = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Fetch> _fetches = new(StringComparer.Ordinal);
 
     /// <param name="ttl">How long a listing is good for, or <see cref="Kept"/>.</param>
@@ -66,6 +67,16 @@ public sealed class ListingCache
     /// </summary>
     public Func<string, string?, CancellationToken, ValueTask<string?>>? StampOf { get; init; }
 
+    /// <summary>
+    /// How long a folder whose listing failed, with none held, answers with that failure at once, by the failure (a
+    /// refusal, say, longer than a service that did not answer); null or zero for not at all. A client that lists the tree
+    /// over and over (a search) then pays for a folder the upstream refuses once, not every time. Listed again when asked
+    /// after that, by <see cref="RefreshAsync(string, CancellationToken)"/> (a walk), and after <see cref="ForgetFailures"/>.
+    /// Never for a folder not found or not a folder: whether a path is there is its parent's listing's to say. Null (the
+    /// default) asks the upstream again whenever asked.
+    /// </summary>
+    public Func<VfsException, TimeSpan?>? FailureKeptFor { get; init; }
+
     /// <summary>The listing of <paramref name="path"/> (a normalised directory path), from the cache when fresh.</summary>
     public ValueTask<IReadOnlyList<VfsEntry>> GetAsync(string path, CancellationToken ct)
     {
@@ -79,8 +90,16 @@ public sealed class ListingCache
             return ValueTask.FromResult(held.List);
         }
 
+        if (_failures.TryGetValue(path, out var failed) && _time.GetElapsedTime(failed.At) < failed.For)
+        {
+            return ValueTask.FromException<IReadOnlyList<VfsEntry>>(new VfsException(failed.Error.Error, failed.Error.Message, failed.Error.InnerException));
+        }
+
         return FetchAsync(path, ct, null);
     }
+
+    /// <summary>Lets go of the failures kept (<see cref="FailureKeptFor"/>): for a source that knows what refused them may not now (a sign-in renewed), so each is listed again when next asked.</summary>
+    public void ForgetFailures() => _failures.Clear();
 
     /// <summary>
     /// Keeps <paramref name="listing"/> as the listing of <paramref name="path"/>, as if it had just come from the upstream:
@@ -96,6 +115,7 @@ public sealed class ListingCache
         lock (_gate)
         {
             _entries[path] = new Entry(_time.GetTimestamp(), listing) { Stamp = stamp };
+            _failures.TryRemove(path, out _);
             TrimIfNeededLocked();
         }
     }
@@ -267,6 +287,7 @@ public sealed class ListingCache
         lock (_gate)
         {
             _entries.TryRemove(directoryPath, out _);
+            _failures.TryRemove(directoryPath, out _);
             if (_fetches.TryGetValue(directoryPath, out var fetch))
             {
                 fetch.Invalidated = true;
@@ -290,6 +311,14 @@ public sealed class ListingCache
                 }
             }
 
+            foreach (var key in _failures.Keys)
+            {
+                if (VfsPath.IsUnder(key, directoryPath))
+                {
+                    _failures.TryRemove(key, out _);
+                }
+            }
+
             foreach (var (key, fetch) in _fetches)
             {
                 if (VfsPath.IsUnder(key, directoryPath))
@@ -305,6 +334,7 @@ public sealed class ListingCache
         lock (_gate)
         {
             _entries.Clear();
+            _failures.Clear();
             foreach (var fetch in _fetches.Values)
             {
                 fetch.Invalidated = true;
@@ -439,6 +469,7 @@ public sealed class ListingCache
                     // good for its time from when it arrived: a folder slower to list than that would otherwise be stale
                     // on arrival, and every stat in it would list it again
                     _entries[path] = new Entry(_time.GetTimestamp(), result) { Stamp = fetch.Unstamped ? null : stamp };
+                    _failures.TryRemove(path, out _);
                     TrimIfNeededLocked();
                 }
             }
@@ -450,6 +481,13 @@ public sealed class ListingCache
             lock (_gate)
             {
                 Forget(path, fetch);
+
+                // a refusal or a failure of the folder's own, where nothing is held to answer instead (FailureKeptFor)
+                if (FailureKeptFor is { } keptFor && ex is VfsException { Error: not (VfsError.NotFound or VfsError.NotADirectory) } failure
+                    && !fetch.Invalidated && !_entries.ContainsKey(path) && keptFor(failure) is { } span && span > TimeSpan.Zero)
+                {
+                    _failures[path] = new Failure(_time.GetTimestamp(), span, failure);
+                }
             }
 
             fetch.Result.TrySetException(ex);
@@ -522,6 +560,9 @@ public sealed class ListingCache
 
     /// <summary>A write's change to one name in a listing.</summary>
     private sealed record Change(string Name, VfsEntry? Entry, StringComparison Comparison);
+
+    /// <summary>A listing that failed, with nothing held for the folder: when, for how long it answers, and how (<see cref="FailureKeptFor"/>).</summary>
+    private sealed record Failure(long At, TimeSpan For, VfsException Error);
 
     /// <summary>A listing on its way from the upstream, what changed meanwhile, and the folder's stamp where the caller read it.</summary>
     private sealed class Fetch

@@ -60,7 +60,7 @@ public sealed class KeptListings : IAsyncDisposable
         _logger = logger;
         _time = time ?? TimeProvider.System;
         Cache = _options.Keep
-            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { RefreshAfter = _options.RefreshAfter, StampOf = _options.StampOf }
+            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { RefreshAfter = _options.RefreshAfter, StampOf = _options.StampOf, FailureKeptFor = _options.FailureKeptFor }
             : new ListingCache(_options.UnkeptFor, lister, time: _time) { StampOf = _options.StampOf };
         if (_options.Keep && _options.SaveTo is { } saved)
         {
@@ -591,6 +591,12 @@ public sealed record KeptListingsOptions
 
     /// <summary>With listings kept, the age past which a listing is answered and listed afresh behind the answer (<see cref="ListingCache.RefreshAfter"/>); null keeps it until the next walk.</summary>
     public TimeSpan? RefreshAfter { get; init; }
+
+    /// <summary>
+    /// With listings kept, how long a folder whose listing failed answers with that failure at once, by the failure
+    /// (<see cref="ListingCache.FailureKeptFor"/>): a walk lists it again meanwhile. Null (the default) asks whenever asked.
+    /// </summary>
+    public Func<VfsException, TimeSpan?>? FailureKeptFor { get; init; }
 
     /// <summary>Folders listed at a time in a walk: in each part, where <see cref="PartsBelow"/> makes parts.</summary>
     public int Parallelism { get; init; } = TreeCount.DefaultParallelism;

@@ -12,6 +12,7 @@ public class ListingCacheTests
         ["docs"] = [VfsEntry.File("a.txt", 1), VfsEntry.File("b.txt", 2)],
         ["docs/sub"] = [VfsEntry.File("c.txt", 3)],
     };
+    private readonly Dictionary<string, VfsException> _failing = new(StringComparer.Ordinal);
     private int _calls;
     private TaskCompletionSource? _gate;
 
@@ -21,6 +22,11 @@ public class ListingCacheTests
         if (_gate is not null)
         {
             await _gate.Task;
+        }
+
+        if (_failing.TryGetValue(path, out var failure))
+        {
+            throw failure;
         }
 
         if (!_tree.TryGetValue(path, out var entries))
@@ -109,6 +115,78 @@ public class ListingCacheTests
         await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("nope", CancellationToken.None));
         Assert.AreEqual(2, _calls);
         Assert.AreEqual(0, cache.Count);
+    }
+
+    [TestMethod]
+    public async Task AFailedListingIsAnsweredAtOnceForItsTimeThenAskedAgain()
+    {
+        _failing["docs"] = VfsException.AccessDenied("docs");
+        _failing["docs/sub"] = new VfsException(VfsError.Unavailable, "the service did not answer", new TimeoutException());
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time)
+        {
+            FailureKeptFor = ex => ex.Error == VfsError.AccessDenied ? TimeSpan.FromMinutes(30) : TimeSpan.FromMinutes(1),
+        };
+
+        // a refusal: the second answer the same, without the lister
+        var refused = await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs", CancellationToken.None));
+        var again = await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs", CancellationToken.None));
+        Assert.AreEqual(VfsError.AccessDenied, again.Error);
+        Assert.AreEqual(refused.Message, again.Message);
+        Assert.AreEqual(1, _calls);
+        Assert.AreEqual(0, cache.Count, "a failure is no listing");
+
+        // another kind for its own time, with what caused it
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs/sub", CancellationToken.None));
+        var kept = await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs/sub", CancellationToken.None));
+        Assert.AreEqual(VfsError.Unavailable, kept.Error);
+        Assert.IsInstanceOfType<TimeoutException>(kept.InnerException);
+        Assert.AreEqual(2, _calls);
+
+        _time.Advance(TimeSpan.FromMinutes(2));
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs/sub", CancellationToken.None));
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs", CancellationToken.None));
+        Assert.AreEqual(3, _calls, "the unavailable folder asked again past its minute, the refusal still kept");
+
+        _time.Advance(TimeSpan.FromMinutes(30));
+        _failing.Remove("docs");
+        Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count);
+        Assert.AreEqual(4, _calls);
+    }
+
+    [TestMethod]
+    public async Task AFolderNotFoundIsNeverKeptAsFailed()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { FailureKeptFor = _ => TimeSpan.FromMinutes(30) };
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("nope", CancellationToken.None));
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("nope", CancellationToken.None));
+        Assert.AreEqual(2, _calls, "whether it is there is its parent's listing's to say");
+    }
+
+    [TestMethod]
+    public async Task AFailureKeptIsAskedAgainByARefreshWhenForgottenAndOnceInvalidated()
+    {
+        _failing["docs"] = VfsException.AccessDenied("docs");
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { FailureKeptFor = _ => TimeSpan.FromMinutes(30) };
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs", CancellationToken.None));
+
+        // a walk's listing afresh asks whatever is kept; once the upstream answers, the listing replaces the failure
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.RefreshAsync("docs", CancellationToken.None));
+        Assert.AreEqual(2, _calls);
+        _failing.Remove("docs");
+        await cache.RefreshAsync("docs", CancellationToken.None);
+        Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count);
+        Assert.AreEqual(3, _calls);
+
+        // let go by the source (a token come since) and by an invalidation
+        _failing["docs/sub"] = VfsException.Unavailable("no token yet");
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs/sub", CancellationToken.None));
+        cache.ForgetFailures();
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs/sub", CancellationToken.None));
+        Assert.AreEqual(5, _calls);
+        cache.InvalidateTree("docs");
+        _failing.Remove("docs/sub");
+        Assert.AreEqual(1, (await cache.GetAsync("docs/sub", CancellationToken.None)).Count);
+        Assert.AreEqual(6, _calls);
     }
 
     [TestMethod]
