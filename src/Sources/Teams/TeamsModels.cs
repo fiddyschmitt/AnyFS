@@ -185,9 +185,6 @@ internal sealed record ChatInfo(string Id, string? Title, ChatKind Kind, IReadOn
     /// <summary>The aggregator's version of the chat, which moves on as it changes: an unchanged one is not read again.</summary>
     public string? Version { get; init; }
 
-    /// <summary>Hidden from the chat list in Teams (<c>hidden</c>); a new message shows it again.</summary>
-    public bool Hidden { get; init; }
-
     /// <summary>When it was started (<c>createdAt</c>), and by whom (<c>creator</c>, an mri).</summary>
     public DateTimeOffset? Created { get; init; }
 
@@ -298,7 +295,7 @@ internal sealed record Person(string Mri, string DisplayName)
 /// <param name="Pinned">Its pinned messages among those read.</param>
 /// <param name="Earlier">While chat.md does not reach back to the chat's start yet (its history still being read, or not all of it read): how far it does; else null.</param>
 internal sealed record ChatDetails(string? Link, ChatKind Kind, IReadOnlyList<string> Members, int MemberCount, DateTimeOffset? Started, string? StartedBy,
-    bool External, bool Muted, bool Hidden, IReadOnlyList<TeamsMessage> Pinned, string? Earlier = null);
+    bool External, bool Muted, IReadOnlyList<TeamsMessage> Pinned, string? Earlier = null);
 
 /// <summary>What a chat's folder holds: chat.md, its attachments, its meeting.md (a meeting chat's) and its recordings.</summary>
 internal sealed record ChatParts(byte[] Markdown, IReadOnlyList<TmNode> Attachments, byte[]? Meeting, IReadOnlyList<TmNode> Recordings);

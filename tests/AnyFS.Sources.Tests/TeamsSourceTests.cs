@@ -666,20 +666,6 @@ public class TeamsSourceTests
         CollectionAssert.Contains(await NamesAsync(next, "Chats"), "Later chat", "listed afresh behind that answer");
     }
 
-    [TestMethod]
-    public async Task HiddenChatsAreAmongTheOthers()
-    {
-        var fake = Seed();
-        var hidden = fake.AddChat(ChatKind.Group, "Old project", [Jane], When, hidden: true);
-        fake.Post(hidden.Id, Jane, "Jane Doe", "<p>Archived talk</p>", When);
-        await using var source = await StartAsync(fake);
-
-        CollectionAssert.AreEquivalent(new[] { "Jane Doe", "Project Axle", "Old project" }, await NamesAsync(source, "Chats"));
-        var md = await TextAsync(source, "Chats/Old project/chat.md");
-        StringAssert.Contains(md, "- Hidden in Teams\n", "chat.md says so");
-        StringAssert.Contains(md, "Archived talk");
-    }
-
     private static string Local(DateTimeOffset when) => when.ToLocalTime().ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
 
     [TestMethod]

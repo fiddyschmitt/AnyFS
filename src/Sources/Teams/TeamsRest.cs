@@ -93,7 +93,6 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             chats.Add(new ChatInfo(Str(c, "id") ?? "", NullIfEmpty(Str(c, "title")), KindOf(c), members, Time(Str(c, "lastUpdatedTime") ?? Str(c, "version")))
             {
                 Version = NullIfEmpty(Str(c, "version")),
-                Hidden = Bool(c, "hidden"),
                 Created = Time(Str(c, "createdAt")),
                 CreatorMri = NullIfEmpty(Str(c, "creator")),
                 External = Bool(c, "isExternal"),

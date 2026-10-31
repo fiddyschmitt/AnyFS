@@ -117,8 +117,7 @@ and `SharePointComesWhenAsked` with `SeekHold` for one that comes when asked for
 file calls without it or Graph's (`GraphReady`) as the live seam does; with Graph's alone it gives the groups without
 their sites, as Graph's list of groups does, or (`GraphListsNoGroups`) the sites without their groups, as Microsoft Search
 does where Graph refuses that list. Its `Calls` and `Activity` are the chat service's call history and activity feed (null
-for an account with none: the sandbox has no call history), `CallsFail` refuses the call history, and `AddChat(hidden:
-true)` makes a chat one hidden in Teams. `Threads` holds what the chat service tells of a channel's thread (its site,
+for an account with none: the sandbox has no call history), and `CallsFail` refuses the call history. `Threads` holds what the chat service tells of a channel's thread (its site,
 folder and roster, for channel.md and team.md), and `SetTeam` gives a team its details; `AddPerson` can make someone a
 guest, a bot or of another organisation, and `SetChat` gives a chat its details (who started it, pinned messages).
 `StandIn(newest, pageSize, historyWait)` makes a conversation's newest read and its pages small, so a few messages have a

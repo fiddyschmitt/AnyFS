@@ -579,7 +579,7 @@ public class TeamsRestTests
             new TabInfo("Odd", "Website", null),
         }, general.Tabs.ToArray(), "one with no name left out; a website's address only where it is a web address");
 
-        CollectionAssert.AreEqual(new[] { ("Old", true), ("New", false) }, structure.Chats.Select(c => (c.Title, c.Hidden)).ToArray());
+        CollectionAssert.AreEqual(new[] { "Old", "New" }, structure.Chats.Select(c => c.Title).ToArray(), "one hidden in Teams among the others");
 
         // a chat's start, its maker, other organisations, the account's own mute (not another member's), its pinned messages
         var old = structure.Chats[0];

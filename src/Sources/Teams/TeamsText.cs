@@ -93,11 +93,6 @@ internal static class TeamsText
             text.Append("- Muted\n");
         }
 
-        if (details.Hidden)
-        {
-            text.Append("- Hidden in Teams\n");
-        }
-
         if (details.Pinned.Count > 0)
         {
             text.Append("- Pinned:\n");

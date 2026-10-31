@@ -53,9 +53,9 @@ internal sealed class FakeTeams : ITeamsApi
     public static ChannelInfo Channel(string displayName, bool general = false, bool priv = false)
         => new($"19:{Guid.NewGuid():N}@thread.tacv2", displayName, general, priv);
 
-    public ChatInfo AddChat(ChatKind kind, string? title, IReadOnlyList<string> otherMris, DateTimeOffset? lastUpdated = null, bool hidden = false)
+    public ChatInfo AddChat(ChatKind kind, string? title, IReadOnlyList<string> otherMris, DateTimeOffset? lastUpdated = null)
     {
-        var chat = new ChatInfo($"19:{Guid.NewGuid():N}", title, kind, otherMris, lastUpdated ?? DateTimeOffset.UtcNow) { Hidden = hidden };
+        var chat = new ChatInfo($"19:{Guid.NewGuid():N}", title, kind, otherMris, lastUpdated ?? DateTimeOffset.UtcNow);
         _chats.Add(chat);
         return chat;
     }

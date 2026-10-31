@@ -523,7 +523,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     /// <summary>
     /// What chat.md says of its chat above the messages: its link, kind and members (the account as "you", then by name; a
     /// guest, a bot or another organisation's person marked), who started it and when, whether it is with other
-    /// organisations, muted or hidden, its pinned messages among those read, and, while chat.md does not reach back to the
+    /// organisations or muted, its pinned messages among those read, and, while chat.md does not reach back to the
     /// chat's start yet, how far it does (<paramref name="history"/>).
     /// </summary>
     private ChatDetails DetailsOf(ChatInfo chat, IReadOnlyList<TeamsMessage> messages, string? history)
@@ -537,7 +537,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         var pinned = messages.Where(m => m.IsContent && m.Deleted is null && (m.Pinned || pinnedIds.Contains(m.Id)))
             .OrderBy(m => m.Composed ?? DateTimeOffset.MinValue).ThenBy(m => m.Id, StringComparer.Ordinal).ToList();
         return new ChatDetails(TeamsLinks.Chat(LinkHost, chat), chat.Kind, members.Take(TeamsText.MembersShown).ToList(), members.Count, chat.Created,
-            chat.CreatorMri is { } creator ? (IsMe(creator) ? "you" : NameOf(creator)) : null, chat.External, chat.Muted, chat.Hidden, pinned, history);
+            chat.CreatorMri is { } creator ? (IsMe(creator) ? "you" : NameOf(creator)) : null, chat.External, chat.Muted, pinned, history);
     }
 
     /// <summary>A chat member as chat.md names them: "you", else their name, marked where a guest, a bot or of an organisation other than the account's.</summary>
