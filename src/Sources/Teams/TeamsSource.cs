@@ -1251,10 +1251,16 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     /// their conversation's version as the aggregator gives it now (it moves on with every message; a listing made while
     /// the conversation's history was still being read carries none, <see cref="ConversationWhole"/>), a thread's folder
     /// its messages' (<see cref="TeamsStamps.Of"/>); any other folder none, being cheap to list. The structure is the one
-    /// call every stamp shares, kept a refresh interval.
+    /// call every stamp shares, kept a refresh interval. A folder that cannot be one of those by its path is not looked
+    /// for: finding one lists every folder above it, which for a library's folders asks SharePoint again.
     /// </summary>
     internal async ValueTask<string?> StampAsync(string path, string? held, CancellationToken ct)
     {
+        if (!MayBeStamped(path))
+        {
+            return null;
+        }
+
         switch (await ResolveAsync(path, ct).ConfigureAwait(false))
         {
             case ChatFolder chat:
@@ -1266,6 +1272,22 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             default:
                 return null;
         }
+    }
+
+    /// <summary>
+    /// Whether a folder may be a chat's (<c>Chats/&lt;chat&gt;</c>), a channel's posts (<c>&lt;team&gt;/&lt;channel&gt;/posts</c>)
+    /// or a thread's (one below those posts) by its path: the root's and a channel's own names are fixed (a team of the
+    /// root's names is numbered). A library's folder of one of those names is found and then has none.
+    /// </summary>
+    private static bool MayBeStamped(string path)
+    {
+        var segments = VfsPath.Split(path);
+        return segments.Length switch
+        {
+            2 => segments[0].Equals(ChatsFolder.FolderName, StringComparison.OrdinalIgnoreCase),
+            3 or 4 => segments[2].Equals("posts", StringComparison.OrdinalIgnoreCase),
+            _ => false,
+        };
     }
 
     // --- health --------------------------------------------------------------------------------------------------------
