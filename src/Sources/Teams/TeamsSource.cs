@@ -980,9 +980,12 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     // --- files ---------------------------------------------------------------------------------------------------------
 
-    // inline images by address: an image's bytes never change; kept to 64 MiB in all, then begun again
+    // inline images by address: an image's bytes never change; kept to 64 MiB in all, then begun again. Each one's length
+    // and extension are kept once read, so a listing reads an image once to measure it, and its bytes are read again
+    // only when it is opened after they were let go
     private const long ImagesKept = 64L << 20;
     private readonly ConcurrentDictionary<string, TeamsImage> _images = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (long Length, string Extension)> _imageSizes = new(StringComparer.Ordinal);
     private long _imageBytes;
 
     /// <summary>
@@ -1016,14 +1019,14 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             var number = 0;
             foreach (var src in message.Images)
             {
-                if (!seen.Add(src) || await ImageAsync(src, ct).ConfigureAwait(false) is not { } image)
+                if (!seen.Add(src) || await ImageSizeAsync(src, ct).ConfigureAwait(false) is not { } image)
                 {
                     continue;
                 }
 
                 var stamp = message.Composed?.ToLocalTime().ToString("yyyy-MM-dd_HHmm", CultureInfo.InvariantCulture) ?? "image";
                 var when = message.Composed;
-                found.Add(($"{stamp}_image-{++number}{image.Extension}", name => new ImageFile(name, image, when), src, null));
+                found.Add(($"{stamp}_image-{++number}{image.Extension}", name => new ImageFile(name, src, image.Length, when), src, null));
             }
         }
 
@@ -1059,6 +1062,15 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
     }
 
+    /// <summary>An inline image's length and extension, as first read (the image kept for an open soon after); null when it cannot be read.</summary>
+    private async Task<(long Length, string Extension)?> ImageSizeAsync(string src, CancellationToken ct)
+        => _imageSizes.TryGetValue(src, out var size) ? size
+            : await ImageAsync(src, ct).ConfigureAwait(false) is { } image ? (image.Bytes.Length, image.Extension) : null;
+
+    /// <summary>An inline image's bytes, for an open: as kept, else read again.</summary>
+    internal async Task<byte[]> ImageBytesAsync(string src, CancellationToken ct)
+        => (await ImageAsync(src, ct).ConfigureAwait(false))?.Bytes ?? throw new VfsException(VfsError.IoError, "an inline image could not be read from Teams' media service");
+
     /// <summary>An inline image, read once while kept; null when it cannot be read (an address on no Teams media host is never asked).</summary>
     private async Task<TeamsImage?> ImageAsync(string src, CancellationToken ct)
     {
@@ -1068,7 +1080,18 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
 
         var image = await Api.ImageAsync(src, ct).ConfigureAwait(false);
-        if (image is not null && _images.TryAdd(src, image) && Interlocked.Add(ref _imageBytes, image.Bytes.Length) > ImagesKept)
+        if (image is null)
+        {
+            return null;
+        }
+
+        if (_imageSizes.Count >= 100_000)
+        {
+            _imageSizes.Clear();
+        }
+
+        _imageSizes[src] = (image.Bytes.Length, image.Extension);
+        if (_images.TryAdd(src, image) && Interlocked.Add(ref _imageBytes, image.Bytes.Length) > ImagesKept)
         {
             _images.Clear();
             Interlocked.Exchange(ref _imageBytes, 0);

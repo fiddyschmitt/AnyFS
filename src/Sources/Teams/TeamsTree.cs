@@ -226,10 +226,11 @@ internal sealed class LibraryFile(string name, string siteUrl, string path, long
     public override Task<IVfsFile> OpenAsync(TeamsSource source, CancellationToken ct) => source.OpenLibraryFileAsync(siteUrl, path, url, Entry.Length, ct);
 }
 
-/// <summary>An inline image, read from Teams' media service when its conversation was, held in memory.</summary>
-internal sealed class ImageFile(string name, TeamsImage image, DateTimeOffset? modified) : TmFile(name, image.Bytes.Length, modified)
+/// <summary>An inline image of the length its first reading measured: served as that reading kept it, else read again from Teams' media service when opened.</summary>
+internal sealed class ImageFile(string name, string src, long length, DateTimeOffset? modified) : TmFile(name, length, modified)
 {
-    public override Task<IVfsFile> OpenAsync(TeamsSource source, CancellationToken ct) => Task.FromResult<IVfsFile>(new MemoryFile(image.Bytes, "an inline image from Teams"));
+    public override async Task<IVfsFile> OpenAsync(TeamsSource source, CancellationToken ct)
+        => new MemoryFile(await source.ImageBytesAsync(src, ct).ConfigureAwait(false), "an inline image from Teams");
 }
 
 /// <summary>A conversation's attachments: the files its messages share and its inline images. Not walked: read with the conversation.</summary>
