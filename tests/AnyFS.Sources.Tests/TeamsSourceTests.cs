@@ -251,6 +251,31 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task AnOpenServesTheFileItsListingNamedWithoutListingAgain()
+    {
+        // with nothing kept (refresh 0), finding a file from the root would list the structure and the chat again: an open
+        // of a shared file or an image a listing named needs none of that
+        var fake = new FakeTeams();
+        fake.AddPerson(Jane, "Jane Doe");
+        var chat = fake.AddChat(ChatKind.OneOnOne, null, [Jane], When);
+        fake.AddLibraryFile(Site, "General/report.docx", Encoding.UTF8.GetBytes("a report"), When);
+        const string ImageSrc = "https://as-prod.asyncgw.teams.microsoft.com/v1/objects/0-sa-d1-abc/views/imgo";
+        fake.AddImage(ImageSrc, [0x89, (byte)'P', (byte)'N', (byte)'G', 13, 10, 26, 10, 0, 0]);
+        fake.Post(chat.Id, Jane, "Jane Doe", $"<p>The report <img itemscope=\"\" itemtype=\"http://schema.skype.com/AMSImage\" src=\"{ImageSrc}\" alt=\"image\"></p>", When,
+            files: [new SharedFile("report.docx", $"{Site}/Shared Documents/General/report.docx", $"{Site}/")]);
+        await using var source = await StartAsync(fake, s => s.RefreshSeconds = 0);
+
+        var image = $"{When.ToLocalTime():yyyy-MM-dd_HHmm}_image-1.png";
+        CollectionAssert.AreEqual(new[] { "report.docx", image }, await NamesAsync(source, "Chats/Jane Doe/attachments"));
+        var structures = fake.StructureCalls;
+        var messages = fake.MessageCalls;
+        Assert.AreEqual("a report", await TextAsync(source, "Chats/Jane Doe/attachments/report.docx"));
+        await using var opened = await source.OpenAsync($"Chats/Jane Doe/attachments/{image}", VfsOpenMode.Read, CancellationToken.None);
+        Assert.AreEqual(10, opened.Length);
+        Assert.AreEqual((structures, messages), (fake.StructureCalls, fake.MessageCalls), "found among the listing's files, not from the root again");
+    }
+
+    [TestMethod]
     public async Task AllGroupsMdHasEveryGroupAndGroupsMdTheAccountsWithTheirDetails()
     {
         var fake = new FakeTeams();

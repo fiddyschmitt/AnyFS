@@ -220,6 +220,14 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             return MarkdownFile.Open(bytes);
         }
 
+        // a shared file, an image or a recording as its listing named it: opened from there, not found again from the root
+        // (which lists every folder above it, and a conversation's attachments ask SharePoint for each file)
+        var (parent, name) = VfsPath.SplitLast(normalized);
+        if (_files.TryGetValue(parent, out var files) && files.FirstOrDefault(f => f.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) is { } named)
+        {
+            return await Guard(() => named.OpenAsync(this, ct)).ConfigureAwait(false);
+        }
+
         var node = await ResolveAsync(path, ct).ConfigureAwait(false);
         if (node is MarkdownFile markdown)
         {
@@ -238,22 +246,27 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     // while (FailureKeptFor), so the log is where to see why
     private readonly ConcurrentDictionary<string, byte> _unlisted = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>A folder's listing (what <see cref="KeptListings"/> keeps); the Markdown files' bytes are kept beside it, for the opens.</summary>
+    // the files other than Markdown (shared files, images, recordings) of each folder as last listed, by its path: an open
+    // serves the file the listing named (as _served does the Markdown) without finding it from the root again
+    private readonly ConcurrentDictionary<string, IReadOnlyList<TmFile>> _files = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>A folder's listing (what <see cref="KeptListings"/> keeps); the Markdown files' bytes and the other files are kept beside it, for the opens.</summary>
     private async IAsyncEnumerable<VfsEntry> ListFolderAsync(string path, [EnumeratorCancellation] CancellationToken ct)
     {
+        var normalized = VfsPath.Normalize(path);
         TmFolder folder;
         IReadOnlyList<TmNode> children;
         try
         {
             folder = await ResolveAsync(path, ct).ConfigureAwait(false) as TmFolder ?? throw VfsException.NotADirectory(path);
-            ShowsHistory(folder, VfsPath.Normalize(path));
+            ShowsHistory(folder, normalized);
             children = await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false);
         }
         catch (VfsException ex) when (ex.Error is not (VfsError.NotFound or VfsError.NotADirectory))
         {
-            if (_unlisted.TryAdd(VfsPath.Normalize(path), 0))
+            if (_unlisted.TryAdd(normalized, 0))
             {
-                Logger.LogInformation("teams: '{Path}' could not be listed ({Error}); answered so for a while, the walks asking again", VfsPath.Normalize(path), ex.Message);
+                Logger.LogInformation("teams: '{Path}' could not be listed ({Error}); answered so for a while, the walks asking again", normalized, ex.Message);
             }
 
             throw;
@@ -262,14 +275,29 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         // a conversation listed while its history is still being read is not whole: not kept by its stamp
         if (folder is IHistoryFolder shows && !ConversationWhole(shows.ThreadId))
         {
-            Kept.Cache.Unstamp(VfsPath.Normalize(path));
+            Kept.Cache.Unstamp(normalized);
+        }
+
+        var files = children.OfType<TmFile>().Where(f => f is not MarkdownFile).ToList();
+        if (files.Count == 0)
+        {
+            _files.TryRemove(normalized, out _);
+        }
+        else
+        {
+            if (_files.Count > 50_000)
+            {
+                _files.Clear();
+            }
+
+            _files[normalized] = files;
         }
 
         foreach (var child in children)
         {
             if (child is MarkdownFile markdown)
             {
-                Serve(VfsPath.Join(VfsPath.Normalize(path), child.Name), markdown.Content);
+                Serve(VfsPath.Join(normalized, child.Name), markdown.Content);
             }
 
             yield return child.Entry;
