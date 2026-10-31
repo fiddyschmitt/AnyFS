@@ -48,14 +48,13 @@ internal sealed class PipelinesFolder(GlProject project, string name) : GlFolder
 /// <summary>A pipeline: <c>pipeline.md</c> (its ref, commit, status, times and jobs), and a folder per job.</summary>
 internal sealed class PipelineFolder(GlProject project, GlPipeline pipeline, string name) : GlFolder(name, pipeline.Updated, pipeline.Created)
 {
-    // its jobs are a request of its own, and each job's log and artifacts more
-    public override bool Walked => false;
+    public GlPipeline Pipeline { get; } = pipeline;
 
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
-        var jobs = await source.JobsAsync(project, pipeline, ct).ConfigureAwait(false);
+        var jobs = await source.JobsAsync(project, Pipeline, ct).ConfigureAwait(false);
         var names = GitLabNames.Unique(jobs.Select(j => j.Name).ToList());
-        var children = new List<GlNode> { new TextFile("pipeline.md", Document(pipeline, jobs), pipeline.Updated, pipeline.Created) };
+        var children = new List<GlNode> { new TextFile("pipeline.md", Document(Pipeline, jobs), Pipeline.Updated, Pipeline.Created) };
         children.AddRange(jobs.Select((j, i) => (GlNode)new JobFolder(project, j, names[i])));
         return children;
     }

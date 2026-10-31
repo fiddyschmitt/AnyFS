@@ -23,9 +23,10 @@ internal abstract class GlFolder(string name, DateTimeOffset? modified = null, D
     public override VfsEntry Entry => VfsEntry.Directory(Name, Modified, Created);
 
     /// <summary>
-    /// Whether a walk of the whole tree ("Count files on start") goes into it: not where listing it costs requests of its
-    /// own, and there are many such folders (an issue's notes, a pipeline's jobs, a whole repository at another branch or
-    /// tag); those are listed when opened.
+    /// Whether a walk of the whole tree ("Count files on start") goes into it: not a whole repository at another branch or
+    /// tag (a folder a request each, and a project has many refs); those are listed when opened. An issue's notes and a
+    /// pipeline's jobs are walked: a project whose activity has not moved is kept whole by its stamp
+    /// (<see cref="GitLabSource.StampAsync"/>), so they cost their requests once.
     /// </summary>
     public virtual bool Walked => true;
 

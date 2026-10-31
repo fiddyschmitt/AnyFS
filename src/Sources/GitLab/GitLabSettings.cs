@@ -86,7 +86,7 @@ public sealed class GitLabSettings
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 16,
-        Hint = "With folder listings kept and 'Count files on start': how long after one walk the next begins (the count's is the first). 0 walks for the count only. A walk lists every group and project and each project's default branch whole (a hundred files a request), but not each branch's or tag's repository, issue, merge request or pipeline, which cost requests of their own: those are listed when opened.")]
+        Hint = "With folder listings kept and 'Count files on start': how long after one walk the next begins (the count's is the first). 0 walks for the count only. A walk goes through every group and project, each project's default branch whole (a hundred files a request), its issues, merge requests, pipelines, wiki and releases, but not each branch's or tag's repository, which is listed when opened. A project whose activity and head have not moved since the last walk is kept as it was, so a walk over a quiet server asks for little; once a day everything is listed again. The walk takes half the requests, so browsing meanwhile has the rest.")]
     public int WalkMinutes { get; set; } = 30;
 
     [Setting("Requests at a time", Advanced = true, Order = 17, Hint = "How many requests AnyFS has open with the server at once.")]
@@ -147,6 +147,9 @@ public sealed class GitLabSettings
 
     /// <summary>Whether folder listings are kept: asked for, and a refresh interval to keep them by.</summary>
     internal bool Keeps => KeepListings && Refresh > TimeSpan.Zero;
+
+    /// <summary>The settings that shape the tree, as one string: listings saved under another are not read back.</summary>
+    internal string Shape => $"{BranchesAndTags}|{Wiki}|{IssuesAndMergeRequests}|{Pipelines}|{Releases}|{OpenOnly}|{PipelinesKept}";
 
     internal TimeSpan WalkEvery => TimeSpan.FromMinutes(Math.Clamp(WalkMinutes, 0, 7 * 24 * 60));
 

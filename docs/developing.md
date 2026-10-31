@@ -107,7 +107,9 @@ or address) and `ANYFS_TEST_GITLAB_TOKEN` (the tester's token) are set; `ANYFS_T
 `_PASSWORD` add the Windows account's sign-in (LDAP, where Kerberos cannot get through), and `ANYFS_TEST_GITLAB_BROWSER=1`
 the web session with Edge (a profile of its own, signed in through GitLab's LDAP form). AnyFS.E2E's `gitlab` rows serve
 the seeded project's `files/e2e` from each host (a token by address on Linux and macOS, the tester's domain account by name,
-through Kerberos, on Windows; `ANYFS_E2E_GITLAB_SIGNIN=token` uses the token everywhere).
+through Kerberos, on Windows; `ANYFS_E2E_GITLAB_SIGNIN=token` uses the token everywhere). The fake counts its `Requests`
+(`Count(what)`), so a test can check what a walk asked and what a restart did not; a project's `LastActivity` can be moved
+to make a stamped project worth walking again, and the source's `Listings` shows the stamps.
 
 The Teams source's unit tests run against `tests/AnyFS.Sources.Tests/FakeTeams.cs`, a stand-in for Microsoft's Teams
 services made from what the Microsoft 365 developer sandbox answered (the aggregator's teams, channels and chats; the chat

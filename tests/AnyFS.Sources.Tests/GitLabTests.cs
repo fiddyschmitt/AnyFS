@@ -482,12 +482,12 @@ public class GitLabSourceTests
         Assert.AreEqual(3 + 1, fake.Count("repository/tree"), "the default branches' trees, whole, and no branch's or tag's");
         Assert.AreEqual(0, fake.Count("path=many"), "no repository folder listed alone");
         Assert.AreEqual(3 + 1, fake.Count("POST /api/graphql"));
-        Assert.AreEqual(0, fake.Count("/notes"), "no issue's or merge request's notes: those folders are left out");
-        Assert.AreEqual(0, fake.Count("/jobs"), "no pipeline's jobs");
+        Assert.IsTrue(fake.Count("/notes") > 0, "the issues' and merge requests' notes: their folders are walked");
+        Assert.IsTrue(fake.Count("/jobs") > 0, "the pipelines' jobs too");
 
         // docs: README.md and the wiki's five pages; app: 258 files (and its release's)
         Assert.IsTrue(source.Counters.FilesKnown >= 1 + 5 + 258, $"{source.Counters.FilesKnown:N0} files");
-        Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "the folders left out make it a lower bound");
+        Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "the branches' and tags' repositories left out make it a lower bound");
 
         // every folder the walk went into answers from what it kept
         var asked = fake.Requests.Count;
@@ -496,11 +496,43 @@ public class GitLabSourceTests
         Assert.AreEqual(GitLabSeed.Large.Length, (await source.StatAsync("tools/app/files/e2e/large.bin", CancellationToken.None))!.Length, "the LFS object's size");
         CollectionAssert.AreEquivalent(new[] { "home.md", "guides", "notes.asciidoc", "Ünïcödé-résumé.md" }, (await ListAsync(source, "docs/wiki")).Select(e => e.Name).ToArray());
         Assert.AreEqual(4, (await ListAsync(source, "docs/issues")).Count);
+        CollectionAssert.Contains((await ListAsync(source, "docs/issues/#1 Install fails on Debian")).Select(e => e.Name).ToList(), "comments.md");
         Assert.AreEqual(asked, fake.Requests.Count, "nothing asked");
 
-        // a folder the walk left out is listed when opened
-        Assert.IsTrue((await ListAsync(source, "docs/issues/#1 Install fails on Debian")).Count > 0);
-        Assert.IsTrue(fake.Count("/notes") > 0);
+        // a folder the walk left out (a tag's repository, at a commit that is no branch's head) is listed when opened
+        var trees = fake.Count("repository/tree");
+        Assert.IsTrue((await ListAsync(source, "tools/app/tags/release/2.0")).Count > 0);
+        Assert.IsTrue(fake.Count("repository/tree") > trees, "the tag's repository, listed now");
+    }
+
+    [TestMethod]
+    public async Task AProjectWhoseActivityHoldsIsKeptAcrossARestartAndAChangedOneListedAgain()
+    {
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        var (first, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"), context);
+        await first.CountFilesAsync(CancellationToken.None);
+        var notes = fake.Count("/notes");
+        Assert.IsTrue(notes > 0);
+        var docs = fake.ProjectAt("anyfs/docs");
+        StringAssert.StartsWith(first.Listings.StampHeld("docs"), $"{docs.LastActivity.UtcTicks}|", "kept by its activity and head");
+        await first.DisposeAsync();
+
+        // the next run: every project's activity and head hold, so nothing in them is asked again
+        var (second, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"), context);
+        await second.CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(notes, fake.Count("/notes"), "no issue or merge request read again");
+        Assert.AreEqual(4, (await ListAsync(second, "docs/issues")).Count, "answered from what was kept");
+        await second.DisposeAsync();
+
+        // an issue raised in docs, and its activity moved: its issues are listed again, the new one's notes read, the rest kept
+        docs.IssueList.Add(new FakeGitLab.Ticket(5, "A new question", "Asked today.", fake.AddUser("asker", "Ask Er"), docs.LastActivity.AddDays(1)));
+        docs.LastActivity = docs.LastActivity.AddDays(1);
+        var (third, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"), context);
+        await using var _t = third;
+        await third.CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(notes + 1, fake.Count("/notes"), "the new issue's notes alone");
+        Assert.AreEqual(5, (await ListAsync(third, "docs/issues")).Count);
     }
 
     [TestMethod]

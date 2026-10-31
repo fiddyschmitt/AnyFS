@@ -80,6 +80,12 @@ internal sealed record GlUpload(string Secret, string FileName)
 /// </summary>
 internal static partial class GitLabDocuments
 {
+    /// <summary>
+    /// Bumped when what the files made here hold, or what the tree's folders are named, changes: the sizes in the listings
+    /// a run before saved would no longer be the files', so they are not read back.
+    /// </summary>
+    public const int Format = 1;
+
     [GeneratedRegex(@"(?<![\w/])/uploads/(?<secret>[0-9a-f]{32})/(?<name>[^)\s""'\]>]+)", RegexOptions.CultureInvariant)]
     private static partial Regex ProjectUpload();
 

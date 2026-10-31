@@ -143,6 +143,9 @@ internal sealed partial class FakeGitLab
 
         public DateTimeOffset Created { get; } = new(2026, 1, 2, 3, 4, 5, TimeSpan.Zero);
 
+        /// <summary>When the project last saw activity, as GitLab tells it (a month after its making unless a test moves it).</summary>
+        public DateTimeOffset LastActivity { get; set; } = new DateTimeOffset(2026, 1, 2, 3, 4, 5, TimeSpan.Zero).AddDays(30);
+
         /// <summary>A commit of these files (path → bytes; a path under <see cref="Lfs"/> goes to Git LFS) on <paramref name="branch"/>, made the branch's head.</summary>
         public string Commit(string branch, IReadOnlyDictionary<string, byte[]> files, DateTimeOffset? when = null, IEnumerable<string>? lfs = null, IEnumerable<string>? submodules = null)
         {
@@ -746,7 +749,7 @@ internal sealed partial class FakeGitLab
         ["default_branch"] = p.EmptyRepo ? null : p.DefaultBranch,
         ["empty_repo"] = p.EmptyRepo,
         ["created_at"] = p.Created.ToString("O", CultureInfo.InvariantCulture),
-        ["last_activity_at"] = p.Created.AddDays(30).ToString("O", CultureInfo.InvariantCulture),
+        ["last_activity_at"] = p.LastActivity.ToString("O", CultureInfo.InvariantCulture),
         ["web_url"] = $"{Server}/{p.FullPath}",
         ["repository_access_level"] = "enabled",
         ["issues_access_level"] = p.Issues ? "enabled" : "disabled",

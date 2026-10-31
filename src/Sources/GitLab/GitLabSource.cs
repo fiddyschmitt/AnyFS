@@ -111,19 +111,27 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             throw new SourceFailedException($"Opening {(path.Length == 0 ? _session.Address.Server.Host : path)}: {ex.Message}", permanent: ex.Error == VfsError.AccessDenied, ex);
         }
 
-        // with no refresh interval nothing is kept: every listing asks, through the caches below
+        // with no refresh interval nothing is kept: every listing asks, through the caches below; the walks take half the
+        // requests, so whoever browses meanwhile has the other half
         var requests = Math.Clamp(_settings.Concurrency, 1, 64);
+        var walking = Math.Max(1, requests / 2);
         _kept = new KeptListings(ListFolderAsync, Counters, Logger, new KeptListingsOptions
         {
             Keep = _settings.Keeps,
             UnkeptFor = TimeSpan.Zero,
             RefreshAfter = _settings.Refresh,
             WalkEvery = _settings.WalkEvery,
-            Parallelism = requests,
-            MaxInFlight = requests,
+            Parallelism = walking,
+            MaxInFlight = walking,
             LeftOut = LeftOutAsync,
             ListTree = ListTreeAsync,
+            StampOf = StampAsync,
             Name = "gitlab",
+
+            // the listings last run saw open at once at the next start: for the same server, account and scope, the same
+            // settings that shape the tree, and the same files (a file's size is a fact about how it is written)
+            SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
+            SaveKey = $"{_session.Address.Server}|{_session.User?.Username}|{path}|{_settings.Shape}|md{GitLabDocuments.Format}",
         });
 
         Logger.LogInformation("gitlab: serving {Scope} {Path} on {Server} as {User} ({Trees:N0} repository folders kept)",
@@ -408,6 +416,33 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     /// bound ("+").
     /// </summary>
     public Task CountFilesAsync(CancellationToken ct) => Kept.CountAsync(ct);
+
+    /// <summary>The listings as kept, for tests.</summary>
+    internal ListingCache Listings => Kept.Cache;
+
+    /// <summary>
+    /// A folder's stamp for the walks (<see cref="KeptListingsOptions.StampOf"/>): a project's folder has its last activity
+    /// as GitLab tells it (moved by a push, an issue, a comment, a pipeline, with an hour's grain) and its default branch's
+    /// head, so a project nothing happened in is kept whole; an issue's or merge request's folder its last update, a
+    /// pipeline's its last update, so a changed project costs only what changed in it; any other folder none, being a
+    /// request or two to list. The project's parent listing and its head are the calls the stamps share, each kept a
+    /// refresh interval.
+    /// </summary>
+    internal async ValueTask<string?> StampAsync(string path, string? held, CancellationToken ct)
+    {
+        switch (await ResolveAsync(path, ct).ConfigureAwait(false))
+        {
+            case ProjectFolder project:
+                var head = project.Project.Repository ? await HeadAsync(project.Project, ct).ConfigureAwait(false) : null;
+                return $"{project.Project.LastActivity?.UtcTicks ?? 0}|{head?.Commit}";
+            case TicketFolder ticket:
+                return (ticket.Ticket.Updated?.UtcTicks ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            case PipelineFolder pipeline:
+                return $"{pipeline.Pipeline.Updated?.UtcTicks ?? 0}|{pipeline.Pipeline.Status}";
+            default:
+                return null;
+        }
+    }
 
     /// <summary>For a walk: of the folders in a folder, those a walk leaves out (<see cref="GlFolder.Walked"/>).</summary>
     private async ValueTask<IReadOnlySet<string>?> LeftOutAsync(string path, CancellationToken ct)

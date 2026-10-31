@@ -22,30 +22,29 @@ internal sealed class TicketFolder(GlProject project, GlTicket ticket, bool merg
 {
     public const string Attachments = "attachments";
 
-    // its notes (and a merge request's changes) are requests of its own, and a project has thousands
-    public override bool Walked => false;
+    public GlTicket Ticket { get; } = ticket;
 
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
-        var notes = await source.NotesAsync(project, ticket, mergeRequest, ct).ConfigureAwait(false);
-        var uploads = GitLabDocuments.Uploads(notes.Where(n => !n.System).Select(n => n.Body).Prepend(ticket.Description));
+        var notes = await source.NotesAsync(project, Ticket, mergeRequest, ct).ConfigureAwait(false);
+        var uploads = GitLabDocuments.Uploads(notes.Where(n => !n.System).Select(n => n.Body).Prepend(Ticket.Description));
         var names = GitLabNames.Unique(uploads.Select(u => u.Name).ToList());
         var byUpload = uploads.Select((u, i) => (u, names[i])).ToDictionary(p => p.u, p => p.Item2);
-        var heading = $"{(mergeRequest ? "!" : "#")}{ticket.Iid} {ticket.Title}";
+        var heading = $"{(mergeRequest ? "!" : "#")}{Ticket.Iid} {Ticket.Title}";
         var children = new List<GlNode>
         {
-            new TextFile(mergeRequest ? "merge_request.md" : "issue.md", GitLabDocuments.Ticket(ticket, mergeRequest, byUpload), ticket.Updated, ticket.Created),
-            new TextFile("comments.md", GitLabDocuments.Comments($"Comments on {heading}", notes, byUpload), notes.Count == 0 ? ticket.Created : notes.Max(n => n.Created) ?? ticket.Updated, ticket.Created),
+            new TextFile(mergeRequest ? "merge_request.md" : "issue.md", GitLabDocuments.Ticket(Ticket, mergeRequest, byUpload), Ticket.Updated, Ticket.Created),
+            new TextFile("comments.md", GitLabDocuments.Comments($"Comments on {heading}", notes, byUpload), notes.Count == 0 ? Ticket.Created : notes.Max(n => n.Created) ?? Ticket.Updated, Ticket.Created),
         };
         if (mergeRequest)
         {
-            var diffs = await source.DiffsAsync(project, ticket, ct).ConfigureAwait(false);
-            children.Add(new TextFile("changes.diff", GitLabDocuments.Patch(diffs), ticket.Updated, ticket.Created));
+            var diffs = await source.DiffsAsync(project, Ticket, ct).ConfigureAwait(false);
+            children.Add(new TextFile("changes.diff", GitLabDocuments.Patch(diffs), Ticket.Updated, Ticket.Created));
         }
 
         if (uploads.Count > 0)
         {
-            children.Add(new AttachmentsFolder(project, uploads.Select(u => (u, byUpload[u])).ToList(), Attachments, ticket.Updated));
+            children.Add(new AttachmentsFolder(project, uploads.Select(u => (u, byUpload[u])).ToList(), Attachments, Ticket.Updated));
         }
 
         return children;
