@@ -626,6 +626,25 @@ public abstract class SharePointRestLiveTests
         CollectionAssert.Contains(top, Target.FixtureFolder);
     }
 
+    /// <summary>The library's stamp (what the walks keep it by): there, and another once a file is added, from the list's last item change and item count.</summary>
+    [TestMethod]
+    public async Task TheLibrarysStampMovesWhenAFileIsAdded()
+    {
+        Target.Require();
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
+        var library = (await source.Store.ListLibrariesAsync(null, None)).Single(l => l.Name == Target.Library);
+        var before = await source.Store.LibraryStampAsync(library, None);
+        Assert.IsNotNull(before, "the store stamps its libraries");
+        StringAssert.Matches(before, new System.Text.RegularExpressions.Regex(@"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\|\d+$"), "the list's LastItemModifiedDate and ItemCount");
+
+        // past the moment a site's libraries share one lists call for, and into another second (the times are whole seconds)
+        await Task.Delay(TimeSpan.FromSeconds(3.5));
+        await SpoTestServer.EnsureFileAsync(source, VfsPath.Join(VfsPath.Join(Target.Library, Target.FixtureFolder), $"scratch/stamp-{Guid.NewGuid():N}.txt"), "stamp"u8.ToArray());
+        var after = await source.Store.LibraryStampAsync(library, None);
+        Assert.IsNotNull(after);
+        Assert.AreNotEqual(before, after, "a file added moves it");
+    }
+
     [TestMethod]
     public async Task ASubsiteIsAFolderWithItsOwnLibraries()
     {

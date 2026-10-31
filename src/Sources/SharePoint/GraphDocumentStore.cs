@@ -133,6 +133,13 @@ internal sealed class GraphDocumentStore : IDocumentStore
     public Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(WebInfo? web, CancellationToken ct)
         => web is null ? _listLibraries(ct) : ListDrivesAsync(_graph, web.Key, web, web.Name, ct);
 
+    /// <summary>A library's stamp: when its list last changed, as Graph gives the drive's list (SharePoint's last item change); null where Graph has no list for the drive.</summary>
+    public async Task<string?> LibraryStampAsync(LibraryInfo library, CancellationToken ct)
+    {
+        using var doc = await _graph.TryGetJsonAsync($"drives/{Uri.EscapeDataString(library.Key)}/list?$select=lastModifiedDateTime", library.Shown, ct).ConfigureAwait(false);
+        return doc is not null && doc.RootElement.TryGetProperty("lastModifiedDateTime", out var modified) && modified.ValueKind == JsonValueKind.String ? modified.GetString() : null;
+    }
+
     /// <summary>None: Graph reaches the files in lists and drives only, not those in a site's own folder.</summary>
     public Task<IReadOnlyList<SitePage>> ListSitePagesAsync(WebInfo? web, CancellationToken ct) => Task.FromResult<IReadOnlyList<SitePage>>([]);
 

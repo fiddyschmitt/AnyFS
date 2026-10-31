@@ -273,6 +273,7 @@ internal sealed partial class FakeSharePoint
         {
             ["id"] = library.Id.ToString(),
             ["displayName"] = library.Title,
+            ["lastModifiedDateTime"] = GraphTime(library.LastItemModified),
             ["list"] = new JsonObject { ["template"] = library.Pages ? "webPageLibrary" : "documentLibrary", ["hidden"] = library.Hidden },
         };
         if (!library.InGraphDrives)
@@ -408,6 +409,11 @@ internal sealed partial class FakeSharePoint
             var itemId = end < 0 ? after[6..] : after[6..end];
             item = Everything(library.Root).FirstOrDefault(i => i.GraphId == itemId);
             suffix = end < 0 ? "" : after[end..];
+        }
+        else if (after == "list" && request.Method == "GET")
+        {
+            // the drive's list: what the source reads a library's stamp from
+            return GraphJson(200, Select(request, ListJson(library, false)));
         }
         else
         {

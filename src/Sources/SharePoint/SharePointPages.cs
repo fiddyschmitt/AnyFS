@@ -20,6 +20,12 @@ namespace AnyFS.Sources.SharePoint;
 /// </summary>
 internal static partial class SharePointPages
 {
+    /// <summary>
+    /// Bumped when what a page's Markdown holds changes: the sizes in the listings a run before saved would no longer be
+    /// the files', so they are not read back.
+    /// </summary>
+    public const int Format = 1;
+
     /// <summary>The list fields a page's content comes from.</summary>
     public const string Fields = "Title,CanvasContent1,WikiField";
 

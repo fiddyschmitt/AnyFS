@@ -68,6 +68,37 @@ public class FakeSharePointTests
     }
 
     /// <summary>
+    /// The listings kept, a library's stamp is its list's last item change and item count, read from one <c>web/lists</c>
+    /// call a site: a restart's walk asks for the lists and keeps every library whose stamp holds without listing a folder
+    /// of it, and a library a file was added to is walked again.
+    /// </summary>
+    [TestMethod]
+    public async Task ALibrarysStampIsItsListsLastChangeAndTheWalkKeepsALibraryWhoseStampHolds()
+    {
+        using var fake = FakeSharePoint.LabFarm();
+        var settings = FarmSettings(fake);
+        settings.KeepListings = true;
+        using var context = new TestSourceContext("sharepoint");
+        static bool Names(FakeSharePoint.Seen s, string text) => s.Path.Contains(text, StringComparison.OrdinalIgnoreCase) || Uri.UnescapeDataString(s.RawQuery).Contains(text, StringComparison.OrdinalIgnoreCase);
+        var first = await StartAsync(fake, settings, context);
+        await first.CountFilesAsync(None);
+        Assert.IsTrue(fake.Count(s => Names(s, "Shared Documents")) > 0, "the library's folders listed by the first walk");
+        await first.DisposeAsync();
+
+        // a file added to Style Library: its stamp moves, Documents' holds
+        fake.WebAt(FakeSharePoint.TestSitePath)!.Library("Style Library").Root.AddFile("new.css", System.Text.Encoding.UTF8.GetBytes("a {}"));
+        var documents = fake.Count(s => Names(s, "Shared Documents"));
+        var styles = fake.Count(s => Names(s, "Style Library"));
+        var lists = fake.Count(s => s.Path.EndsWith("/web/lists", StringComparison.OrdinalIgnoreCase));
+        await using var second = await StartAsync(fake, settings, context);
+        await second.CountFilesAsync(None);
+        Assert.IsTrue(fake.Count(s => s.Path.EndsWith("/web/lists", StringComparison.OrdinalIgnoreCase)) > lists, "the lists asked for their stamps");
+        Assert.AreEqual(documents, fake.Count(s => Names(s, "Shared Documents")), "Documents kept by its stamp: no folder of it listed");
+        Assert.IsTrue(fake.Count(s => Names(s, "Style Library")) > styles, "Style Library walked again");
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(second, "Style Library"), "new.css");
+    }
+
+    /// <summary>
     /// The farm's Windows sign-in as the farms have it (Negotiate or NTLM, here through HTTP.sys): "Windows account, as
     /// yourself" signs in as this PC's user, whom the fake takes for the lab's test account (Windows only).
     /// </summary>

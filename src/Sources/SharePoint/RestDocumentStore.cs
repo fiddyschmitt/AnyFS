@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Security;
@@ -167,6 +168,46 @@ internal sealed class RestDocumentStore : IDocumentStore
         }
 
         return libraries;
+    }
+
+    // each site's lists' stamps, one call a site, kept a moment so a walk's libraries (stamped together) share it
+    private readonly ConcurrentDictionary<string, (long At, Task<Dictionary<string, string>> Stamps)> _listStamps = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan ListStampsKept = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// A library's stamp: its list's <c>LastItemModifiedDate</c> (which moves when any item in it is added, changed or
+    /// removed) and <c>ItemCount</c>, from one <c>web/lists</c> call for its site shared by every library of the site for
+    /// a moment; null for a library the call does not name.
+    /// </summary>
+    public async Task<string?> LibraryStampAsync(LibraryInfo library, CancellationToken ct)
+    {
+        var key = library.Web?.Key ?? "";
+        var now = Stopwatch.GetTimestamp();
+        if (!_listStamps.TryGetValue(key, out var kept) || Stopwatch.GetElapsedTime(kept.At) > ListStampsKept || kept.Stamps.IsFaulted)
+        {
+            kept = (now, ListStampsAsync(library.Web, ct));
+            _listStamps[key] = kept;
+        }
+
+        return (await kept.Stamps.WaitAsync(ct).ConfigureAwait(false)).GetValueOrDefault(library.Key.TrimEnd('/'));
+    }
+
+    private async Task<Dictionary<string, string>> ListStampsAsync(WebInfo? web, CancellationToken ct)
+    {
+        using var doc = await Client(web).GetJsonAsync("web/lists?$select=LastItemModifiedDate,ItemCount,RootFolder/ServerRelativeUrl&$expand=RootFolder", web?.Key ?? Description, ct).ConfigureAwait(false);
+        var stamps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var list in doc.RootElement.GetProperty("value").EnumerateArray())
+        {
+            var root = list.TryGetProperty("RootFolder", out var rf) && rf.TryGetProperty("ServerRelativeUrl", out var sru) ? sru.GetString() : null;
+            var modified = list.TryGetProperty("LastItemModifiedDate", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null;
+            var count = list.TryGetProperty("ItemCount", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetRawText() : "";
+            if (!string.IsNullOrEmpty(root) && modified is not null)
+            {
+                stamps[root.TrimEnd('/')] = $"{modified}|{count}";
+            }
+        }
+
+        return stamps;
     }
 
     /// <summary>The subsites the account may open, as SharePoint filters them for the current user (-1: of every template and configuration), each by its address.</summary>

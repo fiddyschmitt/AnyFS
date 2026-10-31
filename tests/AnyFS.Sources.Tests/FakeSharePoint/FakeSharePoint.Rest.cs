@@ -322,6 +322,8 @@ internal sealed partial class FakeSharePoint
                 ["BaseTemplate"] = l.BaseTemplate,
                 ["Hidden"] = l.Hidden,
                 ["Id"] = l.Id.ToString(),
+                ["LastItemModifiedDate"] = l.LastItemModified.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+                ["ItemCount"] = l.ItemCount,
                 ["RootFolder"] = new JsonObject { ["ServerRelativeUrl"] = l.Url },
             }).ToArray()),
         });

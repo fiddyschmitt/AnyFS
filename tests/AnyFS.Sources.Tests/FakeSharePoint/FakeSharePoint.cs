@@ -767,6 +767,12 @@ internal sealed partial class FakeSharePoint : IDisposable
         public HashSet<string> Members { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         public long Used => Root.Size;
+
+        /// <summary>When an item in it last changed (the list's LastItemModifiedDate, Graph's lastModifiedDateTime): what a library's stamp is made of.</summary>
+        public DateTimeOffset LastItemModified => Everything(Root).Select(i => i.Modified).DefaultIfEmpty(Root.Modified).Max();
+
+        /// <summary>How many items it holds (the list's ItemCount).</summary>
+        public int ItemCount => Everything(Root).Count();
     }
 
     /// <summary>A file or a folder.</summary>

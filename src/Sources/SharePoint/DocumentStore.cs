@@ -167,6 +167,13 @@ internal interface IDocumentStore : IDisposable
     /// <summary>The libraries of the source's site, or of one of its subsites.</summary>
     Task<IReadOnlyList<LibraryInfo>> ListLibrariesAsync(WebInfo? web, CancellationToken ct);
 
+    /// <summary>
+    /// A library's stamp (<see cref="KeptListingsOptions.StampOf"/>): what the store can tell cheaply that changes whenever
+    /// anything in the library does (REST: the list's last item change and item count; Graph: the list's last change), the
+    /// same string back while nothing has; null where the store cannot tell, and the library is then walked every time.
+    /// </summary>
+    Task<string?> LibraryStampAsync(LibraryInfo library, CancellationToken ct) => Task.FromResult<string?>(null);
+
     /// <summary>The subsites of the source's site or of a subsite, those the account may open; none where there are no sites (containers).</summary>
     Task<IReadOnlyList<WebInfo>> ListSubsitesAsync(WebInfo? web, CancellationToken ct);
 

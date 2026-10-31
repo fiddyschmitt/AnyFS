@@ -96,7 +96,10 @@ a farm's REST API on 127.0.0.1 (Basic, or Windows' own sign-in on Windows) and a
 SharePoint Embedded in-process, so they need nothing outside either. `FakeSharePointTests` has what only a
 fake does on demand (throttling, a lapsed session or token, a server that ignores ranges, an answer that is not
 SharePoint's); `ANYFS_TEST_SHAREPOINT_FAKES=0` turns the fakes off, and the suites are then inconclusive without
-the lab.
+the lab. The fakes' lists carry a library's `LastItemModifiedDate`/`ItemCount` (REST) and `lastModifiedDateTime`
+(Graph, with `drives/{id}/list`), what a library's stamp is read from; `SharePointWalkTests` checks the walk keeps a
+library whose stamp holds against the in-memory store (`MemoryDocumentStore.Stamps`), and a `MemorySharePointSource`
+can be started in a given context, for a restart in the same state folder.
 
 The GitLab source's unit tests run against `tests/AnyFS.Sources.Tests/FakeGitLab*.cs`, a stand-in made from what the
 lab's GitLab answered (REST v4 and GraphQL, paging, Git LFS, wikis, issues, merge requests, pipelines with zipped

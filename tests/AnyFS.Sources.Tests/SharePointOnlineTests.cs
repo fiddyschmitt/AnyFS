@@ -444,6 +444,24 @@ public class SharePointOnlineLiveTests
         Assert.AreEqual(VfsError.InvalidPath, ex.Error, "a file can't be created beside the libraries");
     }
 
+    /// <summary>The library's stamp (what the walks keep it by): there, and another once a file is added, through Graph's drive list.</summary>
+    [TestMethod]
+    public async Task TheLibrarysStampMovesWhenAFileIsAdded()
+    {
+        Target.Require();
+        await using var source = await Target.StartWithFixtureAsync(Target.Settings());
+        var library = (await source.Store.ListLibrariesAsync(null, None)).Single(l => l.Name == Target.Library);
+        var before = await source.Store.LibraryStampAsync(library, None);
+        Assert.IsNotNull(before, "the store stamps its libraries");
+
+        // into another second: the list's time is whole seconds
+        await Task.Delay(TimeSpan.FromSeconds(1.5));
+        await SpoTestServer.EnsureFileAsync(source, VfsPath.Join(VfsPath.Join(Target.Library, Target.FixtureFolder), $"scratch/stamp-{Guid.NewGuid():N}.txt"), "stamp"u8.ToArray());
+        var after = await source.Store.LibraryStampAsync(library, None);
+        Assert.IsNotNull(after);
+        Assert.AreNotEqual(before, after, "a file added moves it");
+    }
+
     [TestMethod]
     public async Task ASubsiteIsAFolderWithItsOwnLibraries()
     {

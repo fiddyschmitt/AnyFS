@@ -164,7 +164,13 @@ public abstract class SharePointSource : SourceBase, ICountable
             Parallelism = WalkPerSite,
             MaxInFlight = WalkInFlight,
             PartsBelow = HoldsSitesAsync,
+            StampOf = StampAsync,
             Name = "sharepoint",
+
+            // the listings last run saw open at once at the next start: for the same site(s), account and settings that
+            // shape the tree, and the same pages' Markdown (a page file's size is a fact about how it is written)
+            SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
+            SaveKey = $"{Target}|{SignedInAs}|{string.Join(",", (GivenSites ?? []).Select(s => s.ToString()))}|{PinnedLibrary}|{ShowsOtherSites}|pages{SharePointPages.Format}",
         });
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
@@ -775,6 +781,16 @@ public abstract class SharePointSource : SourceBase, ICountable
     private KeptListings Kept => _kept ?? throw VfsException.Unavailable($"{Target} is not connected yet");
 
     private ListingCache Listings => Kept.Cache;
+
+    /// <summary>
+    /// A folder's stamp for the walks (<see cref="KeptListingsOptions.StampOf"/>): a library's root has what its store tells
+    /// of the library's last change (<see cref="IDocumentStore.LibraryStampAsync"/>), so a library nothing changed in is
+    /// kept whole, folders and all; any other folder (a site's own, Subsites, Sites, a folder in a library) none.
+    /// </summary>
+    private async ValueTask<string?> StampAsync(string path, string? held, CancellationToken ct)
+        => await ResolveAsync(path, ct).ConfigureAwait(false) is { Library: { } library, ItemPath.Length: 0 }
+            ? await Store.LibraryStampAsync(library, ct).ConfigureAwait(false)
+            : null;
 
     /// <summary>
     /// Where a source path leads: a site's own folder (the source's site at the root, a subsite's or another site's

@@ -365,10 +365,11 @@ public class SharePointSubsiteContractTests : SourceContractTests
     }
 }
 
-/// <summary>The SharePoint source over a <see cref="MemoryDocumentStore"/>, with a test context of its own.</summary>
-internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? pinned, bool otherSites, IReadOnlyList<SiteAddress>? given, TimeSpan? retry, TimeSpan? wait, TimeSpan? walkEvery) : SharePointSource
+/// <summary>The SharePoint source over a <see cref="MemoryDocumentStore"/>, with a test context of its own (or one given, for a restart in the same state folder).</summary>
+internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? pinned, bool otherSites, IReadOnlyList<SiteAddress>? given, TimeSpan? retry, TimeSpan? wait, TimeSpan? walkEvery, TestSourceContext? context = null) : SharePointSource
 {
-    private readonly TestSourceContext _context = new("sharepoint");
+    private readonly TestSourceContext _context = context ?? new("sharepoint");
+    private readonly bool _ownsContext = context is null;
 
     public TestSourceContext TestContext => _context;
 
@@ -397,9 +398,10 @@ internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? 
     /// <param name="retry">How soon a site left out is tried again, when not the source's own five minutes.</param>
     /// <param name="wait">How long the start waits for every site given, when not the source's own fifteen seconds.</param>
     /// <param name="walkEvery">With listings kept (the plugin's default), the time between walks; null for listings kept two seconds (the source's own default).</param>
-    public static async Task<MemorySharePointSource> StartAsync(MemoryDocumentStore store, string? pinned = null, bool otherSites = false, IReadOnlyList<SiteAddress>? given = null, TimeSpan? retry = null, TimeSpan? wait = null, TimeSpan? walkEvery = null)
+    /// <param name="context">A context to start in (its state folder, for a restart); null for one of the source's own.</param>
+    public static async Task<MemorySharePointSource> StartAsync(MemoryDocumentStore store, string? pinned = null, bool otherSites = false, IReadOnlyList<SiteAddress>? given = null, TimeSpan? retry = null, TimeSpan? wait = null, TimeSpan? walkEvery = null, TestSourceContext? context = null)
     {
-        var source = new MemorySharePointSource(store, pinned, otherSites, given, retry, wait, walkEvery);
+        var source = new MemorySharePointSource(store, pinned, otherSites, given, retry, wait, walkEvery, context);
         try
         {
             await source.InitialiseAsync(source._context, CancellationToken.None);
@@ -418,7 +420,10 @@ internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? 
     public override async ValueTask DisposeAsync()
     {
         await base.DisposeAsync();
-        _context.Dispose();
+        if (_ownsContext)
+        {
+            _context.Dispose();
+        }
     }
 }
 
@@ -490,6 +495,11 @@ internal sealed class MemoryDocumentStore : IDocumentStore
 
     /// <summary>How often a site's libraries were listed.</summary>
     public int Loads(string web) => _loads.GetValueOrDefault(web);
+
+    /// <summary>Each library's stamp, by its key, as a test sets it (<see cref="LibraryStampAsync"/>); none for a library not here.</summary>
+    public ConcurrentDictionary<string, string> Stamps { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public Task<string?> LibraryStampAsync(LibraryInfo library, CancellationToken ct) => Task.FromResult(Stamps.GetValueOrDefault(library.Key));
 
     public int SubsiteListings => Volatile.Read(ref _subsiteListings);
 

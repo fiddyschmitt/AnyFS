@@ -1,5 +1,6 @@
 using System.Text;
 using AnyFS.Sdk;
+using AnyFS.Sdk.Testing;
 using AnyFS.Sources.SharePoint;
 
 namespace AnyFS.Sources.Tests;
@@ -79,6 +80,34 @@ public class SharePointWalkTests
         }
 
         Assert.AreEqual(4, (await source.StatAsync("Documents/fixture/made.txt", None))?.Length);
+    }
+
+    [TestMethod]
+    public async Task ALibraryWhoseStampHoldsIsKeptAcrossARestartAndOneWhoseStampMovedIsWalkedAgain()
+    {
+        var store = MemoryDocumentStore.Sample();
+        store.Seed("/Shared Documents", "fixture/readme.txt", Encoding.UTF8.GetBytes("readme"));
+        store.Seed("/SiteAssets", "img/logo.png", Encoding.UTF8.GetBytes("png"));
+        store.Stamps["/Shared Documents"] = "d1";
+        store.Stamps["/SiteAssets"] = "a1";
+        using var context = new TestSourceContext("sharepoint");
+        var first = await MemorySharePointSource.StartAsync(store, walkEvery: TimeSpan.FromHours(1), context: context);
+        await first.CountFilesAsync(None);
+        var files = first.Counters.FilesKnown;
+        await first.DisposeAsync();
+
+        // Site Assets changed, and its stamp with it; Documents changed too, but its stamp did not: the kept listing stands
+        store.Seed("/SiteAssets", "img/new.png", Encoding.UTF8.GetBytes("png"));
+        store.Stamps["/SiteAssets"] = "a2";
+        store.Seed("/Shared Documents", "fixture/unseen.txt", Encoding.UTF8.GetBytes("unseen"));
+        var listed = store.FolderListings;
+        await using var second = await MemorySharePointSource.StartAsync(store, walkEvery: TimeSpan.FromHours(1), context: context);
+        await second.CountFilesAsync(None);
+        Assert.AreEqual(EnumerationState.Complete, second.Counters.State);
+        Assert.AreEqual(files + 1, second.Counters.FilesKnown, "the kept library counted with the listed");
+        Assert.IsNotNull(await second.StatAsync("Site Assets/img/new.png", None), "its stamp moved: walked again");
+        Assert.IsNull(await second.StatAsync("Documents/fixture/unseen.txt", None), "its stamp holds: kept as the last run saw it");
+        Assert.IsTrue(store.FolderListings < listed + 6, $"the sites' own folders and Site Assets listed, not Documents: {store.FolderListings - listed} listings");
     }
 
     [TestMethod]
