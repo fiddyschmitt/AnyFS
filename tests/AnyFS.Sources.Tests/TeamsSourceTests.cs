@@ -36,11 +36,11 @@ public class TeamsSourceTests
         return fake;
     }
 
-    private static async Task<TeamsSource> StartAsync(FakeTeams fake, Action<TeamsSettings>? change = null, int newest = 2_000, int pageSize = 200, TimeSpan? historyWait = null)
+    private static async Task<TeamsSource> StartAsync(FakeTeams fake, Action<TeamsSettings>? change = null, int newest = 2_000, int pageSize = 200)
     {
         var settings = new TeamsSettings { Account = fake.Account };
         change?.Invoke(settings);
-        var source = new TeamsSource(settings, fake.StandIn(newest, pageSize, historyWait));
+        var source = new TeamsSource(settings, fake.StandIn(newest, pageSize));
         await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
         return source;
     }
@@ -768,9 +768,9 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
-    public async Task AConversationListedBeforeItsHistoryIsWholeCarriesNoStampUntilItIs()
+    public async Task AConversationsListingWaitsForItsWholeHistoryAndCarriesItsStamp()
     {
-        var fake = new FakeTeams { OlderDelay = TimeSpan.FromMilliseconds(200) };
+        var fake = new FakeTeams { OlderDelay = TimeSpan.FromMilliseconds(20) };
         fake.AddPerson(Jane, "Jane Doe");
         var newest = Mid(10, 20);
         var chat = fake.AddChat(ChatKind.OneOnOne, null, [Jane], newest);
@@ -779,15 +779,15 @@ public class TeamsSourceTests
             fake.Post(chat.Id, Jane, "Jane Doe", $"<p>Day {i}</p>", newest.AddDays(-i));
         }
 
-        await using var source = await StartAsync(fake, newest: 5, pageSize: 5, historyWait: TimeSpan.Zero);
-        await NamesAsync(source, "Chats/Jane Doe");
-        Assert.IsNull(source.Listings.StampHeld("Chats/Jane Doe"), "listed while its history was still being read: not kept by its version");
-
-        // read whole, the folder is listed afresh, and that listing carries the version
+        // the listing that begins the history waits for it, so a search finds the same files the first time as the tenth;
+        // whole, it is kept by the chat's version
+        await using var source = await StartAsync(fake, newest: 5, pageSize: 5);
+        CollectionAssert.AreEqual(new[] { "chat.md" }, await NamesAsync(source, "Chats/Jane Doe"));
         var version = (await fake.StructureAsync(CancellationToken.None)).Chats.Single().Version;
-        var stamp = await UntilAsync(() => Task.FromResult(source.Listings.StampHeld("Chats/Jane Doe")), s => s is not null);
-        Assert.AreEqual(version, stamp);
-        StringAssert.Contains(await TextAsync(source, "Chats/Jane Doe/chat.md"), "Day 129\n");
+        Assert.AreEqual(version, source.Listings.StampHeld("Chats/Jane Doe"), "whole, so kept by its version");
+        var md = await TextAsync(source, "Chats/Jane Doe/chat.md");
+        StringAssert.Contains(md, "Day 129\n");
+        Assert.IsFalse(md.Contains("Earlier messages", StringComparison.Ordinal), "nothing more to come");
     }
 
     [TestMethod]
@@ -1055,31 +1055,6 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
-    public async Task AChatMdWhoseHistoryIsStillBeingReadSaysSoAndFillsIn()
-    {
-        var fake = new FakeTeams { OlderDelay = TimeSpan.FromMilliseconds(300) };
-        fake.AddPerson(Jane, "Jane Doe");
-        var newest = Mid(10, 20);
-        var chat = fake.AddChat(ChatKind.OneOnOne, null, [Jane], newest);
-        for (var i = 0; i < 130; i++)
-        {
-            fake.Post(chat.Id, Jane, "Jane Doe", $"<p>Day {i}</p>", newest.AddDays(-i));
-        }
-
-        // the listing that begins the history not waiting for it: chat.md has the newest read and says the rest is coming
-        await using var source = await StartAsync(fake, newest: 5, pageSize: 5, historyWait: TimeSpan.Zero);
-        CollectionAssert.AreEqual(new[] { "chat.md" }, await NamesAsync(source, "Chats/Jane Doe"));
-        var first = await TextAsync(source, "Chats/Jane Doe/chat.md");
-        StringAssert.Contains(first, $"- Earlier messages: still being read: this file goes back to {Local(newest.AddDays(-4))} so far, and fills in as they arrive\n");
-        Assert.IsFalse(first.Contains("Day 5\n", StringComparison.Ordinal));
-
-        // listed afresh once read
-        var whole = await UntilAsync(() => TextAsync(source, "Chats/Jane Doe/chat.md"), md => md.Contains("Day 129\n", StringComparison.Ordinal));
-        StringAssert.Contains(whole, "Day 129\n");
-        Assert.IsFalse(whole.Contains("Earlier messages", StringComparison.Ordinal), "nothing more to come");
-    }
-
-    [TestMethod]
     public async Task TheHistoryReadFirstIsThatOfTheConversationOpenedLast()
     {
         var fake = new FakeTeams { OlderDelay = TimeSpan.FromMilliseconds(20) };
@@ -1098,13 +1073,13 @@ public class TeamsSourceTests
             fake.Post(second.Id, John, "John Roe", $"<p>Second {i}</p>", newest.AddMinutes(-i));
         }
 
-        // the first chat's history under way, a second chat opened: its pages are read one after another, the first's after
-        // (no walk, which would begin both on its own)
-        await using var source = await StartAsync(fake, s => s.KeepListings = false, newest: 5, pageSize: 5, historyWait: TimeSpan.Zero);
-        await NamesAsync(source, "Chats/First");
+        // the first chat's history under way (its listing waits for it), a second chat listed: its pages are read one after
+        // another, the first's after (no walk, which would begin both on its own)
+        await using var source = await StartAsync(fake, s => s.KeepListings = false, newest: 5, pageSize: 5);
+        var listing = NamesAsync(source, "Chats/First");
         await UntilAsync(() => Task.FromResult(fake.OlderAsked.Count), n => n > 0);
         await NamesAsync(source, "Chats/Second");
-        StringAssert.Contains(await UntilAsync(() => TextAsync(source, "Chats/Second/chat.md"), md => md.Contains("Second 199\n", StringComparison.Ordinal)), "Second 199\n");
+        StringAssert.Contains(await TextAsync(source, "Chats/Second/chat.md"), "Second 199\n");
         string Order()
         {
             lock (fake.OlderAsked)
@@ -1115,6 +1090,50 @@ public class TeamsSourceTests
 
         var order = await UntilAsync(() => Task.FromResult(Order()), o => o.EndsWith('F'));
         StringAssert.Matches(order, new System.Text.RegularExpressions.Regex("^F+S{4}F+$"), $"the second chat's four pages together, between the first's: {order}");
+        CollectionAssert.AreEqual(new[] { "chat.md" }, await listing);
+    }
+
+    [TestMethod]
+    public async Task AClientsListingTakesTheHistorysTurnBeforeTheWalks()
+    {
+        // the first walk under way with two workers, one reading Alpha's history and one held on Delta's newest page, a
+        // client lists Client: its pages follow Alpha's current one; Echo, which the freed worker enters meanwhile (so used
+        // later than Client), waits until Client is whole, then goes before the rest of Alpha
+        var hold = new TaskCompletionSource();
+        var fake = new FakeTeams { OlderDelay = TimeSpan.FromMilliseconds(20) };
+        fake.AddPerson(Jane, "Jane Doe");
+        var newest = Mid(10, 20);
+        var alpha = fake.AddChat(ChatKind.Group, "Alpha", [Jane], newest);
+        var delta = fake.AddChat(ChatKind.Group, "Delta", [Jane], newest);
+        var echo = fake.AddChat(ChatKind.Group, "Echo", [Jane], newest);
+        var client = fake.AddChat(ChatKind.Group, "Client", [Jane], newest);
+        foreach (var (chat, count) in new[] { (alpha, 1_000), (echo, 300), (client, 1_000) })
+        {
+            for (var i = 0; i < count; i++)
+            {
+                fake.Post(chat.Id, Jane, "Jane Doe", $"<p>{chat.Title} {i}</p>", newest.AddMinutes(-i));
+            }
+        }
+
+        fake.Post(delta.Id, Jane, "Jane Doe", "<p>Delta</p>", newest);
+        fake.MessagesHold[delta.Id] = hold.Task;
+        await using var source = await StartAsync(fake, s => s.Concurrency = 4, newest: 50, pageSize: 50);
+        string Asked()
+        {
+            lock (fake.OlderAsked)
+            {
+                return string.Concat(fake.OlderAsked.Select(t => t == alpha.Id ? 'A' : t == echo.Id ? 'E' : t == client.Id ? 'C' : 'D'));
+            }
+        }
+
+        await UntilAsync(() => Task.FromResult(Asked().Contains('A')), begun => begun);
+        var listing = NamesAsync(source, "Chats/Client");
+        await UntilAsync(() => Task.FromResult(Asked().Contains('C')), begun => begun);
+        hold.SetResult();
+        CollectionAssert.AreEqual(new[] { "chat.md" }, await listing);
+        await source.CountFilesAsync(CancellationToken.None);
+        var asked = Asked();
+        StringAssert.Matches(asked, new System.Text.RegularExpressions.Regex("^A+C{19}E{5}A+$"), $"Client's pages together, then Echo's, then the rest of Alpha's: {asked}");
     }
 
     [TestMethod]
@@ -1184,7 +1203,7 @@ public class TeamsSourceTests
             fake.Post(chat.Id, Jane, "Jane Doe", i < 129 ? $"<p>Day {i}</p>" : $"<p><img itemscope=\"\" itemtype=\"http://schema.skype.com/AMSImage\" src=\"{ImageSrc}\" alt=\"image\"></p>", newest.AddDays(-i));
         }
 
-        await using var source = await StartAsync(fake, newest: 5, pageSize: 5, historyWait: TimeSpan.Zero);
+        await using var source = await StartAsync(fake, newest: 5, pageSize: 5);
         var oldest = newest.AddDays(-129).ToLocalTime();
         StringAssert.Contains(await TextAsync(source, $"AnyFS Lab/General/posts/{oldest:yyyy-MM-dd HHmm} Jane Doe Day 129/post.md"), "Day 129");
         await using var image = await source.OpenAsync($"Chats/Jane Doe/attachments/{oldest:yyyy-MM-dd_HHmm}_image-1.png", VfsOpenMode.Read, CancellationToken.None);

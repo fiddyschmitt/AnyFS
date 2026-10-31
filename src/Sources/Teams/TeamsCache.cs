@@ -91,6 +91,6 @@ internal sealed class TeamsCache(CancellationToken stopping)
 /// <summary>
 /// The seam that gives a source its <see cref="ITeamsApi"/> in tests: the fake's, in place of the live web session; with
 /// how far back a conversation's newest read goes and how many messages a page holds, so a test's few messages have a
-/// history, and how long the listing that begins a history waits for it (null: as the source does).
+/// history.
 /// </summary>
-internal sealed record TeamsStandIn(ITeamsApi Api, int NewestMessages = 2_000, int PageSize = 200, TimeSpan? HistoryWait = null);
+internal sealed record TeamsStandIn(ITeamsApi Api, int NewestMessages = 2_000, int PageSize = 200);

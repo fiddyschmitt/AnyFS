@@ -150,20 +150,28 @@ internal sealed class FakeTeams : ITeamsApi
         return new TeamsStructure(_teams.ToList(), _chats.ToList());
     }
 
+    /// <summary>What a conversation's newest read waits on before it answers, by conversation: a test's say-so, to hold a walk's worker on it.</summary>
+    public Dictionary<string, Task> MessagesHold { get; } = new(StringComparer.Ordinal);
+
     public Task<MessagePage> MessagesAsync(string threadId, int max, CancellationToken ct)
     {
         MessageCalls++;
-        return InFlightAsync(() =>
+        return InFlightAsync(async () =>
         {
+            if (MessagesHold.TryGetValue(threadId, out var hold))
+            {
+                await hold.WaitAsync(ct);
+            }
+
             var all = Ordered(threadId);
             if (EmptyNewestPage)
             {
-                return Task.FromResult(new MessagePage([], all.Count > 0 ? $"{threadId}|{all.Count}" : null));
+                return new MessagePage([], all.Count > 0 ? $"{threadId}|{all.Count}" : null);
             }
 
             var page = all.TakeLast(max).ToList();
             var older = all.Count > max ? $"{threadId}|{all.Count - max}" : null;
-            return Task.FromResult(new MessagePage(page, older));
+            return new MessagePage(page, older);
         });
     }
 
@@ -512,7 +520,7 @@ internal sealed class FakeTeams : ITeamsApi
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     /// <summary>The seam a source reads this fake through; with a newest read of <paramref name="newest"/> messages, <paramref name="pageSize"/> to a page, so a few messages have a history.</summary>
-    public TeamsStandIn StandIn(int newest = 2_000, int pageSize = 200, TimeSpan? historyWait = null) => new(this, newest, pageSize, historyWait);
+    public TeamsStandIn StandIn(int newest = 2_000, int pageSize = 200) => new(this, newest, pageSize);
 
     private List<TeamsMessage> Ordered(string threadId)
         => _messages.TryGetValue(threadId, out var list)

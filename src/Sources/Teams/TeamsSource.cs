@@ -187,7 +187,8 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     public override async IAsyncEnumerable<VfsEntry> ListAsync(string path, [EnumeratorCancellation] CancellationToken ct)
     {
-        foreach (var entry in await Kept.Cache.GetAsync(VfsPath.Normalize(path), ct).ConfigureAwait(false))
+        var normalized = VfsPath.Normalize(path);
+        foreach (var entry in await AwaitedAsync(normalized, Kept.Cache.GetAsync(normalized, ct)).ConfigureAwait(false))
         {
             yield return entry;
         }
@@ -201,7 +202,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             return VfsEntry.Directory("");
         }
 
-        return await Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false);
+        return await AwaitedAsync(VfsPath.Parent(normalized), Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase)).ConfigureAwait(false);
     }
 
     public override async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct)
@@ -213,33 +214,75 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
         // a conversation's Markdown as the listing measured it: the bytes of the length the client was told
         var normalized = VfsPath.Normalize(path);
+        var (parent, name) = VfsPath.SplitLast(normalized);
         if (_served.TryGetValue(normalized, out var served))
         {
-            var length = (await Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false))?.Length;
+            var length = (await AwaitedAsync(parent, Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase)).ConfigureAwait(false))?.Length;
             var bytes = served.Previous is { } previous && length == previous.Length && length != served.Latest.Length ? previous : served.Latest;
             return MarkdownFile.Open(bytes);
         }
 
         // a shared file, an image or a recording as its listing named it: opened from there, not found again from the root
         // (which lists every folder above it, and a conversation's attachments ask SharePoint for each file)
-        var (parent, name) = VfsPath.SplitLast(normalized);
         if (_files.TryGetValue(parent, out var files) && files.FirstOrDefault(f => f.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) is { } named)
         {
             return await Guard(() => named.OpenAsync(this, ct)).ConfigureAwait(false);
         }
 
-        var node = await ResolveAsync(path, ct).ConfigureAwait(false);
+        TmNode node;
+        Awaiting(parent);
+        try
+        {
+            node = await ResolveAsync(path, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            Awaited(parent);
+        }
+
         if (node is MarkdownFile markdown)
         {
             // built now (the last run's listing named it): served as built, and the listing put right where its length differs
             Serve(normalized, markdown.Content);
-            if ((await Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false))?.Length is { } told && told != markdown.Content.Length)
+            if ((await AwaitedAsync(parent, Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase)).ConfigureAwait(false))?.Length is { } told && told != markdown.Content.Length)
             {
                 Kept.Cache.Update(normalized, markdown.Entry, StringComparison.OrdinalIgnoreCase);
             }
         }
 
         return node is TmFile file ? await Guard(() => file.OpenAsync(this, ct)).ConfigureAwait(false) : throw VfsException.IsADirectory(path);
+    }
+
+    /// <summary>
+    /// A client's wait on a listing (its own folder's, or its parent's for a stat or an open), noted while it lasts
+    /// (<see cref="_awaited"/>): a conversation the folder shows gets the history's turn before those the walks are on.
+    /// </summary>
+    private async ValueTask<T> AwaitedAsync<T>(string folder, ValueTask<T> listing)
+    {
+        if (listing.IsCompleted)
+        {
+            return await listing.ConfigureAwait(false);
+        }
+
+        Awaiting(folder);
+        try
+        {
+            return await listing.ConfigureAwait(false);
+        }
+        finally
+        {
+            Awaited(folder);
+        }
+    }
+
+    private void Awaiting(string folder) => _awaited.AddOrUpdate(folder, 1, (_, n) => n + 1);
+
+    private void Awaited(string folder)
+    {
+        if (_awaited.AddOrUpdate(folder, 0, (_, n) => n - 1) <= 0)
+        {
+            _awaited.TryRemove(new KeyValuePair<string, int>(folder, 0));
+        }
     }
 
     // the folders whose listing failed, each said once in the log: a drive shows one as empty, and the failure is kept a
@@ -325,37 +368,16 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
         var segments = VfsPath.Split(normalized);
         var names = new List<string>(segments.Length);
-        (TmNode Folder, int Index, string ThreadId)? history = null;
-        for (var i = 0; i < segments.Length; i++)
+        foreach (var segment in segments)
         {
             if (node is not TmFolder folder)
             {
                 throw VfsException.NotADirectory(path);
             }
 
-            var found = await Guard(() => folder.FindAsync(this, segments[i], ct)).ConfigureAwait(false);
-            if (found is null)
-            {
-                // what a listing from before named (a kept one, after a restart) may be in a conversation's history not read
-                // yet: found again once the history is read past the time its name gives, or else to its end
-                var time = segments.Skip(i).Select(TeamsNames.TimeOf).FirstOrDefault(t => t is not null);
-                if (history is { } at && await HistoryPastAsync(at.ThreadId, time, ct).ConfigureAwait(false))
-                {
-                    (node, i) = (at.Folder, at.Index);
-                    names.RemoveRange(i + 1, names.Count - i - 1);
-                    continue;
-                }
-
-                throw VfsException.NotFound(path);
-            }
-
+            var found = await Guard(() => folder.FindAsync(this, segment, ct)).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
             names.Add(found.Name);
-            if (found is IHistoryFolder shows)
-            {
-                history = (found, i, shows.ThreadId);
-                ShowsHistory(found, VfsPath.Join(names));
-            }
-
+            ShowsHistory(found, VfsPath.Join(names));
             node = found;
         }
 

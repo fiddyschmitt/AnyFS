@@ -251,9 +251,9 @@ internal sealed class RecordingFile(string name, string video, long length, Date
 
 /// <summary>
 /// A channel's posts: a folder per thread (the opening message and its replies), back to the channel's start or the window.
-/// A busy channel's latest 2,000 messages are read when it is listed and the rest behind the listings, the folder listed
-/// afresh as they land (an opening message read brings its thread's name). Its stamp for the walks is the channel's
-/// version, once its history is whole (<see cref="TeamsSource.StampAsync"/>).
+/// A busy channel's latest 2,000 messages are read when it is listed and the rest of its history read on, the listing
+/// waiting for it (an opening message read brings its thread's name). Its stamp for the walks is the channel's version,
+/// once its history is whole (<see cref="TeamsSource.StampAsync"/>).
 /// </summary>
 internal sealed class PostsFolder(TeamInfo team, ChannelInfo channel) : TmFolder("posts", null), IHistoryFolder
 {
@@ -317,8 +317,8 @@ internal sealed class ChatsFolder() : TmFolder(FolderName)
 /// <summary>
 /// One chat: <c>chat.md</c>, the whole conversation, its <c>attachments</c> where it has any, a meeting's chat its
 /// <c>meeting.md</c>, and a chat with recordings its <c>recordings</c>. A long chat's latest 2,000 messages are read when it
-/// is listed and the rest behind the listings, the folder listed afresh as they land. Its stamp for the walks is the
-/// chat's version, once its history is whole (<see cref="TeamsSource.StampAsync"/>).
+/// is listed and the rest of its history read on, the listing waiting for it. Its stamp for the walks is the chat's
+/// version, once its history is whole (<see cref="TeamsSource.StampAsync"/>).
 /// </summary>
 internal sealed class ChatFolder(ChatInfo chat, string name) : TmFolder(name, chat.LastUpdated), IHistoryFolder
 {

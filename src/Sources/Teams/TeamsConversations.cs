@@ -25,23 +25,14 @@ public sealed partial class TeamsSource
     /// <summary>How many messages the conversations hold in all before the least used histories are let go (read again when next listed).</summary>
     private const int KeptMessages = 150_000;
 
-    /// <summary>
-    /// How long from the beginning of a conversation's history read its listings wait for it: a short history is whole in
-    /// the listing that begins it (and one that joins it then), a long one fills in as it lands, its listings after that
-    /// moment answering at once.
-    /// </summary>
-    private TimeSpan FirstHistoryWait => _standIn?.HistoryWait ?? TimeSpan.FromSeconds(5);
-
-    // how often the folders that show a conversation's history are listed afresh while it is read (and twice at its end)
-    private static readonly TimeSpan RelistEvery = TimeSpan.FromSeconds(20);
-
     // how soon a history read that failed is begun again
     private static readonly TimeSpan HistoryRetry = TimeSpan.FromMinutes(1);
 
     private readonly ConcurrentDictionary<string, Conversation> _conversations = new(StringComparer.Ordinal);
 
-    // one page of history read at a time, so the requests stay free for the listings: the turn goes to the conversation used
-    // last (the one being looked at, not those a program listed on its way past), the others waiting for it
+    // one page of history read at a time, so the requests stay free for the listings: the turn goes first to a conversation
+    // a client is waiting on a listing of (the one being looked at, or a search's next folder: not the walk's), then to the
+    // one used last, the others waiting for it
     private readonly Lock _turns = new();
     private readonly List<(Conversation Store, TaskCompletionSource Turn)> _waiting = [];
     private bool _turnTaken;
@@ -49,9 +40,13 @@ public sealed partial class TeamsSource
     // the conversations' uses so far (Conversation.Used)
     private long _uses;
 
-    // the folders that show a conversation's history (a chat's folder, a channel's posts), by conversation: listed afresh as
-    // its history lands
+    // the folders that show a conversation's history (a chat's folder, a channel's posts), by conversation: which
+    // conversations the clients' waits (_awaited) are on
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _historyFolders = new(StringComparer.Ordinal);
+
+    // the folders a client is waiting on a listing of now (its own, or for a stat or an open the parent's), by path, with how
+    // many wait: the walks and the refreshes behind the answers are not clients, and wait their turn
+    private readonly ConcurrentDictionary<string, int> _awaited = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>How long a conversation goes without its newest messages being read whole: an edit or reaction on an older message among them shows by then (the daily walk).</summary>
     private static readonly TimeSpan ReadWholeEvery = TimeSpan.FromDays(1);
@@ -79,9 +74,6 @@ public sealed partial class TeamsSource
         public string? Next;
 
         public bool HistoryBegun;
-
-        /// <summary>When its history read last began: its listings wait for it until <see cref="FirstHistoryWait"/> after.</summary>
-        public DateTimeOffset ReadBegan;
 
         public DateTimeOffset? Oldest;
 
@@ -301,8 +293,8 @@ public sealed partial class TeamsSource
     }
 
     /// <summary>
-    /// What chat.md says of a conversation's history while it does not reach back to its start or the window: how far back
-    /// it goes, and whether the rest is still being read; null once it does.
+    /// What chat.md says of a conversation's history where it does not reach back to its start or the window (a read that
+    /// failed part way): how far back it goes; null once it does.
     /// </summary>
     private static string? HistoryNote(Conversation store)
     {
@@ -314,31 +306,22 @@ public sealed partial class TeamsSource
             }
 
             var since = store.Oldest?.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) ?? "?";
-            return store.Reading.IsCompleted || store.Failed
-                ? $"not all could be read just now: this file goes back to {since}, and the rest are read when the chat is next opened"
-                : $"still being read: this file goes back to {since} so far, and fills in as they arrive";
+            return $"not all could be read just now: this file goes back to {since}, and the rest are read when the chat is next opened";
         }
     }
 
     // --- the history ---------------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Begins reading a conversation's history behind the listings, unless it has none left, is being read, or failed a
-    /// moment ago; a listing made in the first moment of its reading waits for it (until <see cref="FirstHistoryWait"/> after
-    /// it began), so a short history is whole in the listing that begins it, and in one that joins it (an open while a walk
-    /// reads it). After that moment a listing answers at once with what is read: a long history's relists, and its folders
-    /// found as more of it lands, wait no more than the first did. The rest lands behind, the folders that show it listed
-    /// afresh.
+    /// Reads a conversation's history (unless it has none left, is being read, or failed a moment ago) and waits for it: a
+    /// listing is whole, back to the conversation's start or the window, however long that takes, so a search finds the
+    /// same files the first time it lists the folder as the tenth (one page at a time, the turn going first to a conversation
+    /// a client is waiting on, <see cref="PassTurn"/>). After a read that failed, a listing answers with what was read, and
+    /// chat.md says so; the rest is read when its folder is next listed, a minute on at the soonest.
     /// </summary>
     private async Task HistoryAsync(Conversation store, CancellationToken ct)
     {
         BeginHistory(store);
-        DateTimeOffset deadline;
-        lock (store.Gate)
-        {
-            deadline = store.ReadBegan + FirstHistoryWait;
-        }
-
         while (true)
         {
             Task landed;
@@ -352,24 +335,11 @@ public sealed partial class TeamsSource
                 landed = store.Landed.Task;
             }
 
-            var left = deadline - DateTimeOffset.UtcNow;
-            if (left <= TimeSpan.Zero)
-            {
-                return;
-            }
-
-            try
-            {
-                await landed.WaitAsync(left, ct).ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-                return;
-            }
+            await landed.WaitAsync(ct).ConfigureAwait(false);
         }
     }
 
-    /// <summary>Begins reading a conversation's history behind the listings, unless it has none left, is being read, failed a moment ago or the source is stopping: whether it began it.</summary>
+    /// <summary>Begins reading a conversation's history, unless it has none left, is being read, failed a moment ago or the source is stopping: whether it began it.</summary>
     private bool BeginHistory(Conversation store)
     {
         lock (store.Gate)
@@ -381,42 +351,9 @@ public sealed partial class TeamsSource
 
             store.HistoryBegun = true;
             store.Failed = false;
-            store.ReadBegan = DateTimeOffset.UtcNow;
             var stopping = _stopping.Token;
             store.Reading = Task.Run(() => ReadHistoryAsync(store, stopping), CancellationToken.None);
             return true;
-        }
-    }
-
-    /// <summary>
-    /// For a path a listing from before named (a kept listing, after a restart) that is not among what is read yet: waits
-    /// until its conversation's history is read past <paramref name="before"/> (the time its name gives), or else to its end;
-    /// whether more was read meanwhile (the path is then worth finding again).
-    /// </summary>
-    private async Task<bool> HistoryPastAsync(string threadId, DateTimeOffset? before, CancellationToken ct)
-    {
-        if (!_conversations.TryGetValue(threadId, out var store))
-        {
-            return false;
-        }
-
-        BeginHistory(store);
-        var waited = false;
-        while (true)
-        {
-            Task landed;
-            lock (store.Gate)
-            {
-                if (store.Next is null || store.Failed || store.Reading.IsCompleted || (before is { } time && store.Oldest is { } oldest && oldest < time))
-                {
-                    return waited;
-                }
-
-                landed = store.Landed.Task;
-            }
-
-            await landed.WaitAsync(ct).ConfigureAwait(false);
-            waited = true;
         }
     }
 
@@ -438,23 +375,28 @@ public sealed partial class TeamsSource
     }
 
     /// <summary>
-    /// Ends a page's turn: it stays with this conversation while it has more to read and none waiting was used later, else
-    /// goes to the one waiting that was used last; whether it stays.
+    /// Ends a page's turn: it stays with this conversation while it has more to read and none waiting ranks higher, else
+    /// goes to the one waiting that ranks highest; whether it stays. A conversation a client is waiting on a listing of
+    /// ranks above those only the walks list (a search's next folder, or the one being looked at, is read before the walk's
+    /// twentieth), then the one used last.
     /// </summary>
     private bool PassTurn(Conversation store, bool more)
     {
         lock (_turns)
         {
             var next = -1;
+            (bool Client, long Used) best = default;
             for (var i = 0; i < _waiting.Count; i++)
             {
-                if (next < 0 || _waiting[i].Store.Used > _waiting[next].Store.Used)
+                var rank = Rank(_waiting[i].Store);
+                if (next < 0 || Higher(rank, best))
                 {
                     next = i;
+                    best = rank;
                 }
             }
 
-            if (more && (next < 0 || store.Used >= _waiting[next].Store.Used))
+            if (more && (next < 0 || !Higher(best, Rank(store))))
             {
                 return true;
             }
@@ -472,16 +414,42 @@ public sealed partial class TeamsSource
         }
     }
 
+    /// <summary>A conversation's rank for the history's turn: whether a client is waiting on a listing that shows it, then when it was last used.</summary>
+    private (bool Client, long Used) Rank(Conversation store) => (ClientWaits(store), store.Used);
+
+    private static bool Higher((bool Client, long Used) rank, (bool Client, long Used) than)
+        => rank.Client != than.Client ? rank.Client : rank.Used > than.Used;
+
+    /// <summary>Whether a client is waiting on a listing of a folder that shows a conversation's history, or of one below it (<see cref="_awaited"/>).</summary>
+    private bool ClientWaits(Conversation store)
+    {
+        if (_awaited.IsEmpty || !_historyFolders.TryGetValue(store.ThreadId, out var folders))
+        {
+            return false;
+        }
+
+        foreach (var waited in _awaited.Keys)
+        {
+            foreach (var folder in folders.Keys)
+            {
+                if (waited.Equals(folder, StringComparison.OrdinalIgnoreCase) || (waited.Length > folder.Length && waited[folder.Length] == '/' && waited.StartsWith(folder, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Reads a conversation's history, a page at a time back from where its reading stopped, to its start or the window, a
-    /// page's turn going to the conversation used last; the folders that show it listed afresh now and then (behind the
-    /// reading) and at the end. A failure keeps what was read; the rest is read when its folder is next listed, a minute on
-    /// at the soonest.
+    /// page's turn going to the conversation that ranks highest (<see cref="PassTurn"/>); the listings waiting on it answer
+    /// as it ends. A failure keeps what was read; the rest is read when its folder is next listed, a minute on at the
+    /// soonest.
     /// </summary>
     private async Task ReadHistoryAsync(Conversation store, CancellationToken ct)
     {
-        var relisting = Task.CompletedTask;
-        var relisted = DateTimeOffset.UtcNow;
         var turn = false;
         try
         {
@@ -529,12 +497,6 @@ public sealed partial class TeamsSource
 
                 turn = PassTurn(store, more);
                 LetGo(store);
-                if (relisting.IsCompleted && DateTimeOffset.UtcNow - relisted >= RelistEvery)
-                {
-                    // behind the reading: a folder slow to build holds up no page
-                    relisted = DateTimeOffset.UtcNow;
-                    relisting = RelistHistoryAsync(store.ThreadId, ct);
-                }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -562,50 +524,14 @@ public sealed partial class TeamsSource
                 store.Signal();
             }
         }
-
-        // a refresh joins a listing already on its way, which may have begun before the end: then once more, begun after it
-        await relisting.ConfigureAwait(false);
-        await RelistHistoryAsync(store.ThreadId, ct).ConfigureAwait(false);
-        await RelistHistoryAsync(store.ThreadId, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Notes a folder that shows a conversation's history, by its path, to be listed afresh as the history lands.</summary>
+    /// <summary>Notes a folder that shows a conversation's history, by its path (<see cref="ClientWaits"/>).</summary>
     private void ShowsHistory(TmNode folder, string path)
     {
         if (folder is IHistoryFolder shows)
         {
             _historyFolders.GetOrAdd(shows.ThreadId, _ => new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase)).TryAdd(path, 0);
-        }
-    }
-
-    /// <summary>Lists afresh the folders that show a conversation's history: one gone since is no longer listed afresh, one that fails is next time.</summary>
-    private async Task RelistHistoryAsync(string threadId, CancellationToken ct)
-    {
-        if (!_historyFolders.TryGetValue(threadId, out var folders))
-        {
-            return;
-        }
-
-        foreach (var path in folders.Keys)
-        {
-            try
-            {
-                await Kept.Cache.RefreshAsync(path, ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (VfsException ex) when (ex.Error is VfsError.NotFound or VfsError.NotADirectory)
-            {
-                // gone since (renamed, or past the window): no longer listed afresh
-                Logger.LogDebug("teams: {Path} is no longer listed afresh ({Error})", path, ex.Message);
-                folders.TryRemove(path, out _);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogDebug("teams: {Path} could not be listed afresh ({Error})", path, ex.Message);
-            }
         }
     }
 
@@ -648,7 +574,7 @@ public sealed partial class TeamsSource
     private IEnumerable<Task> HistoryReads => _conversations.Values.Select(c => c.Reading);
 }
 
-/// <summary>A folder that shows a conversation's history as it lands: listed afresh as more is read (<see cref="TeamsSource"/>).</summary>
+/// <summary>A folder that shows a conversation's history (a chat's folder, a channel's posts): its listing waits for the history to be read (<see cref="TeamsSource"/>).</summary>
 internal interface IHistoryFolder
 {
     string ThreadId { get; }
