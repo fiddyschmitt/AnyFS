@@ -923,6 +923,43 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task TheHistoryReadFirstIsThatOfTheConversationOpenedLast()
+    {
+        var fake = new FakeTeams { OlderDelay = TimeSpan.FromMilliseconds(20) };
+        fake.AddPerson(Jane, "Jane Doe");
+        fake.AddPerson(John, "John Roe");
+        var newest = Mid(10, 20);
+        var first = fake.AddChat(ChatKind.Group, "First", [Jane], newest);
+        var second = fake.AddChat(ChatKind.Group, "Second", [John], newest);
+        for (var i = 0; i < 10_000; i++)
+        {
+            fake.Post(first.Id, Jane, "Jane Doe", $"<p>First {i}</p>", newest.AddMinutes(-i));
+        }
+
+        for (var i = 0; i < 200; i++)
+        {
+            fake.Post(second.Id, John, "John Roe", $"<p>Second {i}</p>", newest.AddMinutes(-i));
+        }
+
+        // the first chat's history under way, a second chat opened: its pages are read one after another, the first's after
+        await using var source = await StartAsync(fake, newest: 5, pageSize: 5, historyWait: TimeSpan.Zero);
+        await NamesAsync(source, "Chats/First");
+        await UntilAsync(() => Task.FromResult(fake.OlderAsked.Count), n => n > 0);
+        await NamesAsync(source, "Chats/Second");
+        StringAssert.Contains(await UntilAsync(() => TextAsync(source, "Chats/Second/chat.md"), md => md.Contains("Second 199\n", StringComparison.Ordinal)), "Second 199\n");
+        string Order()
+        {
+            lock (fake.OlderAsked)
+            {
+                return string.Concat(fake.OlderAsked.Select(t => t == first.Id ? 'F' : 'S'));
+            }
+        }
+
+        var order = await UntilAsync(() => Task.FromResult(Order()), o => o.EndsWith('F'));
+        StringAssert.Matches(order, new System.Text.RegularExpressions.Regex("^F+S{4}F+$"), $"the second chat's four pages together, between the first's: {order}");
+    }
+
+    [TestMethod]
     public async Task AChannelsPostsGoBackToItsStart()
     {
         var fake = new FakeTeams();

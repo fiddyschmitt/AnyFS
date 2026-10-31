@@ -137,19 +137,27 @@ internal sealed class FakeTeams : ITeamsApi
         return Task.FromResult(new MessagePage(page, older));
     }
 
-    /// <summary>A delay on each older page, so a test can open a month before the history has reached it.</summary>
+    /// <summary>A delay on each older page, so a test can read a chat.md or open an old post before the history has reached it.</summary>
     public TimeSpan OlderDelay { get; set; }
+
+    /// <summary>The conversation of each older page asked for, in order.</summary>
+    public List<string> OlderAsked { get; } = [];
 
     public async Task<MessagePage> OlderAsync(string olderLink, CancellationToken ct)
     {
         MessageCalls++;
+        var bar = olderLink.LastIndexOf('|');
+        var threadId = olderLink[..bar];
+        lock (OlderAsked)
+        {
+            OlderAsked.Add(threadId);
+        }
+
         if (OlderDelay > TimeSpan.Zero)
         {
             await Task.Delay(OlderDelay, ct);
         }
 
-        var bar = olderLink.LastIndexOf('|');
-        var threadId = olderLink[..bar];
         var before = int.Parse(olderLink[(bar + 1)..]);
         var all = Ordered(threadId);
         const int size = 50;

@@ -9,8 +9,8 @@ namespace AnyFS.Sources.Teams;
 /// A conversation's messages as read (spec 7.9), back to its start or the "within" window: what chat.md and a channel's
 /// posts show. Its newest messages are read with its listings: again only as the aggregator's version of it moves on (its
 /// newest page merged), whole once a walk interval, back as far as <see cref="NewestMessages"/> or the window. Everything
-/// before them is its history: read behind the listings from its first listing on, a page at a time, the conversations
-/// being read taking turns; the folder that shows it listed afresh as it lands.
+/// before them is its history: read behind the listings from its first listing on, a page at a time, the conversation used
+/// last first; the folder that shows it listed afresh as it lands.
 /// </summary>
 public sealed partial class TeamsSource
 {
@@ -34,8 +34,14 @@ public sealed partial class TeamsSource
 
     private readonly ConcurrentDictionary<string, Conversation> _conversations = new(StringComparer.Ordinal);
 
-    // one page of history read at a time, the conversations being read taking turns, so the requests stay free for the listings
-    private readonly SemaphoreSlim _historyGate = new(1, 1);
+    // one page of history read at a time, so the requests stay free for the listings: the turn goes to the conversation used
+    // last (the one being looked at, not those a program listed on its way past), the others waiting for it
+    private readonly Lock _turns = new();
+    private readonly List<(Conversation Store, TaskCompletionSource Turn)> _waiting = [];
+    private bool _turnTaken;
+
+    // the conversations' uses so far (Conversation.Used)
+    private long _uses;
 
     // the folders that show a conversation's history (a chat's folder, a channel's posts), by conversation: listed afresh as
     // its history lands
@@ -79,6 +85,7 @@ public sealed partial class TeamsSource
         /// <summary>Completed (and replaced) as each page of history lands, and when its reading ends.</summary>
         public TaskCompletionSource Landed = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
+        /// <summary>When it was last used, as a count of the conversations' uses: the higher, the later (a clock's tick would tie two uses a moment apart).</summary>
         public long Used;
 
         public int Count => Messages.Count;
@@ -109,7 +116,7 @@ public sealed partial class TeamsSource
             await LearnNamesAsync(conversation.All(), c).ConfigureAwait(false);
             return conversation;
         }, ct).ConfigureAwait(false);
-        store.Used = Environment.TickCount64;
+        store.Used = Interlocked.Increment(ref _uses);
         return store;
     }
 
@@ -381,9 +388,61 @@ public sealed partial class TeamsSource
         }
     }
 
+    /// <summary>Waits for a page's turn: one page of history is read at a time.</summary>
+    private Task TurnAsync(Conversation store, CancellationToken ct)
+    {
+        lock (_turns)
+        {
+            if (!_turnTaken)
+            {
+                _turnTaken = true;
+                return Task.CompletedTask;
+            }
+
+            var turn = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _waiting.Add((store, turn));
+            return turn.Task.WaitAsync(ct);
+        }
+    }
+
     /// <summary>
-    /// Reads a conversation's history, a page at a time back from where its reading stopped, to its start or the window, the
-    /// conversations being read taking turns a page each; the folders that show it listed afresh now and then (behind the
+    /// Ends a page's turn: it stays with this conversation while it has more to read and none waiting was used later, else
+    /// goes to the one waiting that was used last; whether it stays.
+    /// </summary>
+    private bool PassTurn(Conversation store, bool more)
+    {
+        lock (_turns)
+        {
+            var next = -1;
+            for (var i = 0; i < _waiting.Count; i++)
+            {
+                if (next < 0 || _waiting[i].Store.Used > _waiting[next].Store.Used)
+                {
+                    next = i;
+                }
+            }
+
+            if (more && (next < 0 || store.Used >= _waiting[next].Store.Used))
+            {
+                return true;
+            }
+
+            if (next < 0)
+            {
+                _turnTaken = false;
+                return false;
+            }
+
+            var (_, turn) = _waiting[next];
+            _waiting.RemoveAt(next);
+            turn.TrySetResult();
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Reads a conversation's history, a page at a time back from where its reading stopped, to its start or the window, a
+    /// page's turn going to the conversation used last; the folders that show it listed afresh now and then (behind the
     /// reading) and at the end. A failure keeps what was read; the rest is read when its folder is next listed, a minute on
     /// at the soonest.
     /// </summary>
@@ -391,6 +450,7 @@ public sealed partial class TeamsSource
     {
         var relisting = Task.CompletedTask;
         var relisted = DateTimeOffset.UtcNow;
+        var turn = false;
         try
         {
             while (true)
@@ -406,19 +466,16 @@ public sealed partial class TeamsSource
                     break;
                 }
 
-                MessagePage page;
-                await _historyGate.WaitAsync(ct).ConfigureAwait(false);
-                try
+                if (!turn)
                 {
-                    page = await Api.OlderAsync(link, ct).ConfigureAwait(false);
-                }
-                finally
-                {
-                    _historyGate.Release();
+                    await TurnAsync(store, ct).ConfigureAwait(false);
+                    turn = true;
                 }
 
+                var page = await Api.OlderAsync(link, ct).ConfigureAwait(false);
                 await LearnNamesAsync(page.Messages, ct).ConfigureAwait(false);
                 var cutoff = Cutoff;
+                bool more;
                 lock (store.Gate)
                 {
                     // a message the newest read has stays as that read has it (an edit, a reaction since)
@@ -434,9 +491,11 @@ public sealed partial class TeamsSource
                     }
 
                     store.Next = page.Messages.Count == 0 || (cutoff is { } since && store.Oldest < since) ? null : page.OlderLink;
+                    more = store.Next is not null;
                     store.Signal();
                 }
 
+                turn = PassTurn(store, more);
                 LetGo(store);
                 if (relisting.IsCompleted && DateTimeOffset.UtcNow - relisted >= RelistEvery)
                 {
@@ -461,6 +520,11 @@ public sealed partial class TeamsSource
         }
         finally
         {
+            if (turn)
+            {
+                PassTurn(store, more: false);
+            }
+
             lock (store.Gate)
             {
                 store.Signal();

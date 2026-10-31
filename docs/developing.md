@@ -123,7 +123,8 @@ folder and roster, for channel.md and team.md), and `SetTeam` gives a team its d
 guest, a bot or of another organisation, and `SetChat` gives a chat its details (who started it, pinned messages).
 `StandIn(newest, pageSize, historyWait)` makes a conversation's newest read and its pages small, so a few messages have a
 history (read behind the listings), and sets how long the listing that begins it waits for it; `OlderDelay` slows the
-older pages, so a chat.md can be read, or an old post or image opened, before the history reaches it.
+older pages, so a chat.md can be read, or an old post or image opened, before the history reaches it, and `OlderAsked`
+records whose older pages were asked for, in order.
 `AddMedia` puts a meeting recording's video in its stand-in for Teams' media service, served in ranges (`MediaCalls`
 counts the reads); the tests' meeting messages (`Event/Call`, `Media_CallRecording`) are shaped as a GCC High tenant's are. `TeamsRestTests` read the
 services' answers through a fake handler (the call history's, activity feed's and threads' shapes as a GCC High account's

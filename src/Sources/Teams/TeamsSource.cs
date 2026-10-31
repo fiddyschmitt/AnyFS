@@ -1282,7 +1282,6 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
 
         _stopping.Dispose();
-        _historyGate.Dispose();
         await base.DisposeAsync().ConfigureAwait(false);
     }
 }
