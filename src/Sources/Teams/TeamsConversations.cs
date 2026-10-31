@@ -25,7 +25,11 @@ public sealed partial class TeamsSource
     /// <summary>How many messages the conversations hold in all before the least used histories are let go (read again when next listed).</summary>
     private const int KeptMessages = 150_000;
 
-    /// <summary>How long the listing that begins a conversation's history waits for it: a short history is whole in that listing, a long one fills in as it lands.</summary>
+    /// <summary>
+    /// How long from the beginning of a conversation's history read its listings wait for it: a short history is whole in
+    /// the listing that begins it (and one that joins it then), a long one fills in as it lands, its listings after that
+    /// moment answering at once.
+    /// </summary>
     private TimeSpan FirstHistoryWait => _standIn?.HistoryWait ?? TimeSpan.FromSeconds(5);
 
     // how often the folders that show a conversation's history are listed afresh while it is read (and twice at its end)
@@ -75,6 +79,9 @@ public sealed partial class TeamsSource
         public string? Next;
 
         public bool HistoryBegun;
+
+        /// <summary>When its history read last began: its listings wait for it until <see cref="FirstHistoryWait"/> after.</summary>
+        public DateTimeOffset ReadBegan;
 
         public DateTimeOffset? Oldest;
 
@@ -317,14 +324,21 @@ public sealed partial class TeamsSource
 
     /// <summary>
     /// Begins reading a conversation's history behind the listings, unless it has none left, is being read, or failed a
-    /// moment ago; a listing made while it is being read waits for it a moment (<see cref="FirstHistoryWait"/>), so a short
-    /// history is whole in the listing that begins it, and in one that joins it (an open while a walk reads it). The rest
-    /// lands behind, the folders that show it listed afresh.
+    /// moment ago; a listing made in the first moment of its reading waits for it (until <see cref="FirstHistoryWait"/> after
+    /// it began), so a short history is whole in the listing that begins it, and in one that joins it (an open while a walk
+    /// reads it). After that moment a listing answers at once with what is read: a long history's relists, and its folders
+    /// found as more of it lands, wait no more than the first did. The rest lands behind, the folders that show it listed
+    /// afresh.
     /// </summary>
     private async Task HistoryAsync(Conversation store, CancellationToken ct)
     {
         BeginHistory(store);
-        var deadline = DateTimeOffset.UtcNow + FirstHistoryWait;
+        DateTimeOffset deadline;
+        lock (store.Gate)
+        {
+            deadline = store.ReadBegan + FirstHistoryWait;
+        }
+
         while (true)
         {
             Task landed;
@@ -367,6 +381,7 @@ public sealed partial class TeamsSource
 
             store.HistoryBegun = true;
             store.Failed = false;
+            store.ReadBegan = DateTimeOffset.UtcNow;
             var stopping = _stopping.Token;
             store.Reading = Task.Run(() => ReadHistoryAsync(store, stopping), CancellationToken.None);
             return true;
