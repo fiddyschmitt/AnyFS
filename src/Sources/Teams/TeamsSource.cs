@@ -82,6 +82,12 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             StampOf = StampAsync,
             Name = "teams",
 
+            // a folder that cannot be listed answers so at once for a while, so a search over the whole tree pays for it once,
+            // not on every pass: a service's answer (a group's site the account cannot open, an error it gave) for a walk
+            // interval, the walks asking again; no answer (a service not reached, a token not handed out yet) for the refresh
+            // interval
+            FailureKeptFor = ex => ex.Error != VfsError.Unavailable && _settings.WalkEvery > TimeSpan.Zero ? _settings.WalkEvery : _settings.Refresh,
+
             // the listings last run saw open at once at the next start: for the same account and cloud, the same settings
             // that shape the tree, and the same Markdown (a file's size is a fact about how it is written)
             SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
@@ -228,17 +234,30 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         return node is TmFile file ? await Guard(() => file.OpenAsync(this, ct)).ConfigureAwait(false) : throw VfsException.IsADirectory(path);
     }
 
+    // the folders whose listing failed, each said once in the log: a drive shows one as empty, and the failure is kept a
+    // while (FailureKeptFor), so the log is where to see why
+    private readonly ConcurrentDictionary<string, byte> _unlisted = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>A folder's listing (what <see cref="KeptListings"/> keeps); the Markdown files' bytes are kept beside it, for the opens.</summary>
     private async IAsyncEnumerable<VfsEntry> ListFolderAsync(string path, [EnumeratorCancellation] CancellationToken ct)
     {
-        var node = await ResolveAsync(path, ct).ConfigureAwait(false);
-        if (node is not TmFolder folder)
+        TmFolder folder;
+        IReadOnlyList<TmNode> children;
+        try
         {
-            throw VfsException.NotADirectory(path);
+            folder = await ResolveAsync(path, ct).ConfigureAwait(false) as TmFolder ?? throw VfsException.NotADirectory(path);
+            ShowsHistory(folder, VfsPath.Normalize(path));
+            children = await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false);
         }
+        catch (VfsException ex) when (ex.Error is not (VfsError.NotFound or VfsError.NotADirectory))
+        {
+            if (_unlisted.TryAdd(VfsPath.Normalize(path), 0))
+            {
+                Logger.LogInformation("teams: '{Path}' could not be listed ({Error}); answered so for a while, the walks asking again", VfsPath.Normalize(path), ex.Message);
+            }
 
-        ShowsHistory(folder, VfsPath.Normalize(path));
-        var children = await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false);
+            throw;
+        }
 
         // a conversation listed while its history is still being read is not whole: not kept by its stamp
         if (folder is IHistoryFolder shows && !ConversationWhole(shows.ThreadId))
@@ -982,8 +1001,10 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         await KnowATeamSiteAsync(ct).ConfigureAwait(false);
         if (await Api.SeekTokensAsync(ct).ConfigureAwait(false))
         {
-            // the group sites read again: behind the answer when there is one, else at the next asking
+            // the group sites read again: behind the answer when there is one, else at the next asking; and the folders that
+            // failed for want of a token asked again when next listed
             _sitesRead = _sitesRead is { Sites: not null } read ? read with { At = DateTimeOffset.MinValue } : null;
+            Kept.Cache.ForgetFailures();
             await RelistAsync(ct).ConfigureAwait(false);
         }
     });

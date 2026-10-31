@@ -189,6 +189,38 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task AGroupWhoseLibraryRefusesTheAccountAnswersAtOnceEveryPassAfterTheFirst()
+    {
+        var fake = new FakeTeams();
+        fake.AddTeam("AnyFS Lab", FakeTeams.Channel("General", general: true));
+        const string Mark8 = "https://contoso.sharepoint.com/sites/Mark8ProjectTeam";
+        const string Board = "https://contoso.sharepoint.com/sites/Board";
+        fake.AddGroupSite(new GroupSite("g-mark8", "Mark 8 Project Team", Mark8, null, When));
+        fake.AddGroupSite(new GroupSite("g-board", "Board", Board, null, When));
+        fake.AddLibraryFile(Mark8, "Plan.docx", Encoding.UTF8.GetBytes("the plan"), When);
+        fake.RefusedSites.Add(Board);
+        await using var source = await StartAsync(fake);
+        await source.CountFilesAsync(CancellationToken.None);
+
+        // a search over the tree, pass after pass (FileLocator Pro's): the refusal the walk met answers each time
+        var asked = fake.SharePointCalls;
+        for (var pass = 0; pass < 3; pass++)
+        {
+            CollectionAssert.AreEqual(new[] { "Plan.docx" }, await NamesAsync(source, "Other groups/Mark 8 Project Team"));
+            var refused = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, "Other groups/Board"));
+            Assert.AreEqual(VfsError.AccessDenied, refused.Error);
+        }
+
+        Assert.AreEqual(asked, fake.SharePointCalls, "SharePoint not asked again for the refused library");
+
+        // the next walk asks again, and finds it opened since
+        fake.RefusedSites.Clear();
+        fake.AddLibraryFile(Board, "Minutes.docx", Encoding.UTF8.GetBytes("minutes"), When);
+        await source.Listings.RefreshAsync("Other groups/Board", CancellationToken.None);
+        CollectionAssert.AreEqual(new[] { "Minutes.docx" }, await NamesAsync(source, "Other groups/Board"));
+    }
+
+    [TestMethod]
     public async Task AllGroupsMdHasEveryGroupAndGroupsMdTheAccountsWithTheirDetails()
     {
         var fake = new FakeTeams();

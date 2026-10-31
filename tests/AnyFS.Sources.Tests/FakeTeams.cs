@@ -330,9 +330,17 @@ internal sealed class FakeTeams : ITeamsApi
             ?? (team.GroupId is { } group && _sites.TryGetValue(group, out var site) ? ((string, string)?)(site, channel.DisplayName) : null));
     }
 
+    /// <summary>The sites whose library refuses the account (a 403), as a group site under restricted access does.</summary>
+    public HashSet<string> RefusedSites { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     public Task<IReadOnlyList<DriveEntry>> FolderAsync(string siteUrl, string path, CancellationToken ct)
     {
         SharePoint();
+        if (RefusedSites.Contains(siteUrl))
+        {
+            throw VfsException.AccessDenied($"Teams (fake) answered 403 for {siteUrl}");
+        }
+
         var prefix = path.Length == 0 ? "" : path + "/";
         var entries = new Dictionary<string, DriveEntry>(StringComparer.OrdinalIgnoreCase);
         foreach (var (site, file, bytes, modified) in _library.Values)
