@@ -255,14 +255,40 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             return node;
         }
 
-        foreach (var segment in VfsPath.Split(normalized))
+        var segments = VfsPath.Split(normalized);
+        var names = new List<string>(segments.Length);
+        (TmNode Folder, int Index, string ThreadId)? history = null;
+        for (var i = 0; i < segments.Length; i++)
         {
             if (node is not TmFolder folder)
             {
                 throw VfsException.NotADirectory(path);
             }
 
-            node = await Guard(() => folder.FindAsync(this, segment, ct)).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
+            var found = await Guard(() => folder.FindAsync(this, segments[i], ct)).ConfigureAwait(false);
+            if (found is null)
+            {
+                // what a listing from before named (a kept one, after a restart) may be in a conversation's history not read
+                // yet: found again once the history is read past the time its name gives, or else to its end
+                var time = segments.Skip(i).Select(TeamsNames.TimeOf).FirstOrDefault(t => t is not null);
+                if (history is { } at && await HistoryPastAsync(at.ThreadId, time, ct).ConfigureAwait(false))
+                {
+                    (node, i) = (at.Folder, at.Index);
+                    names.RemoveRange(i + 1, names.Count - i - 1);
+                    continue;
+                }
+
+                throw VfsException.NotFound(path);
+            }
+
+            names.Add(found.Name);
+            if (found is IHistoryFolder shows)
+            {
+                history = (found, i, shows.ThreadId);
+                ShowsHistory(found, VfsPath.Join(names));
+            }
+
+            node = found;
         }
 
         return node;
@@ -350,20 +376,27 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     private DateTimeOffset? Cutoff => _settings.Within is { } within ? DateTimeOffset.UtcNow - within : null;
 
     /// <summary>
-    /// A chat as Markdown (its newest messages: the earlier ones are in its earlier folder, where it has one), with its
-    /// attachments (the files it shares, its inline images), whether it goes back further than chat.md, and its meetings:
-    /// a meeting chat's meeting.md, and its recordings.
+    /// A chat as Markdown, the whole conversation (a long one's history read behind the listings, its folder listed afresh as
+    /// it lands), with its attachments (the files it shares, its inline images) and its meetings: a meeting chat's
+    /// meeting.md, and its recordings.
     /// </summary>
     internal async Task<ChatParts> ChatAsync(ChatInfo chat, CancellationToken ct)
     {
-        var store = await ChatConversationAsync(chat, ct).ConfigureAwait(false);
-        var messages = store.Newest();
+        var (messages, note) = await ChatMessagesAsync(chat, ct).ConfigureAwait(false);
         var (attachments, names) = await AttachmentsAsync(messages, ct).ConfigureAwait(false);
         var now = (await StructureAsync(ct).ConfigureAwait(false)).Chats.FirstOrDefault(ch => ch.Id == chat.Id) ?? chat;
         var (meeting, recordings, recorded) = await MeetingsAsync(now, messages, ct).ConfigureAwait(false);
-        var from = store.From;
-        var markdown = TeamsText.Chat(messages, ChatName(chat), NameOf, names with { Recordings = recorded }, DetailsOf(now, messages, from));
-        return new ChatParts(markdown, attachments, from is not null, meeting, recordings);
+        var markdown = TeamsText.Chat(messages, ChatName(chat), NameOf, names with { Recordings = recorded }, DetailsOf(now, messages, note));
+        return new ChatParts(markdown, attachments, meeting, recordings);
+    }
+
+    /// <summary>A chat's attachments and recordings alone, for finding a file among them: no chat.md built (a folder of images opened is a find per image).</summary>
+    internal async Task<(IReadOnlyList<TmNode> Attachments, IReadOnlyList<TmNode> Recordings)> ChatFilesAsync(ChatInfo chat, CancellationToken ct)
+    {
+        var (messages, _) = await ChatMessagesAsync(chat, ct).ConfigureAwait(false);
+        var (attachments, _) = await AttachmentsAsync(messages, ct).ConfigureAwait(false);
+        var (_, recordings, _) = await RecordingsAsync(messages, ct).ConfigureAwait(false);
+        return (attachments, recordings);
     }
 
     // a meeting recording's length, by its video's address (-1: the media service does not serve it), once asked
@@ -490,10 +523,10 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     /// <summary>
     /// What chat.md says of its chat above the messages: its link, kind and members (the account as "you", then by name; a
     /// guest, a bot or another organisation's person marked), who started it and when, whether it is with other
-    /// organisations, muted or hidden, its pinned messages among those read, and where its earlier messages are (those
-    /// before <paramref name="earlierThan"/>, where it has any).
+    /// organisations, muted or hidden, its pinned messages among those read, and, while chat.md does not reach back to the
+    /// chat's start yet, how far it does (<paramref name="history"/>).
     /// </summary>
-    private ChatDetails DetailsOf(ChatInfo chat, IReadOnlyList<TeamsMessage> messages, DateTimeOffset? earlierThan)
+    private ChatDetails DetailsOf(ChatInfo chat, IReadOnlyList<TeamsMessage> messages, string? history)
     {
         var home = _people.Values.FirstOrDefault(p => IsMe(p.Mri))?.Organisation;
         var members = chat.MemberMris.Distinct(StringComparer.OrdinalIgnoreCase)
@@ -504,8 +537,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         var pinned = messages.Where(m => m.IsContent && m.Deleted is null && (m.Pinned || pinnedIds.Contains(m.Id)))
             .OrderBy(m => m.Composed ?? DateTimeOffset.MinValue).ThenBy(m => m.Id, StringComparer.Ordinal).ToList();
         return new ChatDetails(TeamsLinks.Chat(LinkHost, chat), chat.Kind, members.Take(TeamsText.MembersShown).ToList(), members.Count, chat.Created,
-            chat.CreatorMri is { } creator ? (IsMe(creator) ? "you" : NameOf(creator)) : null, chat.External, chat.Muted, chat.Hidden, pinned,
-            earlierThan is { } from ? $"in the {EarlierFolderName} folder, a folder per month; this file has those since {from.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)}" : null);
+            chat.CreatorMri is { } creator ? (IsMe(creator) ? "you" : NameOf(creator)) : null, chat.External, chat.Muted, chat.Hidden, pinned, history);
     }
 
     /// <summary>A chat member as chat.md names them: "you", else their name, marked where a guest, a bot or of an organisation other than the account's.</summary>

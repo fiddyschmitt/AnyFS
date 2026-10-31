@@ -121,8 +121,9 @@ for an account with none: the sandbox has no call history), `CallsFail` refuses 
 true)` makes a chat one hidden in Teams. `Threads` holds what the chat service tells of a channel's thread (its site,
 folder and roster, for channel.md and team.md), and `SetTeam` gives a team its details; `AddPerson` can make someone a
 guest, a bot or of another organisation, and `SetChat` gives a chat its details (who started it, pinned messages).
-`StandIn(newest, pageSize)` makes a conversation's newest read and its pages small, so a few messages have a history (its
-earlier folder), and `OlderDelay` slows the older pages, so a month can be opened before the history reaches it.
+`StandIn(newest, pageSize, historyWait)` makes a conversation's newest read and its pages small, so a few messages have a
+history (read behind the listings), and sets how long the listing that begins it waits for it; `OlderDelay` slows the
+older pages, so a chat.md can be read, or an old post or image opened, before the history reaches it.
 `AddMedia` puts a meeting recording's video in its stand-in for Teams' media service, served in ranges (`MediaCalls`
 counts the reads); the tests' meeting messages (`Event/Call`, `Media_CallRecording`) are shaped as a GCC High tenant's are. `TeamsRestTests` read the
 services' answers through a fake handler (the call history's, activity feed's and threads' shapes as a GCC High account's
@@ -135,7 +136,7 @@ only one). `TheLibrariesAreReadThroughGraphWithoutSharePointsToken` reads the li
 at work: the sandbox's Teams page mints no Graph token, so it takes the AnyFS app's from a `tests/fixtures/SharePointSignIn`
 sign-in as the tester (`ANYFS_TEST_GRAPH_CACHE`, else the fixture's default file) and withholds SharePoint's.
 `EarlierMessagesAreReadBackThroughTheChatServicesOwnLinks` gives the sandbox's few posts a history (a newest read of two,
-two to a page) and checks every post lands once, in posts or a month of earlier.
+two to a page) and checks the posts folder then shows every post once.
 `ATeamsSharePointSiteHandsOutTheTokensTeamsPageDoesNot` asks for Graph's token (which Teams' page never hands out in
 Microsoft 365) with a load of the team's SharePoint site, as the source asks for its missing tokens. `TeamsSandboxSeed` seeds the sandbox for them, once, with `ANYFS_SEED_TEAMS=1` beside those two: the team "AnyFS
 Lab" with its SharePoint site, a thread in General with replies, reactions, an edit, a deletion, a shared file and an inline

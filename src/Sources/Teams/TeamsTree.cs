@@ -3,10 +3,10 @@ using AnyFS.Sdk;
 namespace AnyFS.Sources.Teams;
 
 /// <summary>
-/// One thing in a Teams source's tree (spec 7.9): a folder (the root, a team, a channel, the Chats folder, a channel post,
-/// a chat, a conversation's earlier messages and their months) or a file (a post, a chat or a month of it as Markdown, a
-/// team's or channel's details). A path is found from the root a folder at a time, each folder finding its child through
-/// the source. Names are compared in either case, as Windows does.
+/// One thing in a Teams source's tree (spec 7.9): a folder (the root, a team, a channel, its posts, the Chats folder, a
+/// channel post, a chat, their attachments and recordings) or a file (a post or a chat as Markdown, a team's or channel's
+/// details, a shared file, an image, a recording). A path is found from the root a folder at a time, each folder finding
+/// its child through the source. Names are compared in either case, as Windows does.
 /// </summary>
 internal abstract class TmNode(string name)
 {
@@ -26,10 +26,7 @@ internal abstract class TmFolder(string name, DateTimeOffset? modified = null) :
 
     public abstract Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct);
 
-    /// <summary>
-    /// A child by name, for finding a path: listed and looked up. A folder whose children land as they are read (a
-    /// conversation's earlier months) waits for one a listing from before named.
-    /// </summary>
+    /// <summary>A child by name, for finding a path: listed and looked up (a chat finds its attachments without building its chat.md).</summary>
     public virtual async Task<TmNode?> FindAsync(TeamsSource source, string name, CancellationToken ct)
         => (await ListAsync(source, ct).ConfigureAwait(false)).FirstOrDefault(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
 }
@@ -234,16 +231,20 @@ internal sealed class ImageFile(string name, string src, long length, DateTimeOf
 }
 
 /// <summary>A conversation's attachments: the files its messages share and its inline images. Not walked: read with the conversation.</summary>
-internal sealed class AttachmentsFolder(IReadOnlyList<TmNode> attachments, DateTimeOffset? modified) : TmFolder("attachments", modified)
+internal sealed class AttachmentsFolder(IReadOnlyList<TmNode> attachments, DateTimeOffset? modified) : TmFolder(FolderName, modified)
 {
+    public const string FolderName = "attachments";
+
     public override bool Walked => false;
 
     public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct) => Task.FromResult(attachments);
 }
 
 /// <summary>A chat's meeting recordings: a file each. Not walked: read with the chat.</summary>
-internal sealed class RecordingsFolder(IReadOnlyList<TmNode> recordings, DateTimeOffset? modified) : TmFolder("recordings", modified)
+internal sealed class RecordingsFolder(IReadOnlyList<TmNode> recordings, DateTimeOffset? modified) : TmFolder(FolderName, modified)
 {
+    public const string FolderName = "recordings";
+
     public override bool Walked => false;
 
     public override Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct) => Task.FromResult(recordings);
@@ -256,10 +257,9 @@ internal sealed class RecordingFile(string name, string video, long length, Date
 }
 
 /// <summary>
-/// A channel's posts: a folder per thread (the opening message and its replies) with a message among the channel's newest
-/// (the latest 2,000), and, where it goes back further, <c>earlier</c>: the threads before them, a folder per month. Not
-/// walked: the messages are a call. Listed afresh as the channel's history lands (an opening message read brings its
-/// thread's name).
+/// A channel's posts: a folder per thread (the opening message and its replies), back to the channel's start or the window.
+/// A busy channel's latest 2,000 messages are read when it is listed and the rest behind the listings, the folder listed
+/// afresh as they land (an opening message read brings its thread's name). Not walked: the messages are a call.
 /// </summary>
 internal sealed class PostsFolder(TeamInfo team, ChannelInfo channel) : TmFolder("posts", null), IHistoryFolder
 {
@@ -268,51 +268,7 @@ internal sealed class PostsFolder(TeamInfo team, ChannelInfo channel) : TmFolder
     public override bool Walked => false;
 
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
-    {
-        var (threads, earlier) = await source.ThreadsAsync(channel.Id, ct).ConfigureAwait(false);
-        var children = ThreadFolder.Of(source, team, channel, threads, [TeamsSource.EarlierFolderName]);
-        if (earlier)
-        {
-            children.Add(new EarlierPostsFolder(team, channel));
-        }
-
-        return children;
-    }
-}
-
-/// <summary>
-/// A channel's threads before its newest (<c>posts\earlier</c>): a folder per month they were opened in, the channel's
-/// history read behind the listings once this folder is opened, back to its start or the window; a month shows as it lands.
-/// </summary>
-internal sealed class EarlierPostsFolder(TeamInfo team, ChannelInfo channel) : TmFolder(TeamsSource.EarlierFolderName), IHistoryFolder
-{
-    public string ThreadId => channel.Id;
-
-    public override bool Walked => false;
-
-    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
-        => (await source.PostMonthsAsync(channel.Id, ct).ConfigureAwait(false)).Select(m => (TmNode)new PostsMonthFolder(team, channel, m.Month, m.Last)).ToList();
-
-    public override async Task<TmNode?> FindAsync(TeamsSource source, string name, CancellationToken ct)
-    {
-        var found = await base.FindAsync(source, name, ct).ConfigureAwait(false);
-        if (found is not null || !Month.TryParse(name, out var month))
-        {
-            return found;
-        }
-
-        await source.PostMonthReadAsync(channel.Id, month, ct).ConfigureAwait(false);
-        return await base.FindAsync(source, name, ct).ConfigureAwait(false);
-    }
-}
-
-/// <summary>A month of a channel's earlier threads: a folder per thread opened in it, once the channel's history is read past the month's start.</summary>
-internal sealed class PostsMonthFolder(TeamInfo team, ChannelInfo channel, Month month, DateTimeOffset? last) : TmFolder(month.Name, last)
-{
-    public override bool Walked => false;
-
-    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
-        => ThreadFolder.Of(source, team, channel, await source.PostMonthAsync(channel.Id, month, ct).ConfigureAwait(false));
+        => ThreadFolder.Of(source, team, channel, await source.ThreadsAsync(channel.Id, ct).ConfigureAwait(false));
 }
 
 /// <summary>
@@ -323,9 +279,9 @@ internal sealed class PostsMonthFolder(TeamInfo team, ChannelInfo channel, Month
 internal sealed class ThreadFolder(TeamInfo team, ChannelInfo channel, string name, IReadOnlyList<TeamsMessage> thread) : TmFolder(name, thread[0].Composed)
 {
     /// <summary>A folder per thread, named by its time, its author and its first line, twins numbered.</summary>
-    public static List<TmNode> Of(TeamsSource source, TeamInfo team, ChannelInfo channel, IReadOnlyList<IReadOnlyList<TeamsMessage>> threads, IEnumerable<string>? reserved = null)
+    public static List<TmNode> Of(TeamsSource source, TeamInfo team, ChannelInfo channel, IReadOnlyList<IReadOnlyList<TeamsMessage>> threads)
     {
-        var names = TeamsNames.Unique(threads.Select(t => TeamsText.ThreadName(t[0], source.NameOf)).ToList(), reserved);
+        var names = TeamsNames.Unique(threads.Select(t => TeamsText.ThreadName(t[0], source.NameOf)).ToList());
         return threads.Select((t, i) => (TmNode)new ThreadFolder(team, channel, names[i], t)).ToList();
     }
 
@@ -367,13 +323,15 @@ internal sealed class ChatsFolder() : TmFolder(FolderName)
 }
 
 /// <summary>
-/// One chat: <c>chat.md</c>, the conversation (its latest 2,000 messages), its <c>attachments</c> where it has any, and,
-/// where it goes back further, <c>earlier</c>: the messages before them, a folder per month; a meeting's chat its
-/// <c>meeting.md</c>, and a chat with recordings its <c>recordings</c>. Not walked: the messages are a call.
+/// One chat: <c>chat.md</c>, the whole conversation, its <c>attachments</c> where it has any, a meeting's chat its
+/// <c>meeting.md</c>, and a chat with recordings its <c>recordings</c>. A long chat's latest 2,000 messages are read when it
+/// is listed and the rest behind the listings, the folder listed afresh as they land. Not walked: the messages are a call.
 /// </summary>
-internal sealed class ChatFolder(ChatInfo chat, string name) : TmFolder(name, chat.LastUpdated)
+internal sealed class ChatFolder(ChatInfo chat, string name) : TmFolder(name, chat.LastUpdated), IHistoryFolder
 {
     public ChatInfo Chat { get; } = chat;
+
+    public string ThreadId => Chat.Id;
 
     public override bool Walked => false;
 
@@ -384,11 +342,6 @@ internal sealed class ChatFolder(ChatInfo chat, string name) : TmFolder(name, ch
         if (parts.Attachments.Count > 0)
         {
             children.Add(new AttachmentsFolder(parts.Attachments, Chat.LastUpdated));
-        }
-
-        if (parts.Earlier)
-        {
-            children.Add(new EarlierChatFolder(Chat));
         }
 
         if (parts.Meeting is { } meeting)
@@ -403,48 +356,22 @@ internal sealed class ChatFolder(ChatInfo chat, string name) : TmFolder(name, ch
 
         return children;
     }
-}
 
-/// <summary>
-/// A chat's messages before those its chat.md has (<c>earlier</c>): a folder per month, the chat's history read behind the
-/// listings once this folder is opened, back to its start or the window; a month shows as it lands.
-/// </summary>
-internal sealed class EarlierChatFolder(ChatInfo chat) : TmFolder(TeamsSource.EarlierFolderName), IHistoryFolder
-{
-    public string ThreadId => chat.Id;
-
-    public override bool Walked => false;
-
-    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
-        => (await source.ChatMonthsAsync(chat, ct).ConfigureAwait(false)).Select(m => (TmNode)new ChatMonthFolder(chat, m.Month, m.Last)).ToList();
-
+    /// <summary>A child by name: its attachments or its recordings found without building chat.md (a folder of images opened is a find per image).</summary>
     public override async Task<TmNode?> FindAsync(TeamsSource source, string name, CancellationToken ct)
     {
-        var found = await base.FindAsync(source, name, ct).ConfigureAwait(false);
-        if (found is not null || !Month.TryParse(name, out var month))
+        var attachments = name.Equals(AttachmentsFolder.FolderName, StringComparison.OrdinalIgnoreCase);
+        if (!attachments && !name.Equals(RecordingsFolder.FolderName, StringComparison.OrdinalIgnoreCase))
         {
-            return found;
+            return await base.FindAsync(source, name, ct).ConfigureAwait(false);
         }
 
-        await source.ChatMonthReadAsync(chat, month, ct).ConfigureAwait(false);
-        return await base.FindAsync(source, name, ct).ConfigureAwait(false);
-    }
-}
-
-/// <summary>A month of a chat's earlier messages: <c>chat.md</c> and its <c>attachments</c>, once the chat's history is read past the month's start.</summary>
-internal sealed class ChatMonthFolder(ChatInfo chat, Month month, DateTimeOffset? last) : TmFolder(month.Name, last)
-{
-    public override bool Walked => false;
-
-    public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
-    {
-        var (markdown, attachments) = await source.ChatMonthAsync(chat, month, ct).ConfigureAwait(false);
-        var children = new List<TmNode> { new MarkdownFile("chat.md", markdown, Modified) };
-        if (attachments.Count > 0)
+        var files = await source.ChatFilesAsync(Chat, ct).ConfigureAwait(false);
+        if (attachments)
         {
-            children.Add(new AttachmentsFolder(attachments, Modified));
+            return files.Attachments.Count > 0 ? new AttachmentsFolder(files.Attachments, Chat.LastUpdated) : null;
         }
 
-        return children;
+        return files.Recordings.Count > 0 ? new RecordingsFolder(files.Recordings, Chat.LastUpdated) : null;
     }
 }

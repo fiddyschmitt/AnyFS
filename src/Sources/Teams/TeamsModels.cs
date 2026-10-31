@@ -296,41 +296,9 @@ internal sealed record Person(string Mri, string DisplayName)
 /// <param name="Members">The members by name, the account as "you", each guest, bot or another organisation's person marked; at most <see cref="TeamsText.MembersShown"/> of <paramref name="MemberCount"/>.</param>
 /// <param name="StartedBy">Who started it, by name.</param>
 /// <param name="Pinned">Its pinned messages among those read.</param>
-/// <param name="Earlier">Where its earlier messages are, where it goes back further than chat.md.</param>
+/// <param name="Earlier">While chat.md does not reach back to the chat's start yet (its history still being read, or not all of it read): how far it does; else null.</param>
 internal sealed record ChatDetails(string? Link, ChatKind Kind, IReadOnlyList<string> Members, int MemberCount, DateTimeOffset? Started, string? StartedBy,
     bool External, bool Muted, bool Hidden, IReadOnlyList<TeamsMessage> Pinned, string? Earlier = null);
 
-/// <summary>A calendar month in local time: a conversation's earlier messages are in a folder per month (<c>2024-03</c>).</summary>
-internal readonly record struct Month(int Year, int Number)
-{
-    public string Name => string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{Year:D4}-{Number:D2}");
-
-    /// <summary>Its first moment, in local time.</summary>
-    public DateTimeOffset Start => new(new DateTime(Year, Number, 1, 0, 0, 0, DateTimeKind.Local));
-
-    /// <summary>In words: "March 2024".</summary>
-    public string Label => new DateTime(Year, Number, 1).ToString("MMMM yyyy", System.Globalization.CultureInfo.InvariantCulture);
-
-    public static Month Of(DateTimeOffset when)
-    {
-        var local = when.ToLocalTime();
-        return new Month(local.Year, local.Month);
-    }
-
-    /// <summary>A month by its folder's name (<c>2024-03</c>).</summary>
-    public static bool TryParse(string name, out Month month)
-    {
-        month = default;
-        if (name.Length != 7 || name[4] != '-' || !int.TryParse(name.AsSpan(0, 4), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var year)
-            || !int.TryParse(name.AsSpan(5, 2), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var number) || year < 1 || number is < 1 or > 12)
-        {
-            return false;
-        }
-
-        month = new Month(year, number);
-        return true;
-    }
-}
-
-/// <summary>What a chat's folder holds: chat.md, its attachments, whether it has earlier messages, its meeting.md (a meeting chat's) and its recordings.</summary>
-internal sealed record ChatParts(byte[] Markdown, IReadOnlyList<TmNode> Attachments, bool Earlier, byte[]? Meeting, IReadOnlyList<TmNode> Recordings);
+/// <summary>What a chat's folder holds: chat.md, its attachments, its meeting.md (a meeting chat's) and its recordings.</summary>
+internal sealed record ChatParts(byte[] Markdown, IReadOnlyList<TmNode> Attachments, byte[]? Meeting, IReadOnlyList<TmNode> Recordings);

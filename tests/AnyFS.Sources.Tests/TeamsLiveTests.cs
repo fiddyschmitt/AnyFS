@@ -326,8 +326,8 @@ public class TeamsLiveTests
 
     /// <summary>
     /// A conversation's history, read back through the chat service's own older-page links: a newest read of two messages,
-    /// two to a page, gives the sandbox's few posts a history; every post is then in the posts folder or a month of its
-    /// earlier folder, once, as a source reading them all at once has them.
+    /// two to a page, gives the sandbox's few posts a history, read behind the listings; the posts folder then shows every
+    /// post, once, as a source reading them all at once has them.
     /// </summary>
     [TestMethod]
     [Timeout(300_000)]
@@ -350,25 +350,19 @@ public class TeamsLiveTests
         const string Posts = "AnyFS Lab/General/posts";
         var all = (await ListAsync(whole, Posts)).Select(e => e.Name).Order(StringComparer.Ordinal).ToList();
         Assert.IsTrue(all.Count > 1, "the seeded sandbox has posts");
-        CollectionAssert.Contains((await ListAsync(small, Posts)).Select(e => e.Name).ToList(), "earlier");
 
-        // the months as they land, each waited for until read; the posts folder listed afresh when the history is whole
+        // the posts folder listed afresh as the history lands
         List<string> seen;
         for (var deadline = DateTime.UtcNow.AddMinutes(1); ; await Task.Delay(1000))
         {
-            seen = (await ListAsync(small, Posts)).Select(e => e.Name).Where(n => n != "earlier").ToList();
-            foreach (var month in await ListAsync(small, $"{Posts}/earlier"))
-            {
-                seen.AddRange((await ListAsync(small, $"{Posts}/earlier/{month.Name}")).Select(e => e.Name));
-            }
-
-            if (seen.Order(StringComparer.Ordinal).SequenceEqual(all) || DateTime.UtcNow > deadline)
+            seen = (await ListAsync(small, Posts)).Select(e => e.Name).Order(StringComparer.Ordinal).ToList();
+            if (seen.SequenceEqual(all) || DateTime.UtcNow > deadline)
             {
                 break;
             }
         }
 
-        CollectionAssert.AreEqual(all, seen.Order(StringComparer.Ordinal).ToList(), "every post once, in the posts folder or a month of earlier");
+        CollectionAssert.AreEqual(all, seen, "every post once, in the posts folder");
     }
 
     /// <summary>

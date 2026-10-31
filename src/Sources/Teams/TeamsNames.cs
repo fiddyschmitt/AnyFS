@@ -65,6 +65,15 @@ internal static class TeamsNames
         return names;
     }
 
+    // the time a thread's folder, an inline image or a recording is named by: 2026-10-29 1003 …, 2026-10-29_1003_image-1.png
+    private static readonly string[] Stamps = ["yyyy-MM-dd HHmm", "yyyy-MM-dd_HHmm"];
+
+    /// <summary>The time a name starts with, as a thread's folder, an inline image or a recording is named: local, to the minute; null for another name.</summary>
+    public static DateTimeOffset? TimeOf(string name)
+        => name.Length >= 15 && DateTime.TryParseExact(name.AsSpan(0, 15), Stamps, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var at)
+            ? new DateTimeOffset(at)
+            : null;
+
     private static string Cut(string text, int length)
     {
         if (text.Length <= length)

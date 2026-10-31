@@ -1,46 +1,44 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.Teams;
 
 /// <summary>
-/// A conversation's messages as read (spec 7.9). Its newest messages (chat.md, a channel's posts) are read with its
-/// listings: again only as the aggregator's version of it moves on (its newest page merged), whole once a walk interval,
-/// back as far as <see cref="NewestMessages"/> or the "within" window. Once its earlier folder is opened, everything
-/// before them, back to its start or the window, is its history: read behind the listings, one conversation's at a time,
-/// its folder listed afresh as months land.
+/// A conversation's messages as read (spec 7.9), back to its start or the "within" window: what chat.md and a channel's
+/// posts show. Its newest messages are read with its listings: again only as the aggregator's version of it moves on (its
+/// newest page merged), whole once a walk interval, back as far as <see cref="NewestMessages"/> or the window. Everything
+/// before them is its history: read behind the listings from its first listing on, a page at a time, the conversations
+/// being read taking turns; the folder that shows it listed afresh as it lands.
 /// </summary>
 public sealed partial class TeamsSource
 {
-    /// <summary>What a conversation's folders name their earlier messages' folder (a folder per month in it).</summary>
-    internal const string EarlierFolderName = "earlier";
-
-    /// <summary>How far back a conversation's newest read goes: what is before it is its history, in its earlier folder.</summary>
+    /// <summary>How far back a conversation's newest read goes (the read its listing waits for): what is before it is its history, read behind the listings.</summary>
     private int NewestMessages => _standIn?.NewestMessages ?? 2_000;
 
     /// <summary>A page of the chat service's messages: 200 at most ("PageSize query parameter is too large" past it).</summary>
     private int PageSize => _standIn?.PageSize ?? 200;
 
-    /// <summary>How many messages the conversations hold in all before the least used histories are let go (read again when next opened).</summary>
+    /// <summary>How many messages the conversations hold in all before the least used histories are let go (read again when next listed).</summary>
     private const int KeptMessages = 150_000;
 
-    /// <summary>How long an earlier folder's first listing waits for its first months (it is listed again as more land).</summary>
-    private static readonly TimeSpan FirstHistoryWait = TimeSpan.FromSeconds(5);
+    /// <summary>How long the listing that begins a conversation's history waits for it: a short history is whole in that listing, a long one fills in as it lands.</summary>
+    private TimeSpan FirstHistoryWait => _standIn?.HistoryWait ?? TimeSpan.FromSeconds(5);
 
-    // how many history pages land between listings of the folders that show them
-    private const int RelistEveryPages = 10;
+    // how often the folders that show a conversation's history are listed afresh while it is read (and twice at its end)
+    private static readonly TimeSpan RelistEvery = TimeSpan.FromSeconds(20);
 
     // how soon a history read that failed is begun again
     private static readonly TimeSpan HistoryRetry = TimeSpan.FromMinutes(1);
 
     private readonly ConcurrentDictionary<string, Conversation> _conversations = new(StringComparer.Ordinal);
 
-    // one conversation's history read at a time, so the requests stay free for the listings
+    // one page of history read at a time, the conversations being read taking turns, so the requests stay free for the listings
     private readonly SemaphoreSlim _historyGate = new(1, 1);
 
-    // the folders listed that show a conversation's history (its earlier folder, a channel's posts), by conversation: listed
-    // afresh as its history lands
+    // the folders that show a conversation's history (a chat's folder, a channel's posts), by conversation: listed afresh as
+    // its history lands
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _historyFolders = new(StringComparer.Ordinal);
 
     /// <summary>How long a conversation goes without being read whole: an edit or reaction on an older message shows by then.</summary>
@@ -59,12 +57,13 @@ public sealed partial class TeamsSource
 
         public DateTimeOffset ReadWhole;
 
-        /// <summary>The newest read's oldest message; null where that read reached the start or the window (nothing earlier).</summary>
+        /// <summary>The newest read's oldest message; null where that read reached the start or the window (no history).</summary>
         public DateTimeOffset? NewestFrom;
 
-        /// <summary>Where the newest read stopped, and where reading back goes on (the newest read's, then the history's; null when done).</summary>
+        /// <summary>Where the newest read stopped: where its history begins (null where it has none).</summary>
         public string? NewestNext;
 
+        /// <summary>Where reading back goes on (the newest read's stop, then the history's); null once read back to the start or the window.</summary>
         public string? Next;
 
         public bool HistoryBegun;
@@ -84,40 +83,11 @@ public sealed partial class TeamsSource
 
         public int Count => Messages.Count;
 
-        /// <summary>What chat.md and the posts folder show: the messages from the newest read's on (all, where nothing is earlier).</summary>
-        public List<TeamsMessage> Newest()
-        {
-            lock (Gate)
-            {
-                return NewestFrom is { } from ? Messages.Values.Where(m => m.Composed is not { } at || at >= from).ToList() : Messages.Values.ToList();
-            }
-        }
-
-        /// <summary>The messages before the newest read's (its history, as far as read).</summary>
-        public List<TeamsMessage> Earlier()
-        {
-            lock (Gate)
-            {
-                return NewestFrom is { } from ? Messages.Values.Where(m => m.Composed is { } at && at < from).ToList() : [];
-            }
-        }
-
         public List<TeamsMessage> All()
         {
             lock (Gate)
             {
                 return Messages.Values.ToList();
-            }
-        }
-
-        public DateTimeOffset? From
-        {
-            get
-            {
-                lock (Gate)
-                {
-                    return NewestFrom;
-                }
             }
         }
 
@@ -136,7 +106,7 @@ public sealed partial class TeamsSource
         var store = await Cache.GetAsync($"conversation:{threadId}", _settings.Refresh, async c =>
         {
             var conversation = await RefreshNewestAsync(threadId, versionOf(await StructureAsync(c).ConfigureAwait(false)), c).ConfigureAwait(false);
-            await LearnNamesAsync(conversation.Newest(), c).ConfigureAwait(false);
+            await LearnNamesAsync(conversation.All(), c).ConfigureAwait(false);
             return conversation;
         }, ct).ConfigureAwait(false);
         store.Used = Environment.TickCount64;
@@ -270,91 +240,73 @@ public sealed partial class TeamsSource
             .ToList();
     }
 
+    // --- what the folders show -----------------------------------------------------------------------------------------
+
     /// <summary>
-    /// A channel's posts as its posts folder shows them: its threads with a message from the newest read on (complete, where
-    /// the history has brought their opening messages), newest thread first; and whether it has earlier ones.
+    /// A chat's messages within the window, as far as read, its history begun behind the listings where its newest read did
+    /// not reach its start (the listing that begins it waits a moment); with what chat.md says while it does not reach back
+    /// to the start yet (<see cref="HistoryNote"/>).
     /// </summary>
-    internal async Task<(IReadOnlyList<IReadOnlyList<TeamsMessage>> Threads, bool Earlier)> ThreadsAsync(string channelId, CancellationToken ct)
+    private async Task<(List<TeamsMessage> Messages, string? Note)> ChatMessagesAsync(ChatInfo chat, CancellationToken ct)
+    {
+        var store = await ChatConversationAsync(chat, ct).ConfigureAwait(false);
+        await HistoryAsync(store, ct).ConfigureAwait(false);
+        return (store.All().Where(Within).ToList(), HistoryNote(store));
+    }
+
+    /// <summary>
+    /// A channel's posts as its posts folder shows them: its threads, newest first, back to its start or the window (an
+    /// opening message the history has not brought yet: its thread from what is read of it), its history begun behind the
+    /// listings as for a chat (<see cref="ChatMessagesAsync"/>).
+    /// </summary>
+    internal async Task<IReadOnlyList<IReadOnlyList<TeamsMessage>>> ThreadsAsync(string channelId, CancellationToken ct)
     {
         var store = await ChannelConversationAsync(channelId, ct).ConfigureAwait(false);
-        var from = store.From;
-        return (Threads(store.All()).Where(t => from is null || t[^1].Composed is not { } last || last >= from).ToList(), from is not null);
+        await HistoryAsync(store, ct).ConfigureAwait(false);
+        return Threads(store.All());
+    }
+
+    /// <summary>
+    /// What chat.md says of a conversation's history while it does not reach back to its start or the window: how far back
+    /// it goes, and whether the rest is still being read; null once it does.
+    /// </summary>
+    private static string? HistoryNote(Conversation store)
+    {
+        lock (store.Gate)
+        {
+            if (store.Next is null)
+            {
+                return null;
+            }
+
+            var since = store.Oldest?.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) ?? "?";
+            return store.Reading.IsCompleted || store.Failed
+                ? $"not all could be read just now: this file goes back to {since}, and the rest are read when the chat is next opened"
+                : $"still being read: this file goes back to {since} so far, and fills in as they arrive";
+        }
     }
 
     // --- the history ---------------------------------------------------------------------------------------------------
 
-    /// <summary>A chat's months before its chat.md, as far as its history is read (its earlier folder): its reading begun, and waited for a moment the first time.</summary>
-    internal async Task<IReadOnlyList<(Month Month, DateTimeOffset? Last)>> ChatMonthsAsync(ChatInfo chat, CancellationToken ct)
-    {
-        var store = await ChatConversationAsync(chat, ct).ConfigureAwait(false);
-        await HistoryAsync(store, null, ct).ConfigureAwait(false);
-        return store.Earlier().Where(m => m.IsContent && Within(m) && m.Composed is not null)
-            .GroupBy(m => Month.Of(m.Composed!.Value))
-            .Select(g => (g.Key, (DateTimeOffset?)g.Max(m => m.Composed)))
-            .OrderBy(m => m.Key.Name, StringComparer.Ordinal).ToList();
-    }
-
-    /// <summary>A month of a chat's earlier messages as Markdown, with its attachments: once its history is read past the month's start.</summary>
-    internal async Task<(byte[] Markdown, IReadOnlyList<TmNode> Attachments)> ChatMonthAsync(ChatInfo chat, Month month, CancellationToken ct)
-    {
-        var store = await ChatConversationAsync(chat, ct).ConfigureAwait(false);
-        await HistoryAsync(store, month.Start, ct).ConfigureAwait(false);
-        var messages = store.Earlier().Where(m => Within(m) && m.Composed is { } at && Month.Of(at) == month).ToList();
-        await LearnNamesAsync(messages, ct).ConfigureAwait(false);
-        var (attachments, names) = await AttachmentsAsync(messages, ct).ConfigureAwait(false);
-        return (TeamsText.ChatMonth(messages, ChatName(chat), month, NameOf, names, TeamsLinks.Chat(LinkHost, chat)), attachments);
-    }
-
-    /// <summary>Waits until a chat's history is read past a month's start (or whole): a month a listing from before named, opened before it is read.</summary>
-    internal async Task ChatMonthReadAsync(ChatInfo chat, Month month, CancellationToken ct)
-        => await HistoryAsync(await ChatConversationAsync(chat, ct).ConfigureAwait(false), month.Start, ct).ConfigureAwait(false);
-
-    /// <summary>A channel's months of earlier posts (its posts' earlier folder), as for a chat (<see cref="ChatMonthsAsync"/>): each thread in its opening's month.</summary>
-    internal async Task<IReadOnlyList<(Month Month, DateTimeOffset? Last)>> PostMonthsAsync(string channelId, CancellationToken ct)
-    {
-        var store = await ChannelConversationAsync(channelId, ct).ConfigureAwait(false);
-        await HistoryAsync(store, null, ct).ConfigureAwait(false);
-        return EarlierThreads(store).Where(t => t[0].Composed is not null)
-            .GroupBy(t => Month.Of(t[0].Composed!.Value))
-            .Select(g => (g.Key, g.Max(t => t[^1].Composed)))
-            .OrderBy(m => m.Key.Name, StringComparer.Ordinal).ToList();
-    }
-
-    /// <summary>A month's earlier threads of a channel (those opened in it), once its history is read past the month's start.</summary>
-    internal async Task<IReadOnlyList<IReadOnlyList<TeamsMessage>>> PostMonthAsync(string channelId, Month month, CancellationToken ct)
-    {
-        var store = await ChannelConversationAsync(channelId, ct).ConfigureAwait(false);
-        await HistoryAsync(store, month.Start, ct).ConfigureAwait(false);
-        var threads = EarlierThreads(store).Where(t => t[0].Composed is { } first && Month.Of(first) == month).ToList();
-        await LearnNamesAsync(threads.SelectMany(t => t).ToList(), ct).ConfigureAwait(false);
-        return threads;
-    }
-
-    /// <summary>As <see cref="ChatMonthReadAsync"/>, for a channel's earlier posts.</summary>
-    internal async Task PostMonthReadAsync(string channelId, Month month, CancellationToken ct)
-        => await HistoryAsync(await ChannelConversationAsync(channelId, ct).ConfigureAwait(false), month.Start, ct).ConfigureAwait(false);
-
-    /// <summary>A channel's threads with no message from the newest read on.</summary>
-    private List<IReadOnlyList<TeamsMessage>> EarlierThreads(Conversation store)
-        => store.From is { } from ? Threads(store.All()).Where(t => t[^1].Composed is { } last && last < from).ToList() : [];
-
     /// <summary>
-    /// Begins reading a conversation's history behind the listings, unless it is read, being read, or failed a moment ago;
-    /// then waits: until it is read past <paramref name="past"/> (its oldest message read is older), or else, the first
-    /// time, until its first page lands or <see cref="FirstHistoryWait"/> has passed. Never past its reading's end.
+    /// Begins reading a conversation's history behind the listings, unless it has none left, is being read, or failed a
+    /// moment ago; the listing that begins it waits for it a moment (<see cref="FirstHistoryWait"/>), so a short history is
+    /// whole in that listing. The rest lands behind it, the folders that show it listed afresh.
     /// </summary>
-    private async Task HistoryAsync(Conversation store, DateTimeOffset? past, CancellationToken ct)
+    private async Task HistoryAsync(Conversation store, CancellationToken ct)
     {
-        BeginHistory(store);
+        if (!BeginHistory(store))
+        {
+            return;
+        }
+
         var deadline = DateTimeOffset.UtcNow + FirstHistoryWait;
         while (true)
         {
             Task landed;
             lock (store.Gate)
             {
-                var some = store.NewestFrom is { } from && store.Oldest is { } oldest && oldest < from;
-                if (store.Next is null || store.Failed || store.Reading.IsCompleted
-                    || (past is { } before ? store.Oldest is { } read && read < before : some))
+                if (store.Next is null || store.Failed)
                 {
                     return;
                 }
@@ -363,14 +315,14 @@ public sealed partial class TeamsSource
             }
 
             var left = deadline - DateTimeOffset.UtcNow;
-            if (past is null && left <= TimeSpan.Zero)
+            if (left <= TimeSpan.Zero)
             {
                 return;
             }
 
             try
             {
-                await (past is null ? landed.WaitAsync(left, ct) : landed.WaitAsync(ct)).ConfigureAwait(false);
+                await landed.WaitAsync(left, ct).ConfigureAwait(false);
             }
             catch (TimeoutException)
             {
@@ -379,78 +331,119 @@ public sealed partial class TeamsSource
         }
     }
 
-    private void BeginHistory(Conversation store)
+    /// <summary>Begins reading a conversation's history behind the listings, unless it has none left, is being read, failed a moment ago or the source is stopping: whether it began it.</summary>
+    private bool BeginHistory(Conversation store)
     {
         lock (store.Gate)
         {
             if (store.Next is null || !store.Reading.IsCompleted || DateTimeOffset.UtcNow < store.RetryAfter || _stopping.IsCancellationRequested)
             {
-                return;
+                return false;
             }
 
             store.HistoryBegun = true;
             store.Failed = false;
             var stopping = _stopping.Token;
             store.Reading = Task.Run(() => ReadHistoryAsync(store, stopping), CancellationToken.None);
+            return true;
         }
     }
 
     /// <summary>
-    /// Reads a conversation's history, a page at a time back from where its reading stopped, to its start or the window;
-    /// listing afresh the folders that show it every few pages and at the end. A failure keeps what was read; the rest is
-    /// read when its earlier folder is next opened.
+    /// For a path a listing from before named (a kept listing, after a restart) that is not among what is read yet: waits
+    /// until its conversation's history is read past <paramref name="before"/> (the time its name gives), or else to its end;
+    /// whether more was read meanwhile (the path is then worth finding again).
+    /// </summary>
+    private async Task<bool> HistoryPastAsync(string threadId, DateTimeOffset? before, CancellationToken ct)
+    {
+        if (!_conversations.TryGetValue(threadId, out var store))
+        {
+            return false;
+        }
+
+        BeginHistory(store);
+        var waited = false;
+        while (true)
+        {
+            Task landed;
+            lock (store.Gate)
+            {
+                if (store.Next is null || store.Failed || store.Reading.IsCompleted || (before is { } time && store.Oldest is { } oldest && oldest < time))
+                {
+                    return waited;
+                }
+
+                landed = store.Landed.Task;
+            }
+
+            await landed.WaitAsync(ct).ConfigureAwait(false);
+            waited = true;
+        }
+    }
+
+    /// <summary>
+    /// Reads a conversation's history, a page at a time back from where its reading stopped, to its start or the window, the
+    /// conversations being read taking turns a page each; the folders that show it listed afresh now and then (behind the
+    /// reading) and at the end. A failure keeps what was read; the rest is read when its folder is next listed, a minute on
+    /// at the soonest.
     /// </summary>
     private async Task ReadHistoryAsync(Conversation store, CancellationToken ct)
     {
+        var relisting = Task.CompletedTask;
+        var relisted = DateTimeOffset.UtcNow;
         try
         {
-            await _historyGate.WaitAsync(ct).ConfigureAwait(false);
-            try
+            while (true)
             {
-                for (var pages = 1; ; pages++)
+                string? link;
+                lock (store.Gate)
                 {
-                    string? link;
-                    lock (store.Gate)
-                    {
-                        link = store.Next;
-                    }
-
-                    if (link is null)
-                    {
-                        break;
-                    }
-
-                    var page = await Api.OlderAsync(link, ct).ConfigureAwait(false);
-                    var cutoff = Cutoff;
-                    lock (store.Gate)
-                    {
-                        // a message the newest read has stays as that read has it (an edit, a reaction since)
-                        foreach (var message in page.Messages)
-                        {
-                            store.Messages.TryAdd(message.Id, message);
-                        }
-
-                        var oldest = page.Messages.Select(m => m.Composed).Where(at => at is not null).Min();
-                        if (oldest is { } at && (store.Oldest is null || at < store.Oldest))
-                        {
-                            store.Oldest = at;
-                        }
-
-                        store.Next = page.Messages.Count == 0 || (cutoff is { } since && store.Oldest < since) ? null : page.OlderLink;
-                        store.Signal();
-                    }
-
-                    if (pages % RelistEveryPages == 0)
-                    {
-                        await RelistHistoryAsync(store.ThreadId, ct).ConfigureAwait(false);
-                    }
-
-                    LetGo(store);
+                    link = store.Next;
                 }
-            }
-            finally
-            {
-                _historyGate.Release();
+
+                if (link is null)
+                {
+                    break;
+                }
+
+                MessagePage page;
+                await _historyGate.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    page = await Api.OlderAsync(link, ct).ConfigureAwait(false);
+                }
+                finally
+                {
+                    _historyGate.Release();
+                }
+
+                await LearnNamesAsync(page.Messages, ct).ConfigureAwait(false);
+                var cutoff = Cutoff;
+                lock (store.Gate)
+                {
+                    // a message the newest read has stays as that read has it (an edit, a reaction since)
+                    foreach (var message in page.Messages)
+                    {
+                        store.Messages.TryAdd(message.Id, message);
+                    }
+
+                    var oldest = page.Messages.Select(m => m.Composed).Where(at => at is not null).Min();
+                    if (oldest is { } at && (store.Oldest is null || at < store.Oldest))
+                    {
+                        store.Oldest = at;
+                    }
+
+                    store.Next = page.Messages.Count == 0 || (cutoff is { } since && store.Oldest < since) ? null : page.OlderLink;
+                    store.Signal();
+                }
+
+                LetGo(store);
+                if (relisting.IsCompleted && DateTimeOffset.UtcNow - relisted >= RelistEvery)
+                {
+                    // behind the reading: a folder slow to build holds up no page
+                    relisted = DateTimeOffset.UtcNow;
+                    relisting = RelistHistoryAsync(store.ThreadId, ct);
+                }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -459,7 +452,7 @@ public sealed partial class TeamsSource
         }
         catch (Exception ex)
         {
-            Logger.LogInformation("teams: a conversation's earlier messages could not all be read ({Error}); what was read is shown, the rest is read when its earlier folder is next opened", ex.Message);
+            Logger.LogInformation("teams: a conversation's earlier messages could not all be read ({Error}); what was read is shown, the rest is read when its folder is next listed", ex.Message);
             lock (store.Gate)
             {
                 store.Failed = true;
@@ -475,12 +468,13 @@ public sealed partial class TeamsSource
         }
 
         // a refresh joins a listing already on its way, which may have begun before the end: then once more, begun after it
+        await relisting.ConfigureAwait(false);
         await RelistHistoryAsync(store.ThreadId, ct).ConfigureAwait(false);
         await RelistHistoryAsync(store.ThreadId, ct).ConfigureAwait(false);
     }
 
     /// <summary>Notes a folder that shows a conversation's history, by its path, to be listed afresh as the history lands.</summary>
-    private void ShowsHistory(TmFolder folder, string path)
+    private void ShowsHistory(TmNode folder, string path)
     {
         if (folder is IHistoryFolder shows)
         {
@@ -488,6 +482,7 @@ public sealed partial class TeamsSource
         }
     }
 
+    /// <summary>Lists afresh the folders that show a conversation's history: one gone since is no longer listed afresh, one that fails is next time.</summary>
     private async Task RelistHistoryAsync(string threadId, CancellationToken ct)
     {
         if (!_historyFolders.TryGetValue(threadId, out var folders))
@@ -501,18 +496,26 @@ public sealed partial class TeamsSource
             {
                 await Kept.Cache.RefreshAsync(path, ct).ConfigureAwait(false);
             }
-            catch (VfsException ex)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (VfsException ex) when (ex.Error is VfsError.NotFound or VfsError.NotADirectory)
             {
                 // gone since (renamed, or past the window): no longer listed afresh
                 Logger.LogDebug("teams: {Path} is no longer listed afresh ({Error})", path, ex.Message);
                 folders.TryRemove(path, out _);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug("teams: {Path} could not be listed afresh ({Error})", path, ex.Message);
             }
         }
     }
 
     /// <summary>
     /// While the conversations hold more than <see cref="KeptMessages"/> messages, the least used ones' histories are let go
-    /// (back to their newest messages; read again when their earlier folders are next opened).
+    /// (back to their newest messages; read again when their folders are next listed).
     /// </summary>
     private void LetGo(Conversation reading)
     {

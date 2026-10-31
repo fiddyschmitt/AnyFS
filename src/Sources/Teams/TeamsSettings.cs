@@ -105,11 +105,11 @@ public sealed class TeamsSettings
     public string SignInMethod { get; set; } = WebSession;
 
     [Setting("Channel messages", Order = 5,
-        Hint = "In each team's channels, a folder per conversation (the opening message and its replies) with the messages as Markdown and their files and images: those among the channel's latest 2,000 messages in posts, the earlier ones in posts\\earlier, a folder per month, read back to the channel's start when that folder is opened.")]
+        Hint = "In each team's channels, a posts folder: a folder per conversation (the opening message and its replies) with the messages as Markdown and their files and images, back to the channel's start. A busy channel's latest 2,000 messages are read when posts is opened and the rest behind it, its older conversations showing as they are read.")]
     public bool ChannelMessages { get; set; } = true;
 
     [Setting("Chats", Order = 6,
-        Hint = "Your 1:1, group and meeting chats, each a Markdown file: who is in it (guests, bots and other organisations' people marked), who started it and when, its pinned messages, then the conversation (its latest 2,000 messages; the earlier ones in its earlier folder, a folder per month, read back to the chat's start when that folder is opened), with its shared files and images.")]
+        Hint = "Your 1:1, group and meeting chats, each a Markdown file: who is in it (guests, bots and other organisations' people marked), who started it and when, its pinned messages, then the whole conversation back to its start, with its shared files and images. A long chat's latest 2,000 messages are read when it is opened and the rest behind it, its chat.md filling in as they are read.")]
     public bool Chats { get; set; } = true;
 
     [Setting("Files", Order = 7,
@@ -140,7 +140,7 @@ public sealed class TeamsSettings
     public string? BrowserPath { get; set; }
 
     [Setting("Conversations active in the last (days)", Advanced = true, Order = 13,
-        Hint = "Chats and channel posts whose last message is older than this are left out, and a conversation is read back no further than this, its earlier folder too (a busy account has thousands). 0 shows everything, back to each conversation's start.")]
+        Hint = "Chats and channel posts whose last message is older than this are left out, and a conversation is read back no further than this (a busy account has thousands). 0 shows everything, back to each conversation's start.")]
     public int WithinDays { get; set; }
 
     [Setting("Check for changes every (seconds)", Advanced = true, Order = 14,
