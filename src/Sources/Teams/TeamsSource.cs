@@ -1004,6 +1004,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             // the group sites read again: behind the answer when there is one, else at the next asking; and the folders that
             // failed for want of a token asked again when next listed
             _sitesRead = _sitesRead is { Sites: not null } read ? read with { At = DateTimeOffset.MinValue } : null;
+            _sharedRefused.Clear();
             Kept.Cache.ForgetFailures();
             await RelistAsync(ct).ConfigureAwait(false);
         }
@@ -1122,16 +1123,35 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         return (found.Select((f, i) => f.Make(names[i])).ToList(), new AttachmentNames(images, files));
     }
 
-    /// <summary>A shared file as SharePoint or OneDrive has it now; null when it is gone or out of reach (it is left out, not failed on).</summary>
+    // the shared files SharePoint or OneDrive would not give, by address, each with until when it is left out without being
+    // asked for again: a refusal (the account cannot open it) for a walk interval, a service not reached for the refresh
+    // interval. A search over the tree (FileLocator Pro's) lists a conversation's attachments pass after pass, and each
+    // refused file cost it a request a pass (at work, five of them a second or so each)
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _sharedRefused = new(StringComparer.Ordinal);
+
+    /// <summary>A shared file as SharePoint or OneDrive has it now; null when it is gone or out of reach (it is left out, not failed on, and not asked for again for a while).</summary>
     private async Task<DriveEntry?> SharedAsync((string SiteUrl, string Path) where, string url, CancellationToken ct)
     {
+        var key = $"shared:{where.SiteUrl}/{where.Path}";
+        if (_sharedRefused.TryGetValue(key, out var until) && DateTimeOffset.UtcNow < until)
+        {
+            return null;
+        }
+
         try
         {
-            return await Cache.GetAsync($"shared:{where.SiteUrl}/{where.Path}", _settings.Refresh, async c => new[] { await Api.FileAsync(where.SiteUrl, where.Path, url, c).ConfigureAwait(false) }, ct).ConfigureAwait(false) is [var entry] ? entry : null;
+            return await Cache.GetAsync(key, _settings.Refresh, async c => new[] { await Api.FileAsync(where.SiteUrl, where.Path, url, c).ConfigureAwait(false) }, ct).ConfigureAwait(false) is [var entry] ? entry : null;
         }
         catch (VfsException ex) when (ex.Error is VfsError.AccessDenied or VfsError.Unavailable or VfsError.IoError)
         {
-            Logger.LogInformation("teams: a shared file could not be read and is left out ({Error})", ex.Message);
+            var span = ex.Error != VfsError.Unavailable && _settings.WalkEvery > TimeSpan.Zero ? _settings.WalkEvery : _settings.Refresh;
+            if (_sharedRefused.Count >= 100_000)
+            {
+                _sharedRefused.Clear();
+            }
+
+            _sharedRefused[key] = DateTimeOffset.UtcNow + span;
+            Logger.LogInformation("teams: a shared file could not be read and is left out ({Error}); not asked for again for {Minutes:F0} min", ex.Message, span.TotalMinutes);
             return null;
         }
     }

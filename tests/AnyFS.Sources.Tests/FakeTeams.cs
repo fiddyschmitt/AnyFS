@@ -365,9 +365,17 @@ internal sealed class FakeTeams : ITeamsApi
         return Task.FromResult<IReadOnlyList<DriveEntry>>(entries.Values.OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList());
     }
 
+    /// <summary>The files (<c>site|path</c>) that refuse the account (a 403), as one shared from a OneDrive the account may not open does.</summary>
+    public HashSet<string> RefusedFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     public Task<DriveEntry?> FileAsync(string siteUrl, string path, string? url, CancellationToken ct)
     {
         SharePoint();
+        if (RefusedFiles.Contains($"{siteUrl}|{path}"))
+        {
+            throw VfsException.AccessDenied($"Teams (fake) answered 403 for {path}");
+        }
+
         if (url is not null && !SharePointReady)
         {
             lock (SharedUrlsAsked)

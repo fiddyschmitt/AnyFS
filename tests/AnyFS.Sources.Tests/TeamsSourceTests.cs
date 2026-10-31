@@ -221,6 +221,36 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task ASharedFileThatRefusesTheAccountIsAskedForOnceAWalkInterval()
+    {
+        // a file shared from a OneDrive the account may not open (a 403; five of them a pass at work): left out, and not
+        // asked for again while a search lists the conversation pass after pass
+        const string Mine = "https://contoso-my.sharepoint.com/personal/jane_contoso_com";
+        var fake = new FakeTeams();
+        fake.AddPerson(Jane, "Jane Doe");
+        var chat = fake.AddChat(ChatKind.OneOnOne, null, [Jane], When);
+        fake.AddLibraryFile(Mine, "open.docx", Encoding.UTF8.GetBytes("open"), When);
+        fake.AddLibraryFile(Mine, "closed.docx", Encoding.UTF8.GetBytes("closed"), When);
+        fake.RefusedFiles.Add($"{Mine}|closed.docx");
+        fake.Post(chat.Id, Jane, "Jane Doe", "<p>Two files</p>", When, files:
+        [
+            new SharedFile("open.docx", $"{Mine}/Documents/open.docx", null),
+            new SharedFile("closed.docx", $"{Mine}/Documents/closed.docx", null),
+        ]);
+        await using var source = await StartAsync(fake);
+
+        CollectionAssert.AreEqual(new[] { "open.docx" }, await NamesAsync(source, "Chats/Jane Doe/attachments"));
+        var asked = fake.SharePointCalls;
+        for (var pass = 0; pass < 3; pass++)
+        {
+            await source.Listings.RefreshAsync("Chats/Jane Doe", CancellationToken.None);
+            CollectionAssert.AreEqual(new[] { "open.docx" }, await NamesAsync(source, "Chats/Jane Doe/attachments"));
+        }
+
+        Assert.AreEqual(asked, fake.SharePointCalls, "the refused file is not asked for again (the other is kept for the refresh interval)");
+    }
+
+    [TestMethod]
     public async Task AllGroupsMdHasEveryGroupAndGroupsMdTheAccountsWithTheirDetails()
     {
         var fake = new FakeTeams();
