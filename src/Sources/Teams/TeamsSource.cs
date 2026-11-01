@@ -29,7 +29,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     // open still finds the one the stat saw)
     private readonly ConcurrentDictionary<string, (byte[] Latest, byte[]? Previous)> _served = new(StringComparer.OrdinalIgnoreCase);
     private ITeamsApi? _api;
-    private TeamsCache? _cache;
+    private RequestCache? _cache;
     private KeptListings? _kept;
     private RootFolder? _root;
     private bool _degraded;
@@ -57,7 +57,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     internal ITeamsApi Api => _api ?? throw VfsException.Unavailable("Teams is not signed in to yet");
 
-    private TeamsCache Cache => _cache ?? throw VfsException.Unavailable("Teams is not signed in to yet");
+    private RequestCache Cache => _cache ?? throw VfsException.Unavailable("Teams is not signed in to yet");
 
     private KeptListings Kept => _kept ?? throw VfsException.Unavailable("Teams is not signed in to yet");
 
@@ -65,7 +65,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     {
         _cloud = _settings.ChosenCloud ?? TeamsCloud.Global;
         _api = _standIn?.Api ?? await SignInAsync(ct).ConfigureAwait(false);
-        _cache = new TeamsCache(_stopping.Token);
+        _cache = new RequestCache(_stopping.Token);
         _root = new RootFolder();
 
         // the walks take half the requests, so whoever browses meanwhile has the other half

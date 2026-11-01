@@ -655,7 +655,7 @@ public class TeamsSourceTests
     [TestMethod]
     public async Task AskersAtOnceFetchAThingOnce()
     {
-        var cache = new TeamsCache(CancellationToken.None);
+        var cache = new AnyFS.Sources.Common.RequestCache(CancellationToken.None);
         var calls = 0;
         async Task<string> FetchAsync(CancellationToken c)
         {

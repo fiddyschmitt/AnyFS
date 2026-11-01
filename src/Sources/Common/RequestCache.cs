@@ -1,17 +1,19 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 
-namespace AnyFS.Sources.Teams;
+namespace AnyFS.Sources.Common;
 
 /// <summary>
-/// What the source has asked the Teams services, kept for a while (spec 7.9): one request for a thing however many ask
-/// for it at once; a thing kept until it is older than the refresh interval (null: for the session). A failure is not
-/// kept, so the next asking tries again. An entry's fetch starts only once that entry is the one kept: two askers racing
-/// to replace a stale entry do not both go upstream.
+/// What a source has asked its service, kept for a while (GitLab, Teams, Jira, Confluence): one request for a thing however
+/// many ask for it at once; a thing kept until it is older than the time it was asked with (null: for the session); a
+/// failure not kept, so the next asking tries again. An entry's fetch starts only once that entry is the one kept: two
+/// askers racing to replace a stale entry (or to add a missing one) do not both go upstream, and the loser's request is
+/// never left unobserved. Bounded: past <see cref="MaxEntries"/> the oldest fifth go.
 /// </summary>
-internal sealed class TeamsCache(CancellationToken stopping)
+/// <param name="stopping">The source's own: a request shared by several askers is not cancelled by one of them giving up.</param>
+public sealed class RequestCache(CancellationToken stopping)
 {
-    private const int MaxEntries = 20_000;
+    public const int MaxEntries = 20_000;
 
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
 
@@ -26,6 +28,7 @@ internal sealed class TeamsCache(CancellationToken stopping)
         public TimeSpan? Ttl { get; } = ttl;
     }
 
+    /// <summary>The kept <typeparamref name="T"/> for <paramref name="key"/> while it is younger than <paramref name="ttl"/> (null: for good), else fetched.</summary>
     public async Task<T> GetAsync<T>(string key, TimeSpan? ttl, Func<CancellationToken, Task<T>> fetch, CancellationToken ct)
         where T : class
     {
@@ -62,6 +65,7 @@ internal sealed class TeamsCache(CancellationToken stopping)
         }
     }
 
+    /// <summary>Forgets <paramref name="key"/>: the next asking fetches it.</summary>
     public void Forget(string key) => _entries.TryRemove(key, out _);
 
     private static bool Usable(Entry entry)
@@ -88,9 +92,5 @@ internal sealed class TeamsCache(CancellationToken stopping)
     }
 }
 
-/// <summary>
-/// The seam that gives a source its <see cref="ITeamsApi"/> in tests: the fake's, in place of the live web session; with
-/// how far back a conversation's newest read goes and how many messages a page holds, so a test's few messages have a
-/// history.
-/// </summary>
-internal sealed record TeamsStandIn(ITeamsApi Api, int NewestMessages = 2_000, int PageSize = 200);
+/// <summary>A value kept in a <see cref="RequestCache"/>, which keeps only references: a struct, or a null for a thing that is not there.</summary>
+public sealed record Box<T>(T Value);

@@ -25,7 +25,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     private readonly CancellationTokenSource _stopping = new();
     private GitLabSession? _session;
     private GitLabApi? _api;
-    private Listings? _listings;
+    private RequestCache? _listings;
     private TreeStore? _trees;
     private KeptListings? _kept;
     private SpoolCache? _spool;
@@ -57,7 +57,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     /// <summary>The session (for tests).</summary>
     internal GitLabSession Session => _session ?? throw new InvalidOperationException("the source has not started");
 
-    internal Listings Cache => _listings ?? throw VfsException.Unavailable("GitLab is not signed in to yet");
+    internal RequestCache Cache => _listings ?? throw VfsException.Unavailable("GitLab is not signed in to yet");
 
     internal SpoolCache Spool => _spool ?? throw VfsException.Unavailable("GitLab is not signed in to yet");
 
@@ -72,7 +72,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         _session = new GitLabSession(_settings, Logger, _standIn, Context.Secrets);
         await _session.SignInAsync(interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
         _api = new GitLabApi(_session, _settings.Concurrency, Logger);
-        _listings = new Listings(_stopping.Token);
+        _listings = new RequestCache(_stopping.Token);
         _trees = new TreeStore(Path.Combine(Context.StateDirectory, TreeStore.FileName), Logger);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
@@ -611,9 +611,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         await base.DisposeAsync().ConfigureAwait(false);
     }
 }
-
-/// <summary>A value kept in <see cref="Listings"/>, which keeps only references.</summary>
-internal sealed record Box<T>(T Value);
 
 /// <summary>A group's subgroups and its own projects.</summary>
 internal sealed record GroupContents(List<GlGroup> Subgroups, List<GlProject> Projects);
