@@ -5,6 +5,7 @@ using AnyFS.Mounts.Http;
 using AnyFS.Mounts.Smb;
 using AnyFS.Mounts.WebDav;
 using AnyFS.Mounts.WinFsp;
+using AnyFS.Sources.Atlassian.Jira;
 using AnyFS.Sources.GitLab;
 using AnyFS.Sources.Mirror;
 using AnyFS.Sources.Outlook;
@@ -28,6 +29,7 @@ public static class BuiltIns
         registry.AddBuiltIn(new OutlookPlugin());
         registry.AddBuiltIn(new GitLabPlugin());
         registry.AddBuiltIn(new TeamsPlugin());
+        registry.AddBuiltIn(new JiraPlugin());
         registry.AddBuiltIn(new WinFspMountProvider());
         registry.AddBuiltIn(new FuseMountProvider());
         registry.AddBuiltIn(new SmbMountProvider());

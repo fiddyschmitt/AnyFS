@@ -31,6 +31,9 @@
     <Project Path="src/Mounts/WinFsp/AnyFS.Mounts.WinFsp.csproj" />
   </Folder>
   <Folder Name="/src/Sources/" />
+  <Folder Name="/src/Sources/Atlassian/">
+    <Project Path="src/Sources/Atlassian/AnyFS.Sources.Atlassian.csproj" />
+  </Folder>
   <Folder Name="/src/Sources/Common/">
     <Project Path="src/Sources/Common/AnyFS.Sources.Common.csproj" />
   </Folder>
