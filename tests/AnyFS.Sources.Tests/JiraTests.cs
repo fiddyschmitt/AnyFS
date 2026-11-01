@@ -188,6 +188,17 @@ public class JiraTests
         Assert.AreEqual(JiraScopeKind.Project, source.Scope.Kind);
     }
 
+    [TestMethod]
+    public async Task AConfluenceServerIsNamedForWhatItIs()
+    {
+        var confluence = new FakeConfluence("https://jira.fake.test", "/jira");
+        confluence.AddAccount("tester", "Test Er", JiraSeed.Token);
+        var source = new JiraSource(new JiraSettings { Address = confluence.Server, AccessToken = JiraSeed.Token }, confluence.StandIn());
+        var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => source.InitialiseAsync(new TestSourceContext(), CancellationToken.None));
+        StringAssert.Contains(ex.Message, "is Confluence, not Jira");
+        await source.DisposeAsync();
+    }
+
     // --- signing in ----------------------------------------------------------------------------------------------------
 
     [TestMethod]

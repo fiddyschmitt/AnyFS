@@ -23,6 +23,7 @@
   <ItemGroup>
     <!-- the types' icons (OpenIcon): own marks in each product's blue, drawn for AnyFS (Atlassian's logos are trademarks) -->
     <EmbeddedResource Include="Assets\jira.png" LogicalName="jira.png" />
+    <EmbeddedResource Include="Assets\confluence.png" LogicalName="confluence.png" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
