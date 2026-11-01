@@ -7,6 +7,7 @@
 #   role: upstream     upstream.yml   sshd for the SSHFS source, the Samba share of the fixture tree
 #   role: host         host.yml       fuse3 for the FUSE mount
 #   role: gitlab       gitlab.yml     GitLab and a runner in Docker, the domain's Kerberos and LDAP, the seed
+#   role: atlassian    atlassian.yml  Jira Software and Confluence Data Center in Docker, their setup, the seed
 #
 # Inputs:
 #   settings.yml (vars_files)   the lab: machines, accounts, paths
@@ -43,6 +44,10 @@
     - name: The GitLab server
       ansible.builtin.import_tasks: tasks/gitlab.yml
       when: machine.role == 'gitlab'
+
+    - name: The Atlassian server
+      ansible.builtin.import_tasks: tasks/atlassian.yml
+      when: machine.role == 'atlassian'
 
   handlers:
     - name: systemctl daemon-reload

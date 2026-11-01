@@ -1,0 +1,143 @@
+---
+# The Atlassian server (provisioning/atlassian/README.md): Jira Software and Confluence Data Center in Docker, one
+# PostgreSQL between them; their setup with the Data Center developer licences from provisioning/atlassian/licences/
+# (git ignores that folder; a licence names the organisation that holds it, so nothing here prints one); then the seed:
+# what the Jira and Confluence sources' tests read.
+
+- name: Docker, and the tools the setup and the seed use
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose
+      - curl
+      - jq
+    state: present
+
+- name: Docker runs at boot
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: The servers' folders
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: /srv/atlassian, mode: "0755" }
+    - { path: /srv/atlassian/run, mode: "0700" }
+    - { path: /srv/atlassian/initdb, mode: "0755" }
+    - { path: /srv/atlassian/postgres, mode: "0700" }
+    - { path: /srv/atlassian/jira, mode: "0755" }
+    - { path: /srv/atlassian/confluence, mode: "0755" }
+    - { path: /opt/anyfs, mode: "0755" }
+
+# PostgreSQL's entrypoint reads its password file and the init script as root and again as its own user (999)
+- name: PostgreSQL's password, its user's to read
+  ansible.builtin.copy:
+    dest: /srv/atlassian/run/postgres-password
+    content: "{{ atlassian.database_password }}"
+    owner: "999"
+    mode: "0600"
+  no_log: true
+
+- name: The products' databases and roles, made on PostgreSQL's first start
+  ansible.builtin.template:
+    src: atlassian-initdb.sql.j2
+    dest: /srv/atlassian/initdb/10-atlassian.sql
+    owner: "999"
+    mode: "0600"
+  no_log: true
+
+- name: Each product's database password, for Docker to hand it (root's only)
+  ansible.builtin.copy:
+    dest: "/srv/atlassian/run/{{ item }}.env"
+    content: "ATL_JDBC_PASSWORD={{ atlassian.database_password }}\n"
+    mode: "0600"
+  loop:
+    - jira
+    - confluence
+  no_log: true
+
+- name: What the setup, the seed and the smoke test read (root's only)
+  ansible.builtin.template:
+    src: atlassian-lab.env.j2
+    dest: /root/.atlassian-lab.env
+    mode: "0600"
+  no_log: true
+
+- name: The setup and the seed
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "/opt/anyfs/{{ item }}"
+    mode: "0755"
+  loop:
+    - atlassian-setup.sh
+    - atlassian-seed.sh
+
+- name: Jira, Confluence and PostgreSQL, as Docker Compose runs them
+  ansible.builtin.template:
+    src: atlassian-compose.yml.j2
+    dest: /srv/atlassian/docker-compose.yml
+    mode: "0644"
+
+- name: Jira, Confluence and PostgreSQL running
+  ansible.builtin.command: docker compose -f /srv/atlassian/docker-compose.yml up -d
+  register: compose_up
+  changed_when: "'Started' in compose_up.stderr or 'Created' in compose_up.stderr or 'Recreated' in compose_up.stderr"
+
+- name: Jira and Confluence answer (a first start takes some minutes)
+  ansible.builtin.shell: >-
+    curl -s -m 10 http://127.0.0.1:{{ item.port }}{{ item.context_path }}/status | jq -r .state
+  register: atl_state
+  until: atl_state.stdout in ['FIRST_RUN', 'RUNNING']
+  retries: 90
+  delay: 10
+  changed_when: false
+  loop:
+    - "{{ atlassian.jira }}"
+    - "{{ atlassian.confluence }}"
+  loop_control:
+    label: "{{ item.context_path }}"
+
+# The servers run without their licences; only the setup needs them. The setup reads the keys where the PC keeps them
+# (the shared folder: no copy is made in the VM) and offers each product every key, so a key's file name does not matter.
+# With no key at all the play stops here, the servers up and waiting at their setup pages.
+- name: The licence keys in provisioning/atlassian/licences (any .lic or .txt file)
+  ansible.builtin.find:
+    paths: /vagrant/atlassian/licences
+    patterns:
+      - "*.lic"
+      - "*.txt"
+    size: "100"
+  register: licences
+
+- name: Without one, stop here and say where it goes
+  ansible.builtin.fail:
+    msg: >-
+      There is no licence key in provisioning/atlassian/licences/. Save each Data Center developer licence key there as
+      a text file whose name ends .lic or .txt (provisioning/atlassian/README.md), then run `vagrant provision
+      anyfs-atl-1`.
+  when: licences.matched == 0
+
+# The setup wizards, answered over HTTP: whatever is set up already is left as it is, and a product that none of the
+# keys fits waits for one (the setup says so). It prints status lines only (a wizard's page can echo a key back).
+- name: Jira and Confluence set up (the licences, the administrator, the base address)
+  ansible.builtin.command: /opt/anyfs/atlassian-setup.sh /root/.atlassian-lab.env
+  register: atl_setup
+  changed_when: "'something changed' in atl_setup.stdout"
+
+- name: The setup's lines
+  ansible.builtin.debug:
+    var: atl_setup.stdout_lines
+
+- name: The seed (accounts, the tester's tokens, projects and issues, spaces and pages)
+  ansible.builtin.command: /opt/anyfs/atlassian-seed.sh /root/.atlassian-lab.env
+  register: atl_seed
+  changed_when: "'made' in (atl_seed.stdout + atl_seed.stderr)"
+
+# the functions that print an id say what they made on stderr
+- name: The seed's lines
+  ansible.builtin.debug:
+    msg: "{{ atl_seed.stdout_lines + atl_seed.stderr_lines }}"

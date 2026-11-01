@@ -507,6 +507,10 @@ anyfs.*.log
 provisioning/publish/
 provisioning/.vagrant/
 provisioning/macos/tart-*.log
+# the Atlassian lab's Data Center licence keys (each names the organisation that holds the licence) and the tokens its
+# seed makes: never committed (provisioning/atlassian/README.md)
+provisioning/atlassian/licences/
+provisioning/atlassian/secrets/
 
 # the Visual Studio template above ignores *.e2e, which would swallow the end-to-end test projects
 !tests/AnyFS.E2E/

@@ -1,0 +1,64 @@
+# Written by the AnyFS lab's playbook: Jira Software and Confluence Data Center on one PostgreSQL.
+# `docker compose -f /srv/atlassian/docker-compose.yml ...`
+services:
+  postgres:
+    image: {{ atlassian.postgres_image }}
+    container_name: atl-postgres
+    restart: always
+    environment:
+      POSTGRES_PASSWORD_FILE: /run/atl/postgres-password
+    volumes:
+      - /srv/atlassian/postgres:/var/lib/postgresql/data
+      - /srv/atlassian/initdb:/docker-entrypoint-initdb.d:ro
+      - /srv/atlassian/run/postgres-password:/run/atl/postgres-password:ro
+    networks:
+      - lab
+
+  jira:
+    image: {{ atlassian.jira.image }}
+    container_name: jira
+    restart: always
+    depends_on:
+      - postgres
+    ports:
+      - "{{ atlassian.jira.port }}:8080"
+    environment:
+      ATL_JDBC_URL: jdbc:postgresql://postgres:5432/jiradb
+      ATL_JDBC_USER: jira
+      ATL_DB_DRIVER: org.postgresql.Driver
+      ATL_DB_TYPE: postgres72
+      ATL_DB_SCHEMA_NAME: public
+      ATL_TOMCAT_CONTEXTPATH: {{ atlassian.jira.context_path }}
+      JVM_MINIMUM_MEMORY: 1024m
+      JVM_MAXIMUM_MEMORY: {{ atlassian.jira.heap_mb }}m
+    env_file:
+      - /srv/atlassian/run/jira.env
+    volumes:
+      - /srv/atlassian/jira:/var/atlassian/application-data/jira
+    networks:
+      - lab
+
+  confluence:
+    image: {{ atlassian.confluence.image }}
+    container_name: confluence
+    restart: always
+    depends_on:
+      - postgres
+    ports:
+      - "{{ atlassian.confluence.port }}:8090"
+    environment:
+      ATL_JDBC_URL: jdbc:postgresql://postgres:5432/confluencedb
+      ATL_JDBC_USER: confluence
+      ATL_DB_TYPE: postgresql
+      ATL_TOMCAT_CONTEXTPATH: {{ atlassian.confluence.context_path }}
+      JVM_MINIMUM_MEMORY: 1024m
+      JVM_MAXIMUM_MEMORY: {{ atlassian.confluence.heap_mb }}m
+    env_file:
+      - /srv/atlassian/run/confluence.env
+    volumes:
+      - /srv/atlassian/confluence:/var/atlassian/application-data/confluence
+    networks:
+      - lab
+
+networks:
+  lab: {}

@@ -80,4 +80,38 @@ kerberos_sign_in() {
 }
 check "a Kerberos ticket for $TESTER_USER@$REALM signs in to GitLab" kerberos_sign_in
 {% endif %}
+{% if machine.role == 'atlassian' %}
+
+# the lab's values (URLs, accounts): root's only, read without a shell parsing them
+while IFS='=' read -r key value; do
+    [[ -z "$key" || "$key" == \#* ]] && continue
+    export "$key=$value"
+done < /root/.atlassian-lab.env
+# after a boot both products take minutes to start: give them ten (FIRST_RUN is a product not set up yet)
+atl_state() { curl -s -m 5 "$1/status" | jq -r .state 2>/dev/null; }
+for _ in $(seq 1 120); do
+    case "$(atl_state "$JIRA_URL") $(atl_state "$CONFLUENCE_URL")" in
+        "RUNNING RUNNING" | "RUNNING FIRST_RUN" | "FIRST_RUN RUNNING" | "FIRST_RUN FIRST_RUN") break ;;
+    esac
+    sleep 5
+done
+check "service docker" systemctl is-active --quiet docker
+for container in atl-postgres jira confluence; do
+    check "the $container container is running" bash -c "[ \"\$(docker inspect --format '{% raw %}{{.State.Running}}{% endraw %}' $container)\" = true ]"
+done
+if [ "$(atl_state "$JIRA_URL")" = FIRST_RUN ]; then
+    warn "Jira waits for its setup at $JIRA_URL: no key it takes in provisioning/atlassian/licences yet (then vagrant provision)"
+else
+    check "Jira is running at $JIRA_URL" bash -c '[ "$(curl -s -m 10 "$JIRA_URL/status" | jq -r .state)" = RUNNING ]'
+    check "the tester's Jira token reads the API as $TESTER_USER" bash -c '[ "$(curl -s -H "Authorization: Bearer $(cat "$SECRETS/jira-tester.token")" "$JIRA_URL/rest/api/2/myself" | jq -r .name)" = "$TESTER_USER" ]'
+    check "the tester browses ANYFS, OPS and BULK but not HIDDEN" bash -c '[ "$(curl -s -H "Authorization: Bearer $(cat "$SECRETS/jira-tester.token")" "$JIRA_URL/rest/api/2/project" | jq -r "[.[].key] | sort | join(\",\")")" = "ANYFS,BULK,OPS" ]'
+fi
+if [ "$(atl_state "$CONFLUENCE_URL")" = FIRST_RUN ]; then
+    warn "Confluence waits for its setup at $CONFLUENCE_URL: no key it takes in provisioning/atlassian/licences yet (then vagrant provision)"
+else
+    check "Confluence is running at $CONFLUENCE_URL" bash -c '[ "$(curl -s -m 10 "$CONFLUENCE_URL/status" | jq -r .state)" = RUNNING ]'
+    check "the tester's Confluence token reads the API as $TESTER_USER" bash -c '[ "$(curl -s -H "Authorization: Bearer $(cat "$SECRETS/confluence-tester.token")" "$CONFLUENCE_URL/rest/api/user/current" | jq -r .username)" = "$TESTER_USER" ]'
+    check "the tester reads the space ANYFS" bash -c '[ "$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $(cat "$SECRETS/confluence-tester.token")" "$CONFLUENCE_URL/rest/api/space/ANYFS")" = 200 ]'
+fi
+{% endif %}
 exit $fail

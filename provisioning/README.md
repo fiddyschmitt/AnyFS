@@ -17,6 +17,7 @@ two OSes' machines reach each host's mounts, so each OS is tested as a client of
 | `anyfs-sp-2` | SQL Server 2022 Developer + SharePoint Server 2019, a second one-server farm in the same domain, for the older on-premises API (off by default) | Windows Server 2019 (evaluation) | 192.168.0.90 | VirtualBox, this PC | `windows/sp-provision.ps1`, `windows/sp-farm-configuration.ps1` |
 | `anyfs-ex-1` | Exchange Server Subscription Edition, one Mailbox server in the same domain, which the Outlook source's on-premises store reads from (off by default) | Windows Server 2022 (evaluation) | 192.168.0.89 | VirtualBox, this PC | `windows/ex-provision.ps1`, `windows/ex-configure.ps1` |
 | `anyfs-gitlab-1` | GitLab Enterprise Edition (no licence: the Free tier) and a runner in Docker, signing in through the same domain (LDAP, Kerberos), which the GitLab source reads from (off by default) | Debian 13 | 192.168.0.85 | VirtualBox, this PC | `ansible/tasks/gitlab.yml` |
+| `anyfs-atl-1` | Jira Software and Confluence Data Center in Docker on one PostgreSQL, set up with Data Center developer licences the repository never holds ([atlassian/README.md](atlassian/README.md)), which the Jira and Confluence sources read from (off by default) | Debian 13 | 192.168.0.78 | VirtualBox, this PC | `ansible/tasks/atlassian.yml` |
 | this PC | runs the tests; publishes the builds and shares them into the VMs | Windows 11 | 192.168.0.31 | | |
 
 The domain controller, the two farms, the Exchange server and the GitLab server are not mount hosts and `vagrant up`

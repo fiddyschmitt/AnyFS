@@ -8,6 +8,7 @@
 #   * mac.ps1, macos/        -> `mac:` (the macOS VM, which runs on the Mac mini)
 #   * tests/AnyFS.TestLab    -> every machine's role, address and login (Lab.cs, for the E2E tests)
 #   * the GitLab server      -> `gitlab:` (ansible/tasks/gitlab.yml: its image, tokens and Kerberos service account)
+#   * the Atlassian server   -> `atlassian:` (ansible/tasks/atlassian.yml: its images, ports, accounts; never its licences)
 #
 # After changing a value:
 #   memory_mb / cpus / ip    ->  vagrant reload --provision <name>
@@ -159,6 +160,19 @@ machines:
     memory_mb: 8192                  # GitLab's docs: 8 GB will do for a small instance, with Puma and Sidekiq turned down
     cpus: 4
 
+  # The Atlassian server: Jira Software and Confluence Data Center in Docker on Debian, one PostgreSQL between them, no
+  # domain (each product's own users). `vagrant up anyfs-atl-1` builds it once a licence key is in place
+  # (provisioning/atlassian/README.md). It is what the Jira and Confluence sources read from. Off by default.
+  - name: anyfs-atl-1
+    os: linux
+    role: atlassian
+    autostart: false
+    ip: 192.168.0.78
+    box: bento/debian-13
+    box_version: "202510.26.0"
+    memory_mb: 12288                 # two JVMs of 2 GB, Confluence's collaborative-editing process, PostgreSQL
+    cpus: 4
+
 linux:
   # On the upstream machine: the fixture tree the tests generate there (tests/fixtures/MakeTree), which
   # Samba shares as [fixture] and the SSHFS source serves over sshd.
@@ -214,6 +228,27 @@ gitlab:
   root_token: "anyfs-lab-dTk4MRYqrMGNmsLTMH3CCij6"       # root's personal access token (api, sudo): the seed's
   service_account: { user: svc_gitlab, password: "hpMU9rwAWF-Dgtdd4SaoK" }   # GitLab's LDAP bind; the Kerberos service principal maps to it
   tester_token: "anyfs-lab-xMTJaKGp3buxS6dWaA4kDmnM"   # the tester's personal access token (read_api, read_repository): the token sign-in's tests
+
+# The Atlassian server (the machine with role atlassian): Jira Software and Confluence Data Center, each at a context path
+# of its own port (the sources find an installation below the host). Their Data Center developer licences are NOT here:
+# a licence key names the organisation that holds it, so each lives in a file under provisioning/atlassian/licences/
+# (any *.lic or *.txt), which git ignores, and is never printed. The tester's personal access tokens, which the
+# servers make, go to provisioning/atlassian/secrets/ (ignored too). Throwaway values for this lab only.
+atlassian:
+  postgres_image: "postgres:16.15"            # 16: Jira 10.3 supports it from 10.3.7, Confluence 9.2 too (17 is newer than both)
+  jira:
+    image: "atlassian/jira-software:10.3.26"        # pinned: the 10.3 long-term-support release
+    port: 8080
+    context_path: /jira
+    heap_mb: 2048
+  confluence:
+    image: "atlassian/confluence:9.2.26"            # pinned: the 9.2 long-term-support release
+    port: 8090
+    context_path: /confluence
+    heap_mb: 2048
+  database_password: "aEMa9v-GQmckHvuBi4uf3"
+  admin: { user: atl_admin, password: "yFWK7r-jpqmRiwmPvFdEN" }    # both products' administrator: the setup's and the seed's
+  tester: { user: atl_user, password: "RPKMYj-CmPoSAA4ijLskP" }   # the tester, an ordinary user of both
 
 # The Mac mini runs the macOS test VM (tart, on Apple's Virtualization framework); only a Mac can.
 # Vagrant runs there for it, with the vagrant-tart provider. mac.ps1 drives it from this PC: it copies

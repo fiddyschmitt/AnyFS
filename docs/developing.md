@@ -151,6 +151,23 @@ image, files in the channel's folder, and the same in the tester's first chat; a
 is hidden in Teams; the source lists it in `Chats` with the others. Teams is cloud only, so there is no lab machine or
 E2E row for it.
 
+The Jira and Confluence sources' unit tests run against `tests/AnyFS.Sources.Tests/FakeJira.cs` and `FakeConfluence.cs`,
+in-process stand-ins for Data Center servers at a context path that share `FakeAtlassian.cs`: the accounts and their
+sign-ins (a personal access token, the two-step verification login of Jira 10.2+ and Confluence 9.1+, Seraph's older
+login form, Basic authentication where `BasicAllowed`), the application links manifest that names the product, 401 for
+a REST call without a sign-in (or the anonymous user's answer where `Anonymous`), `X-AUSERNAME`, and 429 when told
+(`ThrottleNext`). `FakeJira` holds projects (visible to everyone or to some accounts), issues with fields, rendered text,
+comments and attachments, filters and boards, and answers the JQL the source writes (`Searches` records it);
+`CommentsCarried` caps the comments a search carries and `MaxResults` a search's page. `FakeConfluence` holds spaces,
+a page tree, blog posts, attachments, comments (footer, inline, replies) and read restrictions, and pages its lists with
+`_links.next` as Confluence does (`LimitWithBodies` caps a request with bodies; `Scan` turns the cursor scan off).
+`AtlassianLiveTests` read the lab's servers ([provisioning/atlassian](../provisioning/atlassian/README.md)) when
+`ANYFS_TEST_JIRA_URL` (`http://192.168.0.78:8080/jira`) and `ANYFS_TEST_JIRA_TOKEN` (the tester's token, which the seed
+writes to `provisioning/atlassian/secrets/jira-tester.token`) are set, and the same for `CONFLUENCE` (`:8090/confluence`);
+`ANYFS_TEST_JIRA_USER` and `_PASSWORD` (the tester, `atl_user`, and its password in settings.yml) add the password
+sign-in. The sources' folders are made of documents and attachments, not the fixture tree the E2E compares, so there are
+no E2E rows for them.
+
 ## Publish
 
 ```

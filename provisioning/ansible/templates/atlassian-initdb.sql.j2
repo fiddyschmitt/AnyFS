@@ -1,0 +1,6 @@
+-- Written by the AnyFS lab's playbook: PostgreSQL runs this once, into an empty data folder. Each product its own role and
+-- database, as Atlassian's database guides make them (Jira's with the C collation it asks for).
+CREATE ROLE jira LOGIN PASSWORD '{{ atlassian.database_password }}';
+CREATE DATABASE jiradb WITH OWNER jira ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;
+CREATE ROLE confluence LOGIN PASSWORD '{{ atlassian.database_password }}';
+CREATE DATABASE confluencedb WITH OWNER confluence ENCODING 'UTF8' LC_COLLATE 'en_US.utf8' LC_CTYPE 'en_US.utf8' TEMPLATE template0;
