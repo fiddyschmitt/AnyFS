@@ -1,4 +1,4 @@
-namespace AnyFS.Sdk.Tests;
+namespace AnyFS.Sdk.Testing;
 
 /// <summary>A clock the test moves by hand (timestamps and wall time advance together).</summary>
 public sealed class FakeTime : TimeProvider

@@ -1,3 +1,5 @@
+using AnyFS.Sdk.Testing;
+
 namespace AnyFS.Sdk.Tests;
 
 [TestClass]
