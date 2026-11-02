@@ -380,8 +380,10 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         }, ct);
 
     /// <summary>
-    /// A page with its body, kept a refresh interval: read with the pages beside it (its parent's children, or the space's
-    /// top-level pages, or its blog), as a client goes on through a folder; read alone where that read did not have it.
+    /// A page with its body, kept a refresh interval: read alone, unless the page before it under the same parent was asked for
+    /// moments ago, when the few beside it come with it, as a client going straight through a folder of pages asks for them next. A
+    /// client going depth first gets one at a time, which is all it can use before the bodies read with it grow old, and a
+    /// request of 50 bodies can take longer than the request timeout on a server that shows any one page in a few seconds.
     /// </summary>
     internal async Task<ConfluenceContent> PageAsync(ConfluencePageFolder folder, CancellationToken ct)
     {
@@ -391,26 +393,40 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             return kept;
         }
 
-        var siblings = folder.ParentId is { } parent
-            ? $"content/{parent}/child/page?limit={BodiesPerRequest}&expand={Whole}"
-            : folder.Blog
-                ? $"content?spaceKey={Uri.EscapeDataString(folder.Content.SpaceKey)}&type=blogpost&limit={BodiesPerRequest}&expand={Whole}"
-                : folder.Content.SpaceKey.Length > 0 ? $"space/{Uri.EscapeDataString(folder.Content.SpaceKey)}/content/page?depth=root&limit={BodiesPerRequest}&expand={Whole}" : null;
-        if (siblings is not null)
+        // the few pages beside it, where a client is going straight through them: the one before it was asked for moments ago
+        if (folder.ParentId is { } parent)
         {
-            var reading = _reading.GetOrAdd(siblings, s => new Lazy<Task>(() => ReadTogetherAsync(s))).Value;
-            try
+            var now = Stopwatch.GetTimestamp();
+            var goingThrough = _askedUnder.TryGetValue(parent, out var asked) && Stopwatch.GetElapsedTime(asked, now) < TogetherWithin;
+            _askedUnder[parent] = now;
+            if (_askedUnder.Count > PagesKept)
             {
-                await reading.WaitAsync(ct).ConfigureAwait(false);
-            }
-            catch (VfsException ex) when (ex.Error is not VfsError.Unavailable)
-            {
-                Logger.LogDebug("confluence: the pages beside {Id} could not be read together ({Error}); reading it alone", id, ex.Message);
+                _askedUnder.Clear();
             }
 
-            if (Fresh(id, null) is { } together)
+            if (goingThrough && now >= Volatile.Read(ref _readAloneUntil) && Cache.Peek<List<ConfluenceContent>>($"children:{parent}") is { } beside)
             {
-                return together;
+                var at = beside.FindIndex(c => c.Id == id);
+                if (at >= 0)
+                {
+                    var relative = $"content/{parent}/child/page?start={at / 10 * 10}&limit=10&expand={Whole}";
+                    var reading = _reading.GetOrAdd(relative, r => new Lazy<Task>(() => ReadTogetherAsync(r))).Value;
+                    try
+                    {
+                        await reading.WaitAsync(ct).ConfigureAwait(false);
+                    }
+                    catch (VfsException ex)
+                    {
+                        // the server takes too long over several at once, or refuses one of them: alone for a while
+                        Volatile.Write(ref _readAloneUntil, Stopwatch.GetTimestamp() + (long)(TimeSpan.FromMinutes(10).TotalSeconds * Stopwatch.Frequency));
+                        Logger.LogDebug("confluence: the pages beside {Id} could not be read together ({Error}); reading pages alone for a while", id, ex.Message);
+                    }
+
+                    if (Fresh(id, null) is { } together)
+                    {
+                        return together;
+                    }
+                }
             }
         }
 
@@ -421,12 +437,20 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         return alone.Value;
     }
 
+    private static readonly TimeSpan TogetherWithin = TimeSpan.FromSeconds(10);
+
+    // when a page under each parent was last asked for, by the parent's id
+    private readonly ConcurrentDictionary<string, long> _askedUnder = new(StringComparer.Ordinal);
+    private long _readAloneUntil;
+
+    /// <summary>One request's pages with their bodies, kept for the listings and opens that follow.</summary>
     private async Task ReadTogetherAsync(string relative)
     {
         await Task.Yield();
         try
         {
-            await foreach (var e in PagesAsync(relative, _stopping.Token).ConfigureAwait(false))
+            using var doc = await Api.GetAsync(relative, _stopping.Token).ConfigureAwait(false);
+            foreach (var e in doc.RootElement.Arr("results"))
             {
                 Remember(ConfluenceContent.Parse(e));
             }

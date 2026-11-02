@@ -315,7 +315,49 @@ public class ConfluenceTests
         }
 
         var bodies = fake.Requests.Count(r => r.Contains("body.storage", StringComparison.Ordinal) && !r.Contains("/child/comment", StringComparison.Ordinal)) - before;
-        Assert.IsTrue(bodies <= 3, $"{bodies} reads with bodies for forty pages: the siblings come fifty a request");
+        Assert.IsTrue(bodies <= 6, $"{bodies} reads with bodies for forty pages asked for one after the other: they come ten a request");
+    }
+
+    [TestMethod]
+    public async Task AReadOfTheSiblingsThatFailsIsNoFailureOfThePage()
+    {
+        var fake = ConfluenceSeed.Lab();
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake, "/display/BULK"));
+        var pages = (await NamesAsync(source, "Bulk pages Home")).Where(n => n.StartsWith("Bulk page ", StringComparison.Ordinal)).ToList();
+
+        // the server takes too long over several at once (a page in place of data stands for any such failure)
+        fake.Fault = r => r.Url.AbsolutePath.EndsWith("/child/page", StringComparison.Ordinal) && r.Q("expand")?.Contains("body.storage", StringComparison.Ordinal) == true
+            ? FakeAtlassian.Response.Html("<html>busy</html>")
+            : null;
+        StringAssert.Contains(await TextAsync(source, $"Bulk pages Home/{pages[0]}/{pages[0]}.md"), "One of many");
+        Assert.AreEqual(0, fake.Count("/child/page?start="), "the first alone");
+        StringAssert.Contains(await TextAsync(source, $"Bulk pages Home/{pages[1]}/{pages[1]}.md"), "One of many");
+        var together = fake.Count("/child/page?start=");
+        Assert.AreEqual(1, together, "the next, moments later, with those beside it; which fails, and it is read alone");
+        StringAssert.Contains(await TextAsync(source, $"Bulk pages Home/{pages[20]}/{pages[20]}.md"), "One of many");
+        Assert.AreEqual(together, fake.Count("/child/page?start="), "not tried again for a while: each of them costs a timeout on a slow server");
+    }
+
+    [TestMethod]
+    public async Task APageAskedForAloneIsReadAlone()
+    {
+        var fake = ConfluenceSeed.Lab();
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake, "/display/BULK"));
+        var pages = (await NamesAsync(source, "Bulk pages Home")).Where(n => n.StartsWith("Bulk page ", StringComparison.Ordinal)).ToList();
+        fake.Requests.Clear();
+        await TextAsync(source, $"Bulk pages Home/{pages[7]}/{pages[7]}.md");
+        Assert.AreEqual(1, fake.Requests.Count(r => r.Contains("body.storage", StringComparison.Ordinal) && !r.Contains("/child/comment", StringComparison.Ordinal)), "one body, not the hundred and twenty beside it");
+    }
+
+    [TestMethod]
+    public async Task ABlogPostsBodyIsNeverAskedForWithoutItsSpace()
+    {
+        var fake = ConfluenceSeed.Lab();
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake, "/display/ANYFS"));
+        var posts = await NamesAsync(source, "Blog");
+        Assert.AreEqual(2, posts.Count);
+        StringAssert.Contains(await TextAsync(source, $"Blog/{posts[0]}/{posts[0]}.md"), "Release");
+        Assert.AreEqual(0, fake.Count("spaceKey=&"), "an empty key may name every space there is");
     }
 
     [TestMethod]

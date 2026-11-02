@@ -65,6 +65,11 @@ public sealed class RequestCache(CancellationToken stopping)
         }
     }
 
+    /// <summary>The kept <typeparamref name="T"/> for <paramref name="key"/> if there is one, finished and younger than the time it was asked with; nothing is fetched.</summary>
+    public T? Peek<T>(string key)
+        where T : class
+        => _entries.TryGetValue(key, out var kept) && kept.Task.IsCompletedSuccessfully && Usable(kept) ? kept.Task.Result as T : null;
+
     /// <summary>Forgets <paramref name="key"/>: the next asking fetches it.</summary>
     public void Forget(string key) => _entries.TryRemove(key, out _);
 
