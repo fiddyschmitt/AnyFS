@@ -357,6 +357,43 @@ public class ConfluenceTests
     }
 
     [TestMethod]
+    public async Task AKeptFolderInAQuietSpaceIsNotListedAgainAndOneInAChangedSpaceIs()
+    {
+        var fake = ConfluenceSeed.Lab();
+        var settings = ConfluenceSeed.Settings(fake, "/display/ANYFS");
+        settings.RefreshSeconds = 1;
+        await using var source = await StartAsync(fake, settings);
+        var home = "AnyFS Lab Home";
+        await NamesAsync(source, home);
+
+        // older than the interval, the space quiet: one search for the space's stamp and no listing, however often it is asked
+        await Task.Delay(1100);
+        fake.Requests.Clear();
+        await NamesAsync(source, home);
+        await WaitUntilAsync(() => fake.Count("/rest/api/search") > 0);
+        await Task.Delay(100);
+        Assert.AreEqual(0, fake.Count("/child/"), string.Join("; ", fake.Requests));
+        Assert.AreEqual(0, fake.Count("/content/" + fake.PageTitled("AnyFS Lab Home").Id), string.Join("; ", fake.Requests));
+
+        // something changed in the space: listed afresh behind the next answer
+        fake.AddPage(fake.Spaces[0], fake.Spaces[0].Home, "A page made since", "<p>New.</p>");
+        await Task.Delay(1100);
+        await WaitUntilAsync(async () => (await NamesAsync(source, home)).Contains("A page made since"));
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> done) => await WaitUntilAsync(() => Task.FromResult(done()));
+
+    private static async Task WaitUntilAsync(Func<Task<bool>> done)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!await done())
+        {
+            Assert.IsTrue(DateTime.UtcNow < deadline, "timed out waiting");
+            await Task.Delay(50);
+        }
+    }
+
+    [TestMethod]
     public async Task ThePasswordGoesThroughTheLoginFormOnAnOlderServer()
     {
         var fake = ConfluenceSeed.Lab();
@@ -488,7 +525,9 @@ public class ConfluenceTests
         Assert.AreEqual(stamp, await source.StampAsync("AnyFS Lab (ANYFS)", stamp, CancellationToken.None));
         fake.AddComment(fake.PageTitled("Onboarding"), "other", "<p>New.</p>", new DateTimeOffset(2026, 10, 30, 9, 0, 0, TimeSpan.Zero));
         Assert.AreNotEqual(stamp, await source.StampAsync("AnyFS Lab (ANYFS)", stamp, CancellationToken.None));
-        Assert.IsNull(await source.StampAsync("AnyFS Lab (ANYFS)/AnyFS Lab Home", null, CancellationToken.None), "a page folder has none");
+        var now = await source.StampAsync("AnyFS Lab (ANYFS)", stamp, CancellationToken.None);
+        Assert.AreEqual(now, await source.StampAsync("AnyFS Lab (ANYFS)/AnyFS Lab Home", null, CancellationToken.None), "a page's folder goes by its space");
+        Assert.IsNull(await source.StampAsync("", null, CancellationToken.None), "the list of spaces has none");
     }
 
     // --- the plugin ----------------------------------------------------------------------------------------------------

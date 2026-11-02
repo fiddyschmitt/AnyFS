@@ -11,10 +11,11 @@ namespace AnyFS.Sources.Atlassian.Confluence;
 /// <summary>
 /// A Confluence server, space or page (type <c>confluence</c>, spec 7.10), read-only: a folder per space, every page a
 /// folder holding its Markdown, its attachments and its child pages' folders, and each space's blog. Names are compared in
-/// either case, as Windows does. Folder listings are kept (the SDK's <see cref="KeptListings"/>), each asked for again
-/// behind the answer once older than the refresh interval; "Count files on start" walks the tree into them, a space whole
-/// at a time (its pages, attachments and comments in bulk); a space whose newest change and content count have not moved
-/// is kept as it was. A folder whose listing failed stays so until the next walk.
+/// either case, as Windows does. Folder listings are kept (the SDK's <see cref="KeptListings"/>), and go by their space's stamp:
+/// its newest change and content count, one search every few seconds however many folders ask. While it holds a kept folder is
+/// as good as new; once it moves, a folder asked for is listed again behind the answer, a few at a time, so a client going through
+/// the tree never waits behind them. "Count files on start" walks the tree into the listings, a space whole at a time (its pages,
+/// attachments and comments in bulk). A folder whose listing failed stays so until the next walk.
 /// </summary>
 public sealed class ConfluenceSource : SourceBase, ICountable
 {
@@ -543,18 +544,41 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     /// <summary>One walk now (a test's: the walks after the count come by the clock), stamps kept unless <paramref name="full"/>.</summary>
     internal Task<bool> WalkAsync(SourceCounters counters, bool full, CancellationToken ct) => Kept.WalkAsync(counters, full, ct);
 
+    // a few seconds, or the refresh interval where that is shorter
+    private TimeSpan StampKeptFor => Refresh < TimeSpan.FromSeconds(5) ? Refresh : TimeSpan.FromSeconds(5);
+
     /// <summary>
-    /// A folder's stamp for the walks (<see cref="KeptListingsOptions.StampOf"/>): a space's folder has its newest change
-    /// and its content count by CQL (pages, blog posts, comments and attachments alike), one search with one result, so a
-    /// space nothing changed in is kept whole; a page that is the source's root the same over itself and the pages below
-    /// it. Any other folder none.
+    /// A folder's stamp (<see cref="KeptListingsOptions.StampOf"/>): a space's folder has its newest change and its content
+    /// count by CQL (pages, blog posts, comments and attachments alike), one search with one result, so a space nothing changed
+    /// in is kept whole; a page that is the source's root the same over itself and the pages below it. A folder below one of
+    /// those goes by its stamp, as asked moments ago. With the day, so that what no search shows (a page moved, a label added)
+    /// is read again within a day however quiet the space. The folders above the spaces have none.
     /// </summary>
     internal async ValueTask<string?> StampAsync(string path, string? held, CancellationToken ct)
     {
-        var cql = await ResolveAsync(path, ct).ConfigureAwait(false) switch
+        // the space (or the page that is the source) the folder is in: the top of the path, its names in the spaces' list
+        CoNode node = _root ?? throw VfsException.Unavailable("Confluence is not signed in to yet");
+        var below = false;
+        foreach (var segment in VfsPath.Split(VfsPath.Normalize(path)))
+        {
+            if (node is ConfluenceSpaceFolder or ConfluencePageFolder)
+            {
+                below = true;
+                break;
+            }
+
+            if (node is not CoFolder folder || await Guard(() => folder.FindAsync(this, segment, ct)).ConfigureAwait(false) is not { } found)
+            {
+                return null;
+            }
+
+            node = found;
+        }
+
+        var cql = node switch
         {
             ConfluenceSpaceFolder space => $"space = {ConfluenceScope.Quote(space.Space.Key)}",
-            ConfluencePageFolder page when path.Length == 0 => $"(id = {page.Content.Id} or ancestor = {page.Content.Id})",
+            ConfluencePageFolder page => $"(id = {page.Content.Id} or ancestor = {page.Content.Id})",
             _ => null,
         };
         if (cql is null)
@@ -562,11 +586,22 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             return null;
         }
 
-        using var doc = await Api.GetAsync($"search?cql={Uri.EscapeDataString(cql + " order by lastmodified desc")}&limit=1&excerpt=none", ct).ConfigureAwait(false);
-        var newest = doc.RootElement.Arr("results").FirstOrDefault();
-        var when = newest.Str("lastModified") ?? newest.Obj("content").Obj("version").Str("when");
-        var count = doc.RootElement.Has("totalSize") ? doc.RootElement.Long("totalSize") : doc.RootElement.Long("size");
-        return $"{when}|{count}";
+        // the folder at the top of it asked afresh (a walk's, and a test's); a folder below it as asked moments ago: a client going
+        // through a space asks for its folders by the thousand, and one search answers them all
+        var key = $"stamp:{cql}";
+        if (!below)
+        {
+            Cache.Forget(key);
+        }
+
+        return (await Cache.GetAsync(key, StampKeptFor, async c =>
+        {
+            using var doc = await Api.GetAsync($"search?cql={Uri.EscapeDataString(cql + " order by lastmodified desc")}&limit=1&excerpt=none", c).ConfigureAwait(false);
+            var newest = doc.RootElement.Arr("results").FirstOrDefault();
+            var when = newest.Str("lastModified") ?? newest.Obj("content").Obj("version").Str("when");
+            var count = doc.RootElement.Has("totalSize") ? doc.RootElement.Long("totalSize") : doc.RootElement.Long("size");
+            return new Box<string>($"{when}|{count}|{DateTimeOffset.UtcNow:yyyy-MM-dd}");
+        }, ct).ConfigureAwait(false)).Value;
     }
 
     /// <summary>

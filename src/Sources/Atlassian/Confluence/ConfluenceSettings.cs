@@ -46,11 +46,11 @@ public sealed class ConfluenceSettings : IAtlassianSettings
     public bool TrustAnyCertificate { get; set; }
 
     [Setting("Check for changes every (seconds)", Advanced = true, Order = 12,
-        Hint = "How old a folder's listing may be before it is asked for again. 0 asks every time, and keeps no folder listings.")]
+        Hint = "How old a folder's listing may be before AnyFS checks for changes: one search of its space, and the folder is listed again only if something in the space changed. 0 asks every time, and keeps no folder listings.")]
     public int RefreshSeconds { get; set; } = 60;
 
     [Setting(KeptListings.KeepSetting, Advanced = true, Order = 13,
-        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once; a listing older than 'Check for changes every' is asked for again behind the answer, so a change shows the next time the folder is opened. With 'Count files on start', the count walks the folders first and keeps what it finds (below). A folder that could not be listed shows empty until the next walk. Off: each folder is asked for as it is opened.")]
+        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once; a listing older than 'Check for changes every' is checked behind the answer, so a change shows the next time the folder is opened (within a day for what a search does not show, such as a page moved). With 'Count files on start', the count walks the folders first and keeps what it finds (below). A folder that could not be listed shows empty until the next walk. Off: each folder is asked for as it is opened.")]
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 14,

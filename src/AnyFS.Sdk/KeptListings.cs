@@ -418,7 +418,8 @@ public sealed class KeptListings : IAsyncDisposable
                             // the folder and everything below it at once: all kept and counted, nothing left to go into
                             foreach (var (path, listing) in tree)
                             {
-                                Cache.Keep(path, listing, path == folder ? stamp : null);
+                                // what was read with the folder goes by the folder's stamp too
+                                Cache.Keep(path, listing, stamp);
                                 walk.Counters.Add(listing.Count(e => !e.IsDirectory), listing.Count(e => e.IsDirectory));
                             }
                         }
@@ -630,7 +631,8 @@ public sealed record KeptListingsOptions
     /// <summary>
     /// The listings of a folder and of every folder below it at once, by path (the folder's own among them), where the source
     /// knows a quicker way than folder by folder (GitLab's repository: its whole tree a hundred entries a request); null for
-    /// a folder it does not, which the walk lists alone.
+    /// a folder it does not, which the walk lists alone. All of them are kept with the folder's stamp (<see cref="StampOf"/>),
+    /// read before them.
     /// </summary>
     public Func<string, CancellationToken, Task<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>>? ListTree { get; init; }
 
