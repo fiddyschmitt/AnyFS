@@ -50,7 +50,7 @@ public sealed class ConfluenceSettings : IAtlassianSettings
     public int RefreshSeconds { get; set; } = 60;
 
     [Setting(KeptListings.KeepSetting, Advanced = true, Order = 13,
-        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once; a listing older than 'Check for changes every' is asked for again behind the answer, so a change shows the next time the folder is opened. With 'Count files on start', the count walks the folders first and keeps what it finds (below). Off: each folder is asked for as it is opened.")]
+        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once; a listing older than 'Check for changes every' is asked for again behind the answer, so a change shows the next time the folder is opened. With 'Count files on start', the count walks the folders first and keeps what it finds (below). A folder that could not be listed shows empty until the next walk. Off: each folder is asked for as it is opened.")]
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 14,
@@ -86,4 +86,10 @@ public sealed class ConfluenceSettings : IAtlassianSettings
     internal string Shape => $"{Comments}|{Attachments}|{BlogPosts}|{PersonalSpaces}|{ArchivedSpaces}";
 
     internal TimeSpan WalkEvery => TimeSpan.FromMinutes(Math.Clamp(WalkMinutes, 0, 7 * 24 * 60));
+
+    /// <summary>
+    /// How long a folder whose listing failed answers so at once: until the next walk lists it again, whatever the failure;
+    /// where no walk comes ("Count files on start" off, or walks turned off), as long as the walks' usual interval.
+    /// </summary>
+    internal TimeSpan FailureKeptFor => WalkEvery > TimeSpan.Zero ? WalkEvery : TimeSpan.FromMinutes(30);
 }

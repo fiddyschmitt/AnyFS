@@ -191,6 +191,26 @@ public class ListingCacheTests
     }
 
     [TestMethod]
+    public async Task AFailureMetByAWalkCountsFromTheWalksEnd()
+    {
+        _failing["docs"] = new VfsException(VfsError.Unavailable, "the service did not answer");
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { FailureKeptFor = _ => TimeSpan.FromMinutes(30) };
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.RefreshAsync("docs", CancellationToken.None));
+        Assert.AreEqual(1, _calls);
+
+        // the walk goes on for most of the time, then ends: what it met holds a whole interval from there, to the next walk
+        _time.Advance(TimeSpan.FromMinutes(29));
+        cache.RenewFailures();
+        _time.Advance(TimeSpan.FromMinutes(29));
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs", CancellationToken.None));
+        Assert.AreEqual(1, _calls, "still kept, 58 minutes after it was noted");
+
+        _time.Advance(TimeSpan.FromMinutes(2));
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs", CancellationToken.None));
+        Assert.AreEqual(2, _calls, "over: asked again, where no walk came");
+    }
+
+    [TestMethod]
     public async Task StatUsesTheParentListing()
     {
         var cache = new ListingCache(TimeSpan.FromSeconds(2), ListAsync, time: _time);

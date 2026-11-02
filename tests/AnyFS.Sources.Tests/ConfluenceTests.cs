@@ -319,6 +319,44 @@ public class ConfluenceTests
     }
 
     [TestMethod]
+    public async Task AFolderWhoseListingFailedStaysSoUntilTheNextWalk()
+    {
+        var fake = ConfluenceSeed.Lab();
+        var settings = ConfluenceSeed.Settings(fake);
+        settings.WalkMinutes = 30;
+        await using var source = await StartAsync(fake, settings);
+        await NamesAsync(source, "AnyFS Lab (ANYFS)");
+        var home = "AnyFS Lab (ANYFS)/AnyFS Lab Home";
+
+        // a service that does not answer, not only a refusal: a whole interval, not the 60 s between refreshes
+        var failing = true;
+        var asked = 0;
+        fake.Fault = r =>
+        {
+            if (failing && r.Url.AbsolutePath.EndsWith("/child/comment", StringComparison.Ordinal))
+            {
+                asked++;
+                return FakeAtlassian.Response.Html("<html>busy</html>");
+            }
+
+            return null;
+        };
+        var first = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, home));
+        Assert.AreEqual(VfsError.Unavailable, first.Error);
+        var times = asked;
+        Assert.IsTrue(times > 0);
+        failing = false;
+        var again = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, home));
+        Assert.AreEqual(first.Message, again.Message, "answered at once as it failed");
+        Assert.AreEqual(times, asked, "nothing asked");
+        Assert.AreEqual(TimeSpan.FromMinutes(30), settings.FailureKeptFor);
+
+        // the walk lists it again, and it comes back
+        await source.WalkAsync(new SourceCounters(), full: true, CancellationToken.None);
+        CollectionAssert.Contains(await NamesAsync(source, home), "AnyFS Lab Home.md");
+    }
+
+    [TestMethod]
     public async Task ThePasswordGoesThroughTheLoginFormOnAnOlderServer()
     {
         var fake = ConfluenceSeed.Lab();

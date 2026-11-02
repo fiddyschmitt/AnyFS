@@ -316,6 +316,8 @@ public sealed class KeptListings : IAsyncDisposable
                     _fullWalkAt = _time.GetUtcNow();
                 }
 
+                // what this walk could not list stays as it is until the next one, which begins a WalkEvery from now
+                Cache.RenewFailures();
                 var state = whole ? EnumerationState.Complete : EnumerationState.Unknown;
                 _counters.Set(counters.FilesKnown, counters.DirectoriesKnown, state);
                 _walked = (int)state;
@@ -594,7 +596,8 @@ public sealed record KeptListingsOptions
 
     /// <summary>
     /// With listings kept, how long a folder whose listing failed answers with that failure at once, by the failure
-    /// (<see cref="ListingCache.FailureKeptFor"/>): a walk lists it again meanwhile. Null (the default) asks whenever asked.
+    /// (<see cref="ListingCache.FailureKeptFor"/>), counted from the end of a walk that met it, so <see cref="WalkEvery"/> holds it until
+    /// the next walk, which lists it again. Null (the default) asks whenever asked.
     /// </summary>
     public Func<VfsException, TimeSpan?>? FailureKeptFor { get; init; }
 

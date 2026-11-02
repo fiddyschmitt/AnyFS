@@ -117,6 +117,9 @@ internal sealed class AtlassianSession : IDisposable
     /// <summary>How many times the sign-in has been renewed: a request remembers it, so one renewal serves every request that lapsed with it.</summary>
     public int Generation => Volatile.Read(ref _generation);
 
+    /// <summary>Raised when the sign-in has been renewed.</summary>
+    public event Action? Renewed;
+
     /// <summary>Whether a refused request may be signed in again: not with a token, which only a person can replace.</summary>
     public bool CanRenew => Method != AtlassianSignIn.Token;
 
@@ -686,6 +689,7 @@ internal sealed class AtlassianSession : IDisposable
 
             Interlocked.Increment(ref _generation);
             Save();
+            Renewed?.Invoke();
         }
         finally
         {

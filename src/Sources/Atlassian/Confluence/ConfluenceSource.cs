@@ -14,7 +14,7 @@ namespace AnyFS.Sources.Atlassian.Confluence;
 /// either case, as Windows does. Folder listings are kept (the SDK's <see cref="KeptListings"/>), each asked for again
 /// behind the answer once older than the refresh interval; "Count files on start" walks the tree into them, a space whole
 /// at a time (its pages, attachments and comments in bulk); a space whose newest change and content count have not moved
-/// is kept as it was.
+/// is kept as it was. A folder whose listing failed stays so until the next walk.
 /// </summary>
 public sealed class ConfluenceSource : SourceBase, ICountable
 {
@@ -113,12 +113,14 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             MaxInFlight = walking,
             ListTree = ListTreeAsync,
             StampOf = StampAsync,
-            FailureKeptFor = ex => ex.Error != VfsError.Unavailable && _settings.WalkEvery > TimeSpan.Zero ? _settings.WalkEvery : _settings.Refresh,
+            FailureKeptFor = _ => _settings.FailureKeptFor,
             Name = "confluence",
             SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
             SaveKey = $"{_session.Address.Server}|{_session.User?.Name}|{Scope}|{_settings.Shape}|md{ConfluenceDocuments.Format}",
         });
 
+        // a sign-in renewed: what it refused may be answered now
+        _session.Renewed += _kept.Cache.ForgetFailures;
         Logger.LogInformation("confluence: serving {Scope} on {Server} as {User}", Scope, _session.Address.Server, _session.User?.Name);
     }
 
@@ -188,17 +190,37 @@ public sealed class ConfluenceSource : SourceBase, ICountable
 
     private async IAsyncEnumerable<VfsEntry> ListFolderAsync(string path, [EnumeratorCancellation] CancellationToken ct)
     {
-        var node = await ResolveAsync(path, ct).ConfigureAwait(false);
-        if (node is not CoFolder folder)
+        foreach (var entry in await ListedAsync(path, ct).ConfigureAwait(false))
         {
-            throw VfsException.NotADirectory(path);
-        }
-
-        foreach (var child in await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false))
-        {
-            yield return child.Entry;
+            yield return entry;
         }
     }
+
+    /// <summary>A folder's listing from Confluence. One that fails is said once in the log: a drive shows it as an empty folder, and it stays so until the next walk.</summary>
+    private async Task<List<VfsEntry>> ListedAsync(string path, CancellationToken ct)
+    {
+        try
+        {
+            if (await ResolveAsync(path, ct).ConfigureAwait(false) is not CoFolder folder)
+            {
+                throw VfsException.NotADirectory(path);
+            }
+
+            return (await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false)).Select(child => child.Entry).ToList();
+        }
+        catch (VfsException ex) when (ex.Error is not (VfsError.NotFound or VfsError.NotADirectory))
+        {
+            if (_unlisted.TryAdd(path, 0))
+            {
+                Logger.LogInformation("confluence: '{Path}' could not be listed ({Error}); it shows as an empty folder until the next walk", path, ex.Message);
+            }
+
+            throw;
+        }
+    }
+
+    // the folders whose listing failed, each said once in the log
+    private readonly ConcurrentDictionary<string, byte> _unlisted = new(StringComparer.Ordinal);
 
     public override async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct)
     {

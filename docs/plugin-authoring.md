@@ -224,8 +224,9 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   whatever its stamp, for what a stamp does not cover. `FailureKeptFor` keeps a folder whose listing
   failed (nothing held for it) answering with that failure at once for a while, by the failure: a
   search that lists the tree over and over then pays for a folder the upstream refuses once, not on
-  every pass; the walks ask again meanwhile, `ForgetFailures` lets them all go (a sign-in renewed),
-  and a folder not found is never kept so. Teams, SharePoint and GitLab keep their
+  every pass. The time counts from the end of a walk that met the failure, so `WalkEvery` keeps it
+  until the next walk, which asks again; `ForgetFailures` lets them all go (a sign-in renewed), and a
+  folder not found is never kept so. Teams, SharePoint and GitLab keep their
   listings so; their settings `KeptListings.KeepSetting` and `KeptListings.WalkSetting` give the
   same names to the same choices.
 - `SpoolCache`: for upstreams that only stream sequentially. The first open starts the download

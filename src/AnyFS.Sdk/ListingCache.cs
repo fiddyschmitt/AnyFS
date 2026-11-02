@@ -101,6 +101,16 @@ public sealed class ListingCache
     /// <summary>Lets go of the failures kept (<see cref="FailureKeptFor"/>): for a source that knows what refused them may not now (a sign-in renewed), so each is listed again when next asked.</summary>
     public void ForgetFailures() => _failures.Clear();
 
+    /// <summary>Counts each failure kept as noted now: a walk that has just ended asks this, so that a failure it met lasts until the next walk.</summary>
+    public void RenewFailures()
+    {
+        var now = _time.GetTimestamp();
+        foreach (var (path, failure) in _failures)
+        {
+            _failures.TryUpdate(path, failure with { At = now }, failure);
+        }
+    }
+
     /// <summary>
     /// Keeps <paramref name="listing"/> as the listing of <paramref name="path"/>, as if it had just come from the upstream:
     /// for a source that learnt it otherwise than folder by folder (a walk that lists a whole subtree at once). A listing of

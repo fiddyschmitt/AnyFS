@@ -58,6 +58,9 @@ internal abstract class FakeAtlassian
     /// <summary>Whether a REST call without a sign-in is served as the anonymous user (a site open to anyone) rather than refused.</summary>
     public bool Anonymous { get; set; }
 
+    /// <summary>A request the test wants answered otherwise: its answer in place of the product's, or null to answer as usual.</summary>
+    public Func<Request, Response?>? Fault { get; set; }
+
     /// <summary>How many requests to answer 429 with Retry-After: 1 before answering again.</summary>
     public int ThrottleNext { get; set; }
 
@@ -197,6 +200,11 @@ internal abstract class FakeAtlassian
         {
             ThrottleNext--;
             return Response.Json(new JsonObject { ["message"] = "Rate limit exceeded" }, 429, new Dictionary<string, string> { ["Retry-After"] = "1" });
+        }
+
+        if (Fault?.Invoke(request) is { } faulted)
+        {
+            return faulted;
         }
 
         var answer = path == WhoPath ? (user is null && !Anonymous ? Response.Message(401, "Client must be authenticated to access this resource.") : Response.Json(Who(user))) : AnswerProduct(request, path, user);
