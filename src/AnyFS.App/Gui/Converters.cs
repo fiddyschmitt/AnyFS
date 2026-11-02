@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using AnyFS.Core.Operations;
 using AnyFS.Core.Plugins;
 using AnyFS.Core.Status;
 using Avalonia.Data.Converters;
@@ -32,6 +33,19 @@ public static class Converters
     public static readonly IValueConverter HasPluginIcon = new FuncValueConverter<string?, bool>(key => PluginIcons.For(key) is not null);
 
     public static readonly IValueConverter IsNotNull = new FuncValueConverter<object?, bool>(value => value is not null);
+
+    private static readonly IBrush Succeeded = new SolidColorBrush(Color.Parse("#3334A853"));
+    private static readonly IBrush Failed = new SolidColorBrush(Color.Parse("#40EA4335"));
+    private static readonly IBrush Cancelled = new SolidColorBrush(Color.Parse("#339E9E9E"));
+
+    /// <summary>An Operations row's background once it has ended: a wash of green, red or grey over the theme's own, so it reads in light and dark alike.</summary>
+    public static readonly IValueConverter OutcomeBrush = new FuncValueConverter<OperationOutcome, IBrush>(outcome => outcome switch
+    {
+        OperationOutcome.Succeeded => Succeeded,
+        OperationOutcome.Failed => Failed,
+        OperationOutcome.Cancelled => Cancelled,
+        _ => Brushes.Transparent,
+    });
 
     /// <summary>The value minus the converter parameter, never below zero: a MaxWidth bound to a parent's width, leaving room for what sits beside.</summary>
     public static readonly IValueConverter Minus = new MinusConverter();

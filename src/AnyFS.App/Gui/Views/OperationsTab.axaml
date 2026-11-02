@@ -1,0 +1,119 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+             xmlns:g="using:AnyFS.App.Gui"
+             x:Class="AnyFS.App.Gui.Views.OperationsTab"
+             x:DataType="vm:OperationsTabViewModel">
+  <!-- spec 11.5: what the sources are being asked, as it happens; a finished operation stays five seconds, green or red -->
+  <UserControl.Styles>
+    <!-- a column header is a flat button: click to sort by it -->
+    <Style Selector="Button.colhead">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="CornerRadius" Value="0" />
+      <Setter Property="HorizontalAlignment" Value="Stretch" />
+      <Setter Property="HorizontalContentAlignment" Value="Left" />
+      <Setter Property="Padding" Value="8,6" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="FontSize" Value="12" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.colhead.num">
+      <Setter Property="HorizontalContentAlignment" Value="Right" />
+    </Style>
+    <Style Selector="Border.oprow">
+      <Setter Property="BorderThickness" Value="0,1,0,0" />
+      <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseLowBrush}" />
+    </Style>
+    <Style Selector="TextBlock.cell">
+      <Setter Property="Margin" Value="8,4" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+    </Style>
+    <Style Selector="TextBlock.cell.num">
+      <Setter Property="HorizontalAlignment" Value="Right" />
+      <Setter Property="FontFeatures" Value="+tnum" />
+    </Style>
+  </UserControl.Styles>
+  <DockPanel Margin="4">
+    <TextBlock DockPanel.Dock="Top" Classes="header" Text="Operations" />
+    <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Spacing="8" Margin="0,0,0,8">
+      <TextBlock Text="Operations longer than" VerticalAlignment="Center" />
+      <TextBox Name="LongerThan" Width="64" Text="{Binding LongerThanText}" PlaceholderText="0" />
+      <TextBlock Text="seconds" VerticalAlignment="Center" Margin="0,0,8,0" />
+      <CheckBox Content="Failures only" IsChecked="{Binding FailuresOnly}" />
+      <ToggleButton Content="Pause" IsChecked="{Binding IsPaused}" ToolTip.Tip="Hold the list still; operations go on being recorded" />
+      <Button Command="{Binding CopyCommand}" ToolTip.Tip="Copy the rows shown, tab-separated">
+        <StackPanel Orientation="Horizontal" Spacing="6">
+          <PathIcon Classes="small" Data="{StaticResource IconCopy}" />
+          <TextBlock Text="Copy" />
+        </StackPanel>
+      </Button>
+      <TextBlock Classes="muted" Text="{Binding Summary}" VerticalAlignment="Center" FontFeatures="+tnum" />
+    </StackPanel>
+
+    <!-- the source filter: a checkbox per source instance -->
+    <Border DockPanel.Dock="Right" Classes="group" Width="210" Margin="8,0,0,0">
+      <DockPanel>
+        <TextBlock DockPanel.Dock="Top" Classes="subheader" Text="Sources" />
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Classes="buttons" Margin="0,0,0,8">
+          <Button Content="All" Command="{Binding ShowAllSourcesCommand}" />
+          <Button Content="None" Command="{Binding ShowNoSourcesCommand}" />
+        </StackPanel>
+        <TextBlock DockPanel.Dock="Top" Classes="muted" Text="No sources yet." IsVisible="{Binding !HasSources}" />
+        <ScrollViewer>
+          <ItemsControl Name="SourceFilters" ItemsSource="{Binding Sources}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:SourceFilterViewModel">
+                <CheckBox Content="{Binding Name}" IsChecked="{Binding IsChecked}" MinHeight="0" Padding="6,2" />
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </DockPanel>
+    </Border>
+
+    <!-- the list: a header of sort buttons, then the rows, virtualised -->
+    <Border Classes="table">
+      <DockPanel>
+        <Border DockPanel.Dock="Top" Classes="tablehead">
+          <Grid ColumnDefinitions="96,150,110,2*,104,110,1.5*">
+            <Button Classes="colhead" Content="{Binding StartedHeader}" Command="{Binding SortCommand}" CommandParameter="Started" />
+            <Button Grid.Column="1" Classes="colhead" Content="{Binding SourceHeader}" Command="{Binding SortCommand}" CommandParameter="Source" />
+            <Button Grid.Column="2" Classes="colhead" Content="{Binding OperationHeader}" Command="{Binding SortCommand}" CommandParameter="Operation" />
+            <Button Grid.Column="3" Classes="colhead" Content="{Binding PathHeader}" Command="{Binding SortCommand}" CommandParameter="Path" />
+            <Button Grid.Column="4" Classes="colhead num" Content="{Binding DurationHeader}" Command="{Binding SortCommand}" CommandParameter="Duration" />
+            <Button Grid.Column="5" Classes="colhead" Content="{Binding DetailHeader}" Command="{Binding SortCommand}" CommandParameter="Detail" />
+            <Button Grid.Column="6" Classes="colhead" Content="{Binding ResultHeader}" Command="{Binding SortCommand}" CommandParameter="Result" />
+          </Grid>
+        </Border>
+        <TextBlock DockPanel.Dock="Top" Classes="muted" Text="{Binding EmptyText}" Margin="8,8" IsVisible="{Binding !HasRows}" />
+        <ScrollViewer HorizontalScrollBarVisibility="Disabled">
+          <ItemsControl Name="OperationRows" ItemsSource="{Binding Rows}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <VirtualizingStackPanel />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:OperationRowViewModel">
+                <Border Classes="oprow" Background="{Binding Outcome, Converter={x:Static g:Converters.OutcomeBrush}}">
+                  <Grid ColumnDefinitions="96,150,110,2*,104,110,1.5*">
+                    <TextBlock Classes="cell" Text="{Binding Started}" ToolTip.Tip="{Binding StartedFull}" FontFeatures="+tnum" />
+                    <TextBlock Grid.Column="1" Classes="cell" Text="{Binding Source}" ToolTip.Tip="{Binding Source}" />
+                    <TextBlock Grid.Column="2" Classes="cell" Text="{Binding Operation}" />
+                    <!-- a long path keeps its end, the file's name, and loses its middle -->
+                    <TextBlock Grid.Column="3" Classes="cell" Text="{Binding Path}" ToolTip.Tip="{Binding Path}" TextTrimming="PrefixCharacterEllipsis" />
+                    <TextBlock Grid.Column="4" Classes="cell num" Text="{Binding Duration}" />
+                    <TextBlock Grid.Column="5" Classes="cell" Text="{Binding Detail}" ToolTip.Tip="{Binding Detail}" />
+                    <TextBlock Grid.Column="6" Classes="cell" Text="{Binding Result}" ToolTip.Tip="{Binding Result}" />
+                  </Grid>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </DockPanel>
+    </Border>
+  </DockPanel>
+</UserControl>

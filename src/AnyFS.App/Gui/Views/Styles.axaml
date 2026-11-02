@@ -50,6 +50,17 @@
     <Setter Property="BorderBrush" Value="{DynamicResource SystemControlHighlightAccentBrush}" />
   </Style>
 
+  <!-- a table of rows, on the Stats and Operations tabs: a bordered box with a shaded header -->
+  <Style Selector="Border.table">
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseLowBrush}" />
+    <Setter Property="CornerRadius" Value="4" />
+    <Setter Property="ClipToBounds" Value="True" />
+  </Style>
+  <Style Selector="Border.tablehead">
+    <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundBaseLowBrush}" />
+  </Style>
+
   <!-- tabs: Fluent's default header is 24px; the spec wants an ordinary window -->
   <Style Selector="TabControl > TabItem">
     <Setter Property="FontSize" Value="15" />

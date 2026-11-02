@@ -6,7 +6,7 @@ using CommunityToolkit.Mvvm.Input;
 
 namespace AnyFS.App.Gui.ViewModels;
 
-/// <summary>The window: three tabs and the status bar (spec 11).</summary>
+/// <summary>The window: four tabs and the status bar (spec 11).</summary>
 public sealed partial class MainViewModel : ObservableObject
 {
     private readonly AnyFsEngine _engine;
@@ -19,15 +19,19 @@ public sealed partial class MainViewModel : ObservableObject
         Operations = new Operations(dialogs);
         Collections = new CollectionsViewModel(engine, dialogs, opener, clipboard, Operations);
         AllSources = new AllSourcesViewModel(engine, dialogs, Operations);
+        OperationsTab = new OperationsTabViewModel(engine, clipboard);
         Stats = new StatsViewModel(engine, dialogs, Operations);
         Title = $"AnyFS {AnyFsEngine.Version}";
     }
 
+    /// <summary>The window's own long-running actions (not the sources' operations: those are <see cref="OperationsTab"/>).</summary>
     public Operations Operations { get; }
 
     public CollectionsViewModel Collections { get; }
 
     public AllSourcesViewModel AllSources { get; }
+
+    public OperationsTabViewModel OperationsTab { get; }
 
     public StatsViewModel Stats { get; }
 
@@ -48,6 +52,7 @@ public sealed partial class MainViewModel : ObservableObject
         var snapshot = _engine.Snapshot();
         Collections.Refresh(snapshot);
         AllSources.Refresh();
+        OperationsTab.Refresh();
         Stats.Refresh(snapshot.Stats);
 
         var enabled = snapshot.Collections.Where(c => c.Enabled).ToList();

@@ -5,16 +5,7 @@
              x:DataType="vm:StatsViewModel">
   <!-- spec 11.3: total and session, a per-collection table, Reset totals -->
   <UserControl.Styles>
-    <!-- the per-collection table: a bordered box, a shaded two-row header, a rule above each row, numbers on the right -->
-    <Style Selector="Border.table">
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseLowBrush}" />
-      <Setter Property="CornerRadius" Value="4" />
-      <Setter Property="ClipToBounds" Value="True" />
-    </Style>
-    <Style Selector="Border.tablehead">
-      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundBaseLowBrush}" />
-    </Style>
+    <!-- the per-collection table (Border.table and tablehead in Styles.axaml): a shaded two-row header, a rule above each row, numbers on the right -->
     <Style Selector="Border.tablerow">
       <Setter Property="BorderThickness" Value="0,1,0,0" />
       <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseLowBrush}" />

@@ -1,12 +1,15 @@
 using AnyFS.App.Gui;
+using AnyFS.App.Gui.ViewModels;
 using AnyFS.App.Gui.Views;
 using AnyFS.App.Tests;
+using AnyFS.Core.Operations;
 using AnyFS.Core.Plugins;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless;
+using Avalonia.Media;
 using Avalonia.VisualTree;
 
 [assembly: AvaloniaTestApplication(typeof(TestAppBuilder))]
@@ -27,7 +30,7 @@ public class HeadlessWindowTests
     private static HeadlessUnitTestSession Session => HeadlessUnitTestSession.GetOrStartForAssembly(typeof(HeadlessWindowTests).Assembly);
 
     [TestMethod]
-    public async Task TheWindowOpensWithThreeTabsAndCollectionOne()
+    public async Task TheWindowOpensWithFourTabsAndCollectionOne()
     {
         var root = Path.Combine(Path.GetTempPath(), "anyfs-tests", "window-" + Guid.NewGuid().ToString("N"));
         try
@@ -46,9 +49,9 @@ public class HeadlessWindowTests
 
                 var tabs = window.FindControl<TabControl>("Tabs");
                 Assert.IsNotNull(tabs);
-                Assert.AreEqual(3, tabs.ItemCount);
+                Assert.AreEqual(4, tabs.ItemCount);
                 var headers = tabs.Items.OfType<TabItem>().Select(t => t.Header?.ToString()).ToList();
-                CollectionAssert.AreEqual(new[] { "Collections", "All sources", "Stats" }, headers);
+                CollectionAssert.AreEqual(new[] { "Collections", "All sources", "Operations", "Stats" }, headers);
 
                 var list = window.GetVisualDescendants().OfType<ListBox>().Single(l => l.Name == "CollectionsList");
                 Assert.AreEqual(1, list.ItemCount);
@@ -71,6 +74,146 @@ public class HeadlessWindowTests
             {
             }
         }
+    }
+
+    /// <summary>The Operations tab in the real window: its rows, their colours, and the XAML's bindings to the view model (spec 11.5).</summary>
+    [TestMethod]
+    public async Task TheOperationsTabShowsWhatTheSourcesAreAsked()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "anyfs-tests", "window-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await Session.Dispatch(async () =>
+            {
+                var registry = new PluginRegistry();
+                registry.AddBuiltIn(new MemoryPlugin());
+                registry.AddBuiltIn(new FakeMountProvider());
+                var host = GuiHost.Create(new GuiOptions(Path.Combine(root, "settings")), registry);
+                host.Start();
+                var window = new MainWindow(host);
+                window.Show();
+                await Task.Delay(500);
+                var collection = host.Engine.Settings.Collections.Single();
+                var definition = await host.Engine.AddSourceAsync("alpha", "memory", true, false, new MemoryPluginSettings { Files = "a.txt=A" });
+                await host.Engine.AddMembershipAsync(collection.Id, definition.Id, "alpha", false);
+                var handle = host.Engine.FindSourceRunner(definition.Id)!.Handle;
+                await Wait.UntilAsync(() => handle.IsUsable, what: "alpha ready");
+
+                // kept up to date only once it is the tab shown
+                var tab = window.ViewModel.OperationsTab;
+                Assert.IsFalse(tab.IsActive);
+                Assert.AreEqual(0, tab.Rows.Count);
+                var tabs = window.FindControl<TabControl>("Tabs")!;
+                tabs.SelectedIndex = 2;
+                Assert.IsTrue(tab.IsActive);
+                Assert.AreEqual("Operations", ((TabItem)tabs.SelectedItem!).Header);
+                await Task.Delay(100);
+                window.UpdateLayout();
+
+                // what a real call leaves behind: a read through the source's handle
+                Assert.AreEqual("A", await ReadAllAsync(handle.Current!, "a.txt"));
+                tab.Refresh();
+                CollectionAssert.Contains(tab.Rows.Select(r => r.Operation).ToList(), "Read file");
+
+                // a row of each kind, as the list draws it
+                var running = host.Engine.Operations.Begin(definition.Id, "alpha", OperationKind.List, "running");
+                var failed = host.Engine.Operations.Begin(definition.Id, "alpha", OperationKind.Delete, "failed");
+                failed.Fail(new IOException("boom"));
+                var ok = host.Engine.Operations.Begin(definition.Id, "alpha", OperationKind.Stat, "ok");
+                ok.Complete();
+                tab.Refresh();
+                await Task.Delay(100);
+                window.UpdateLayout();
+                var rows = window.GetVisualDescendants().OfType<ItemsControl>().Single(i => i.Name == "OperationRows");
+                Assert.AreEqual(tab.Rows.Count, rows.ItemCount);
+                CollectionAssert.AreEqual(new[] { "ok", "failed", "running" }, tab.Rows.Take(3).Select(r => r.Path).ToList(), "newest at the top");
+
+                var greenRow = RowBackground(rows, 0);
+                Assert.IsTrue(greenRow.G > greenRow.R && greenRow.A > 0, $"a success is washed green: {greenRow}");
+                var redRow = RowBackground(rows, 1);
+                Assert.IsTrue(redRow.R > redRow.G && redRow.A > 0, $"a failure is washed red: {redRow}");
+                Assert.AreEqual(0, RowBackground(rows, 2).A, "a running row has none");
+                var texts = rows.ContainerFromIndex(1)!.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text).ToList();
+                CollectionAssert.Contains(texts, "alpha");
+                CollectionAssert.Contains(texts, "Delete");
+                CollectionAssert.Contains(texts, "failed");
+                CollectionAssert.Contains(texts, "boom");
+
+                // every header sorts, through its binding and parameter
+                var headers = window.GetVisualDescendants().OfType<Button>().Where(b => b.Classes.Contains("colhead")).ToList();
+                Assert.AreEqual(7, headers.Count);
+                foreach (var (header, title) in headers.Zip(new[] { "Started", "Source", "Operation", "Path", "Duration (s)", "Detail", "Result" }))
+                {
+                    StringAssert.StartsWith(header.Content?.ToString(), title);
+                    Assert.IsTrue(header.Command!.CanExecute(header.CommandParameter));
+                    header.Command.Execute(header.CommandParameter);
+                    await Task.Delay(10);
+                    window.UpdateLayout();
+                    Assert.AreEqual(Enum.Parse<OperationColumn>((string)header.CommandParameter!), tab.SortColumn, title);
+                    StringAssert.Contains(header.Content?.ToString(), tab.SortDescending ? "▼" : "▲", title);
+                }
+
+                tab.SortCommand.Execute("Started");
+                Assert.IsTrue(tab.SortDescending, "Started begins with the latest");
+
+                // the filters, as the controls set them
+                var longer = window.GetVisualDescendants().OfType<TextBox>().Single(t => t.Name == "LongerThan");
+                longer.Text = "1000";
+                Assert.AreEqual("1000", tab.LongerThanText);
+                Assert.AreEqual(0, tab.Rows.Count);
+                longer.Text = "";
+                Assert.IsTrue(tab.Rows.Count > 0);
+
+                var failures = window.GetVisualDescendants().OfType<CheckBox>().Single(c => c.Content as string == "Failures only");
+                failures.IsChecked = true;
+                Assert.IsTrue(tab.Rows.All(r => r.Outcome == OperationOutcome.Failed));
+                failures.IsChecked = false;
+
+                var filters = window.GetVisualDescendants().OfType<ItemsControl>().Single(i => i.Name == "SourceFilters");
+                await Task.Delay(100);
+                window.UpdateLayout();
+                var alpha = filters.GetVisualDescendants().OfType<CheckBox>().Single(c => c.Content as string == "alpha");
+                Assert.IsTrue(alpha.IsChecked);
+                alpha.IsChecked = false;
+                Assert.AreEqual(0, tab.Rows.Count, "unticked, the source's rows go");
+                alpha.IsChecked = true;
+                Assert.IsTrue(tab.Rows.Count > 0);
+
+                running.Complete();
+                tabs.SelectedIndex = 3;
+                Assert.IsFalse(tab.IsActive, "another tab shown, the rows are left alone");
+
+                await host.ShutdownAsync();
+                window.Close();
+                return true;
+            }, CancellationToken.None);
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    private static async Task<string> ReadAllAsync(ISource source, string path)
+    {
+        await using var file = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
+        var buffer = new byte[file.Length];
+        var n = await file.ReadFullyAsync(0, buffer, CancellationToken.None);
+        return System.Text.Encoding.UTF8.GetString(buffer, 0, n);
+    }
+
+    private static Color RowBackground(ItemsControl rows, int index)
+    {
+        var row = rows.ContainerFromIndex(index);
+        Assert.IsNotNull(row, $"row {index} was realised");
+        var border = row.GetVisualDescendants().OfType<Border>().Prepend(row as Border).OfType<Border>().First(b => b.Classes.Contains("oprow"));
+        return ((ISolidColorBrush)border.Background!).Color;
     }
 
     /// <summary>

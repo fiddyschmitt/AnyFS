@@ -34,6 +34,9 @@
       <TabItem Header="All sources">
         <views:AllSourcesTab DataContext="{Binding AllSources}" />
       </TabItem>
+      <TabItem Header="Operations" Name="OperationsTabItem">
+        <views:OperationsTab DataContext="{Binding OperationsTab}" />
+      </TabItem>
       <TabItem Header="Stats">
         <views:StatsTab DataContext="{Binding Stats}" />
       </TabItem>

@@ -473,8 +473,9 @@ public sealed partial class MountTileViewModel : TileViewModel
 /// <summary>Keeps an observable list in step with a fresh snapshot, by id and in the snapshot's order, touching as little as possible.</summary>
 internal static class ListSync
 {
-    public static void Sync<TVm, TItem>(ObservableCollection<TVm> target, IReadOnlyList<TItem> items, Func<TItem, Guid> key, Func<TVm, Guid> vmKey, Func<TItem, TVm> create, Action<TVm, TItem> update)
+    public static void Sync<TVm, TItem, TKey>(ObservableCollection<TVm> target, IReadOnlyList<TItem> items, Func<TItem, TKey> key, Func<TVm, TKey> vmKey, Func<TItem, TVm> create, Action<TVm, TItem> update)
         where TVm : class
+        where TKey : notnull
     {
         var byId = target.ToDictionary(vmKey);
         var desired = new List<TVm>(items.Count);

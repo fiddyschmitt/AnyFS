@@ -45,6 +45,8 @@ public partial class MainWindow : Window
         DataContext = ViewModel;
         host.Prompts.SetPresenter(ShowPromptAsync);
         host.Engine.Changed += OnEngineChanged;
+        // the Operations tab's rows are kept up to date (every tick, so the durations run) only while it is the tab shown
+        Tabs.SelectionChanged += (_, _) => ViewModel.OperationsTab.IsActive = ReferenceEquals(Tabs.SelectedItem, OperationsTabItem);
         _timer = new DispatcherTimer(TimeSpan.FromMilliseconds(250), DispatcherPriority.Background, (_, _) => Tick());
         _watchdog = new Timer(_ => Probe(), null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         Opened += (_, _) =>
@@ -104,6 +106,10 @@ public partial class MainWindow : Window
         {
             _lastRefresh = now;
             ViewModel.Refresh();
+        }
+        else if (ViewModel.OperationsTab.IsActive)
+        {
+            ViewModel.OperationsTab.Refresh();
         }
     }
 
