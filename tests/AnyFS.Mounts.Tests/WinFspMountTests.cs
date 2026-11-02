@@ -55,7 +55,7 @@ public class WinFspMountTests
         }
     }
 
-    private async Task<(IMount Mount, string Unc, MemorySource Source)> MountAsync(bool readOnly = false)
+    private async Task<(IMount Mount, string Unc, MemorySource Source)> MountAsync(bool readOnly = false, Func<IVirtualFileSystem, IVirtualFileSystem>? wrap = null)
     {
         var name = "anyfs-test-" + Guid.NewGuid().ToString("N")[..8];
         var source = Tree();
@@ -64,7 +64,8 @@ public class WinFspMountTests
         var settings = (WinFspMountSettings)provider.CreateDefaultSettings(new Collection(name));
         var mount = provider.CreateMount(settings, new Collection(name));
         var context = new TestMountContext(name, "winfsp", logger: new ConsoleLogger());
-        await mount.StartAsync(new SingleSourceVfs(source, name, readOnly), context, CancellationToken.None);
+        IVirtualFileSystem vfs = new SingleSourceVfs(source, name, readOnly);
+        await mount.StartAsync(wrap?.Invoke(vfs) ?? vfs, context, CancellationToken.None);
         _cleanup.Add(mount);
         var unc = $@"\\anyfs\{name}";
         Assert.AreEqual(unc, mount.AccessPaths.Single().Value, "no drive letter: the UNC path is the only access path");
@@ -231,6 +232,161 @@ public class WinFspMountTests
             CollectionAssert.AreEqual(patch, got[1000..4000], "the patch");
             CollectionAssert.AreEqual(Big[1_503_000..1_504_000], got[4000..], "after the patch");
         }
+    }
+
+    [TestMethod]
+    public async Task AnOpenOnlyToLookAtAFileOpensNothingInTheSource()
+    {
+        RequireWinFsp();
+        var counting = default(OpenCounting);
+        var (_, unc, _) = await MountAsync(wrap: vfs => counting = new OpenCounting(vfs));
+        var path = Path.Combine(unc, "big.bin");
+
+        // FILE_READ_ATTRIBUTES, as the shell and search tools open what they only look at (a source may take long to open it)
+        var handle = Native.CreateFileW(path, Native.FileReadAttributes, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        Assert.AreNotEqual(new IntPtr(-1), handle, $"opened for its attributes: error {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
+        Assert.IsTrue(Native.GetFileSizeEx(handle, out var size), "and its size asked through the handle");
+        Assert.IsTrue(Native.CloseHandle(handle));
+        Assert.AreEqual(Big.Length, size, "the listing's size");
+        Assert.AreEqual(0, counting!.Opens, "nothing asked of the source");
+
+        // an open for its data is one
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 1))
+        {
+            var start = new byte[1000];
+            stream.ReadExactly(start);
+            CollectionAssert.AreEqual(Big[..1000], start);
+        }
+
+        Assert.AreEqual(1, counting.Opens);
+    }
+
+    [TestMethod]
+    public async Task ASupersedeWithNoAccessToTheDataStillReplacesTheFile()
+    {
+        RequireWinFsp();
+        var (_, unc, source) = await MountAsync();
+        var path = Path.Combine(unc, "medium.bin");
+        Assert.AreEqual(Medium.Length, new FileInfo(path).Length);
+
+        // FILE_SUPERSEDE with DELETE alone: the open asks for nothing of the data, and the overwrite comes all the same
+        var status = Native.Supersede(@"\??\UNC\" + path.TrimStart('\\'));
+        Assert.AreEqual(0, status, $"NTSTATUS 0x{status:X8}");
+        Assert.AreEqual(0, (await source.StatAsync("medium.bin", CancellationToken.None))!.Length, "replaced");
+    }
+
+    private static class Native
+    {
+        public const uint FileReadAttributes = 0x80;
+
+        private const uint Delete = 0x10000;
+        private const uint Synchronize = 0x100000;
+        private const uint CaseInsensitive = 0x40;
+        private const uint FileSupersede = 0;
+        private const uint FileSynchronousIoNonAlert = 0x20;
+        private const uint FileNonDirectoryFile = 0x40;
+
+        /// <summary>NtCreateFile with FILE_SUPERSEDE, which Win32's CreateFile cannot ask for: its NTSTATUS.</summary>
+        public static int Supersede(string ntPath)
+        {
+            var name = System.Runtime.InteropServices.Marshal.StringToHGlobalUni(ntPath);
+            try
+            {
+                var unicode = new UnicodeString { Length = (ushort)(ntPath.Length * 2), MaximumLength = (ushort)(ntPath.Length * 2), Buffer = name };
+                var attributes = new ObjectAttributes { Length = System.Runtime.InteropServices.Marshal.SizeOf<ObjectAttributes>(), ObjectName = System.Runtime.InteropServices.Marshal.AllocHGlobal(System.Runtime.InteropServices.Marshal.SizeOf<UnicodeString>()), Attributes = CaseInsensitive };
+                try
+                {
+                    System.Runtime.InteropServices.Marshal.StructureToPtr(unicode, attributes.ObjectName, false);
+                    var status = NtCreateFile(out var handle, Delete | Synchronize, ref attributes, out _, IntPtr.Zero, 0, 7, FileSupersede, FileSynchronousIoNonAlert | FileNonDirectoryFile, IntPtr.Zero, 0);
+                    if (status == 0)
+                    {
+                        CloseHandle(handle);
+                    }
+
+                    return status;
+                }
+                finally
+                {
+                    System.Runtime.InteropServices.Marshal.FreeHGlobal(attributes.ObjectName);
+                }
+            }
+            finally
+            {
+                System.Runtime.InteropServices.Marshal.FreeHGlobal(name);
+            }
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct UnicodeString
+        {
+            public ushort Length;
+            public ushort MaximumLength;
+            public IntPtr Buffer;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct ObjectAttributes
+        {
+            public int Length;
+            public IntPtr RootDirectory;
+            public IntPtr ObjectName;
+            public uint Attributes;
+            public IntPtr SecurityDescriptor;
+            public IntPtr SecurityQualityOfService;
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct IoStatusBlock
+        {
+            public IntPtr Status;
+            public IntPtr Information;
+        }
+
+        [System.Runtime.InteropServices.DllImport("ntdll.dll")]
+        private static extern int NtCreateFile(out IntPtr handle, uint access, ref ObjectAttributes attributes, out IoStatusBlock status, IntPtr allocationSize, uint fileAttributes, uint share, uint disposition, uint options, IntPtr eaBuffer, uint eaLength);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+        public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool GetFileSizeEx(IntPtr handle, out long size);
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        public static extern bool CloseHandle(IntPtr handle);
+    }
+
+    /// <summary>A file system that counts what is opened in it.</summary>
+    private sealed class OpenCounting(IVirtualFileSystem inner) : IVirtualFileSystem
+    {
+        private int _opens;
+
+        public int Opens => Volatile.Read(ref _opens);
+
+        public string CollectionName => inner.CollectionName;
+
+        public bool ReadOnly => inner.ReadOnly;
+
+        public bool CanWrite(string path) => inner.CanWrite(path);
+
+        public Task<VfsEntry?> StatAsync(string path, CancellationToken ct) => inner.StatAsync(path, ct);
+
+        public IAsyncEnumerable<VfsEntry> ListAsync(string path, CancellationToken ct) => inner.ListAsync(path, ct);
+
+        public Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct)
+        {
+            Interlocked.Increment(ref _opens);
+            return inner.OpenAsync(path, mode, ct);
+        }
+
+        public Task CreateDirectoryAsync(string path, CancellationToken ct) => inner.CreateDirectoryAsync(path, ct);
+
+        public Task DeleteAsync(string path, CancellationToken ct) => inner.DeleteAsync(path, ct);
+
+        public Task RenameAsync(string fromPath, string toPath, bool replace, CancellationToken ct) => inner.RenameAsync(fromPath, toPath, replace, ct);
+
+        public Task SetTimesAsync(string path, DateTimeOffset? created, DateTimeOffset? modified, CancellationToken ct) => inner.SetTimesAsync(path, created, modified, ct);
+
+        public Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct) => inner.GetSpaceAsync(path, ct);
     }
 
     [TestMethod]

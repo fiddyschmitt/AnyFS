@@ -27,6 +27,11 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
     private const uint AttrSystem = 0x4;
     private const uint AttrDirectory = 0x10;
     private const uint AttrNormal = 0x80;
+    private const uint AccessReadData = 0x1;
+    private const uint AccessExecute = 0x20;
+    private const uint AccessMaximumAllowed = 0x02000000;
+    private const uint AccessGenericRead = 0x80000000;
+    private const uint AccessGenericExecute = 0x20000000;
     private const uint AccessWriteData = 0x2;
     private const uint AccessAppendData = 0x4;
     private const uint AccessDelete = 0x10000;
@@ -161,7 +166,11 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         }
 
         var desc = new Desc(path) { IsDirectory = entry.IsDirectory };
-        if (!entry.IsDirectory)
+
+        // an open only to look at the file (its attributes, its security), as Explorer and search tools make by the thousand,
+        // reaches nothing of its data: the source is not asked for it until a read through this handle wants it, if one does
+        var wantsData = wantsWrite || (grantedAccess & (AccessReadData | AccessExecute | AccessGenericRead | AccessGenericExecute | AccessMaximumAllowed)) != 0;
+        if (!entry.IsDirectory && wantsData)
         {
             status = Guard(() =>
             {
@@ -183,7 +192,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
     {
         var desc = (Desc)fileDesc;
         fileInfo = default;
-        if (desc.File is null)
+        if (desc.IsDirectory)
         {
             return STATUS_INVALID_DEVICE_REQUEST;
         }
@@ -193,6 +202,8 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         {
             status = Guard(() =>
             {
+                // a supersede asks for no access to the data, only to replace the file: opened for it now
+                desc.File ??= Wait(fs.OpenAsync(desc.Path, VfsOpenMode.ReadWrite, CancellationToken.None));
                 Wait(desc.File.SetLengthAsync(0, CancellationToken.None).AsTask());
                 return STATUS_SUCCESS;
             });
@@ -269,7 +280,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
     {
         bytesTransferred = 0;
         var desc = (Desc)fileDesc;
-        if (desc.File is null)
+        if (desc.IsDirectory)
         {
             return STATUS_INVALID_DEVICE_REQUEST;
         }
@@ -278,7 +289,21 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         var count = (int)length;
         lock (desc.ReadLock)
         {
-            var file = desc.File;
+            if (desc.File is null)
+            {
+                // an open without access to the data that reads all the same: the file is opened now
+                var opened = Guard(() =>
+                {
+                    desc.File = Wait(fs.OpenAsync(desc.Path, VfsOpenMode.Read, CancellationToken.None));
+                    return STATUS_SUCCESS;
+                });
+                if (opened < 0)
+                {
+                    return opened;
+                }
+            }
+
+            var file = desc.File!;
             var rented = ArrayPool<byte>.Shared.Rent(count);
             try
             {
