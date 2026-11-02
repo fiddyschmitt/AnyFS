@@ -77,6 +77,9 @@ public sealed class ListingCache
     /// </summary>
     public Func<VfsException, TimeSpan?>? FailureKeptFor { get; init; }
 
+    /// <summary>Told of each folder as it goes to the upstream, and why (no listing held, a failure's time over, a listing grown old, its stamp moved, a walk): for the log.</summary>
+    public Action<string, string>? OnListing { get; init; }
+
     /// <summary>The listing of <paramref name="path"/> (a normalised directory path), from the cache when fresh.</summary>
     public ValueTask<IReadOnlyList<VfsEntry>> GetAsync(string path, CancellationToken ct)
     {
@@ -95,7 +98,9 @@ public sealed class ListingCache
             return ValueTask.FromException<IReadOnlyList<VfsEntry>>(new VfsException(failed.Error.Error, failed.Error.Message, failed.Error.InnerException));
         }
 
-        return FetchAsync(path, ct, null);
+        return FetchAsync(path, ct, null, failed is not null
+            ? $"it failed {_time.GetElapsedTime(failed.At).TotalSeconds:F0} s ago and that failure was kept {failed.For.TotalSeconds:F0} s ({failed.Error.Message})"
+            : held is not null ? "its listing is past its time" : "no listing is held");
     }
 
     /// <summary>Lets go of the failures kept (<see cref="FailureKeptFor"/>): for a source that knows what refused them may not now (a sign-in renewed), so each is listed again when next asked.</summary>
@@ -220,7 +225,7 @@ public sealed class ListingCache
 
             // checked a year ago: past any refresh age
             var now = _time.GetTimestamp();
-            _entries[path] = new Entry(now, listing) { Checked = now - (long)(TimeSpan.FromDays(365).TotalSeconds * _time.TimestampFrequency), Stamp = stamp };
+            _entries[path] = new Entry(now, listing) { Checked = now - (long)(TimeSpan.FromDays(365).TotalSeconds * _time.TimestampFrequency), Stamp = stamp, Restored = true };
             TrimIfNeededLocked();
         }
     }
@@ -230,10 +235,10 @@ public sealed class ListingCache
     public ValueTask<IReadOnlyList<VfsEntry>> ListAsync(string path, CancellationToken ct) => GetAsync(path, ct);
 
     /// <summary>Lists <paramref name="path"/> from the upstream now (or joins a listing of it on its way) and keeps the result in place of what was held.</summary>
-    public ValueTask<IReadOnlyList<VfsEntry>> RefreshAsync(string path, CancellationToken ct) => FetchAsync(path, ct, null);
+    public ValueTask<IReadOnlyList<VfsEntry>> RefreshAsync(string path, CancellationToken ct) => FetchAsync(path, ct, null, "a walk");
 
     /// <summary>The same, keeping <paramref name="stamp"/> with the listing: the folder's stamp as the caller read it before asking (<see cref="StampOf"/> is not asked again).</summary>
-    public ValueTask<IReadOnlyList<VfsEntry>> RefreshAsync(string path, string? stamp, CancellationToken ct) => FetchAsync(path, ct, (true, stamp));
+    public ValueTask<IReadOnlyList<VfsEntry>> RefreshAsync(string path, string? stamp, CancellationToken ct) => FetchAsync(path, ct, (true, stamp), "a walk");
 
     /// <summary>Finds <paramref name="path"/> in its parent's cached listing; null when absent.</summary>
     public async ValueTask<VfsEntry?> StatAsync(string path, CancellationToken ct, StringComparison comparison = StringComparison.Ordinal)
@@ -409,6 +414,12 @@ public sealed class ListingCache
             }
 
             fetch.Stamp = (true, now);
+            OnListing?.Invoke(path, $"its stamp moved, behind an answer ({stamp} to {now ?? "none"})");
+        }
+        else
+        {
+            var age = _time.GetElapsedTime(held.Fetched);
+            OnListing?.Invoke(path, held.Restored ? "it came from the last run, behind an answer" : $"its listing is {age.TotalSeconds:F0} s old, behind an answer");
         }
 
         await RunAsync(path, fetch).ConfigureAwait(false);
@@ -416,7 +427,8 @@ public sealed class ListingCache
 
     /// <summary>The listing from the upstream: the one on its way when there is one, else a new one, shared by every caller until it lands.</summary>
     /// <param name="stamp">The folder's stamp as the caller read it, to keep with the listing; null to read it here (<see cref="StampOf"/>).</param>
-    private ValueTask<IReadOnlyList<VfsEntry>> FetchAsync(string path, CancellationToken ct, (bool Read, string? Value)? stamp)
+    /// <param name="why">Why the upstream is asked: told to <see cref="OnListing"/> if this starts a listing.</param>
+    private ValueTask<IReadOnlyList<VfsEntry>> FetchAsync(string path, CancellationToken ct, (bool Read, string? Value)? stamp, string why)
     {
         Fetch fetch;
         var started = false;
@@ -432,6 +444,7 @@ public sealed class ListingCache
 
         if (started)
         {
+            OnListing?.Invoke(path, why);
             _ = RunAsync(path, fetch);
         }
 
@@ -566,6 +579,9 @@ public sealed class ListingCache
         public long Checked { get; init; } = Fetched;
 
         public string? Stamp { get; init; }
+
+        /// <summary>Whether it came from what an earlier run saved, and has not been listed afresh since.</summary>
+        public bool Restored { get; init; }
     }
 
     /// <summary>A write's change to one name in a listing.</summary>

@@ -199,7 +199,8 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   listed afresh: call `RefreshAsync` from a walk of your tree now and then, or set `RefreshAfter`
   to answer a listing older than that at once and list the folder afresh behind the answer. A
   folder listed again soon after is no sign that the person pressed refresh: programs list a folder
-  over and over (opening a file in Adobe Acrobat does).
+  over and over (opening a file in Adobe Acrobat does). `OnListing` is told why each folder goes to
+  the upstream; `KeptListings` logs it at debug.
 - `KeptListings`: a slow source's listings kept, and the walks of its tree that fill them. Give it
   your listing, your `Counters` and `KeptListingsOptions`; answer `ListAsync` and stats from its
   `Cache`, and make `CountFilesAsync` its `CountAsync`: "Count files on start" is then the first

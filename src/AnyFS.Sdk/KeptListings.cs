@@ -59,9 +59,10 @@ public sealed class KeptListings : IAsyncDisposable
         _counters = counters;
         _logger = logger;
         _time = time ?? TimeProvider.System;
+        void Listing(string path, string why) => _logger.LogDebug("{Name}: listing '{Path}' from the service: {Why}", _options.Name, path, why);
         Cache = _options.Keep
-            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { RefreshAfter = _options.RefreshAfter, StampOf = _options.StampOf, FailureKeptFor = _options.FailureKeptFor }
-            : new ListingCache(_options.UnkeptFor, lister, time: _time) { StampOf = _options.StampOf };
+            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { OnListing = Listing, RefreshAfter = _options.RefreshAfter, StampOf = _options.StampOf, FailureKeptFor = _options.FailureKeptFor }
+            : new ListingCache(_options.UnkeptFor, lister, time: _time) { OnListing = Listing, StampOf = _options.StampOf };
         if (_options.Keep && _options.SaveTo is { } saved)
         {
             Load(saved);
