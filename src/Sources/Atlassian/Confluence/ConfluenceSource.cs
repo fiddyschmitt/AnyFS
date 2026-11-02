@@ -14,8 +14,10 @@ namespace AnyFS.Sources.Atlassian.Confluence;
 /// either case, as Windows does. Folder listings are kept (the SDK's <see cref="KeptListings"/>), and go by their space's stamp:
 /// its newest change and content count, one search every few seconds however many folders ask. While it holds a kept folder is
 /// as good as new; once it moves, a folder asked for is listed again behind the answer, a few at a time, so a client going through
-/// the tree never waits behind them. "Count files on start" walks the tree into the listings, a space whole at a time (its pages,
-/// attachments and comments in bulk). A folder whose listing failed stays so until the next walk.
+/// the tree never waits behind them. What a listing names it also keeps the key of (<see cref="ConfluenceKeys"/>), so an open or a
+/// listing goes straight to the page or the attachment, however deep it is, without building the folders above it. "Count
+/// files on start" walks the tree into the listings, a space whole at a time (its pages, attachments and comments in bulk). A
+/// folder whose listing failed stays so until the next walk.
 /// </summary>
 public sealed class ConfluenceSource : SourceBase, ICountable
 {
@@ -244,7 +246,20 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             return node;
         }
 
-        foreach (var segment in VfsPath.Split(normalized))
+        // the nearest thing on the path that a kept listing names by its key: everything above it needs no asking
+        var segments = VfsPath.Split(normalized);
+        var from = 0;
+        for (var i = segments.Length; i > 0; i--)
+        {
+            if (KeptNode(string.Join('/', segments, 0, i)) is { } kept)
+            {
+                node = kept;
+                from = i;
+                break;
+            }
+        }
+
+        foreach (var segment in segments.Skip(from))
         {
             if (node is not CoFolder folder)
             {
@@ -255,6 +270,49 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         }
 
         return node;
+    }
+
+    /// <summary>The thing at <paramref name="path"/> as the listing held of its folder names it, by its key; null where no listing is held or it has none.</summary>
+    private CoNode? KeptNode(string path)
+    {
+        var (parent, name) = VfsPath.SplitLast(path);
+        var listing = _kept?.Cache.Held(parent);
+        if (listing is null)
+        {
+            return null;
+        }
+
+        foreach (var entry in listing)
+        {
+            if (entry.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return ConfluenceKeys.Node(entry);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>A page's child page's folder by its name, from the pages' names alone: what walking down a path needs, without a body read.</summary>
+    internal async Task<CoNode?> ChildFolderAsync(ConfluencePageFolder folder, string name, CancellationToken ct)
+    {
+        if (folder.Blog)
+        {
+            return null;
+        }
+
+        var children = (await ChildPagesAsync(folder.Content.Id, ct).ConfigureAwait(false)).OrderBy(c => c.Title, StringComparer.OrdinalIgnoreCase).ThenBy(c => c.Id, StringComparer.Ordinal).ToList();
+        var markdownName = folder.Name.Length == 0 ? AtlassianNames.Safe(ConfluenceDocuments.PageFolderName(folder.Content) + ".md") : folder.Name + ".md";
+        var names = AtlassianNames.Unique(children.Select(ConfluenceDocuments.PageFolderName).ToList(), [markdownName]);
+        for (var i = 0; i < children.Count; i++)
+        {
+            if (names[i].Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return new ConfluencePageFolder(children[i], names[i], folder.Content.Id, blog: false);
+            }
+        }
+
+        return null;
     }
 
     private async Task<T> Guard<T>(Func<Task<T>> work)

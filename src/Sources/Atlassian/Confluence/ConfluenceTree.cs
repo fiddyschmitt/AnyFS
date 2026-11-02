@@ -25,7 +25,7 @@ internal abstract class CoFolder(string name, DateTimeOffset? modified = null, D
     public abstract Task<IReadOnlyList<CoNode>> ListAsync(ConfluenceSource source, CancellationToken ct);
 
     /// <summary>The child named <paramref name="name"/> (in either case), or null.</summary>
-    public async Task<CoNode?> FindAsync(ConfluenceSource source, string name, CancellationToken ct)
+    public virtual async Task<CoNode?> FindAsync(ConfluenceSource source, string name, CancellationToken ct)
         => (await ListAsync(source, ct).ConfigureAwait(false)).FirstOrDefault(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
 }
 
@@ -135,7 +135,15 @@ internal sealed class ConfluencePageFolder(ConfluenceContent content, string nam
 
     public bool Blog { get; } = blog;
 
+    /// <summary>With its key (<see cref="ConfluenceKeys"/>): the listing that names it is enough to find it again.</summary>
+    public override VfsEntry Entry => base.Entry with { Key = ConfluenceKeys.Of(this) };
+
     public override Task<IReadOnlyList<CoNode>> ListAsync(ConfluenceSource source, CancellationToken ct) => source.PageChildrenAsync(this, ct);
+
+    /// <summary>A child page's folder from the pages' names alone, no body or comments read; anything else from the whole listing.</summary>
+    public override async Task<CoNode?> FindAsync(ConfluenceSource source, string name, CancellationToken ct)
+        => (name.Equals(Name + ".md", StringComparison.OrdinalIgnoreCase) ? null : await source.ChildFolderAsync(this, name, ct).ConfigureAwait(false))
+            ?? await base.FindAsync(source, name, ct).ConfigureAwait(false);
 }
 
 /// <summary>An attached file, read from Confluence as it is opened (spooled), its size from the attachment's own record.</summary>
@@ -143,5 +151,39 @@ internal sealed class ConfluenceAttachmentFile(ConfluenceAttachment attachment, 
 {
     public ConfluenceAttachment Attachment { get; } = attachment;
 
+    /// <summary>With its key (<see cref="ConfluenceKeys"/>): the listing that names it is enough to fetch it.</summary>
+    public override VfsEntry Entry => base.Entry with { Key = ConfluenceKeys.Of(Attachment) };
+
     public override Task<IVfsFile> OpenAsync(ConfluenceSource source, CancellationToken ct) => source.OpenAttachmentAsync(Attachment, ct);
+}
+
+/// <summary>
+/// What a listing keeps of a page's folder and an attachment (<see cref="VfsEntry.Key"/>): what finding them again takes, kept
+/// with the listing and saved with it, so an open or a listing goes straight to the thing however deep it is.
+/// </summary>
+internal static class ConfluenceKeys
+{
+    private const char Separator = '\n';
+
+    public static string Of(ConfluencePageFolder folder)
+        => string.Join(Separator, "p", folder.Content.Id, folder.Content.Version.ToString(System.Globalization.CultureInfo.InvariantCulture), folder.ParentId ?? "", folder.Blog ? "1" : "0", folder.Content.SpaceKey);
+
+    public static string Of(ConfluenceAttachment attachment)
+        => string.Join(Separator, "a", attachment.Id, attachment.Version.ToString(System.Globalization.CultureInfo.InvariantCulture), attachment.ContainerId ?? "", attachment.FileName, attachment.Download ?? "");
+
+    /// <summary>The thing an entry of a held listing names, from its key; null for an entry without one.</summary>
+    public static CoNode? Node(VfsEntry entry)
+    {
+        var parts = entry.Key?.Split(Separator);
+        switch (parts)
+        {
+            case ["p", var id, var version, var parent, var blog, var space]:
+                var content = new ConfluenceContent(id, blog == "1" ? "blogpost" : "page", entry.Name, space, int.Parse(version, System.Globalization.CultureInfo.InvariantCulture), entry.Modified, null, entry.Created, null, [], parent.Length == 0 ? null : parent, null, null, null);
+                return new ConfluencePageFolder(content, entry.Name, content.ParentId, blog == "1");
+            case ["a", var id, var version, var container, var file, var download]:
+                return new ConfluenceAttachmentFile(new ConfluenceAttachment(id, file, entry.Length, null, int.Parse(version, System.Globalization.CultureInfo.InvariantCulture), entry.Modified, download.Length == 0 ? null : download, container.Length == 0 ? null : container), entry.Name);
+            default:
+                return null;
+        }
+    }
 }

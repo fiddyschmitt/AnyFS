@@ -361,6 +361,71 @@ public class ConfluenceTests
     }
 
     [TestMethod]
+    public async Task AnOpenAndAListingAskNothingAboutTheFoldersAboveThem()
+    {
+        var fake = ConfluenceSeed.Lab();
+        var settings = ConfluenceSeed.Settings(fake);
+        settings.RefreshSeconds = 1;
+        await using var source = await StartAsync(fake, settings);
+
+        // down to the page, as a client goes
+        var path = "";
+        foreach (var name in new[] { "AnyFS Lab (ANYFS)", "AnyFS Lab Home", "Architecture", "Services" })
+        {
+            await NamesAsync(source, path);
+            path = VfsPath.Join(path, name);
+        }
+
+        await NamesAsync(source, path);
+        await Task.Delay(1100);
+
+        // past every request kept: an attachment comes straight from its listing
+        fake.Requests.Clear();
+        CollectionAssert.AreEqual(ConfluenceSeed.Large, await ReadAsync(source, path + "/large.bin"));
+        Assert.AreEqual(1, fake.Requests.Count, string.Join("; ", fake.Requests));
+        StringAssert.Contains(fake.Requests.Single(), "/download/attachments/");
+
+        // a page's Markdown asks for that page alone: no page above it, no page beside it
+        await Task.Delay(1100);
+        fake.Requests.Clear();
+        StringAssert.Contains(await TextAsync(source, path + "/Services.md"), "The services.");
+        var services = fake.PageTitled("Services").Id;
+        Assert.IsTrue(fake.Requests.All(r => r.Contains($"/content/{services}", StringComparison.Ordinal)), string.Join("; ", fake.Requests));
+    }
+
+    [TestMethod]
+    public async Task WhatAKeptListingNamesIsFoundFromItAfterARestart()
+    {
+        var fake = ConfluenceSeed.Lab();
+        using var context = new TestSourceContext();
+        var path = "AnyFS Lab (ANYFS)/AnyFS Lab Home/Architecture/Services";
+        await using (var first = await StartAsync(fake, ConfluenceSeed.Settings(fake), context))
+        {
+            await first.CountFilesAsync(CancellationToken.None);
+        }
+
+        await using var next = await StartAsync(fake, ConfluenceSeed.Settings(fake), context);
+        fake.Requests.Clear();
+        CollectionAssert.AreEqual(ConfluenceSeed.Large, await ReadAsync(next, path + "/large.bin"));
+        Assert.AreEqual(1, fake.Requests.Count, string.Join("; ", fake.Requests));
+    }
+
+    [TestMethod]
+    public async Task WithNoListingHeldAPathIsFoundByNamesAlone()
+    {
+        var fake = ConfluenceSeed.Lab();
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake));
+
+        // straight to a deep file: the pages above it are asked for their children, not their bodies or comments
+        fake.Requests.Clear();
+        CollectionAssert.AreEqual(ConfluenceSeed.Large, await ReadAsync(source, "AnyFS Lab (ANYFS)/AnyFS Lab Home/Architecture/Services/large.bin"));
+        var services = fake.PageTitled("Services").Id;
+        Assert.IsTrue(fake.Requests.Count(r => r.Contains("body.storage", StringComparison.Ordinal)) <= 2, string.Join("; ", fake.Requests));
+        Assert.AreEqual(0, fake.Count("/content/" + fake.PageTitled("Architecture").Id + "?"), "no page above it read");
+        Assert.AreEqual(0, fake.Count("/content/" + fake.PageTitled("AnyFS Lab Home").Id + "?"), "no page above it read");
+    }
+
+    [TestMethod]
     public async Task AFolderWhoseListingFailedStaysSoUntilTheNextWalk()
     {
         var fake = ConfluenceSeed.Lab();

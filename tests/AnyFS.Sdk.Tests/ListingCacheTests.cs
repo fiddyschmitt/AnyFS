@@ -211,6 +211,20 @@ public class ListingCacheTests
     }
 
     [TestMethod]
+    public async Task HeldAnswersWithoutAskingAndWithoutListingAfresh()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { RefreshAfter = TimeSpan.FromSeconds(10) };
+        Assert.IsNull(cache.Held("docs"), "nothing held yet");
+        Assert.AreEqual(0, _calls, "and nothing asked");
+
+        var listed = await cache.GetAsync("docs", CancellationToken.None);
+        _time.Advance(TimeSpan.FromSeconds(11));
+        Assert.AreSame(listed, cache.Held("docs"));
+        await Task.Delay(50);
+        Assert.AreEqual(1, _calls, "older than RefreshAfter, and not listed afresh: looking at it is not asking for it");
+    }
+
+    [TestMethod]
     public async Task OnlySoManyListingsRunBehindAnswersAndAFolderLeftGoesNextTime()
     {
         var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { RefreshAfter = TimeSpan.FromSeconds(10), MaxRefreshesBehind = 1 };

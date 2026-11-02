@@ -89,6 +89,9 @@ public sealed class ListingCache
     /// <summary>Told of each folder as it goes to the upstream, and why (no listing held, a failure's time over, a listing grown old, its stamp moved, a walk): for the log.</summary>
     public Action<string, string>? OnListing { get; init; }
 
+    /// <summary>The listing held of <paramref name="path"/> as it is, nothing asked of the upstream and nothing listed afresh; null where none is held.</summary>
+    public IReadOnlyList<VfsEntry>? Held(string path) => _entries.TryGetValue(path, out var held) && !IsExpired(held) ? held.List : null;
+
     /// <summary>The listing of <paramref name="path"/> (a normalised directory path), from the cache when fresh.</summary>
     public ValueTask<IReadOnlyList<VfsEntry>> GetAsync(string path, CancellationToken ct)
     {

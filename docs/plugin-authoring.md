@@ -201,7 +201,9 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   folder listed again soon after is no sign that the person pressed refresh: programs list a folder
   over and over (opening a file in Adobe Acrobat does). A client going through a kept tree asks for
   thousands of folders in seconds: set `MaxRefreshesBehind` so that only so many of those listings
-  run at once, or whatever the client asks next waits behind them all.
+  run at once, or whatever the client asks next waits behind them all. `Held` looks at a listing
+  without asking anything, and an entry's `Key` is yours to keep what finding that thing again takes
+  (a page's id), kept and saved with the listing, so an open need not walk down from the root.
   `OnListing` is told why each folder goes to the upstream; `KeptListings` logs it at debug.
 - `KeptListings`: a slow source's listings kept, and the walks of its tree that fill them. Give it
   your listing, your `Counters` and `KeptListingsOptions`; answer `ListAsync` and stats from its

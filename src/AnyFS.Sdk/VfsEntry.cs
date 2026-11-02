@@ -22,6 +22,13 @@ public sealed record VfsEntry(
     VfsAttributes Attributes = VfsAttributes.None,
     string? ETag = null)
 {
+    /// <summary>
+    /// What the source knows this thing by (a Confluence page's id), kept and saved with the listing that names it, so the
+    /// source can go straight to it from that listing instead of walking down from the root again. Its own, to no one else.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? Key { get; init; }
+
     public static VfsEntry Directory(string name, DateTimeOffset? modified = null, DateTimeOffset? created = null, VfsAttributes attributes = VfsAttributes.None)
         => new(name, true, 0, created, modified, attributes);
 

@@ -362,6 +362,31 @@ public class KeptListingsTests
     }
 
     [TestMethod]
+    public async Task AnEntrysKeyIsSavedWithItsListing()
+    {
+        var file = TempFile();
+        try
+        {
+            _tree["docs"][1] = _tree["docs"][1] with { Key = "the source's own" };
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, SaveKey = "jane@contoso.com" };
+            await using (var first = Kept(new SourceCounters(), options))
+            {
+                await first.Cache.GetAsync("docs", CancellationToken.None);
+            }
+
+            await using var next = Kept(new SourceCounters(), options);
+            var held = next.Cache.Held("docs");
+            Assert.IsNotNull(held, "from the last run");
+            Assert.AreEqual("the source's own", held.Single(e => e.Name == "a.txt").Key);
+            Assert.IsNull(held.Single(e => e.Name == "b.txt").Key, "none where there was none");
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [TestMethod]
     public async Task AFolderBelowAKeptOneWithNoListingHeldIsWalked()
     {
         var file = TempFile();
