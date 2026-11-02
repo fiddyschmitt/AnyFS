@@ -211,6 +211,31 @@ public class ListingCacheTests
     }
 
     [TestMethod]
+    public async Task OnlySoManyListingsRunBehindAnswersAndAFolderLeftGoesNextTime()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { RefreshAfter = TimeSpan.FromSeconds(10), MaxRefreshesBehind = 1 };
+        await cache.GetAsync("docs", CancellationToken.None);
+        await cache.GetAsync("docs/sub", CancellationToken.None);
+        Assert.AreEqual(2, _calls);
+
+        // both old: the first sets off its listing; the second has no room, however often it is asked, and answers all the same
+        _time.Advance(TimeSpan.FromSeconds(11));
+        _gate = new TaskCompletionSource();
+        Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count);
+        await WaitForAsync(() => _calls == 3);
+        Assert.AreEqual(1, (await cache.GetAsync("docs/sub", CancellationToken.None)).Count);
+        Assert.AreEqual(1, (await cache.GetAsync("docs/sub", CancellationToken.None)).Count);
+        await Task.Delay(50);
+        Assert.AreEqual(3, _calls, "no room for the second");
+
+        // the room freed: the folder left is listed the next time it is asked for
+        _gate.SetResult();
+        _tree["docs/sub"].Add(VfsEntry.File("new.txt", 4));
+        await WaitForAsync(async () => (await cache.GetAsync("docs/sub", CancellationToken.None)).Count == 2);
+        Assert.AreEqual(4, _calls);
+    }
+
+    [TestMethod]
     public async Task EachListingFromTheUpstreamSaysWhy()
     {
         var told = new System.Collections.Concurrent.ConcurrentQueue<string>();

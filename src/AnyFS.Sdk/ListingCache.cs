@@ -27,6 +27,7 @@ public sealed class ListingCache
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Failure> _failures = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Fetch> _fetches = new(StringComparer.Ordinal);
+    private int _refreshingBehind;
 
     /// <param name="ttl">How long a listing is good for, or <see cref="Kept"/>.</param>
     public ListingCache(TimeSpan ttl, Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> lister, int maxDirectories = 10_000, TimeProvider? time = null)
@@ -56,6 +57,14 @@ public sealed class ListingCache
     /// being asked for the listing.
     /// </summary>
     public TimeSpan? RefreshAfter { get; init; }
+
+    /// <summary>
+    /// How many listings afresh behind an answer (<see cref="RefreshAfter"/>) run at once at most; a folder asked for past
+    /// that is answered and left as it is, to be listed afresh the next time it is asked for with room. A client going through
+    /// a kept tree asks for thousands of folders in seconds: without a limit each sets off its requests, and whatever the
+    /// client asks next waits behind them all. Null (the default) starts them all.
+    /// </summary>
+    public int? MaxRefreshesBehind { get; init; }
 
     /// <summary>
     /// A folder's stamp: what its listing, and every listing below it, depends on, as the upstream tells it cheaply (a
@@ -365,11 +374,12 @@ public sealed class ListingCache
         Fetch fetch;
         lock (_gate)
         {
-            if (_fetches.ContainsKey(path))
+            if (_fetches.ContainsKey(path) || (MaxRefreshesBehind is { } most && _refreshingBehind >= most))
             {
                 return;
             }
 
+            _refreshingBehind++;
             if (_entries.TryGetValue(path, out var current) && ReferenceEquals(current, held))
             {
                 _entries[path] = held with { Checked = _time.GetTimestamp() };
@@ -380,7 +390,20 @@ public sealed class ListingCache
         }
 
         // on the pool, so the answer is not held up by the lister's first steps; RunAsync observes a failure itself
-        _ = Task.Run(() => RefreshBehindAsync(path, fetch, held));
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await RefreshBehindAsync(path, fetch, held).ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_gate)
+                {
+                    _refreshingBehind--;
+                }
+            }
+        });
     }
 
     /// <summary>A listing afresh behind an answer: spared where the folder's stamp still holds (the held listing is then as good as new), else as any, with the stamp just read.</summary>

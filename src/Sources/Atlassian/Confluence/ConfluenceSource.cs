@@ -108,6 +108,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             Keep = _settings.Keeps,
             UnkeptFor = TimeSpan.Zero,
             RefreshAfter = _settings.Refresh,
+            MaxRefreshesBehind = Math.Max(1, requests / 4),
             WalkEvery = _settings.WalkEvery,
             Parallelism = walking,
             MaxInFlight = walking,

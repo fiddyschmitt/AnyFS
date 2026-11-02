@@ -61,7 +61,7 @@ public sealed class KeptListings : IAsyncDisposable
         _time = time ?? TimeProvider.System;
         void Listing(string path, string why) => _logger.LogDebug("{Name}: listing '{Path}' from the service: {Why}", _options.Name, path, why);
         Cache = _options.Keep
-            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { OnListing = Listing, RefreshAfter = _options.RefreshAfter, StampOf = _options.StampOf, FailureKeptFor = _options.FailureKeptFor }
+            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { OnListing = Listing, RefreshAfter = _options.RefreshAfter, MaxRefreshesBehind = _options.MaxRefreshesBehind, StampOf = _options.StampOf, FailureKeptFor = _options.FailureKeptFor }
             : new ListingCache(_options.UnkeptFor, lister, time: _time) { OnListing = Listing, StampOf = _options.StampOf };
         if (_options.Keep && _options.SaveTo is { } saved)
         {
@@ -594,6 +594,9 @@ public sealed record KeptListingsOptions
 
     /// <summary>With listings kept, the age past which a listing is answered and listed afresh behind the answer (<see cref="ListingCache.RefreshAfter"/>); null keeps it until the next walk.</summary>
     public TimeSpan? RefreshAfter { get; init; }
+
+    /// <summary>With listings kept, how many listings afresh behind answers run at once at most (<see cref="ListingCache.MaxRefreshesBehind"/>); null starts them all.</summary>
+    public int? MaxRefreshesBehind { get; init; }
 
     /// <summary>
     /// With listings kept, how long a folder whose listing failed answers with that failure at once, by the failure
