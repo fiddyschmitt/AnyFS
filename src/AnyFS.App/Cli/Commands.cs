@@ -1,5 +1,6 @@
 using System.CommandLine;
 using AnyFS.Core.Logging;
+using AnyFS.Core.Operations;
 using AnyFS.Core.Runtime;
 using AnyFS.Core.Settings;
 using AnyFS.Core.Status;
@@ -43,8 +44,12 @@ internal static class Commands
         serve.SetAction((parseResult, ct) => ServeAsync(parseResult.GetValue(settingsDir), parseResult.GetValue(logLevel), parseResult.GetValue(collectionOption), ct));
         root.Subcommands.Add(serve);
 
-        var status = new Command("status", "Print collections, sources, mounts, their states and access paths. Exit code 0 when everything is green, 1 when not, 2 when anyfs is not running.");
-        status.SetAction(parseResult => Status(parseResult.GetValue(settingsDir)));
+        var operationsOption = new Option<bool>("--operations")
+        {
+            Description = "Also print what each source was asked this session, per kind of operation: how many finished, failed and are running, the average and the longest.",
+        };
+        var status = new Command("status", "Print collections, sources, mounts, their states and access paths. Exit code 0 when everything is green, 1 when not, 2 when anyfs is not running.") { operationsOption };
+        status.SetAction(parseResult => Status(parseResult.GetValue(settingsDir), parseResult.GetValue(operationsOption)));
         root.Subcommands.Add(status);
 
         var dllArgument = new Argument<string>("dll") { Description = "The plugin DLL to check." };
@@ -112,7 +117,7 @@ internal static class Commands
         return report.Passed ? 0 : 1;
     }
 
-    public static int Status(string? settingsDir)
+    public static int Status(string? settingsDir, bool operations = false)
     {
         var paths = SettingsPaths.Resolve(settingsDir);
         var (snapshot, running) = StatusFileReader.Read(paths);
@@ -173,8 +178,43 @@ internal static class Commands
         out_.WriteLine();
         var stats = snapshot.Stats;
         out_.WriteLine($"Files served: {stats.Total.FilesServed:N0} total, {stats.Session.FilesServed:N0} this session.  Bytes served: {Format.Bytes(stats.Total.BytesRead + stats.Total.BytesWritten)} total, {Format.Bytes(stats.Session.BytesRead + stats.Session.BytesWritten)} this session.  Active connections: {stats.ActiveConnections}.");
+        if (operations)
+        {
+            out_.WriteLine();
+            PrintOperations(out_, snapshot.Operations);
+        }
+
         return snapshot.AllGreen ? 0 : 1;
     }
+
+    /// <summary>The session's operations per source and kind, as the engine counts them (<see cref="OperationStatsSnapshot"/>).</summary>
+    public static void PrintOperations(TextWriter out_, OperationStatsSnapshot operations)
+    {
+        out_.WriteLine("Operations this session:");
+        if (operations.Sources.Count == 0)
+        {
+            out_.WriteLine("  none yet");
+            return;
+        }
+
+        out_.WriteLine($"  {"Source",-24} {"Operation",-14} {"Finished",9} {"Failed",7} {"Running",8} {"Average",9} {"Longest",9}  Data");
+        foreach (var source in operations.Sources)
+        {
+            var name = source.Name.Length > 24 ? source.Name[..21] + "..." : source.Name;
+            foreach (var o in source.Operations)
+            {
+                out_.WriteLine($"  {name,-24} {o.Kind.Describe(),-14} {o.Finished,9:N0} {o.Failed,7:N0} {o.Running,8:N0} {o.AverageSeconds,7:0.00} s {o.MaxSeconds,7:0.00} s  {Data(o)}");
+            }
+        }
+    }
+
+    private static string Data(OperationKindStats o) => o.Kind switch
+    {
+        OperationKind.ReadFile or OperationKind.WriteFile => o.Bytes > 0 ? Format.Bytes(o.Bytes) : "",
+        OperationKind.List => o.Items > 0 ? $"{o.Items:N0} entries" : "",
+        OperationKind.Count => o.Items > 0 ? $"{o.Items:N0} files" : "",
+        _ => "",
+    };
 
     private static void PrintPlugins(TextWriter out_, IEnumerable<(string TypeId, string Kind, string DisplayName, string Origin, string? Error)> plugins)
     {

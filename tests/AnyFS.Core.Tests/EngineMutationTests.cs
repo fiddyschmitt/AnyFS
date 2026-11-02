@@ -1,4 +1,5 @@
 using AnyFS.Core.Model;
+using AnyFS.Core.Operations;
 using AnyFS.Core.Plugins;
 using AnyFS.Core.Runtime;
 using AnyFS.Core.Settings;
@@ -196,7 +197,7 @@ public class EngineMutationTests
         await engine.AddMembershipAsync(work.Id, alpha.Id, "mem/alpha", false);
         await engine.AddMembershipAsync(bob.Id, alpha.Id, "", true);
         await Wait.UntilAsync(() => engine.FindSourceRunner(alpha.Id)!.Handle.IsUsable, what: "ready");
-        var source = (MemorySource)engine.FindSourceRunner(alpha.Id)!.Handle.Current!;
+        var source = (MemorySource)TrackedSource.Unwrap(engine.FindSourceRunner(alpha.Id)!.Handle.Current!);
         Directory.CreateDirectory(_paths.SourceState(alpha.Id));
 
         await engine.DeleteSourceAsync(alpha.Id);

@@ -45,6 +45,7 @@ served over HTTP, is in [settings-format.md](settings-format.md).
 anyfs                                  the window
 anyfs serve [--collection NAME]...     run all (or the named) enabled collections until Ctrl+C
 anyfs status                           collections, sources, mounts, states, access paths; exit 0 when all green
+anyfs status --operations              also what each source was asked this session, per kind of operation
 anyfs plugin check <dll>               whether a third-party plugin loads in the trimmed host
 anyfs --settings-dir DIR ...           use another settings folder (window or command)
 anyfs --log-level LEVEL ...            trace, debug, info, warn, error
@@ -226,7 +227,8 @@ in seconds), several hours each while it is up.
 ```
 src/AnyFS.Sdk            interfaces, DTOs, SourceBase, caching helpers (the NuGet package)
 src/AnyFS.Sdk.Testing    contract tests and fakes for plugin authors (and our own tests)
-src/AnyFS.Core           model, plugin host, router, read-only layers, status, settings, secrets, stats, logging
+src/AnyFS.Core           model, plugin host, router, read-only layers, status, settings, secrets, stats, operations,
+                         logging
 src/AnyFS.App            anyfs: the window (Gui/) and the command line (Cli/)
 src/LibOutlook           a self-contained reader of Outlook's PST and OST files (no AnyFS reference; its own package)
 src/LibSmb               a self-contained SMB 2 and 3 server over a file system you supply (no AnyFS reference)

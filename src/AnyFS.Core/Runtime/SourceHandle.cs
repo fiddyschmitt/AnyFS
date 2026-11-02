@@ -29,7 +29,10 @@ public sealed class SourceHandle
 
     public string TypeId { get; }
 
-    /// <summary>The initialised source, or null while Starting/Failed/Disabled.</summary>
+    /// <summary>
+    /// The initialised source, or null while Starting/Failed/Disabled. Under the engine it is a
+    /// <see cref="Operations.TrackedSource"/> around the plugin's own, so ask of it only what <see cref="ISource"/> offers.
+    /// </summary>
     public ISource? Current
     {
         get => Volatile.Read(ref _current);

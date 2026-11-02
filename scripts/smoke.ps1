@@ -203,6 +203,8 @@ try {
         # exit 1 is allowed only for the WebDAV mount's yellow on Windows (the WebClient service is usually stopped); nothing may be Failed
         Check (($statusExit -eq 0) -or ($statusExit -eq 1 -and $status -match 'WebClient' -and $status -notmatch 'Failed')) "anyfs status while serving: all green, or only WebDAV yellow about WebClient (exit $statusExit)"
         Check ($status -match 'Files served: [1-9]') "status reports files served"
+        $operations = & $Exe status --operations --settings-dir $settings 2>&1 | Out-String
+        Check ($operations -match 'Operations this session' -and $operations -match 'Read file') "anyfs status --operations lists what the sources were asked"
     }
 }
 finally {

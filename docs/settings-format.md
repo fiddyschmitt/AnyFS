@@ -195,7 +195,8 @@ otherwise ignored.
   Protected with ASP.NET Core Data Protection; keys in `state/keys/` (DPAPI-wrapped on Windows).
 - `stats.json`: lifetime counters (`filesServed`, `bytesRead`, `bytesWritten`, per collection).
 - `status.json`: written every 2 s by a running `anyfs serve` (pid, collections, sources,
-  mounts, states, access paths, stats); `anyfs status` reads it and treats it as live when it is
+  mounts, states, access paths, stats, and `operations`: what each source was asked this session,
+  per kind); `anyfs status` reads it and treats it as live when it is
   under 10 s old and the pid is alive. Removed on a clean stop.
 - `sources/<id>/`, `mounts/<id>/`: per-plugin state.
 

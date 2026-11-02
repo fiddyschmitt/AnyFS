@@ -1,4 +1,5 @@
 using AnyFS.Core.Model;
+using AnyFS.Core.Operations;
 using AnyFS.Core.Settings;
 using AnyFS.Core.Status;
 using AnyFS.Sdk;
@@ -27,7 +28,8 @@ public static class RetryPolicy
 /// Runs one configured source: creates it from its settings, initialises it on the thread pool with a
 /// cancellation token tied to disable/delete/exit, retries failures with backoff unless they're
 /// permanent, applies the source's progress and health reports to its status, and optionally walks
-/// the tree to count files at start.
+/// the tree to count files at start. With an <see cref="OperationTracker"/>, the source is handed out wrapped in a
+/// <see cref="TrackedSource"/>, so every call to it is recorded.
 /// </summary>
 public sealed class SourceRunner : IAsyncDisposable
 {
@@ -39,6 +41,7 @@ public sealed class SourceRunner : IAsyncDisposable
     private readonly IPromptHandler _prompts;
     private readonly ILogger _logger;
     private readonly TimeProvider _time;
+    private readonly OperationTracker? _operations;
     private readonly object _gate = new();
     private CancellationTokenSource? _cts;
     private Task? _loop;
@@ -55,7 +58,8 @@ public sealed class SourceRunner : IAsyncDisposable
         SecretStore? secrets,
         IPromptHandler prompts,
         ILogger logger,
-        TimeProvider? time = null)
+        TimeProvider? time = null,
+        OperationTracker? operations = null)
     {
         Definition = definition;
         _plugin = plugin;
@@ -67,6 +71,7 @@ public sealed class SourceRunner : IAsyncDisposable
         _prompts = prompts;
         _logger = logger;
         _time = time ?? TimeProvider.System;
+        _operations = operations;
     }
 
     public SourceDefinition Definition { get; }
@@ -218,16 +223,17 @@ public sealed class SourceRunner : IAsyncDisposable
             try
             {
                 var context = new SourceContextImpl(this, Definition, _paths, _secrets, _prompts, _logger);
-                source = _plugin!.CreateSource(_settings ?? _plugin.CreateDefaultSettings());
+                var created = _plugin!.CreateSource(_settings ?? _plugin.CreateDefaultSettings());
+                source = _operations is null ? created : new TrackedSource(created, Handle, _operations);
                 await source.InitialiseAsync(context, ct).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested();
                 Handle.Current = source;
                 Handle.Status = _pendingHealth is { } pending ? StatusFor(pending, _pendingHealthDetail) : ComponentStatus.ReadyStatus;
                 _logger.LogInformation("source {Source} ({Type}) is {State}", Definition.Name, Definition.Type, Handle.Status.State.ToString().ToLowerInvariant());
                 // a source that counts itself is asked even when it says Complete: it learns the option is on
-                if (Definition.CountFilesOnStart && (source is ICountable || source.Counters.State != EnumerationState.Complete))
+                if (Definition.CountFilesOnStart && (created is ICountable || source.Counters.State != EnumerationState.Complete))
                 {
-                    await CountAsync(source, ct).ConfigureAwait(false);
+                    await CountAsync(source, created as ICountable, ct).ConfigureAwait(false);
                 }
 
                 return;
@@ -262,15 +268,17 @@ public sealed class SourceRunner : IAsyncDisposable
     /// <summary>
     /// The opt-in "Count files on start" walk (spec 6.8), with the spinner on: the source's own
     /// <see cref="ICountable.CountFilesAsync"/> when it has one, else the host's walk, several folders listed at a time.
+    /// One Count operation in the tracker, over the source's own count or the walk's listings.
     /// </summary>
-    private async Task CountAsync(ISource source, CancellationToken ct)
+    private async Task CountAsync(ISource source, ICountable? countable, CancellationToken ct)
     {
         var healthy = Handle.Status;
         Handle.Status = new ComponentStatus(ComponentState.Enumerating, "Counting files");
         source.Counters.SetState(EnumerationState.InProgress);
+        var op = (source as TrackedSource)?.Begin(OperationKind.Count);
         try
         {
-            if (source is ICountable countable)
+            if (countable is not null)
             {
                 await CountViaSourceAsync(source, countable, ct).ConfigureAwait(false);
             }
@@ -278,6 +286,14 @@ public sealed class SourceRunner : IAsyncDisposable
             {
                 await WalkAsync(source, ct).ConfigureAwait(false);
             }
+
+            op?.AddItems(source.Counters.FilesKnown);
+            op?.Complete();
+        }
+        catch (Exception ex)
+        {
+            op?.Fail(ex, ct);
+            throw;
         }
         finally
         {

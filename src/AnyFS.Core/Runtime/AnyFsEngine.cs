@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json.Nodes;
 using AnyFS.Core.Model;
+using AnyFS.Core.Operations;
 using AnyFS.Core.Plugins;
 using AnyFS.Core.Settings;
 using AnyFS.Core.Stats;
@@ -56,9 +57,14 @@ public sealed class AnyFsEngine : IAsyncDisposable
         _time = time ?? TimeProvider.System;
         Settings = new SettingsStore(paths, loggerFactory.CreateLogger("AnyFS.Settings"));
         Stats = new StatsCollector(_time);
+        Operations = new OperationTracker(_time);
+        Operations.Finished += OnOperationFinished;
         Shared = new SharedResources();
         StartedAt = _time.GetUtcNow();
     }
+
+    /// <summary>An operation that took this long gets a debug line in the log when it ends, as a failed one does.</summary>
+    public static readonly TimeSpan SlowOperation = TimeSpan.FromSeconds(5);
 
     /// <summary>Raised (on any thread) when a status changed or something was added, edited or removed.</summary>
     public event Action? Changed;
@@ -70,6 +76,9 @@ public sealed class AnyFsEngine : IAsyncDisposable
     public SettingsStore Settings { get; }
 
     public StatsCollector Stats { get; }
+
+    /// <summary>Every operation asked of every source: what runs now, what just finished, and the session's counters.</summary>
+    public OperationTracker Operations { get; }
 
     public SharedResources Shared { get; }
 
@@ -259,6 +268,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
             UpdatedAt = _time.GetUtcNow(),
             SettingsDirectory = Paths.Settings,
             Stats = Stats.Snapshot(),
+            Operations = Operations.Stats(),
         };
         foreach (var plugin in Registry.Plugins)
         {
@@ -560,6 +570,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
             }
 
             _handles.Remove(id);
+            Operations.Forget(id);
             if (_secrets is not null || File.Exists(Paths.SecretsFile))
             {
                 Secrets.RemoveAll(id);
@@ -1218,7 +1229,25 @@ public sealed class AnyFsEngine : IAsyncDisposable
             }
         }
 
-        return new SourceRunner(definition, plugin, settings, error, handle, Paths, plugin is null ? _secrets : Secrets, _prompts, _loggerFactory.CreateLogger($"AnyFS.Source.{definition.Name}"), _time);
+        return new SourceRunner(definition, plugin, settings, error, handle, Paths, plugin is null ? _secrets : Secrets, _prompts, _loggerFactory.CreateLogger($"AnyFS.Source.{definition.Name}"), _time, Operations);
+    }
+
+    /// <summary>A failed or slow operation is worth a debug line: with the log at debug, a sluggish mount says which source and call.</summary>
+    private void OnOperationFinished(OperationRecord op)
+    {
+        if (!_logger.IsEnabled(LogLevel.Debug))
+        {
+            return;
+        }
+
+        if (op.Outcome == OperationOutcome.Failed)
+        {
+            _logger.LogDebug("source {Source}: {Operation} '{Path}' failed after {Seconds:F2} s: {Error}", op.Source, op.Kind.Describe().ToLowerInvariant(), op.Path, op.Duration.TotalSeconds, op.Error);
+        }
+        else if (op.Duration >= SlowOperation)
+        {
+            _logger.LogDebug("source {Source}: {Operation} '{Path}' took {Seconds:F1} s ({Outcome})", op.Source, op.Kind.Describe().ToLowerInvariant(), op.Path, op.Duration.TotalSeconds, op.Outcome.ToString().ToLowerInvariant());
+        }
     }
 
     private CollectionRunner CreateCollectionRunner(CollectionDefinition definition)

@@ -1,3 +1,4 @@
+using AnyFS.Core.Operations;
 using AnyFS.Core.Stats;
 
 namespace AnyFS.Core.Status;
@@ -23,6 +24,9 @@ public sealed class StatusSnapshot
     public List<CollectionStatus> Collections { get; set; } = [];
 
     public StatsSnapshot Stats { get; set; } = new();
+
+    /// <summary>What the sources were asked this session, counted per source and kind (<c>anyfs status --operations</c>).</summary>
+    public OperationStatsSnapshot Operations { get; set; } = new();
 
     /// <summary>True when every enabled component is Ready (exit code 0 for <c>anyfs status</c>).</summary>
     public bool AllGreen => Collections.Where(c => c.Enabled).All(c => c.Colour is nameof(StatusColour.Green) or nameof(StatusColour.Grey));

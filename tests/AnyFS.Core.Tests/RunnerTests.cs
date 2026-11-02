@@ -1,4 +1,5 @@
 using AnyFS.Core.Model;
+using AnyFS.Core.Operations;
 using AnyFS.Core.Runtime;
 using AnyFS.Core.Settings;
 using AnyFS.Core.Status;
@@ -33,14 +34,36 @@ public class SourceRunnerTests
         }
     }
 
-    private SourceRunner Runner(MemoryPluginSettings settings, bool enabled = true, bool countOnStart = false, IPromptHandler? prompts = null, ISourcePlugin? plugin = null)
+    private SourceRunner Runner(MemoryPluginSettings settings, bool enabled = true, bool countOnStart = false, IPromptHandler? prompts = null, ISourcePlugin? plugin = null, OperationTracker? operations = null)
     {
         var definition = new SourceDefinition { Name = "src", Type = "memory", Enabled = enabled, CountFilesOnStart = countOnStart };
         var handle = new SourceHandle(definition.Id, definition.Name, definition.Type);
-        return new SourceRunner(definition, plugin ?? new MemoryPlugin(), settings, null, handle, _paths, null, prompts ?? NoPromptHandler.Instance, NullLogger.Instance)
+        return new SourceRunner(definition, plugin ?? new MemoryPlugin(), settings, null, handle, _paths, null, prompts ?? NoPromptHandler.Instance, NullLogger.Instance, operations: operations)
         {
             RetryDelay = _ => TimeSpan.FromMilliseconds(20),
         };
+    }
+
+    [TestMethod]
+    public async Task WithATrackerEveryCallToTheSourceIsRecorded()
+    {
+        var tracker = new OperationTracker();
+        await using var runner = Runner(new MemoryPluginSettings { Files = "a.txt=A" }, countOnStart: true, operations: tracker);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready && runner.Handle.Current?.Counters.State == EnumerationState.Complete, what: "ready and counted");
+        Assert.IsInstanceOfType<TrackedSource>(runner.Handle.Current, "the handle hands out the tracked source");
+        Assert.AreEqual("A", await Handles.ReadTextAsync(runner.Handle.Current!, "a.txt"));
+        await runner.StopAsync();
+
+        var rows = tracker.Recent().OrderBy(r => r.Id).ToList();
+        var kinds = rows.Select(r => r.Kind).ToList();
+        Assert.AreEqual(OperationKind.Start, kinds[0]);
+        Assert.AreEqual(OperationKind.Stop, kinds[^1]);
+        Assert.IsTrue(kinds.Contains(OperationKind.Count), "the count is one operation");
+        Assert.IsTrue(kinds.Contains(OperationKind.List), "and its walk lists through the tracked source");
+        Assert.IsTrue(kinds.Contains(OperationKind.ReadFile));
+        Assert.IsTrue(rows.All(r => r.Outcome == OperationOutcome.Succeeded && r.Source == "src"), string.Join("; ", rows.Select(r => $"{r.Kind} {r.Outcome} {r.Error}")));
+        Assert.AreEqual(1, rows.Single(r => r.Kind == OperationKind.Count).Items, "the count's operation says how many files it found");
     }
 
     [TestMethod]

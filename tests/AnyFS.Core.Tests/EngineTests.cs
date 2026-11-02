@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using AnyFS.Core.Model;
+using AnyFS.Core.Operations;
 using AnyFS.Core.Plugins;
 using AnyFS.Core.Runtime;
 using AnyFS.Core.Settings;
@@ -277,6 +278,39 @@ public class EngineTests
         Assert.IsFalse(File.Exists(_paths.StatusFile));
         Assert.IsTrue(FakeMountProvider.Mounts.Single().Stopped);
         Assert.IsFalse(StatusFileReader.Read(_paths).Running);
+    }
+
+    [TestMethod]
+    public async Task StatusJsonCarriesWhatTheSourcesWereAsked()
+    {
+        await using var engine = Engine();
+        engine.Load();
+        await engine.StartAsync(null, CancellationToken.None);
+        var collection = await engine.AddCollectionAsync("c");
+        var source = await engine.AddSourceAsync("alpha", "memory", true, false, new MemoryPluginSettings { Files = "a.txt=A" });
+        await engine.AddMembershipAsync(collection.Id, source.Id, "mem", false);
+        var runner = engine.FindSourceRunner(source.Id)!;
+        await Wait.UntilAsync(() => runner.Handle.IsUsable, what: "alpha ready");
+        var vfs = engine.Collections.Single(c => c.Name == "c").Vfs;
+
+        Assert.AreEqual("A", await Handles.ReadTextAsync(vfs, "mem/a.txt"));
+        await Handles.ExpectAsync(VfsError.NotFound, () => Handles.ReadTextAsync(vfs, "mem/missing.txt"));
+        CollectionAssert.Contains(await Handles.NamesAsync(vfs, "mem"), "a.txt");
+
+        Assert.IsTrue(engine.Operations.Recent().All(r => r.Source == "alpha"), "what goes through the router is recorded under the source's name");
+        engine.WriteStatus();
+        var (read, _) = StatusFileReader.Read(_paths);
+        var kinds = read!.Operations.Sources.Single(s => s.Id == source.Id).Operations.ToDictionary(o => o.Kind);
+        Assert.AreEqual(1, kinds[OperationKind.Start].Finished);
+        Assert.AreEqual(1, kinds[OperationKind.ReadFile].Finished);
+        Assert.AreEqual(1, kinds[OperationKind.ReadFile].Bytes);
+        Assert.IsTrue(kinds[OperationKind.List].Items >= 1, "a listing counts its entries");
+        Assert.IsTrue(kinds[OperationKind.Stat].Finished >= 2);
+        Assert.IsTrue(read.Operations.Finished >= 4);
+
+        await engine.DeleteSourceAsync(source.Id);
+        Assert.AreEqual(0, engine.Operations.Stats().Sources.Count, "a deleted source's counters go");
+        Assert.AreEqual(0, engine.Operations.Recent().Count, "and its finished operations");
     }
 
     [TestMethod]
