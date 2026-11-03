@@ -253,7 +253,7 @@ public sealed class KeptListings : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(counters);
         using var inFlight = new SemaphoreSlim(_options.MaxInFlight, _options.MaxInFlight);
-        var walk = new Walk(counters, inFlight, full);
+        var walk = new Walk(counters, inFlight, full) { HeldBelow = heldAlone && _options.ListTree is not null ? CountHeldBelow() : null };
         void StartPart(string path, bool held)
         {
             lock (walk.Parts)
@@ -300,6 +300,25 @@ public sealed class KeptListings : IAsyncDisposable
         return !walk.LeftSomeOut && walk.Failed == 0;
     }
 
+    /// <summary>How many folders are held at each folder and below it.</summary>
+    private Dictionary<string, int> CountHeldBelow()
+    {
+        var below = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var path in Cache.Snapshot().Keys)
+        {
+            for (var at = path; ; at = VfsPath.Parent(at))
+            {
+                below[at] = below.GetValueOrDefault(at) + 1;
+                if (at.Length == 0)
+                {
+                    break;
+                }
+            }
+        }
+
+        return below;
+    }
+
     // how many folders the last walk listed afresh, how many it kept as they were by their stamps, and how many it could not list (for the log)
     private (long Listed, long Kept, long Failed) _lastWalk;
 
@@ -329,6 +348,10 @@ public sealed class KeptListings : IAsyncDisposable
         _stopping.Dispose();
         Save();
     }
+
+    // how many folders held below a folder make a walk of what is held read it at once (ListTree) where it can: a client has been
+    // through it, and that is the quicker way by far; with fewer, it lists those few and reads nothing nobody asked for
+    private const int ReadAtOnceFrom = 50;
 
     // how long after the source starts a walk of what an earlier run saved begins: a count, asked for at once, makes it one of every folder
     private static readonly TimeSpan CountComesWithin = TimeSpan.FromSeconds(2);
@@ -495,7 +518,7 @@ public sealed class KeptListings : IAsyncDisposable
                             continue;
                         }
 
-                        tree = heldAlone ? null : await TreeOfAsync(folder, walk, ct).ConfigureAwait(false);
+                        tree = heldAlone && (walk.HeldBelow?.GetValueOrDefault(folder) ?? 0) < ReadAtOnceFrom ? null : await TreeOfAsync(folder, walk, ct).ConfigureAwait(false);
                         entries = tree is null ? await Cache.RefreshAsync(folder, stamp, ct).ConfigureAwait(false) : [];
                         if (tree is not null)
                         {
@@ -697,6 +720,9 @@ public sealed class KeptListings : IAsyncDisposable
         public SemaphoreSlim InFlight { get; } = inFlight;
 
         public bool Full { get; } = full;
+
+        /// <summary>In a walk of what is held, how many folders are held at each folder and below it (<see cref="ReadAtOnceFrom"/>); null otherwise.</summary>
+        public Dictionary<string, int>? HeldBelow { get; init; }
 
         public List<Task> Parts { get; } = [];
 

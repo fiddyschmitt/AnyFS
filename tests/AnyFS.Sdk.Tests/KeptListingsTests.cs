@@ -173,6 +173,46 @@ public class KeptListingsTests
     }
 
     [TestMethod]
+    public async Task AWalkOfWhatIsHeldReadsAtOnceWhereMuchIsHeld()
+    {
+        var trees = new ConcurrentBag<string>();
+        var options = new KeptListingsOptions
+        {
+            WalkEvery = TimeSpan.FromMilliseconds(50),
+            ListTree = (folder, _) =>
+            {
+                if (folder is "docs" or "photos")
+                {
+                    trees.Add(folder);
+                    return Task.FromResult<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>(new Dictionary<string, IReadOnlyList<VfsEntry>> { [folder] = _tree[folder] });
+                }
+
+                return Task.FromResult<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>(null);
+            },
+        };
+
+        // a client has been through docs: more than a few folders held below it; of photos only the folder
+        for (var i = 0; i < 60; i++)
+        {
+            _tree[$"docs/{i}"] = [];
+        }
+
+        await using var kept = Kept(new SourceCounters(), options);
+        await kept.Cache.GetAsync("", CancellationToken.None);
+        await kept.Cache.GetAsync("docs", CancellationToken.None);
+        await kept.Cache.GetAsync("photos", CancellationToken.None);
+        for (var i = 0; i < 60; i++)
+        {
+            await kept.Cache.GetAsync($"docs/{i}", CancellationToken.None);
+        }
+
+        kept.StartWalksOfHeld();
+        await UntilAsync(() => trees.Contains("docs"), "read at once");
+        await UntilAsync(() => Listed("photos") >= 2, "listed alone");
+        Assert.IsFalse(trees.Contains("photos"), "little held: nothing read that nobody asked for");
+    }
+
+    [TestMethod]
     public async Task ACountAskedForAsTheSourceStartsIsItsFirstWalk()
     {
         var counters = new SourceCounters();

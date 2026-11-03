@@ -213,7 +213,8 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   `StartWalksOfHeld` starts walks that go only through the folders that have been asked for, reading
   nothing nobody asked for, until the count is asked for: call it as your source starts unless you
   mean to walk everything anyway, or what was kept is never checked. The first comes at once where an
-  earlier run saved listings. The options shape the walk: `PartsBelow` walks the folders of a folder each on
+  earlier run saved listings. Where much is held below a folder (a client has been through it) such a
+  walk uses `ListTree` all the same. The options shape the walk: `PartsBelow` walks the folders of a folder each on
   its own (SharePoint's sites, four folders of each at a time, 64 listings in flight in all);
   `LeftOut` names folders not worth a walk, listed when opened (GitLab's issues, a request or more
   each), which makes the count a lower bound, and what has been opened of them the walks check like
