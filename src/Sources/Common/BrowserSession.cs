@@ -13,8 +13,8 @@ namespace AnyFS.Sources.Common;
 /// is and when the person has signed in is the <see cref="WebSignInTarget"/>'s to say. The browser is open only long enough
 /// to read the cookies, never while files are served. The profile keeps the sign-in session, so a later headless launch
 /// renews the cookies with nobody at the keyboard until that session itself lapses; only then is a window shown again.
-/// Where AnyFS cannot reach the DevTools port itself (a policy, or a browser that never opens it), the sign-in goes through
-/// Selenium WebDriver instead (<see cref="WebDriverSession"/>), for good. The browser itself is the shared
+/// Where AnyFS cannot reach the DevTools port itself (a policy, a browser that never opens it, or Firefox named as the browser,
+/// which has none), the sign-in goes through Selenium WebDriver instead (<see cref="WebDriverSession"/>), for good. The browser itself is the shared
 /// <see cref="DevToolsBrowser"/>.
 /// </summary>
 public sealed class BrowserSession
@@ -29,7 +29,7 @@ public sealed class BrowserSession
     private readonly IReadOnlyList<WebDriverBrowser> _webDriverBrowsers;
     private WebDriverSession? _webDriver;
 
-    /// <param name="browserPath">The Chromium browser to drive over DevTools, or null when there is none (WebDriver only, through Firefox).</param>
+    /// <param name="browserPath">The browser to use: a Chromium one, driven over DevTools; Firefox, driven through WebDriver; or null when there is no Chromium one (WebDriver only, through Firefox).</param>
     /// <param name="target">What to sign in to, and how to tell the person has.</param>
     public BrowserSession(string? browserPath, WebSignInTarget target, ILogger logger)
     {
@@ -37,7 +37,7 @@ public sealed class BrowserSession
         _target = target;
         _profileDir = target.ProfileDir;
         _logger = logger;
-        _webDriverBrowsers = WebDriverSession.Browsers(ForcedWebDriver);
+        _webDriverBrowsers = NamesFirefox && string.IsNullOrWhiteSpace(ForcedWebDriver) ? [new WebDriverBrowser(BrowserKind.Firefox, browserPath!)] : WebDriverSession.Browsers(ForcedWebDriver);
     }
 
     /// <summary>The browser AnyFS will drive, for messages ("Microsoft Edge").</summary>
@@ -46,21 +46,32 @@ public sealed class BrowserSession
     /// <summary>Whether there is any browser to sign in with, over DevTools or WebDriver.</summary>
     public bool CanSignIn => _browserPath is not null || _webDriverBrowsers.Count > 0;
 
+    /// <summary>The browsers WebDriver would try, in order.</summary>
+    internal IReadOnlyList<WebDriverBrowser> WebDriverBrowsers => _webDriverBrowsers;
+
     private string Prefix => _target.LogPrefix;
 
     private Uri Site => _target.Page;
 
     private string? ForcedWebDriver => _target.WebDriverVariable is { } name ? Environment.GetEnvironmentVariable(name) : null;
 
+    private bool NamesFirefox => _browserPath is not null && BrowserLocator.KindOf(_browserPath) == BrowserKind.Firefox;
+
     /// <summary>
     /// Why AnyFS should sign in through WebDriver from the start, or null: the target's variable says so (tests,
-    /// troubleshooting), there is no Chromium browser, or its policy blocks AnyFS's own DevTools launch.
+    /// troubleshooting), the Browser setting names Firefox, there is no Chromium browser, or its policy blocks AnyFS's own
+    /// DevTools launch.
     /// </summary>
-    private string? WebDriverFromTheStart()
+    internal string? WebDriverFromTheStart()
     {
         if (!string.IsNullOrWhiteSpace(ForcedWebDriver))
         {
             return $"{_target.WebDriverVariable} is set";
+        }
+
+        if (NamesFirefox)
+        {
+            return "the Browser setting names Firefox";
         }
 
         return _browserPath is null ? "no Edge, Chrome or Chromium is installed" : BrowserLocator.DevToolsBlocked(_browserPath);

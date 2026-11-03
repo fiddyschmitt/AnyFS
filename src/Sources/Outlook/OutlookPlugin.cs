@@ -169,6 +169,11 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
                     yield return new ValidationMessage("No browser at that path; leave it empty to find Edge or Chrome automatically.", nameof(OutlookSettings.BrowserPath), IsError: false);
                 }
 
+                if (!s.IsAppSignIn && s.Browser is { } named && BrowserLocator.KindOf(named) == BrowserKind.Firefox)
+                {
+                    yield return new ValidationMessage("The web session reads its sign-in over DevTools, which Firefox does not have: name Edge, Chrome or Chromium, or leave it empty to find one.", nameof(OutlookSettings.BrowserPath), IsError: false);
+                }
+
                 if (s.CalendarMonthsBack is < 0 or > 600 || s.CalendarMonthsAhead is < 1 or > 600)
                 {
                     yield return new ValidationMessage("The calendar window is between 0 and 600 months back and 1 and 600 ahead.", nameof(OutlookSettings.CalendarMonthsBack));

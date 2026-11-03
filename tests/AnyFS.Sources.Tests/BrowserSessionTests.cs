@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using AnyFS.Sources.Common;
+using AnyFS.Sources.Outlook;
 using AnyFS.Sources.SharePoint;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -68,6 +69,78 @@ public class BrowserChoiceTests
     [DataRow("", null)]
     [DataRow(null, null)]
     public void TheForcedBrowserIsReadFromItsName(string? value, string? kind) => Assert.AreEqual(kind, WebDriverSession.ForcedKind(value)?.ToString());
+
+    private sealed class NoTarget(string profile, string? variable = null) : WebSignInTarget(new Uri("https://example.test/"), profile)
+    {
+        public override string LogPrefix => "test";
+
+        public override string? WebDriverVariable => variable;
+
+        public override ValueTask<SignInCheck> CheckAsync(IReadOnlyList<Uri> pages, IReadOnlyList<SessionCookie> cookies, CancellationToken ct) => ValueTask.FromResult(SignInCheck.NotYet);
+    }
+
+    [TestMethod]
+    public void ABrowserSettingNamingFirefoxSignsInThroughWebDriverOnThatFirefox()
+    {
+        var firefox = Path.Combine(Path.GetTempPath(), "somewhere of its own", "firefox.exe");
+        var session = new BrowserSession(firefox, new NoTarget("profile"), NullLogger.Instance);
+        Assert.AreEqual("the Browser setting names Firefox", session.WebDriverFromTheStart());
+        var only = session.WebDriverBrowsers.Single();
+        Assert.AreEqual(BrowserKind.Firefox, only.Kind);
+        Assert.AreEqual(firefox, only.Path);
+        Assert.IsTrue(session.CanSignIn);
+        Assert.AreEqual("Firefox", session.BrowserName);
+    }
+
+    [TestMethod]
+    public void TheTroubleshootingVariableStillWinsOverTheBrowserSetting()
+    {
+        const string variable = "ANYFS_TEST_BROWSER_CHOICE_WEBDRIVER";
+        Environment.SetEnvironmentVariable(variable, "edge");
+        try
+        {
+            var session = new BrowserSession(Path.Combine(Path.GetTempPath(), "firefox.exe"), new NoTarget("profile", variable), NullLogger.Instance);
+            Assert.AreEqual($"{variable} is set", session.WebDriverFromTheStart());
+            Assert.IsFalse(session.WebDriverBrowsers.Any(b => b.Kind == BrowserKind.Firefox));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+    }
+
+    [TestMethod]
+    public async Task TheDevToolsLauncherNeverStartsFirefox()
+    {
+        // started as Chromium is, it would run with no window on the person's own profile, and their next Firefox would open nothing;
+        // this one is no program at all, so starting it would fail another way
+        var dir = Path.Combine(Path.GetTempPath(), "anyfs-tests", "firefox-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var firefox = Path.Combine(dir, "firefox.exe");
+        File.WriteAllText(firefox, "not a program");
+        try
+        {
+            var profile = Path.Combine(dir, "profile");
+            var launch = await DevToolsBrowser.LaunchAsync(firefox, profile, headless: true, "about:blank", [], NullLogger.Instance, "test", CancellationToken.None);
+            Assert.IsNull(launch.Browser);
+            StringAssert.Contains(launch.Failure, "which Firefox does not have");
+            Assert.IsFalse(Directory.Exists(profile), "nothing was done for it");
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [TestMethod]
+    public void OutlooksWebSessionSaysFirefoxWillNotDo()
+    {
+        var firefox = Path.Combine(Path.GetTempPath(), "firefox.exe");
+        var named = new OutlookPlugin().Validate(new OutlookSettings { Path = "https://outlook.office.com", SignInMethod = OutlookSettings.WebSession, BrowserPath = firefox }).ToList();
+        Assert.IsTrue(named.Any(m => !m.IsError && m.Property == nameof(OutlookSettings.BrowserPath) && m.Message.Contains("which Firefox does not have", StringComparison.Ordinal)), string.Join("; ", named.Select(m => m.Message)));
+        var edge = new OutlookPlugin().Validate(new OutlookSettings { Path = "https://outlook.office.com", SignInMethod = OutlookSettings.WebSession, BrowserPath = Path.Combine(Path.GetTempPath(), "msedge.exe") }).ToList();
+        Assert.IsFalse(edge.Any(m => m.Message.Contains("which Firefox does not have", StringComparison.Ordinal)));
+    }
 }
 
 /// <summary>

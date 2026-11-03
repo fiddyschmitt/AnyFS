@@ -63,7 +63,7 @@ public sealed class GitLabSettings
     public bool Releases { get; set; } = true;
 
     [Setting("Browser", Advanced = true, Order = 10, Kind = SettingKind.FilePath,
-        Hint = "The Edge, Chrome or Chromium to open for the web session's sign-in. Leave empty to find one automatically. AnyFS opens it with a profile of its own, never your everyday browser's; where a policy keeps AnyFS from driving it, the sign-in goes through Selenium WebDriver (your default browser, then Firefox and the others).")]
+        Hint = "The Edge, Chrome, Chromium or Firefox to open for the web session's sign-in. Leave empty to find one automatically. AnyFS opens it with a profile of its own, never your everyday browser's; where a policy keeps AnyFS from driving it, the sign-in goes through Selenium WebDriver (your default browser, then Firefox and the others).")]
     public string? BrowserPath { get; set; }
 
     [Setting("Trust any certificate", Advanced = true, Order = 11,

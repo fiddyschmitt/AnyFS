@@ -39,13 +39,21 @@ public sealed class DevToolsBrowser : IAsyncDisposable
 
     /// <summary>
     /// Launches the browser on the profile and connects to its DevTools. No browser, with the reason, when no DevTools port
-    /// appears in time: the launch was handed to another browser holding the profile, or the port is off by policy.
+    /// appears in time: the launch was handed to another browser holding the profile, or the port is off by policy. Firefox
+    /// is never started here: it takes none of these switches for what they mean, so it would run with no window on the person's
+    /// own profile, where nothing here could close it and their next Firefox would open nothing (or, with one already open,
+    /// sit behind a dialog saying Firefox is not responding).
     /// </summary>
     /// <param name="startPage">The page the browser opens with (<c>about:blank</c> for a session that navigates itself).</param>
     /// <param name="extraArguments">More command-line switches (<c>--auth-server-allowlist=…</c>).</param>
     /// <param name="logPrefix">The source's log prefix (<c>sharepoint</c>, <c>outlook</c>).</param>
     public static async Task<Launch> LaunchAsync(string browserPath, string profileDir, bool headless, string startPage, IReadOnlyList<string> extraArguments, ILogger logger, string logPrefix, CancellationToken ct)
     {
+        if (BrowserLocator.KindOf(browserPath) == BrowserKind.Firefox)
+        {
+            return new Launch(null, "this sign-in is read over DevTools, which Firefox does not have; name Edge, Chrome or Chromium under Browser, or leave it empty to find one");
+        }
+
         Directory.CreateDirectory(profileDir);
         await CloseLeftoverAsync(browserPath, profileDir, logger, logPrefix, ct).ConfigureAwait(false);
         var process = Start(browserPath, profileDir, headless, startPage, extraArguments);

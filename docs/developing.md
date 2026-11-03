@@ -78,7 +78,7 @@ platform on 127.0.0.1 (`tests/AnyFS.Sources.Tests/Fake3DX.cs`: 3DPassport, 3DSpa
 server and an identity provider), so they need nothing outside; the Windows sign-ins among them run
 on Windows only. Four of them open more: `ANYFS_TEST_3DX_BROWSER=1` lets the web session's browser
 tests start Edge and Firefox headless (over DevTools, and through WebDriver with each, an identity
-provider on a site of its own and one that shows a dialog among them), `ANYFS_TEST_3DX_EXE` pointing at
+provider on a site of its own, one that shows a dialog and a Browser setting naming Firefox among them), `ANYFS_TEST_3DX_EXE` pointing at
 a published `anyfs.exe` serves a 3DX source of the fake through that build's HTTP mount,
 `ANYFS_TEST_3DX_SCALE=1` builds, saves and reads back a tree of 200,000 documents and prints the
 times and memory to the test's output, and `ANYFS_TEST_3DX_WINDOW` pointing at a published

@@ -1019,10 +1019,11 @@ public class ThreeDXBrowserTests
     /// <param name="driven">The browser WebDriver drives (edge, firefox); null for DevTools.</param>
     /// <param name="elsewhere">Whether the identity provider is a site of its own that asks to be kept apart (Cross-Origin-Opener-Policy), as an organisation's sign-in can be.</param>
     /// <param name="alert">Whether the identity provider's page shows a notice in a dialog of the browser's on the way.</param>
-    private static async Task SignInAndSearchAsync(string? driven, bool elsewhere = false, bool alert = false)
+    /// <param name="named">Whether the Browser setting names Firefox, with nothing else forcing WebDriver.</param>
+    private static async Task SignInAndSearchAsync(string? driven, bool elsewhere = false, bool alert = false, bool named = false)
     {
         Require();
-        var webDriver = driven is not null;
+        var webDriver = driven is not null || named;
         using var fake = new Fake3DX(Fake3DX.Passport.Saml, Fake3DX.Idp.Script, elsewhere ? "localhost" : "127.0.0.1") { IdpOpenerPolicy = elsewhere, IdpAlert = alert };
         fake.Add("DOC-B", "1", "Browser", "Document", ("b.txt", "browser"u8.ToArray()));
         var profile = Path.Combine(Path.GetTempPath(), "anyfs-tests", "3dx-browser-" + Guid.NewGuid().ToString("N"));
@@ -1031,7 +1032,13 @@ public class ThreeDXBrowserTests
         var log = new LineLogger();
         try
         {
-            using var session = new ThreeDXSession(ThreeDXSignInTests.Settings(fake, ThreeDXSettings.WebSession), log, secrets: null, new SessionOptions(Profile: profile));
+            var settings = ThreeDXSignInTests.Settings(fake, ThreeDXSettings.WebSession);
+            if (named)
+            {
+                settings.BrowserPath = BrowserLocator.FindKind(BrowserKind.Firefox) ?? throw new AssertInconclusiveException("no Firefox on this machine");
+            }
+
+            using var session = new ThreeDXSession(settings, log, secrets: null, new SessionOptions(Profile: profile));
             try
             {
                 await session.SignInAsync(interactive: false, _ => { }, CancellationToken.None);
@@ -1043,6 +1050,11 @@ public class ThreeDXBrowserTests
 
             StringAssert.StartsWith(session.How, "with ", "signed in with a browser:\n" + log);
             Assert.IsTrue(log.Lines.Any(l => l.Contains(webDriver ? "through WebDriver" : "DevTools on port", StringComparison.Ordinal)), log.ToString());
+            if (named)
+            {
+                Assert.IsTrue(log.Lines.Any(l => l.Contains("the Browser setting names Firefox", StringComparison.Ordinal)), log.ToString());
+            }
+
             if (alert && webDriver)
             {
                 Assert.IsTrue(log.Lines.Any(l => l.Contains("did not answer for a moment, its window still open", StringComparison.Ordinal)), "the dialog came between AnyFS's questions:\n" + log);
@@ -1098,6 +1110,9 @@ public class ThreeDXBrowserTests
 
     [TestMethod]
     public Task ThroughWebDriverFirefoxSignsInAndOpensThreeDSearch() => SignInAndSearchAsync(driven: "firefox");
+
+    [TestMethod]
+    public Task TheBrowserSettingNamingFirefoxSignsInThroughWebDriver() => SignInAndSearchAsync(driven: null, named: true);
 
     [TestMethod]
     public Task ThroughWebDriverFirefoxSignsInThroughAnIdentityProviderElsewhere() => SignInAndSearchAsync(driven: "firefox", elsewhere: true);

@@ -81,7 +81,7 @@ public sealed class SharePointSettings
     public string ClientId { get; set; } = EntraSignIn.DefaultClientId;
 
     [Setting("Browser", Advanced = true, Order = 12, Kind = SettingKind.FilePath,
-        Hint = "The Edge, Chrome or Chromium to open for the web session's sign-in. Leave empty to find one automatically. AnyFS opens it with a profile of its own, never your everyday browser's.")]
+        Hint = "The Edge, Chrome, Chromium or Firefox to open for the web session's sign-in. Leave empty to find one automatically. AnyFS opens it with a profile of its own, never your everyday browser's.")]
     public string? BrowserPath { get; set; }
 
     [Setting("Trust any certificate", Advanced = true, Order = 13,
