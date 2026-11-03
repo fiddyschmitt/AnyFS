@@ -426,9 +426,9 @@ public class TeamsSourceTests
         Assert.IsFalse(listing.IsCompleted, "waiting for the group sites");
         hold.SetResult();
         CollectionAssert.AreEqual(new[] { "Retail" }, await listing);
-        var asked = fake.SharePointCalls;
+        var asked = fake.GroupSiteReads;
         CollectionAssert.AreEqual(new[] { "Retail" }, await NamesAsync(source, "Other groups"));
-        Assert.AreEqual(asked, fake.SharePointCalls, "the read answers");
+        Assert.AreEqual(asked, fake.GroupSiteReads, "the read answers");
     }
 
     [TestMethod]

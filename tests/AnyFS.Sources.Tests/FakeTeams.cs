@@ -455,12 +455,18 @@ internal sealed class FakeTeams : ITeamsApi
     /// <summary>As the live seam: SharePoint's search with its token; else Graph's list of groups (named without their sites), or Microsoft Search's sites (without their groups) where Graph refuses that list.</summary>
     public async Task<IReadOnlyList<GroupSite>> GroupSitesAsync(CancellationToken ct)
     {
+        Interlocked.Increment(ref _groupSiteReads);
         SharePoint();
         await SitesHold.WaitAsync(ct);
         return SharePointReady ? _groupSites.ToList()
             : GraphListsNoGroups ? _groupSites.Select(s => s with { GroupId = null }).ToList()
             : _groupSites.Select(s => s with { SiteUrl = null }).ToList();
     }
+
+    /// <summary>How many times the group sites were read.</summary>
+    public int GroupSiteReads => _groupSiteReads;
+
+    private int _groupSiteReads;
 
     /// <summary>What the group sites' read waits on before it answers: a test's say-so (a large organisation's takes many requests).</summary>
     public Task SitesHold { get; set; } = Task.CompletedTask;
