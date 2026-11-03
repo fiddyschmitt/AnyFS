@@ -178,10 +178,11 @@ internal sealed class WebDriverSession
     {
         var mode = headless ? "headless" : "with a window";
         Directory.CreateDirectory(profile);
+        using var processes = new DriverProcesses();
         IWebDriver driver;
         try
         {
-            driver = await Task.Run(() => Start(browser, profile, headless, _target.NegotiateHosts), ct).ConfigureAwait(false);
+            driver = await Task.Run(() => Start(browser, profile, headless, _target.NegotiateHosts, processes), ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is WebDriverException or InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
         {
@@ -245,7 +246,10 @@ internal sealed class WebDriverSession
         }
         finally
         {
-            await Task.Run(() => Quit(driver)).ConfigureAwait(false);
+            if (!await processes.QuitAsync(driver).ConfigureAwait(false))
+            {
+                _logger.LogInformation("{Prefix}: {Browser} ({Mode}) did not close when asked; AnyFS ended it", Prefix, browser.Name, mode);
+            }
         }
     }
 
@@ -388,7 +392,7 @@ internal sealed class WebDriverSession
         return (page, cookies);
     }
 
-    private static IWebDriver Start(WebDriverBrowser browser, string profile, bool headless, IReadOnlyList<string> negotiateHosts)
+    private static IWebDriver Start(WebDriverBrowser browser, string profile, bool headless, IReadOnlyList<string> negotiateHosts, DriverProcesses processes)
     {
         SeleniumManagerLocator.Prepare();
         switch (browser.Kind)
@@ -396,6 +400,7 @@ internal sealed class WebDriverSession
             case BrowserKind.Firefox:
             {
                 var service = FirefoxDriverService.CreateDefaultService();
+                processes.Watch(service);
                 service.HideCommandPromptWindow = true;
                 service.SuppressInitialDiagnosticInformation = true;
                 service.LogLevel = FirefoxDriverLogLevel.Fatal;
@@ -417,6 +422,7 @@ internal sealed class WebDriverSession
             case BrowserKind.Edge:
             {
                 var service = EdgeDriverService.CreateDefaultService();
+                processes.Watch(service);
                 Quiet(service);
                 return new EdgeDriver(service, Chromium(new EdgeOptions(), browser, profile, headless, negotiateHosts), CommandTimeout);
             }
@@ -424,6 +430,7 @@ internal sealed class WebDriverSession
             default:
             {
                 var service = ChromeDriverService.CreateDefaultService();
+                processes.Watch(service);
                 Quiet(service);
                 return new ChromeDriver(service, Chromium(new ChromeOptions(), browser, profile, headless, negotiateHosts), CommandTimeout);
             }
@@ -462,17 +469,6 @@ internal sealed class WebDriverSession
         }
 
         return options;
-    }
-
-    private static void Quit(IWebDriver driver)
-    {
-        try
-        {
-            driver.Quit();
-        }
-        catch (Exception ex) when (ex is WebDriverException or InvalidOperationException or ObjectDisposedException)
-        {
-        }
     }
 
     private static string FirstLine(string message) => message.Split('\n', 2)[0].Trim();

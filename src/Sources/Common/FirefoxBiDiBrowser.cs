@@ -20,11 +20,13 @@ public sealed class FirefoxBiDiBrowser : IAsyncDisposable
 
     private readonly IWebDriver _driver;
     private readonly BiDi _bidi;
+    private readonly DriverProcesses _processes;
 
-    private FirefoxBiDiBrowser(IWebDriver driver, BiDi bidi)
+    private FirefoxBiDiBrowser(IWebDriver driver, BiDi bidi, DriverProcesses processes)
     {
         _driver = driver;
         _bidi = bidi;
+        _processes = processes;
     }
 
     /// <summary>A launch: the browser, or why there is none (Firefox or its driver would not start).</summary>
@@ -69,14 +71,21 @@ public sealed class FirefoxBiDiBrowser : IAsyncDisposable
     public static async Task<Launch> LaunchAsync(string firefoxPath, string profileDir, bool headless, Action<string, string?> onRequest, CancellationToken ct)
     {
         Directory.CreateDirectory(profileDir);
+        var processes = new DriverProcesses();
         IWebDriver driver;
         try
         {
-            driver = await Task.Run(() => Start(firefoxPath, profileDir, headless), ct).ConfigureAwait(false);
+            driver = await Task.Run(() => Start(firefoxPath, profileDir, headless, processes), ct).ConfigureAwait(false);
         }
         catch (WebDriverException ex)
         {
+            processes.Dispose();
             return new Launch(null, $"Firefox could not be started through WebDriver: {FirstLine(ex.Message)}");
+        }
+        catch
+        {
+            processes.Dispose();
+            throw;
         }
 
         try
@@ -87,12 +96,18 @@ public sealed class FirefoxBiDiBrowser : IAsyncDisposable
                 var authorization = e.Request.Headers.FirstOrDefault(h => h.Name.Equals("Authorization", StringComparison.OrdinalIgnoreCase))?.Value is StringBytesValue v ? v.Value : null;
                 onRequest(e.Request.Url, authorization);
             }).ConfigureAwait(false);
-            return new Launch(new FirefoxBiDiBrowser(driver, bidi), null);
+            return new Launch(new FirefoxBiDiBrowser(driver, bidi, processes), null);
         }
-        catch (Exception ex) when (ex is WebDriverException or IOException or System.Net.WebSockets.WebSocketException or InvalidOperationException)
+        catch (Exception ex)
         {
-            Quit(driver);
-            return new Launch(null, $"Firefox's WebDriver BiDi could not be reached: {FirstLine(ex.Message)}");
+            await processes.QuitAsync(driver).ConfigureAwait(false);
+            processes.Dispose();
+            if (ex is WebDriverException or BiDiException or IOException or System.Net.WebSockets.WebSocketException or InvalidOperationException)
+            {
+                return new Launch(null, $"Firefox's WebDriver BiDi could not be reached: {FirstLine(ex.Message)}");
+            }
+
+            throw;
         }
     }
 
@@ -116,18 +131,22 @@ public sealed class FirefoxBiDiBrowser : IAsyncDisposable
         {
             await _bidi.DisposeAsync().ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is WebDriverException or IOException or InvalidOperationException or OperationCanceledException or System.Net.WebSockets.WebSocketException)
+        catch (Exception ex) when (ex is WebDriverException or BiDiException or IOException or InvalidOperationException or OperationCanceledException or System.Net.WebSockets.WebSocketException)
         {
             // the browser may be gone already
         }
-
-        Quit(_driver);
+        finally
+        {
+            await _processes.QuitAsync(_driver).ConfigureAwait(false);
+            _processes.Dispose();
+        }
     }
 
-    private static IWebDriver Start(string firefoxPath, string profileDir, bool headless)
+    private static IWebDriver Start(string firefoxPath, string profileDir, bool headless, DriverProcesses processes)
     {
         SeleniumManagerLocator.Prepare();
         var service = FirefoxDriverService.CreateDefaultService();
+        processes.Watch(service);
         service.HideCommandPromptWindow = true;
         service.SuppressInitialDiagnosticInformation = true;
         service.LogLevel = FirefoxDriverLogLevel.Fatal;
@@ -148,20 +167,6 @@ public sealed class FirefoxBiDiBrowser : IAsyncDisposable
         options.SetPreference("security.osclientcerts.autoload", true);
         options.SetPreference("security.enterprise_roots.enabled", true);
         return new FirefoxDriver(service, options, CommandTimeout);
-    }
-
-    private static void Quit(IWebDriver driver)
-    {
-        try
-        {
-            driver.Quit();
-        }
-        catch (Exception ex) when (ex is WebDriverException or InvalidOperationException)
-        {
-            // already gone
-        }
-
-        driver.Dispose();
     }
 
     private static string FirstLine(string message) => message.Split('\n', 2)[0].Trim();
