@@ -211,42 +211,15 @@ public class ListingCacheTests
     }
 
     [TestMethod]
-    public async Task HeldAnswersWithoutAskingAndWithoutListingAfresh()
+    public async Task HeldAnswersWithoutAsking()
     {
-        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { RefreshAfter = TimeSpan.FromSeconds(10) };
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
         Assert.IsNull(cache.Held("docs"), "nothing held yet");
         Assert.AreEqual(0, _calls, "and nothing asked");
 
         var listed = await cache.GetAsync("docs", CancellationToken.None);
-        _time.Advance(TimeSpan.FromSeconds(11));
         Assert.AreSame(listed, cache.Held("docs"));
-        await Task.Delay(50);
-        Assert.AreEqual(1, _calls, "older than RefreshAfter, and not listed afresh: looking at it is not asking for it");
-    }
-
-    [TestMethod]
-    public async Task OnlySoManyListingsRunBehindAnswersAndAFolderLeftGoesNextTime()
-    {
-        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { RefreshAfter = TimeSpan.FromSeconds(10), MaxRefreshesBehind = 1 };
-        await cache.GetAsync("docs", CancellationToken.None);
-        await cache.GetAsync("docs/sub", CancellationToken.None);
-        Assert.AreEqual(2, _calls);
-
-        // both old: the first sets off its listing; the second has no room, however often it is asked, and answers all the same
-        _time.Advance(TimeSpan.FromSeconds(11));
-        _gate = new TaskCompletionSource();
-        Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count);
-        await WaitForAsync(() => _calls == 3);
-        Assert.AreEqual(1, (await cache.GetAsync("docs/sub", CancellationToken.None)).Count);
-        Assert.AreEqual(1, (await cache.GetAsync("docs/sub", CancellationToken.None)).Count);
-        await Task.Delay(50);
-        Assert.AreEqual(3, _calls, "no room for the second");
-
-        // the room freed: the folder left is listed the next time it is asked for
-        _gate.SetResult();
-        _tree["docs/sub"].Add(VfsEntry.File("new.txt", 4));
-        await WaitForAsync(async () => (await cache.GetAsync("docs/sub", CancellationToken.None)).Count == 2);
-        Assert.AreEqual(4, _calls);
+        Assert.AreEqual(1, _calls, "looking at it is not asking for it");
     }
 
     [TestMethod]
@@ -270,13 +243,10 @@ public class ListingCacheTests
     public async Task EachListingFromTheUpstreamSaysWhy()
     {
         var told = new System.Collections.Concurrent.ConcurrentQueue<string>();
-        var stamps = new Dictionary<string, string> { ["docs/sub"] = "v1" };
         var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time)
         {
-            RefreshAfter = TimeSpan.FromSeconds(10),
             FailureKeptFor = _ => TimeSpan.FromMinutes(1),
             OnListing = (path, why) => told.Enqueue($"{path}: {why}"),
-            StampOf = (path, _, _) => ValueTask.FromResult(stamps.GetValueOrDefault(path)),
         };
 
         await cache.GetAsync("docs", CancellationToken.None);
@@ -285,44 +255,26 @@ public class ListingCacheTests
         await cache.GetAsync("docs", CancellationToken.None);
         Assert.AreEqual(1, told.Count, "held: nothing asked, nothing told");
 
-        _time.Advance(TimeSpan.FromSeconds(11));
-        await cache.GetAsync("docs", CancellationToken.None);
-        await WaitForAsync(() => told.Count == 2);
-        StringAssert.Contains(told.Last(), "docs: its listing is 11 s old, behind an answer");
-
         await cache.RefreshAsync("docs", CancellationToken.None);
         StringAssert.Contains(told.Last(), "docs: a walk");
-
-        // a stamp that moved, and a stamp that held (nothing to tell)
-        await cache.GetAsync("docs/sub", CancellationToken.None);
-        var count = told.Count;
-        _time.Advance(TimeSpan.FromSeconds(11));
-        await cache.GetAsync("docs/sub", CancellationToken.None);
-        await Task.Delay(50);
-        Assert.AreEqual(count, told.Count, "its stamp holds");
-        stamps["docs/sub"] = "v2";
-        _time.Advance(TimeSpan.FromSeconds(11));
-        await cache.GetAsync("docs/sub", CancellationToken.None);
-        await WaitForAsync(() => told.Count == count + 1);
-        StringAssert.Contains(told.Last(), "its stamp moved");
 
         // a failure over; the first, kept, is not asked again and so tells nothing
         _failing["docs/sub2"] = new VfsException(VfsError.Unavailable, "the service did not answer");
         _tree["docs/sub2"] = [];
         await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs/sub2", CancellationToken.None));
-        count = told.Count;
+        var count = told.Count;
         await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs/sub2", CancellationToken.None));
         Assert.AreEqual(count, told.Count, "the failure kept answers");
         _time.Advance(TimeSpan.FromMinutes(2));
         await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs/sub2", CancellationToken.None));
         StringAssert.Contains(told.Last(), "it failed 120 s ago and that failure was kept 60 s (the service did not answer)");
 
-        // from the last run
-        cache.Restore("photos", [VfsEntry.File("p.jpg", 1)]);
-        _tree["photos"] = [VfsEntry.File("p.jpg", 1)];
-        await cache.GetAsync("photos", CancellationToken.None);
-        await WaitForAsync(() => told.Any(t => t.StartsWith("photos:", StringComparison.Ordinal)));
-        StringAssert.Contains(told.First(t => t.StartsWith("photos:", StringComparison.Ordinal)), "it came from the last run");
+        // past its time, where listings last a time
+        var timed = new ListingCache(TimeSpan.FromSeconds(2), ListAsync, time: _time) { OnListing = (path, why) => told.Enqueue($"{path}: {why}") };
+        await timed.GetAsync("docs", CancellationToken.None);
+        _time.Advance(TimeSpan.FromSeconds(3));
+        await timed.GetAsync("docs", CancellationToken.None);
+        StringAssert.Contains(told.Last(), "docs: its listing is past its time");
     }
 
     [TestMethod]
@@ -401,86 +353,54 @@ public class ListingCacheTests
     }
 
     [TestMethod]
-    public async Task AListingOlderThanRefreshAfterIsAnsweredAndListedAfreshBehindTheAnswer()
+    public async Task AKeptListingIsNotAskedForHoweverOldUntilAWalkListsItAfresh()
     {
-        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { RefreshAfter = TimeSpan.FromSeconds(10) };
+        var stamped = 0;
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time)
+        {
+            StampOf = (_, _, _) =>
+            {
+                Interlocked.Increment(ref stamped);
+                return ValueTask.FromResult<string?>("v1");
+            },
+        };
         await cache.GetAsync("docs", CancellationToken.None);
-        _time.Advance(TimeSpan.FromSeconds(5));
-        await cache.GetAsync("docs", CancellationToken.None);
-        Assert.AreEqual(1, _calls, "young enough");
+        Assert.AreEqual((1, 1), (_calls, stamped));
 
+        // changed upstream, and however old the listing and however often it is asked for: nothing behind the answer
         _tree["docs"].Add(VfsEntry.File("new.txt", 4));
-        _time.Advance(TimeSpan.FromSeconds(6));
-        _gate = new TaskCompletionSource();
-        Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count, "answered at once from what was held");
-        await cache.GetAsync("docs", CancellationToken.None);
-        await WaitForAsync(() => _calls == 2);
-        _gate.SetResult();
-        await WaitForAsync(async () => (await cache.GetAsync("docs", CancellationToken.None)).Count == 3);
-        Assert.AreEqual(2, _calls, "one listing behind, however many asked meanwhile");
+        _time.Advance(TimeSpan.FromDays(30));
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count, "answered from what is held");
+        }
 
-        _time.Advance(TimeSpan.FromSeconds(9));
-        await cache.GetAsync("docs", CancellationToken.None);
-        Assert.AreEqual(2, _calls, "the fresh listing is young again");
+        await Task.Delay(50);
+        Assert.AreEqual((1, 1), (_calls, stamped), "neither the listing nor its stamp asked for");
+
+        await cache.RefreshAsync("docs", CancellationToken.None);
+        Assert.AreEqual(3, (await cache.GetAsync("docs", CancellationToken.None)).Count, "listed afresh");
         _tree["docs"].RemoveAt(2);
     }
 
     [TestMethod]
-    public async Task AListingBehindTheAnswerThatFailsLeavesWhatWasHeldAndTheNextWaitsAsLongAgain()
+    public async Task ARestoredListingAnswersWithItsStampUntilAWalkListsItAfresh()
     {
-        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { RefreshAfter = TimeSpan.FromSeconds(10) };
-        await cache.GetAsync("docs", CancellationToken.None);
-        var held = _tree["docs"];
-        _tree.Remove("docs");
-        _time.Advance(TimeSpan.FromSeconds(11));
-        Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count);
-        await WaitForAsync(() => _calls == 2);
-        Assert.AreEqual(2, (await cache.GetAsync("docs", CancellationToken.None)).Count, "what was held still answers");
-        Assert.AreEqual(2, _calls, "not asked again at once");
+        var stamps = new Dictionary<string, string>(StringComparer.Ordinal) { ["docs"] = "v2" };
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { StampOf = (path, _, _) => ValueTask.FromResult(stamps.GetValueOrDefault(path)) };
 
-        // as long again: asked behind the next answer, once the failed listing has ended
-        _tree["docs"] = held;
-        _time.Advance(TimeSpan.FromSeconds(11));
-        await WaitForAsync(async () =>
-        {
-            await cache.GetAsync("docs", CancellationToken.None);
-            return _calls == 3;
-        });
-    }
-
-    [TestMethod]
-    public async Task AnOldListingWhoseStampHoldsIsNotListedAfreshBehindTheAnswer()
-    {
-        var stamps = new Dictionary<string, string>(StringComparer.Ordinal) { ["docs"] = "v1" };
-        var asked = new List<string?>();
-        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time)
-        {
-            RefreshAfter = TimeSpan.FromSeconds(10),
-            StampOf = (path, held, _) =>
-            {
-                asked.Add(held);
-                return ValueTask.FromResult(stamps.GetValueOrDefault(path));
-            },
-        };
-
-        // restored from a run before, with its stamp: answered at once, and the stamp holds, so not listed
+        // restored from a run before, with its stamp: answered at once, nothing asked
         cache.Restore("docs", [VfsEntry.File("old.txt", 1)], "v1");
         Assert.AreEqual(1, (await cache.GetAsync("docs", CancellationToken.None)).Count);
-        await Task.Delay(100);
-        Assert.AreEqual(0, _calls, "the stamp holds: the held listing stands");
-        CollectionAssert.AreEqual(new[] { "v1" }, asked, "asked with the stamp held");
+        await Task.Delay(50);
+        Assert.AreEqual(0, _calls);
         Assert.AreEqual("v1", cache.StampHeld("docs"));
 
-        // the stamp moved: listed afresh behind the next answer, the new stamp kept with the listing
-        stamps["docs"] = "v2";
-        _time.Advance(TimeSpan.FromSeconds(11));
-        Assert.AreEqual(1, (await cache.GetAsync("docs", CancellationToken.None)).Count, "answered from what was held");
-        await WaitForAsync(() => _calls == 1);
-        await WaitForAsync(async () => (await cache.GetAsync("docs", CancellationToken.None)).Count == 2);
+        // a walk's listing: its stamp read before it and kept with it
+        Assert.AreEqual(2, (await cache.RefreshAsync("docs", CancellationToken.None)).Count);
         Assert.AreEqual("v2", cache.StampHeld("docs"), "read before the listing, once");
-        Assert.AreEqual(2, asked.Count);
 
-        // a folder listed afresh on its own reads its stamp too
+        // a folder with no stamp
         await cache.RefreshAsync("docs/sub", CancellationToken.None);
         Assert.IsNull(cache.StampHeld("docs/sub"), "no stamp for it");
         CollectionAssert.AreEquivalent(new[] { "docs" }, cache.Stamps().Keys.ToArray());
@@ -496,17 +416,6 @@ public class ListingCacheTests
         Assert.AreEqual(0, _calls);
     }
 
-    private static async Task WaitForAsync(Func<bool> done) => await WaitForAsync(() => Task.FromResult(done()));
-
-    private static async Task WaitForAsync(Func<Task<bool>> done)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (!await done())
-        {
-            Assert.IsTrue(DateTime.UtcNow < deadline, "timed out waiting");
-            await Task.Delay(10);
-        }
-    }
 
     [TestMethod]
     public async Task AFailedRefreshKeepsWhatWasHeld()

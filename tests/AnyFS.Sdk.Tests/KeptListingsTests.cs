@@ -447,12 +447,12 @@ public class KeptListingsTests
     }
 
     [TestMethod]
-    public async Task SavedListingsAnswerTheNextRunAtOnceThenAreListedAfresh()
+    public async Task SavedListingsAnswerTheNextRunUntilAWalkListsThemAfresh()
     {
         var file = Path.Combine(Path.GetTempPath(), $"anyfs-kept-{Guid.NewGuid():N}.json.gz");
         try
         {
-            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, RefreshAfter = TimeSpan.FromMinutes(1), SaveTo = file, SaveKey = "jane@contoso.com" };
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, SaveKey = "jane@contoso.com" };
             await using (var first = Kept(new SourceCounters(), options))
             {
                 await first.Cache.GetAsync("", CancellationToken.None);
@@ -463,22 +463,16 @@ public class KeptListingsTests
             _listed.Clear();
             _tree["docs"].Add(VfsEntry.File("new.txt", 4));
 
-            // the next run: the saved listing at once, without the upstream; then listed afresh behind that answer
+            // the next run: the saved listing at once, without the upstream, nothing behind that answer; a walk lists it afresh
             await using (var next = Kept(new SourceCounters(), options))
             {
                 var docs = await next.Cache.GetAsync("docs", CancellationToken.None);
                 CollectionAssert.AreEqual(new[] { "sub", "a.txt", "b.txt" }, docs.Select(e => e.Name).ToArray(), "what the last run saw");
-                for (var i = 0; i < 100 && Listed("docs") == 0; i++)
-                {
-                    await Task.Delay(20);
-                }
+                await Task.Delay(50);
+                Assert.AreEqual(0, Listed("docs"), "nothing behind the answer");
 
-                Assert.AreEqual(1, Listed("docs"), "listed afresh behind the first answer");
-                for (var i = 0; i < 100 && (await next.Cache.GetAsync("docs", CancellationToken.None)).Count < 4; i++)
-                {
-                    await Task.Delay(20);
-                }
-
+                await next.WalkAsync(new SourceCounters(), CancellationToken.None);
+                Assert.AreEqual(1, Listed("docs"), "listed afresh by the walk");
                 Assert.AreEqual(4, (await next.Cache.GetAsync("docs", CancellationToken.None)).Count);
             }
 

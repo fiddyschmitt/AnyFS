@@ -536,7 +536,7 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
-    public async Task AKeptListingAnswersAtOnceAndIsAskedForAgainBehindTheAnswerOnceOlderThanTheInterval()
+    public async Task AKeptListingAnswersAtOnceAndIsListedAfreshByAWalkAndNotBefore()
     {
         var fake = GitLabSeed.Lab();
         var settings = GitLabSeed.Settings(fake.Server + "/anyfs/docs");
@@ -547,19 +547,16 @@ public class GitLabSourceTests
         CollectionAssert.AreEqual(new[] { "README.md" }, await FilesAsync());
         fake.ProjectAt("anyfs/docs").Commit("main", new Dictionary<string, byte[]> { ["README.md"] = GitLabSeed.Bytes("# Docs\n"), ["new.md"] = GitLabSeed.Bytes("new\n") });
 
+        // older than any interval: answered at once from what was kept, with nothing asked
+        await Task.Delay(TimeSpan.FromSeconds(1.2));
         var asked = fake.Requests.Count;
-        CollectionAssert.AreEqual(new[] { "README.md" }, await FilesAsync(), "within the interval: what was kept");
+        CollectionAssert.AreEqual(new[] { "README.md" }, await FilesAsync(), "what was kept");
+        await Task.Delay(100);
         Assert.AreEqual(asked, fake.Requests.Count, "nothing asked");
 
-        // older than the interval: still answered at once from what was kept, while GitLab is asked behind the answer
-        await Task.Delay(TimeSpan.FromSeconds(1.2));
-        CollectionAssert.AreEqual(new[] { "README.md" }, await FilesAsync());
-        var shown = Stopwatch.StartNew();
-        while (!(await FilesAsync()).Contains("new.md"))
-        {
-            Assert.IsTrue(shown.Elapsed < TimeSpan.FromSeconds(10), "the change shows once the listing behind the answer lands");
-            await Task.Delay(50);
-        }
+        // what a walk does for each folder
+        await source.Listings.RefreshAsync("files", CancellationToken.None);
+        CollectionAssert.Contains(await FilesAsync(), "new.md");
     }
 
     [TestMethod]

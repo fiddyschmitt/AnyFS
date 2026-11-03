@@ -39,16 +39,16 @@ public sealed class JiraSettings : IAtlassianSettings
     [Setting("Open issues only", Advanced = true, Order = 9, Hint = "Leave out issues whose status is done (a busy project has thousands).")]
     public bool OpenOnly { get; set; }
 
-    [Setting("Check for changes every (seconds)", Advanced = true, Order = 10,
-        Hint = "How old a folder's listing may be before it is asked for again. 0 asks every time, and keeps no folder listings.")]
+    [Setting("Use Jira's answers for (seconds)", Advanced = true, Order = 10,
+        Hint = "How long an answer from Jira is used again before it is asked for again, as a file is opened or a folder not kept yet is listed. It checks no kept folder for changes: the walks do that (below). 0 asks every time, and keeps no folder listings.")]
     public int RefreshSeconds { get; set; } = 60;
 
     [Setting(KeptListings.KeepSetting, Advanced = true, Order = 11,
-        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once; a listing older than 'Check for changes every' is asked for again behind the answer, so a change shows the next time the folder is opened. With 'Count files on start', the count walks the folders first and keeps what it finds (below). Off: each folder is asked for as it is opened.")]
+        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once and going through them again asks nothing of Jira; a change shows after the next walk (below). With 'Count files on start', the count walks the folders first and keeps what it finds. Off: each folder is asked for as it is opened.")]
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 12,
-        Hint = "With folder listings kept and 'Count files on start': how long after one walk the next begins (the count's is the first). 0 walks for the count only. A walk reads each project's issues a hundred at a time; a project whose newest change and issue count have not moved since the last walk is kept as it was, and one that moved reads only the issues changed since, so a walk over a quiet server asks a request per project; once a day everything is read again. The walk takes half the requests, so browsing meanwhile has the rest.")]
+        Hint = "With folder listings kept: how long after one walk the next begins. The walks are what checks kept folders for changes, so this is how long a change can take to show. 0 walks once, at the start. Without 'Count files on start' a walk goes only through the folders that have been opened; with it, through every project. A project whose newest change and issue count have not moved since the last walk is kept as it was, and one that moved reads only the issues changed since, so a walk over a quiet server asks a request per project; once a day everything is read again. The walk takes half the requests, so browsing meanwhile has the rest.")]
     public int WalkMinutes { get; set; } = 30;
 
     [Setting("Requests at a time", Advanced = true, Order = 13, Hint = "How many requests AnyFS has open with the server at once.")]

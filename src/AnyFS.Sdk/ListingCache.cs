@@ -7,8 +7,7 @@ namespace AnyFS.Sdk;
 /// share one upstream call. A listing is kept for a time (a couple of seconds, so it is near enough current), or, for a
 /// source that is slow to list, until it is listed afresh (<see cref="Kept"/>): the source then answers from what it
 /// knows and walks its tree again now and then (<see cref="RefreshAsync(string, CancellationToken)"/>, or <see cref="KeptListings"/>, which does the
-/// walking), or lists a folder afresh behind the answer once its listing is older than <see cref="RefreshAfter"/>. Writes
-/// through the same source keep the listings right (<see cref="Update"/>, <see cref="Invalidate"/>), also a listing still
+/// walking). Writes through the same source keep the listings right (<see cref="Update"/>, <see cref="Invalidate"/>), also a listing still
 /// on its way: what changed while it was being fetched is applied to it when it lands, so it never brings back what a
 /// write replaced.
 /// </summary>
@@ -27,7 +26,6 @@ public sealed class ListingCache
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Failure> _failures = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Fetch> _fetches = new(StringComparer.Ordinal);
-    private int _refreshingBehind;
 
     /// <param name="ttl">How long a listing is good for, or <see cref="Kept"/>.</param>
     public ListingCache(TimeSpan ttl, Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> lister, int maxDirectories = 10_000, TimeProvider? time = null)
@@ -50,29 +48,11 @@ public sealed class ListingCache
     public int Count => _entries.Count;
 
     /// <summary>
-    /// The age past which a listing held is answered and listed afresh behind the answer, one listing of a folder at a
-    /// time, so a folder opens at once and a change upstream shows the next time it is listed; null (the default) never
-    /// lists one afresh on its own. A listing afresh that fails leaves what was held, and the next waits as long again.
-    /// With <see cref="StampOf"/>, a held listing whose stamp still holds counts as listed afresh without the upstream
-    /// being asked for the listing.
-    /// </summary>
-    public TimeSpan? RefreshAfter { get; init; }
-
-    /// <summary>
-    /// How many listings afresh behind an answer (<see cref="RefreshAfter"/>) run at once at most; a folder asked for past
-    /// that is answered and left as it is, to be listed afresh the next time it is asked for with room. A client going through
-    /// a kept tree asks for thousands of folders in seconds: without a limit each sets off its requests, and whatever the
-    /// client asks next waits behind them all. Null (the default) starts them all.
-    /// </summary>
-    public int? MaxRefreshesBehind { get; init; }
-
-    /// <summary>
     /// A folder's stamp: what its listing, and every listing below it, depends on, as the upstream tells it cheaply (a
     /// chat's version, a library's last change and item count, a project's last activity), given the stamp held for the
     /// folder (null when none): the same string back when nothing has changed since, another when something has, null
-    /// for a folder the source has no stamp for (listed afresh whenever asked). Read before a folder is listed and kept
-    /// with the listing, so a change during the listing shows as a changed stamp next time. Null (the default) stamps
-    /// nothing.
+    /// for a folder the source has no stamp for (every walk lists it). Read before a folder is listed and kept with the
+    /// listing, so a change during the listing shows as a changed stamp next time. Null (the default) stamps nothing.
     /// </summary>
     public Func<string, string?, CancellationToken, ValueTask<string?>>? StampOf { get; init; }
 
@@ -86,10 +66,10 @@ public sealed class ListingCache
     /// </summary>
     public Func<VfsException, TimeSpan?>? FailureKeptFor { get; init; }
 
-    /// <summary>Told of each folder as it goes to the upstream, and why (no listing held, a failure's time over, a listing grown old, its stamp moved, a walk): for the log.</summary>
+    /// <summary>Told of each folder as it goes to the upstream, and why (no listing held, a failure's time over, a listing past its time, a walk): for the log.</summary>
     public Action<string, string>? OnListing { get; init; }
 
-    /// <summary>The listing held of <paramref name="path"/> as it is, nothing asked of the upstream and nothing listed afresh; null where none is held.</summary>
+    /// <summary>The listing held of <paramref name="path"/> as it is, nothing asked of the upstream; null where none is held.</summary>
     public IReadOnlyList<VfsEntry>? Held(string path) => _entries.TryGetValue(path, out var held) && !IsExpired(held) ? held.List : null;
 
     /// <summary>Whether <paramref name="path"/> has been asked for: a listing of it is held, or its listing failed and that is kept (<see cref="FailureKeptFor"/>).</summary>
@@ -100,11 +80,6 @@ public sealed class ListingCache
     {
         if (_entries.TryGetValue(path, out var held) && !IsExpired(held))
         {
-            if (RefreshAfter is { } after && _time.GetElapsedTime(held.Checked) > after)
-            {
-                RefreshBehind(path, held);
-            }
-
             return ValueTask.FromResult(held.List);
         }
 
@@ -189,7 +164,7 @@ public sealed class ListingCache
     /// <summary>
     /// Takes the stamp off the listing of <paramref name="path"/>, the one on its way (kept without a stamp when it lands)
     /// and the one held: for a lister that finds what it listed is not yet all there is (a conversation whose older
-    /// messages are still being read), so the listing is listed afresh whenever asked, not kept by its stamp.
+    /// messages are still being read), so the next walk lists it afresh, not keeping it by its stamp.
     /// </summary>
     public void Unstamp(string path)
     {
@@ -214,20 +189,18 @@ public sealed class ListingCache
         {
             if (_entries.TryGetValue(path, out var held) && !IsExpired(held))
             {
-                var now = _time.GetTimestamp();
-                _entries[path] = held with { Fetched = now, Checked = now };
+                _entries[path] = held with { Fetched = _time.GetTimestamp() };
             }
         }
     }
 
     /// <summary>
-    /// Keeps a listing an earlier run saved (<see cref="Snapshot"/>) as the listing of <paramref name="path"/>, as old: it
-    /// answers at once and is listed afresh behind the first answer (<see cref="RefreshAfter"/>; without that, by the next
-    /// walk). A listing this run already has wins.
+    /// Keeps a listing an earlier run saved (<see cref="Snapshot"/>) as the listing of <paramref name="path"/>: it answers at
+    /// once, until the next walk lists it afresh. A listing this run already has wins.
     /// </summary>
     public void Restore(string path, IReadOnlyList<VfsEntry> listing) => Restore(path, listing, null);
 
-    /// <summary>The same, with the stamp saved with it (<see cref="Stamps"/>): while it holds, the listing counts as fresh when it would be listed afresh.</summary>
+    /// <summary>The same, with the stamp saved with it (<see cref="Stamps"/>): a walk keeps the listing while that holds.</summary>
     public void Restore(string path, IReadOnlyList<VfsEntry> listing, string? stamp)
     {
         ArgumentNullException.ThrowIfNull(listing);
@@ -238,9 +211,7 @@ public sealed class ListingCache
                 return;
             }
 
-            // checked a year ago: past any refresh age
-            var now = _time.GetTimestamp();
-            _entries[path] = new Entry(now, listing) { Checked = now - (long)(TimeSpan.FromDays(365).TotalSeconds * _time.TimestampFrequency), Stamp = stamp, Restored = true };
+            _entries[path] = new Entry(_time.GetTimestamp(), listing) { Stamp = stamp };
             TrimIfNeededLocked();
         }
     }
@@ -374,86 +345,6 @@ public sealed class ListingCache
 
     private bool IsExpired(Entry entry) => _ttl != Kept && _time.GetElapsedTime(entry.Fetched) > _ttl;
 
-    /// <summary>Lists <paramref name="path"/> afresh in the background unless a listing of it is on its way; meanwhile the held listing counts as checked now.</summary>
-    private void RefreshBehind(string path, Entry held)
-    {
-        Fetch fetch;
-        lock (_gate)
-        {
-            if (_fetches.ContainsKey(path) || (MaxRefreshesBehind is { } most && _refreshingBehind >= most))
-            {
-                return;
-            }
-
-            _refreshingBehind++;
-            if (_entries.TryGetValue(path, out var current) && ReferenceEquals(current, held))
-            {
-                _entries[path] = held with { Checked = _time.GetTimestamp() };
-            }
-
-            fetch = new Fetch();
-            _fetches[path] = fetch;
-        }
-
-        // on the pool, so the answer is not held up by the lister's first steps; RunAsync observes a failure itself
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await RefreshBehindAsync(path, fetch, held).ConfigureAwait(false);
-            }
-            finally
-            {
-                lock (_gate)
-                {
-                    _refreshingBehind--;
-                }
-            }
-        });
-    }
-
-    /// <summary>A listing afresh behind an answer: spared where the folder's stamp still holds (the held listing is then as good as new), else as any, with the stamp just read.</summary>
-    private async Task RefreshBehindAsync(string path, Fetch fetch, Entry held)
-    {
-        if (StampOf is { } stampOf && held.Stamp is { } stamp)
-        {
-            string? now = null;
-            try
-            {
-                now = await stampOf(path, stamp, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception)
-            {
-                // unstamped: listed afresh whenever asked
-            }
-
-            if (now == stamp)
-            {
-                lock (_gate)
-                {
-                    Forget(path, fetch);
-                    if (_entries.TryGetValue(path, out var current) && current.List == held.List)
-                    {
-                        _entries[path] = current with { Fetched = _time.GetTimestamp() };
-                    }
-                }
-
-                fetch.Result.TrySetResult(held.List);
-                return;
-            }
-
-            fetch.Stamp = (true, now);
-            OnListing?.Invoke(path, $"its stamp moved, behind an answer ({stamp} to {now ?? "none"})");
-        }
-        else
-        {
-            var age = _time.GetElapsedTime(held.Fetched);
-            OnListing?.Invoke(path, held.Restored ? "it came from the last run, behind an answer" : $"its listing is {age.TotalSeconds:F0} s old, behind an answer");
-        }
-
-        await RunAsync(path, fetch).ConfigureAwait(false);
-    }
-
     /// <summary>The listing from the upstream: the one on its way when there is one, else a new one, shared by every caller until it lands.</summary>
     /// <param name="stamp">The folder's stamp as the caller read it, to keep with the listing; null to read it here (<see cref="StampOf"/>).</param>
     /// <param name="why">Why the upstream is asked: told to <see cref="OnListing"/> if this starts a listing.</param>
@@ -500,7 +391,7 @@ public sealed class ListingCache
                 }
                 catch (Exception)
                 {
-                    // unstamped: listed afresh whenever asked
+                    // unstamped: every walk lists it
                 }
             }
 
@@ -600,17 +491,11 @@ public sealed class ListingCache
 
     /// <summary>
     /// A listing held: when it arrived from the upstream (it expires from then) and what it said, with the writes since
-    /// applied; when it was last listed afresh or tried to be (<see cref="RefreshAfter"/> counts from then); and the
-    /// folder's stamp as read before it (<see cref="StampOf"/>), where the source has one.
+    /// applied; and the folder's stamp as read before it (<see cref="StampOf"/>), where the source has one.
     /// </summary>
     private sealed record Entry(long Fetched, IReadOnlyList<VfsEntry> List)
     {
-        public long Checked { get; init; } = Fetched;
-
         public string? Stamp { get; init; }
-
-        /// <summary>Whether it came from what an earlier run saved, and has not been listed afresh since.</summary>
-        public bool Restored { get; init; }
     }
 
     /// <summary>A write's change to one name in a listing.</summary>

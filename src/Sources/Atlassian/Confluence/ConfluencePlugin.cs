@@ -82,7 +82,7 @@ public sealed class ConfluencePlugin : ISourcePlugin, IValidatable, ITestable, I
 
         if (s.RefreshSeconds is < 0 or > 86_400)
         {
-            yield return new ValidationMessage("Check for changes every must be between 0 and 86400 seconds (a day).", nameof(ConfluenceSettings.RefreshSeconds));
+            yield return new ValidationMessage("Use Confluence's answers for must be between 0 and 86400 seconds (a day).", nameof(ConfluenceSettings.RefreshSeconds));
         }
 
         if (s.Concurrency is < 1 or > 64)

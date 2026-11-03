@@ -10,7 +10,7 @@ namespace AnyFS.Sources.GitLab;
 /// A GitLab server, group or project (type <c>gitlab</c>, spec 7.8), read-only: groups and projects as GitLab names them,
 /// each project's repository on its default branch (<c>files</c>), every branch and tag, and the project's other folders.
 /// Names are compared in either case, as Windows does. Folder listings are kept (the SDK's <see cref="KeptListings"/>),
-/// each asked for again behind the answer once older than the refresh interval, and "Count files on start" walks the tree
+/// and a change shows when a walk comes to it: the walks go through the folders opened, and "Count files on start" walks the tree
 /// into them, each project's default branch whole at once.
 /// </summary>
 public sealed partial class GitLabSource : SourceBase, ICountable
@@ -119,7 +119,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         {
             Keep = _settings.Keeps,
             UnkeptFor = TimeSpan.Zero,
-            RefreshAfter = _settings.Refresh,
             WalkEvery = _settings.WalkEvery,
             Parallelism = walking,
             MaxInFlight = walking,
@@ -134,6 +133,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             SaveKey = $"{_session.Address.Server}|{_session.User?.Username}|{path}|{_settings.Shape}|md{GitLabDocuments.Format}",
         });
 
+        _kept.StartWalksOfHeld();
         Logger.LogInformation("gitlab: serving {Scope} {Path} on {Server} as {User} ({Trees:N0} repository folders kept)",
             Scope.ToString().ToLowerInvariant(), path, _session.Address.Server, _session.User?.Username, _trees.Count);
         _saving = SaveAsync(_stopping.Token);

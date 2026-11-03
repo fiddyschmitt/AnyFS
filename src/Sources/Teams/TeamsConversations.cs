@@ -45,7 +45,7 @@ public sealed partial class TeamsSource
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> _historyFolders = new(StringComparer.Ordinal);
 
     // the folders a client is waiting on a listing of now (its own, or for a stat or an open the parent's), by path, with how
-    // many wait: the walks and the refreshes behind the answers are not clients, and wait their turn
+    // many wait: the walks are not clients, and wait their turn
     private readonly ConcurrentDictionary<string, int> _awaited = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>How long a conversation goes without its newest messages being read whole: an edit or reaction on an older message among them shows by then (the daily walk).</summary>
@@ -277,7 +277,7 @@ public sealed partial class TeamsSource
     /// <summary>
     /// Whether a conversation's messages are all read, back to its start or the window, so a listing made of them now is
     /// whole: not while its history is still being read, failed, or was let go (<see cref="LetGo"/>). A folder listed
-    /// otherwise carries no stamp (<see cref="ListingCache.Unstamp"/>), so it is listed afresh rather than kept.
+    /// otherwise carries no stamp (<see cref="ListingCache.Unstamp"/>), so the next walk lists it afresh rather than keeping it.
     /// </summary>
     internal bool ConversationWhole(string threadId)
     {

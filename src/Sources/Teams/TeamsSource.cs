@@ -75,7 +75,6 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         {
             Keep = _settings.Keeps,
             UnkeptFor = TimeSpan.Zero,
-            RefreshAfter = _settings.Refresh,
             WalkEvery = _settings.WalkEvery,
             Parallelism = walking,
             MaxInFlight = walking,

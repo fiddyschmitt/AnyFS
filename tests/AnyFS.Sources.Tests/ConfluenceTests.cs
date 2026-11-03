@@ -464,40 +464,33 @@ public class ConfluenceTests
     }
 
     [TestMethod]
-    public async Task AKeptFolderInAQuietSpaceIsNotListedAgainAndOneInAChangedSpaceIs()
+    public async Task AKeptFolderIsNotAskedForAgainAndTheNextWalkKeepsAQuietSpaceAndListsAChangedOne()
     {
         var fake = ConfluenceSeed.Lab();
         var settings = ConfluenceSeed.Settings(fake, "/display/ANYFS");
         settings.RefreshSeconds = 1;
         await using var source = await StartAsync(fake, settings);
         var home = "AnyFS Lab Home";
-        await NamesAsync(source, home);
+        await source.CountFilesAsync(CancellationToken.None);
 
-        // older than the interval, the space quiet: one search for the space's stamp and no listing, however often it is asked
+        // older than any interval: answered from what is kept, however often, with nothing asked
         await Task.Delay(1100);
         fake.Requests.Clear();
         await NamesAsync(source, home);
-        await WaitUntilAsync(() => fake.Count("/rest/api/search") > 0);
+        await NamesAsync(source, home);
         await Task.Delay(100);
+        Assert.AreEqual(0, fake.Requests.Count, string.Join("; ", fake.Requests));
+
+        // a walk over the space, quiet: the search for its stamp and no listing
+        await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
         Assert.AreEqual(0, fake.Count("/child/"), string.Join("; ", fake.Requests));
         Assert.AreEqual(0, fake.Count("/content/" + fake.PageTitled("AnyFS Lab Home").Id), string.Join("; ", fake.Requests));
 
-        // something changed in the space: listed afresh behind the next answer
+        // something changed in the space: the next walk shows it
         fake.AddPage(fake.Spaces[0], fake.Spaces[0].Home, "A page made since", "<p>New.</p>");
-        await Task.Delay(1100);
-        await WaitUntilAsync(async () => (await NamesAsync(source, home)).Contains("A page made since"));
-    }
-
-    private static async Task WaitUntilAsync(Func<bool> done) => await WaitUntilAsync(() => Task.FromResult(done()));
-
-    private static async Task WaitUntilAsync(Func<Task<bool>> done)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        while (!await done())
-        {
-            Assert.IsTrue(DateTime.UtcNow < deadline, "timed out waiting");
-            await Task.Delay(50);
-        }
+        CollectionAssert.DoesNotContain(await NamesAsync(source, home), "A page made since");
+        await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+        CollectionAssert.Contains(await NamesAsync(source, home), "A page made since");
     }
 
     [TestMethod]

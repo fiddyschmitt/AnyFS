@@ -196,27 +196,31 @@ Caching is the source's business; the SDK makes the common strategies one-liners
 - `ListingCache`: memoises listings for a TTL, shares one upstream call between concurrent
   misses, invalidate on writes (`Update` changes one name in place, also in a listing still on
   its way). For a source that is slow to list, `ListingCache.Kept` keeps each listing until it is
-  listed afresh: call `RefreshAsync` from a walk of your tree now and then, or set `RefreshAfter`
-  to answer a listing older than that at once and list the folder afresh behind the answer. A
-  folder listed again soon after is no sign that the person pressed refresh: programs list a folder
-  over and over (opening a file in Adobe Acrobat does). A client going through a kept tree asks for
-  thousands of folders in seconds: set `MaxRefreshesBehind` so that only so many of those listings
-  run at once, or whatever the client asks next waits behind them all. `Held` looks at a listing
-  without asking anything, and an entry's `Key` is yours to keep what finding that thing again takes
-  (a page's id), kept and saved with the listing, so an open need not walk down from the root.
-  `OnListing` is told why each folder goes to the upstream; `KeptListings` logs it at debug.
+  listed afresh: call `RefreshAsync` from a walk of your tree now and then. Nothing is checked
+  behind an answer: a client going through a kept tree asks for thousands of folders in seconds, and
+  whatever it asks next would wait behind them all. A folder listed again soon after is no sign that
+  the person pressed refresh either: programs list a folder over and over (opening a file in Adobe
+  Acrobat does). `Held` looks at a listing without asking anything, `Asked` says whether a folder has
+  been asked for, and an entry's `Key` is yours to keep what finding that thing again takes (a page's
+  id), kept and saved with the listing, so an open need not walk down from the root. `OnListing` is
+  told why each folder goes to the upstream; `KeptListings` logs it at debug.
 - `KeptListings`: a slow source's listings kept, and the walks of its tree that fill them. Give it
   your listing, your `Counters` and `KeptListingsOptions`; answer `ListAsync` and stats from its
   `Cache`, and make `CountFilesAsync` its `CountAsync`: "Count files on start" is then the first
   walk, which lists every folder (eight at a time), counts as it goes and keeps what it saw, and a
-  walk comes again every `WalkEvery` (30 minutes) after the last ends. `StartWalks` starts them
-  without the count. The options shape the walk: `PartsBelow` walks the folders of a folder each on
+  walk comes again every `WalkEvery` (30 minutes) after the last ends. A change upstream shows when
+  a walk comes to it and at no other time. `StartWalks` starts them without the count.
+  `StartWalksOfHeld` starts walks that go only through the folders that have been asked for, reading
+  nothing nobody asked for, until the count is asked for: call it as your source starts unless you
+  mean to walk everything anyway, or what was kept is never checked. The first comes at once where an
+  earlier run saved listings. The options shape the walk: `PartsBelow` walks the folders of a folder each on
   its own (SharePoint's sites, four folders of each at a time, 64 listings in flight in all);
   `LeftOut` names folders not worth a walk, listed when opened (GitLab's issues, a request or more
-  each), which makes the count a lower bound; `ListTree` hands it a whole subtree at once where you
-  have a quicker way than folder by folder (GitLab lists a repository a hundred entries a request),
-  and where it fails the rest of that walk goes folder by folder; everything it hands over is kept
-  with the folder's stamp. A folder that could not be listed makes the count a lower bound too.
+  each), which makes the count a lower bound, and what has been opened of them the walks check like
+  the rest; `ListTree` hands it a whole subtree at once where you have a quicker way than folder by
+  folder (GitLab lists a repository a hundred entries a request), and where it fails the rest of that
+  walk goes folder by folder; everything it hands over is kept with the folder's stamp. A folder that
+  could not be listed makes the count a lower bound too.
   `SaveTo` saves the listings to a file in your state folder when a walk ends and when the source
   stops, and reads them back at the next start, so every folder opens at once from the first moment;
   `SaveKey` says what they were saved for (the account, the server, the settings that shape the tree
@@ -226,9 +230,8 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   count, a project's last activity), given the stamp held, the same string back when nothing changed.
   A walk asks a stamped folder for its stamp first and, where it holds, keeps its listing and
   everything held below it without listing any of it, so a walk over a tree that has not changed,
-  the first after a restart among them, asks for the stamps alone; a listing afresh behind an answer
-  (`RefreshAfter`) is spared the same way. Once a `FullWalkEvery` (a day), a walk lists every folder
-  whatever its stamp, for what a stamp does not cover. `FailureKeptFor` keeps a folder whose listing
+  the first after a restart among them, asks for the stamps alone. Once a `FullWalkEvery` (a day), a
+  walk lists every folder whatever its stamp, for what a stamp does not cover. `FailureKeptFor` keeps a folder whose listing
   failed (nothing held for it) answering with that failure at once for a while, by the failure: a
   search that lists the tree over and over then pays for a folder the upstream refuses once, not on
   every pass. The time counts from the end of a walk that met the failure, so `WalkEvery` keeps it

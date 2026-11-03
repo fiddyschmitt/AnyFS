@@ -13,9 +13,9 @@ namespace AnyFS.Sources.Atlassian.Jira;
 /// <summary>
 /// A Jira server, project, saved filter, board or query (type <c>jira</c>, spec 7.10), read-only: a folder per project, a
 /// folder per issue with its <c>issue.md</c> (fields, description and comments as Markdown) and its attachments. Names are
-/// compared in either case, as Windows does. Folder listings are kept (the SDK's <see cref="KeptListings"/>), each asked
-/// for again behind the answer once older than the refresh interval; "Count files on start" walks the tree into them, a
-/// project's issues a hundred a request; a project whose newest change and issue count have not moved is kept as it was.
+/// compared in either case, as Windows does. Folder listings are kept (the SDK's <see cref="KeptListings"/>), and a change
+/// shows when a walk comes to it: the walks go through the folders opened, or with "Count files on start" through the whole
+/// tree, a project's issues in bulk; a project whose newest change and issue count have not moved is kept as it was.
 /// </summary>
 public sealed class JiraSource : SourceBase, ICountable
 {
@@ -106,7 +106,6 @@ public sealed class JiraSource : SourceBase, ICountable
         {
             Keep = _settings.Keeps,
             UnkeptFor = TimeSpan.Zero,
-            RefreshAfter = _settings.Refresh,
             WalkEvery = _settings.WalkEvery,
             Parallelism = walking,
             MaxInFlight = walking,
@@ -121,6 +120,7 @@ public sealed class JiraSource : SourceBase, ICountable
             SaveKey = $"{_session.Address.Server}|{_session.User?.Name}|{Scope.Kind}:{Scope.Value}|{_settings.Shape}|md{JiraDocuments.Format}",
         });
 
+        _kept.StartWalksOfHeld();
         Logger.LogInformation("jira: serving {Scope} {Value} on {Server} as {User}", Scope.Kind.ToString().ToLowerInvariant(), Scope.Value, _session.Address.Server, _session.User?.Name);
     }
 
@@ -525,8 +525,8 @@ public sealed class JiraSource : SourceBase, ICountable
 
     /// <summary>
     /// "Count files on start": the first walk of the tree (<see cref="KeptListings"/>), which lists every folder and keeps
-    /// the listings, so they open at once afterwards: each project's issues whole, a hundred a request
-    /// (<see cref="ListTreeAsync"/>); with listings kept, a walk again every "Walk every folder every" minutes.
+    /// the listings, so they open at once afterwards: each project's issues whole, in bulk (<see cref="ListTreeAsync"/>);
+    /// with listings kept, a walk again every "Walk every folder every" minutes.
     /// </summary>
     public Task CountFilesAsync(CancellationToken ct) => Kept.CountAsync(ct);
 
@@ -643,9 +643,7 @@ public sealed class JiraSource : SourceBase, ICountable
     /// <summary>
     /// A folder of issues from what is held of it and the issues changed since its last read (<paramref name="read"/>):
     /// null where that cannot be trusted (nothing held, a last read too long ago, an issue count that does not add up),
-    /// and the folder is read whole. The window starts from the last read, not from the newest held issue: the folder's
-    /// own listing is listed afresh behind answers between walks, which moves the newest held issue on while the issue
-    /// folders below it keep the listings of the last read.
+    /// and the folder is read whole. The window starts from the last read.
     /// </summary>
     private async Task<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?> ChangedTreeAsync(string path, JiraIssuesFolder folder, TreeRead read, CancellationToken ct)
     {

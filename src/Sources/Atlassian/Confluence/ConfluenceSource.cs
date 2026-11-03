@@ -11,10 +11,9 @@ namespace AnyFS.Sources.Atlassian.Confluence;
 /// <summary>
 /// A Confluence server, space or page (type <c>confluence</c>, spec 7.10), read-only: a folder per space, every page a
 /// folder holding its Markdown, its attachments and its child pages' folders, and each space's blog. Names are compared in
-/// either case, as Windows does. Folder listings are kept (the SDK's <see cref="KeptListings"/>), and go by their space's stamp:
-/// its newest change and content count, one search every few seconds however many folders ask. While it holds a kept folder is
-/// as good as new; once it moves, a folder asked for is listed again behind the answer, a few at a time, so a client going through
-/// the tree never waits behind them. What a listing names it also keeps the key of (<see cref="ConfluenceKeys"/>), so an open or a
+/// either case, as Windows does. Folder listings are kept (the SDK's <see cref="KeptListings"/>), and a change shows when a walk
+/// comes to it: the walks go through the folders opened, or with "Count files on start" through every space, and keep a space whose
+/// newest change and content count have not moved. What a listing names it also keeps the key of (<see cref="ConfluenceKeys"/>), so an open or a
 /// listing goes straight to the page or the attachment, however deep it is, without building the folders above it. "Count
 /// files on start" walks the tree into the listings, a space whole at a time (its pages, attachments and comments in bulk). A
 /// folder whose listing failed stays so until the next walk.
@@ -110,8 +109,6 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         {
             Keep = _settings.Keeps,
             UnkeptFor = TimeSpan.Zero,
-            RefreshAfter = _settings.Refresh,
-            MaxRefreshesBehind = Math.Max(1, requests / 4),
             WalkEvery = _settings.WalkEvery,
             Parallelism = walking,
             MaxInFlight = walking,
@@ -125,6 +122,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
 
         // a sign-in renewed: what it refused may be answered now
         _session.Renewed += _kept.Cache.ForgetFailures;
+        _kept.StartWalksOfHeld();
         Logger.LogInformation("confluence: serving {Scope} on {Server} as {User}", Scope, _session.Address.Server, _session.User?.Name);
     }
 

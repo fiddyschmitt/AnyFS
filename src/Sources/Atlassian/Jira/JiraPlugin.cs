@@ -84,7 +84,7 @@ public sealed class JiraPlugin : ISourcePlugin, IValidatable, ITestable, ISettin
 
         if (s.RefreshSeconds is < 0 or > 86_400)
         {
-            yield return new ValidationMessage("Check for changes every must be between 0 and 86400 seconds (a day).", nameof(JiraSettings.RefreshSeconds));
+            yield return new ValidationMessage("Use Jira's answers for must be between 0 and 86400 seconds (a day).", nameof(JiraSettings.RefreshSeconds));
         }
 
         if (s.Concurrency is < 1 or > 64)

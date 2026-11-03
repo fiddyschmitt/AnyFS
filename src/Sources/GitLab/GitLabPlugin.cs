@@ -108,7 +108,7 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
 
         if (s.RefreshSeconds is < 5 or > 86_400)
         {
-            yield return new ValidationMessage("Check for changes every must be between 5 seconds and 86400 (a day).", nameof(GitLabSettings.RefreshSeconds));
+            yield return new ValidationMessage("Use GitLab's answers for must be between 5 seconds and 86400 (a day).", nameof(GitLabSettings.RefreshSeconds));
         }
 
         if (s.Concurrency is < 1 or > 64)

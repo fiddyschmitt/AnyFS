@@ -426,6 +426,33 @@ public class JiraTests
     }
 
     [TestMethod]
+    public async Task AKeptFolderIsNotAskedForAgainUntilTheNextWalk()
+    {
+        var fake = JiraSeed.Lab();
+        var settings = JiraSeed.Settings(fake, "/projects/ANYFS");
+        settings.RefreshSeconds = 1;
+        await using var source = await StartAsync(fake, settings);
+        var issue = (await NamesAsync(source, "")).Single(n => n.StartsWith("ANYFS-1 ", StringComparison.Ordinal));
+        await NamesAsync(source, issue);
+
+        // changed, and older than any interval: answered from what is kept, however often, with nothing asked
+        fake.AddIssue(fake.Projects.Single(p => p.Key == "ANYFS"), "Made since", i => i.Updated = DateTimeOffset.UtcNow);
+        await Task.Delay(TimeSpan.FromSeconds(1.2));
+        fake.Requests.Clear();
+        for (var i = 0; i < 3; i++)
+        {
+            CollectionAssert.DoesNotContain((await NamesAsync(source, "")).Select(n => n[(n.IndexOf(' ', StringComparison.Ordinal) + 1)..]).ToList(), "Made since");
+            await NamesAsync(source, issue);
+        }
+
+        await Task.Delay(100);
+        Assert.AreEqual(0, fake.Requests.Count, string.Join("; ", fake.Requests));
+
+        await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+        CollectionAssert.Contains((await NamesAsync(source, "")).Select(n => n[(n.IndexOf(' ', StringComparison.Ordinal) + 1)..]).ToList(), "Made since", "the walk shows it");
+    }
+
+    [TestMethod]
     public async Task AnIssueTheRangeCannotFindIsReadAlone()
     {
         var fake = JiraSeed.Lab();

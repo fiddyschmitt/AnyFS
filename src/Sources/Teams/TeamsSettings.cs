@@ -143,16 +143,16 @@ public sealed class TeamsSettings
         Hint = "Chats and channel posts whose last message is older than this are left out, and a conversation is read back no further than this (a busy account has thousands). 0 shows everything, back to each conversation's start.")]
     public int WithinDays { get; set; }
 
-    [Setting("Check for changes every (seconds)", Advanced = true, Order = 14,
-        Hint = "How old a listing of something that changes (the teams and chats, a conversation's messages) may be before it is asked for again. 0 asks every time, and keeps no folder listings.")]
+    [Setting("Use Teams' answers for (seconds)", Advanced = true, Order = 14,
+        Hint = "How long an answer from Teams about something that changes (the teams and chats, a conversation's messages) is used again before it is asked for again, as a file is opened or a folder not kept yet is listed. It checks no kept folder for changes: the walks do that (below). 0 asks every time, and keeps no folder listings.")]
     public int RefreshSeconds { get; set; } = 60;
 
     [Setting(KeptListings.KeepSetting, Advanced = true, Order = 15,
-        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once; a listing older than 'Check for changes every' is asked for again behind the answer. With 'Count files on start', the count walks the teams, channels and chats first and keeps what it finds (below). Off: each folder is asked for as it is opened.")]
+        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once and going through them again asks nothing of Teams; a change, a new message among them, shows after the next walk (below). The walks go through the teams, channels and chats from the start. Off: each folder is asked for as it is opened.")]
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 16,
-        Hint = "With folder listings kept and 'Count files on start': how long after one walk the next begins (the count's is the first). 0 walks for the count only. A walk goes through the teams, channels and chats and reads the conversations that have changed since the last (Teams says which), taking half the requests so browsing meanwhile has the rest; once a day it reads everything, so edits and reactions on older messages show by then.")]
+        Hint = "With folder listings kept: how long after one walk the next begins. The walks are what checks kept folders for changes, so this is how long a new message can take to show. 0 walks once, at the start. A walk goes through the teams, channels and chats and reads the conversations that have changed since the last (Teams says which), taking half the requests so browsing meanwhile has the rest; once a day it reads everything, so edits and reactions on older messages show by then.")]
     public int WalkMinutes { get; set; } = 30;
 
     [Setting("Requests at a time", Advanced = true, Order = 17, Hint = "How many requests AnyFS has open with Teams at once.")]

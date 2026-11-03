@@ -567,15 +567,10 @@ public class TeamsSourceTests
         await Task.Delay(TimeSpan.FromSeconds(1.2));
         Assert.AreEqual(listed.Length, (await TextBytesAsync(source, "Chats/Jane Doe/chat.md")).Length, "the bytes of the length the listing gave");
 
-        // once the listing has caught up, the open gives the new bytes, their length the new stat's
-        var deadline = DateTime.UtcNow.AddSeconds(10);
-        VfsEntry? now;
-        while ((now = await source.StatAsync("Chats/Jane Doe/chat.md", CancellationToken.None))!.Length == listed.Length)
-        {
-            Assert.IsTrue(DateTime.UtcNow < deadline, "the listing behind the answer lands");
-            await Task.Delay(50);
-        }
-
+        // once a walk has listed it afresh, the open gives the new bytes, their length the new stat's
+        await source.Listings.RefreshAsync("Chats/Jane Doe", CancellationToken.None);
+        var now = await source.StatAsync("Chats/Jane Doe/chat.md", CancellationToken.None);
+        Assert.AreNotEqual(listed.Length, now!.Length);
         var bytes = await TextBytesAsync(source, "Chats/Jane Doe/chat.md");
         Assert.AreEqual(now.Length, bytes.Length);
         StringAssert.Contains(Encoding.UTF8.GetString(bytes), "A much longer reply");

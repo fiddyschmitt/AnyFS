@@ -45,16 +45,16 @@ public sealed class ConfluenceSettings : IAtlassianSettings
         Hint = "Accept the server's HTTPS certificate whatever it is (a server with a self-signed one). Off for a real server.")]
     public bool TrustAnyCertificate { get; set; }
 
-    [Setting("Check for changes every (seconds)", Advanced = true, Order = 12,
-        Hint = "How old a folder's listing may be before AnyFS checks for changes: one search of its space, and the folder is listed again only if something in the space changed. 0 asks every time, and keeps no folder listings.")]
+    [Setting("Use Confluence's answers for (seconds)", Advanced = true, Order = 12,
+        Hint = "How long an answer from Confluence is used again before it is asked for again, as a file is opened or a folder not kept yet is listed. It checks no kept folder for changes: the walks do that (below). 0 asks every time, and keeps no folder listings.")]
     public int RefreshSeconds { get; set; } = 60;
 
     [Setting(KeptListings.KeepSetting, Advanced = true, Order = 13,
-        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once; a listing older than 'Check for changes every' is checked behind the answer, so a change shows the next time the folder is opened (within a day for what a search does not show, such as a page moved). With 'Count files on start', the count walks the folders first and keeps what it finds (below). A folder that could not be listed shows empty until the next walk. Off: each folder is asked for as it is opened.")]
+        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once and going through them again asks nothing of Confluence; a change shows after the next walk (below), and within a day for what a search does not show, such as a page moved. A folder that could not be listed shows empty until then. With 'Count files on start', the count walks the folders first and keeps what it finds. Off: each folder is asked for as it is opened.")]
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 14,
-        Hint = "With folder listings kept and 'Count files on start': how long after one walk the next begins (the count's is the first). 0 walks for the count only. A walk reads each space whole, its pages, attachments and comments in bulk; a space whose newest change and content count have not moved since the last walk is kept as it was, so a walk over a quiet server asks a request per space; once a day everything is read again. The walk takes half the requests, so browsing meanwhile has the rest.")]
+        Hint = "With folder listings kept: how long after one walk the next begins. The walks are what checks kept folders for changes, so this is how long a change can take to show. 0 walks once, at the start. Without 'Count files on start' a walk goes only through the folders that have been opened; with it, through every space, its pages, attachments and comments in bulk. A space whose newest change and content count have not moved since the last walk is kept as it was, so a walk over a quiet server asks a request per space; once a day everything is read again. The walk takes half the requests, so browsing meanwhile has the rest.")]
     public int WalkMinutes { get; set; } = 30;
 
     [Setting("Requests at a time", Advanced = true, Order = 15, Hint = "How many requests AnyFS has open with the server at once.")]

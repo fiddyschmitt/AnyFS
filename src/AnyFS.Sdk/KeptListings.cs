@@ -9,10 +9,13 @@ namespace AnyFS.Sdk;
 /// <summary>
 /// The folder listings of a source that is slow to list, kept, and the walks of the whole tree that fill them (spec 6.8):
 /// what the source last saw of a folder answers at once, and a walk lists every folder afresh, counting files and folders
-/// as it goes. "Count files on start" is the first walk (<see cref="CountAsync"/>, from <see cref="ICountable.CountFilesAsync"/>),
+/// as it goes. A change upstream shows when a walk comes to it and at no other time: a folder asked for is answered from what
+/// is held and nothing is checked behind the answer, so a client going through a kept tree asks nothing of the upstream.
+/// "Count files on start" is the first walk (<see cref="CountAsync"/>, from <see cref="ICountable.CountFilesAsync"/>),
 /// so after the count every folder opens at once instead of being listed again one by one; a walk follows every
-/// <see cref="KeptListingsOptions.WalkEvery"/> after the last ends, and a source can start the walks without the count
-/// (<see cref="StartWalks"/>: SharePoint does, from its start). Where the source stamps its folders
+/// <see cref="KeptListingsOptions.WalkEvery"/> after the last ends. A source can start the walks without the count
+/// (<see cref="StartWalks"/>: SharePoint does, from its start), or have them go only through the folders that have been asked
+/// for until the count is (<see cref="StartWalksOfHeld"/>). Where the source stamps its folders
 /// (<see cref="KeptListingsOptions.StampOf"/>), a walk asks each stamped folder for its stamp first and, where it still
 /// holds, keeps the folder's listing and every listing below it as they are, so a walk over a tree that has not changed
 /// asks for the stamps alone, from one start to the next too (<see cref="KeptListingsOptions.SaveTo"/>); once a
@@ -63,7 +66,7 @@ public sealed class KeptListings : IAsyncDisposable
         _time = time ?? TimeProvider.System;
         void Listing(string path, string why) => _logger.LogDebug("{Name}: listing '{Path}' from the service: {Why}", _options.Name, path, why);
         Cache = _options.Keep
-            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { OnListing = Listing, RefreshAfter = _options.RefreshAfter, MaxRefreshesBehind = _options.MaxRefreshesBehind, StampOf = _options.StampOf, FailureKeptFor = _options.FailureKeptFor }
+            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { OnListing = Listing, StampOf = _options.StampOf, FailureKeptFor = _options.FailureKeptFor }
             : new ListingCache(_options.UnkeptFor, lister, time: _time) { OnListing = Listing, StampOf = _options.StampOf };
         if (_options.Keep && _options.SaveTo is { } saved)
         {
@@ -74,9 +77,8 @@ public sealed class KeptListings : IAsyncDisposable
     private const int SavedVersion = 2;
 
     /// <summary>
-    /// The listings an earlier run saved for the same <see cref="KeptListingsOptions.SaveKey"/>, kept as old (listed afresh
-    /// as they are opened, or by the first walk) with their stamps (a folder whose stamp holds is not), and when the last
-    /// walk that listed every folder was.
+    /// The listings an earlier run saved for the same <see cref="KeptListingsOptions.SaveKey"/>, until the first walk lists
+    /// them afresh, with their stamps (a folder whose stamp holds is not), and when the last walk that listed every folder was.
     /// </summary>
     private void Load(string path)
     {
@@ -96,7 +98,7 @@ public sealed class KeptListings : IAsyncDisposable
 
             _restored = saved.Listings.Count > 0;
             _fullWalkAt = saved.FullWalkAt;
-            _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run answer at once, {Stamped:N0} of them stamped; the rest are listed afresh as they are opened", _options.Name, saved.Listings.Count, saved.Stamps?.Count ?? 0);
+            _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run answer at once, {Stamped:N0} of them stamped", _options.Name, saved.Listings.Count, saved.Stamps?.Count ?? 0);
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
@@ -712,7 +714,7 @@ public sealed class KeptListings : IAsyncDisposable
 /// <summary>How a source's listings are kept and its tree walked (<see cref="KeptListings"/>).</summary>
 public sealed record KeptListingsOptions
 {
-    /// <summary>Whether listings are kept until listed afresh (by a walk, or behind an answer, <see cref="RefreshAfter"/>); off, they last <see cref="UnkeptFor"/> and the count is one walk.</summary>
+    /// <summary>Whether listings are kept until a walk lists them afresh; off, they last <see cref="UnkeptFor"/> and the count is one walk.</summary>
     public bool Keep { get; init; } = true;
 
     /// <summary>Without keeping, how long a listing lasts (two seconds: clients stat every file they list); zero lists every time, for a source whose own caches decide.</summary>
@@ -720,12 +722,6 @@ public sealed record KeptListingsOptions
 
     /// <summary>With listings kept, how long after one walk ends the next begins; zero (or less) for the first walk alone.</summary>
     public TimeSpan WalkEvery { get; init; } = TimeSpan.FromMinutes(30);
-
-    /// <summary>With listings kept, the age past which a listing is answered and listed afresh behind the answer (<see cref="ListingCache.RefreshAfter"/>); null keeps it until the next walk.</summary>
-    public TimeSpan? RefreshAfter { get; init; }
-
-    /// <summary>With listings kept, how many listings afresh behind answers run at once at most (<see cref="ListingCache.MaxRefreshesBehind"/>); null starts them all.</summary>
-    public int? MaxRefreshesBehind { get; init; }
 
     /// <summary>
     /// With listings kept, how long a folder whose listing failed answers with that failure at once, by the failure
@@ -751,8 +747,8 @@ public sealed record KeptListingsOptions
 
     /// <summary>
     /// Of the folders in a folder, the names of those a walk does not go into, because listing them costs requests of their
-    /// own (GitLab's issues): they are listed when opened, and the count ends as a lower bound
-    /// (<see cref="EnumerationState.Unknown"/>). Null, or none, goes into every folder.
+    /// own (GitLab's issues): they are listed when opened, what has been opened of them is checked by the walks like the rest, and
+    /// the count ends as a lower bound (<see cref="EnumerationState.Unknown"/>). Null, or none, goes into every folder.
     /// </summary>
     public Func<string, CancellationToken, ValueTask<IReadOnlySet<string>?>>? LeftOut { get; init; }
 
@@ -769,7 +765,7 @@ public sealed record KeptListingsOptions
 
     /// <summary>
     /// With listings kept, the file they are saved to (in the source's state folder) after each walk and when the source
-    /// stops, and read back from at its next start: folders then open at once, each listed afresh behind its first answer.
+    /// stops, and read back from at its next start: folders then open at once, until the first walk lists them afresh.
     /// Null keeps them for the run alone.
     /// </summary>
     public string? SaveTo { get; init; }
@@ -784,8 +780,7 @@ public sealed record KeptListingsOptions
     /// <summary>
     /// A folder's stamp (<see cref="ListingCache.StampOf"/>): what its listing and every listing below it depend on, as the
     /// upstream tells it cheaply. A walk keeps a stamped folder whose stamp holds, and everything held below it, as they
-    /// are, and a listing afresh behind an answer (<see cref="RefreshAfter"/>) is spared the same way. Null (the default)
-    /// stamps nothing: every walk lists every folder.
+    /// are. Null (the default) stamps nothing: every walk lists every folder.
     /// </summary>
     public Func<string, string?, CancellationToken, ValueTask<string?>>? StampOf { get; init; }
 
