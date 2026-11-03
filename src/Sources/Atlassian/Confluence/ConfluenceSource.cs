@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.Atlassian.Confluence;
@@ -36,7 +37,6 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     private readonly AtlassianStandIn? _standIn;
     private readonly CancellationTokenSource _stopping = new();
     private readonly ConcurrentDictionary<string, (ConfluenceContent Content, long At)> _pages = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, Lazy<Task>> _reading = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string?> _people = new(StringComparer.Ordinal);
     private AtlassianSession? _session;
     private AtlassianApi? _api;
@@ -187,6 +187,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             return (_root ?? throw VfsException.Unavailable("Confluence is not signed in to yet")).Entry;
         }
 
+        using var opening = _readAhead.ForOneThing();
         return await Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false);
     }
 
@@ -231,6 +232,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             throw VfsException.NotSupported("writing to Confluence");
         }
 
+        using var opening = _readAhead.ForOneThing();
         var node = await ResolveAsync(path, ct).ConfigureAwait(false);
         return node is CoFile file ? await Guard(() => file.OpenAsync(this, ct)).ConfigureAwait(false) : throw VfsException.IsADirectory(path);
     }
@@ -436,10 +438,10 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         }, ct);
 
     /// <summary>
-    /// A page with its body, kept a refresh interval: read alone, unless the page before it under the same parent was asked for
-    /// moments ago, when the few beside it come with it, as a client going straight through a folder of pages asks for them next. A
-    /// client going depth first gets one at a time, which is all it can use before the bodies read with it grow old, and a
-    /// request of 50 bodies can take longer than the request timeout on a server that shows any one page in a few seconds.
+    /// A page with its body, kept a refresh interval: read alone, unless a client is going straight through a folder of pages
+    /// (<see cref="ReadAhead"/>), when the few beside it come with it. A client going depth first gets one at a time, which is
+    /// all it can use before the bodies read with it grow old, and a request of 50 bodies can take longer than the request
+    /// timeout on a server that shows any one page in a few seconds.
     /// </summary>
     internal async Task<ConfluenceContent> PageAsync(ConfluencePageFolder folder, CancellationToken ct)
     {
@@ -449,35 +451,16 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             return kept;
         }
 
-        // the few pages beside it, where a client is going straight through them: the one before it was asked for moments ago
+        // the few pages beside it, where a client is going straight through them
         if (folder.ParentId is { } parent)
         {
-            var now = Stopwatch.GetTimestamp();
-            var goingThrough = _askedUnder.TryGetValue(parent, out var asked) && Stopwatch.GetElapsedTime(asked, now) < TogetherWithin;
-            _askedUnder[parent] = now;
-            if (_askedUnder.Count > PagesKept)
-            {
-                _askedUnder.Clear();
-            }
-
-            if (goingThrough && now >= Volatile.Read(ref _readAloneUntil) && Cache.Peek<List<ConfluenceContent>>($"children:{parent}") is { } beside)
+            if (_readAhead.Wanted(parent) && Cache.Peek<List<ConfluenceContent>>($"children:{parent}") is { } beside)
             {
                 var at = beside.FindIndex(c => c.Id == id);
                 if (at >= 0)
                 {
                     var relative = $"content/{parent}/child/page?start={at / 10 * 10}&limit=10&expand={Whole}";
-                    var reading = _reading.GetOrAdd(relative, r => new Lazy<Task>(() => ReadTogetherAsync(r))).Value;
-                    try
-                    {
-                        await reading.WaitAsync(ct).ConfigureAwait(false);
-                    }
-                    catch (VfsException ex)
-                    {
-                        // the server takes too long over several at once, or refuses one of them: alone for a while
-                        Volatile.Write(ref _readAloneUntil, Stopwatch.GetTimestamp() + (long)(TimeSpan.FromMinutes(10).TotalSeconds * Stopwatch.Frequency));
-                        Logger.LogDebug("confluence: the pages beside {Id} could not be read together ({Error}); reading pages alone for a while", id, ex.Message);
-                    }
-
+                    await _readAhead.ReadAsync(relative, () => ReadTogetherAsync(relative), ct).ConfigureAwait(false);
                     if (Fresh(id, null) is { } together)
                     {
                         return together;
@@ -493,16 +476,11 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         return alone.Value;
     }
 
-    private static readonly TimeSpan TogetherWithin = TimeSpan.FromSeconds(10);
-
-    // when a page under each parent was last asked for, by the parent's id
-    private readonly ConcurrentDictionary<string, long> _askedUnder = new(StringComparer.Ordinal);
-    private long _readAloneUntil;
+    private readonly ReadAhead _readAhead = new();
 
     /// <summary>One request's pages with their bodies, kept for the listings and opens that follow.</summary>
     private async Task ReadTogetherAsync(string relative)
     {
-        await Task.Yield();
         try
         {
             using var doc = await Api.GetAsync(relative, _stopping.Token).ConfigureAwait(false);
@@ -511,9 +489,10 @@ public sealed class ConfluenceSource : SourceBase, ICountable
                 Remember(ConfluenceContent.Parse(e));
             }
         }
-        finally
+        catch (VfsException ex)
         {
-            _reading.TryRemove(relative, out _);
+            _readAhead.Failed();
+            Logger.LogDebug("confluence: {Read} could not be read together ({Error}); reading pages alone for a while", relative, ex.Message);
         }
     }
 

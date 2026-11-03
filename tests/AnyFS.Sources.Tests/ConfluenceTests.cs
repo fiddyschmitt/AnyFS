@@ -308,14 +308,94 @@ public class ConfluenceTests
         var fake = ConfluenceSeed.Lab();
         await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake, "/display/BULK"));
         var pages = await NamesAsync(source, "Bulk pages Home");
-        var before = fake.Requests.Count(r => r.Contains("body.storage", StringComparison.Ordinal) && !r.Contains("/child/comment", StringComparison.Ordinal));
+        var before = BodyReads(fake);
         foreach (var page in pages.Where(p => p.StartsWith("Bulk page 0", StringComparison.Ordinal)).Take(40))
         {
             StringAssert.Contains(await TextAsync(source, $"Bulk pages Home/{page}/{page}.md"), "One of many");
         }
 
-        var bodies = fake.Requests.Count(r => r.Contains("body.storage", StringComparison.Ordinal) && !r.Contains("/child/comment", StringComparison.Ordinal)) - before;
-        Assert.IsTrue(bodies <= 6, $"{bodies} reads with bodies for forty pages asked for one after the other: they come ten a request");
+        // two alone, then one alone and ten behind it four times, or a little more where a slow machine left a gap between two opens
+        var bodies = BodyReads(fake) - before;
+        Assert.IsTrue(bodies <= 16, $"{bodies} reads with bodies for forty pages opened one straight after the other: they come ten a request");
+    }
+
+    private static int BodyReads(FakeConfluence fake)
+        => fake.Requests.Count(r => r.Contains("body.storage", StringComparison.Ordinal) && !r.Contains("/child/comment", StringComparison.Ordinal));
+
+    [TestMethod]
+    public async Task GoingThroughFoldersOfPagesReadsTheBodiesBesideThem()
+    {
+        var fake = ConfluenceSeed.Lab();
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake, "/display/BULK"));
+        var pages = (await NamesAsync(source, "Bulk pages Home")).Where(p => p.StartsWith("Bulk page 0", StringComparison.Ordinal)).Take(40).ToList();
+        var before = BodyReads(fake);
+        foreach (var page in pages)
+        {
+            await NamesAsync(source, $"Bulk pages Home/{page}");
+        }
+
+        var bodies = BodyReads(fake) - before;
+        Assert.IsTrue(bodies <= 6, $"{bodies} reads with bodies for forty folders listed one after the other: they come ten a request");
+    }
+
+    [TestMethod]
+    public async Task AnOpenBesideFoldersBeingGoneThroughIsReadAlone()
+    {
+        var fake = ConfluenceSeed.Lab();
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake, "/display/BULK"));
+        var pages = (await NamesAsync(source, "Bulk pages Home")).Where(p => p.StartsWith("Bulk page ", StringComparison.Ordinal)).ToList();
+
+        // a client going straight through the folders, reading those beside them
+        await NamesAsync(source, $"Bulk pages Home/{pages[0]}");
+        await NamesAsync(source, $"Bulk pages Home/{pages[1]}");
+        Assert.AreEqual(1, fake.Count("/child/page?start="));
+
+        // and someone waiting for one page, under the same parent, waits for no others
+        var before = BodyReads(fake);
+        StringAssert.Contains(await TextAsync(source, $"Bulk pages Home/{pages[50]}/{pages[50]}.md"), "One of many");
+        Assert.AreEqual(1, fake.Count("/child/page?start="), "no read of several");
+        Assert.AreEqual(1, BodyReads(fake) - before, "its own body");
+
+        // a stat that has to list the folder of its file, as a program does that opens a file by its path
+        Assert.IsNotNull(await source.StatAsync($"Bulk pages Home/{pages[60]}/{pages[60]}.md", CancellationToken.None));
+        Assert.AreEqual(1, fake.Count("/child/page?start="), "no read of several");
+        Assert.AreEqual(2, BodyReads(fake) - before, "its own body");
+    }
+
+    [TestMethod]
+    public async Task AnOpenBesideAClientGoingThroughTheFilesWaitsForNoOthers()
+    {
+        var fake = ConfluenceSeed.Lab();
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake, "/display/BULK"));
+        var pages = (await NamesAsync(source, "Bulk pages Home")).Where(p => p.StartsWith("Bulk page ", StringComparison.Ordinal)).ToList();
+
+        // a read of several that does not answer
+        using var held = new ManualResetEventSlim();
+        fake.Fault = r =>
+        {
+            if (r.Url.AbsolutePath.EndsWith("/child/page", StringComparison.Ordinal) && r.Q("expand")?.Contains("body.storage", StringComparison.Ordinal) == true)
+            {
+                held.Wait(TimeSpan.FromSeconds(30));
+            }
+
+            return null;
+        };
+
+        try
+        {
+            // the third of a run brings those beside it, and neither it nor someone opening a page elsewhere waits for them
+            for (var i = 0; i < 3; i++)
+            {
+                StringAssert.Contains(await TextAsync(source, $"Bulk pages Home/{pages[i]}/{pages[i]}.md").WaitAsync(TimeSpan.FromSeconds(20)), "One of many");
+            }
+
+            StringAssert.Contains(await TextAsync(source, $"Bulk pages Home/{pages[50]}/{pages[50]}.md").WaitAsync(TimeSpan.FromSeconds(20)), "One of many");
+        }
+        finally
+        {
+            held.Set();
+            fake.Fault = null;
+        }
     }
 
     [TestMethod]
@@ -331,11 +411,17 @@ public class ConfluenceTests
             : null;
         StringAssert.Contains(await TextAsync(source, $"Bulk pages Home/{pages[0]}/{pages[0]}.md"), "One of many");
         Assert.AreEqual(0, fake.Count("/child/page?start="), "the first alone");
-        StringAssert.Contains(await TextAsync(source, $"Bulk pages Home/{pages[1]}/{pages[1]}.md"), "One of many");
+
+        // a client going straight through the files: from the third or so those beside it come behind it; which fails, and each is read alone
+        for (var i = 1; i < 8; i++)
+        {
+            StringAssert.Contains(await TextAsync(source, $"Bulk pages Home/{pages[i]}/{pages[i]}.md"), "One of many");
+        }
+
         var together = fake.Count("/child/page?start=");
-        Assert.AreEqual(1, together, "the next, moments later, with those beside it; which fails, and it is read alone");
+        Assert.IsTrue(together is 1 or 2, $"{together} tries: not tried again for a while, each of them costs a timeout on a slow server");
         StringAssert.Contains(await TextAsync(source, $"Bulk pages Home/{pages[20]}/{pages[20]}.md"), "One of many");
-        Assert.AreEqual(together, fake.Count("/child/page?start="), "not tried again for a while: each of them costs a timeout on a slow server");
+        Assert.AreEqual(together, fake.Count("/child/page?start="), "nor for a page further along");
     }
 
     [TestMethod]

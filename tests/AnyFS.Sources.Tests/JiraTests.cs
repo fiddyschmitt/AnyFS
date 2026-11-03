@@ -399,14 +399,88 @@ public class JiraTests
         Assert.AreEqual(searches, fake.Count("/rest/api/2/search"), "one issue, no search");
         Assert.AreEqual(1, fake.Count("GET /jira/rest/api/2/issue/"), "read alone");
 
-        // the next moments after: going straight through, the rest come with it, more at a time as the server answers quickly
+        // the next straight after: a client going through the files, and from the third the rest come behind them, more at a time
+        // as the server answers quickly (a slow machine leaving a gap between two opens costs another two alone)
         for (var n = 102; n <= 150; n++)
         {
             StringAssert.StartsWith(await TextAsync(source, $"BULK-{n} Bulk issue {n}/issue.md"), $"# BULK-{n} Bulk issue {n}\n");
         }
 
-        Assert.IsTrue(fake.Count("/rest/api/2/search") - searches <= 4, "fifty issues, a few searches");
-        Assert.AreEqual(1, fake.Count("GET /jira/rest/api/2/issue/"), "no other read alone");
+        Assert.IsTrue(fake.Count("/rest/api/2/search") - searches <= 10, "fifty issues, a few searches");
+        Assert.IsTrue(fake.Count("GET /jira/rest/api/2/issue/") <= 15, "a few read alone");
+    }
+
+    [TestMethod]
+    public async Task GoingThroughAProjectsFoldersReadsThoseAroundThem()
+    {
+        var fake = JiraSeed.Lab();
+        await using var source = await StartAsync(fake, JiraSeed.Settings(fake, "/projects/BULK"));
+        var searches = fake.Count("/rest/api/2/search");
+        for (var n = 101; n <= 150; n++)
+        {
+            await NamesAsync(source, $"BULK-{n} Bulk issue {n}");
+        }
+
+        Assert.IsTrue(fake.Count("/rest/api/2/search") - searches <= 4, "fifty folders, a few searches");
+        Assert.AreEqual(1, fake.Count("GET /jira/rest/api/2/issue/"), "the first alone");
+    }
+
+    [TestMethod]
+    public async Task AnOpenInAProjectBeingGoneThroughIsReadAlone()
+    {
+        var fake = JiraSeed.Lab();
+        await using var source = await StartAsync(fake, JiraSeed.Settings(fake, "/projects/BULK"));
+
+        // a client going straight through the folders, reading those around them
+        await NamesAsync(source, "BULK-101 Bulk issue 101");
+        await NamesAsync(source, "BULK-102 Bulk issue 102");
+        var searches = fake.Count("/rest/api/2/search");
+        var alone = fake.Count("GET /jira/rest/api/2/issue/");
+
+        // and someone waiting for one issue waits for no others
+        StringAssert.StartsWith(await TextAsync(source, "BULK-190 Bulk issue 190/issue.md"), "# BULK-190");
+        Assert.AreEqual(searches, fake.Count("/rest/api/2/search"), "no read of several");
+        Assert.AreEqual(alone + 1, fake.Count("GET /jira/rest/api/2/issue/"), "its own");
+
+        // a stat that has to list the folder of its file, as a program does that opens a file by its path
+        Assert.IsNotNull(await source.StatAsync("BULK-180 Bulk issue 180/issue.md", CancellationToken.None));
+        Assert.AreEqual(searches, fake.Count("/rest/api/2/search"), "no read of several");
+        Assert.AreEqual(alone + 2, fake.Count("GET /jira/rest/api/2/issue/"), "its own");
+    }
+
+    [TestMethod]
+    public async Task AnOpenBesideAClientGoingThroughTheFilesWaitsForNoOthers()
+    {
+        var fake = JiraSeed.Lab();
+        await using var source = await StartAsync(fake, JiraSeed.Settings(fake, "/projects/BULK"));
+
+        // a read of several that does not answer
+        using var held = new ManualResetEventSlim();
+        fake.Fault = r =>
+        {
+            if (r.Url.AbsolutePath.EndsWith("/search", StringComparison.Ordinal))
+            {
+                held.Wait(TimeSpan.FromSeconds(30));
+            }
+
+            return null;
+        };
+
+        try
+        {
+            // the third of a run brings those around it, and neither it nor someone opening an issue elsewhere waits for them
+            for (var n = 101; n <= 103; n++)
+            {
+                StringAssert.StartsWith(await TextAsync(source, $"BULK-{n} Bulk issue {n}/issue.md").WaitAsync(TimeSpan.FromSeconds(20)), $"# BULK-{n}");
+            }
+
+            StringAssert.StartsWith(await TextAsync(source, "BULK-190 Bulk issue 190/issue.md").WaitAsync(TimeSpan.FromSeconds(20)), "# BULK-190");
+        }
+        finally
+        {
+            held.Set();
+            fake.Fault = null;
+        }
     }
 
     [TestMethod]
@@ -418,10 +492,17 @@ public class JiraTests
 
         // a server too slow for several at once: a search that fails as one that does not answer does
         fake.Fault = r => r.Url.AbsolutePath.EndsWith("/search", StringComparison.Ordinal) ? FakeAtlassian.Response.Html("<html>busy</html>") : null;
-        StringAssert.StartsWith(await TextAsync(source, "BULK-102 Bulk issue 102/issue.md"), "# BULK-102", "read alone instead");
+        var before = fake.Count("/rest/api/2/search");
+        for (var n = 102; n <= 108; n++)
+        {
+            StringAssert.StartsWith(await TextAsync(source, $"BULK-{n} Bulk issue {n}/issue.md"), $"# BULK-{n}", "read alone instead");
+        }
+
+        var tries = fake.Count("/rest/api/2/search") - before;
+        Assert.IsTrue(tries is >= 1 and <= 3, $"{tries} tries, as a client goes through the files; not one for every issue");
         fake.Fault = null;
         var searches = fake.Count("/rest/api/2/search");
-        StringAssert.StartsWith(await TextAsync(source, "BULK-103 Bulk issue 103/issue.md"), "# BULK-103");
+        StringAssert.StartsWith(await TextAsync(source, "BULK-109 Bulk issue 109/issue.md"), "# BULK-109");
         Assert.AreEqual(searches, fake.Count("/rest/api/2/search"), "alone for a while");
     }
 

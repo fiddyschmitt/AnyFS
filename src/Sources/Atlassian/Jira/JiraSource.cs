@@ -36,7 +36,6 @@ public sealed class JiraSource : SourceBase, ICountable
     private readonly AtlassianStandIn? _standIn;
     private readonly CancellationTokenSource _stopping = new();
     private readonly ConcurrentDictionary<string, (JiraIssue Issue, long At)> _issues = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, Lazy<Task>> _reading = new(StringComparer.OrdinalIgnoreCase);
 
     // whole issues asked for at once: as many as this server answers in a few seconds
     private readonly RequestSizer _wholeIssues = new(smallest: 1, start: 10, largest: IssuesPerRequest);
@@ -188,6 +187,7 @@ public sealed class JiraSource : SourceBase, ICountable
             return (_root ?? throw VfsException.Unavailable("Jira is not signed in to yet")).Entry;
         }
 
+        using var opening = _readAhead.ForOneThing();
         return await Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false);
     }
 
@@ -213,6 +213,7 @@ public sealed class JiraSource : SourceBase, ICountable
             throw VfsException.NotSupported("writing to Jira");
         }
 
+        using var opening = _readAhead.ForOneThing();
         var node = await ResolveAsync(path, ct).ConfigureAwait(false);
         return node is JiFile file ? await Guard(() => file.OpenAsync(this, ct)).ConfigureAwait(false) : throw VfsException.IsADirectory(path);
     }
@@ -296,10 +297,9 @@ public sealed class JiraSource : SourceBase, ICountable
 
     /// <summary>
     /// An issue whole (every field, Jira's rendering of its text, the fields' names), kept a refresh interval: read alone,
-    /// unless another in its project was asked for moments ago, when the issues numbered around it come with it in one search,
-    /// as a client going straight through a project's folders asks for them next; as many as the server answers in a few
-    /// seconds (<see cref="_wholeIssues"/>), and alone for a while after that fails. Null for an issue that is not there (or not
-    /// to this account).
+    /// unless a client is going straight through a project's folders (<see cref="ReadAhead"/>), when the issues numbered around
+    /// it come with it in one search, as many as the server answers in a few seconds (<see cref="_wholeIssues"/>). Null for an
+    /// issue that is not there (or not to this account).
     /// </summary>
     internal async Task<JiraIssue?> IssueAsync(string key, CancellationToken ct)
     {
@@ -311,27 +311,11 @@ public sealed class JiraSource : SourceBase, ICountable
         if (JiraScope.IssueKey().Match(key) is { Success: true } match && long.TryParse(match.Groups["number"].Value, out var number))
         {
             var project = match.Groups["project"].Value.ToUpperInvariant();
-            var now = Stopwatch.GetTimestamp();
-            var goingThrough = _askedIn.TryGetValue(project, out var asked) && Stopwatch.GetElapsedTime(asked, now) < TogetherWithin;
-            _askedIn[project] = now;
-            if (goingThrough && now >= Volatile.Read(ref _readAloneUntil))
+            if (_readAhead.Wanted(project))
             {
                 var size = _wholeIssues.Size;
                 var first = (number - 1) / size * size + 1;
-                var block = $"{project}:{first}:{size}";
-
-                // one read of a block however many ask for issues in it at once
-                var reading = _reading.GetOrAdd(block, b => new Lazy<Task>(() => ReadAroundAsync(b, project, first, first + size - 1))).Value;
-                try
-                {
-                    await reading.WaitAsync(ct).ConfigureAwait(false);
-                }
-                catch (VfsException ex)
-                {
-                    Volatile.Write(ref _readAloneUntil, Stopwatch.GetTimestamp() + (long)(TimeSpan.FromMinutes(10).TotalSeconds * Stopwatch.Frequency));
-                    Logger.LogDebug("jira: the issues around {Key} could not be read together ({Error}); reading issues alone for a while", key, ex.Message);
-                }
-
+                await _readAhead.ReadAsync($"{project}:{first}:{size}", () => ReadAroundAsync(project, first, first + size - 1), ct).ConfigureAwait(false);
                 if (Fresh(key) is { } around)
                 {
                     return around;
@@ -353,9 +337,8 @@ public sealed class JiraSource : SourceBase, ICountable
     }
 
     /// <summary>The issues numbered <paramref name="first"/> to <paramref name="last"/> in a project, read whole in one search and kept.</summary>
-    private async Task ReadAroundAsync(string block, string project, long first, long last)
+    private async Task ReadAroundAsync(string project, long first, long last)
     {
-        await Task.Yield();
         try
         {
             var jql = $"project = {JiraScope.Quote(project)} AND issuekey >= {project}-{first} AND issuekey <= {project}-{last}";
@@ -364,17 +347,14 @@ public sealed class JiraSource : SourceBase, ICountable
                 Remember(JiraIssue.Parse(issue, names));
             }
         }
-        finally
+        catch (VfsException ex)
         {
-            _reading.TryRemove(block, out _);
+            _readAhead.Failed();
+            Logger.LogDebug("jira: {Project} {First} to {Last} could not be read together ({Error}); reading issues alone for a while", project, first, last, ex.Message);
         }
     }
 
-    private static readonly TimeSpan TogetherWithin = TimeSpan.FromSeconds(10);
-
-    // when an issue in each project was last asked for
-    private readonly ConcurrentDictionary<string, long> _askedIn = new(StringComparer.OrdinalIgnoreCase);
-    private long _readAloneUntil;
+    private readonly ReadAhead _readAhead = new();
 
     private JiraIssue? Fresh(string key)
         => _issues.TryGetValue(key, out var kept) && Stopwatch.GetElapsedTime(kept.At) < Refresh ? kept.Issue : null;
