@@ -390,18 +390,39 @@ public class JiraTests
     }
 
     [TestMethod]
-    public async Task AnOpenReadsTheIssueAndItsNeighboursWithoutListingTheProject()
+    public async Task AnIssueOpenedOnItsOwnIsReadAloneAndGoingThroughAProjectReadsThoseAroundIt()
     {
         var fake = JiraSeed.Lab();
         await using var source = await StartAsync(fake, JiraSeed.Settings(fake, "/projects/BULK"));
         var searches = fake.Count("/rest/api/2/search");
-        for (var n = 101; n <= 150; n++)
+        StringAssert.StartsWith(await TextAsync(source, "BULK-101 Bulk issue 101/issue.md"), "# BULK-101 Bulk issue 101\n");
+        Assert.AreEqual(searches, fake.Count("/rest/api/2/search"), "one issue, no search");
+        Assert.AreEqual(1, fake.Count("GET /jira/rest/api/2/issue/"), "read alone");
+
+        // the next moments after: going straight through, the rest come with it, more at a time as the server answers quickly
+        for (var n = 102; n <= 150; n++)
         {
             StringAssert.StartsWith(await TextAsync(source, $"BULK-{n} Bulk issue {n}/issue.md"), $"# BULK-{n} Bulk issue {n}\n");
         }
 
-        Assert.AreEqual(1, fake.Count("/rest/api/2/search") - searches, "fifty issues, one search: the hundred around the first");
-        Assert.AreEqual(0, fake.Count("GET /jira/rest/api/2/issue/"), "none read alone");
+        Assert.IsTrue(fake.Count("/rest/api/2/search") - searches <= 4, "fifty issues, a few searches");
+        Assert.AreEqual(1, fake.Count("GET /jira/rest/api/2/issue/"), "no other read alone");
+    }
+
+    [TestMethod]
+    public async Task WhatCannotBeReadTogetherIsReadAloneForAWhile()
+    {
+        var fake = JiraSeed.Lab();
+        await using var source = await StartAsync(fake, JiraSeed.Settings(fake, "/projects/BULK"));
+        await TextAsync(source, "BULK-101 Bulk issue 101/issue.md");
+
+        // a server too slow for several at once: a search that fails as one that does not answer does
+        fake.Fault = r => r.Url.AbsolutePath.EndsWith("/search", StringComparison.Ordinal) ? FakeAtlassian.Response.Html("<html>busy</html>") : null;
+        StringAssert.StartsWith(await TextAsync(source, "BULK-102 Bulk issue 102/issue.md"), "# BULK-102", "read alone instead");
+        fake.Fault = null;
+        var searches = fake.Count("/rest/api/2/search");
+        StringAssert.StartsWith(await TextAsync(source, "BULK-103 Bulk issue 103/issue.md"), "# BULK-103");
+        Assert.AreEqual(searches, fake.Count("/rest/api/2/search"), "alone for a while");
     }
 
     [TestMethod]
@@ -551,7 +572,7 @@ public class JiraTests
         fake.IssueAt("BULK-250").Updated = now.AddHours(-1);
         await using var source = await StartAsync(fake, JiraSeed.Settings(fake, "/projects/BULK"));
         await source.CountFilesAsync(CancellationToken.None);
-        Assert.AreEqual(2, fake.Searches.Count(q => q.Contains(" AND id > ", StringComparison.Ordinal)), "read whole the first time: three pages of a hundred");
+        Assert.IsTrue(fake.Searches.Count(q => q.Contains(" AND id > ", StringComparison.Ordinal)) >= 2, "read whole the first time, page after page");
 
         var seven = fake.IssueAt("BULK-7");
         seven.Summary = "Bulk issue seven, renamed";

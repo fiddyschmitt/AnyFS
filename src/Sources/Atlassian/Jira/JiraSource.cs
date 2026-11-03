@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.Atlassian.Jira;
@@ -18,7 +19,7 @@ namespace AnyFS.Sources.Atlassian.Jira;
 /// </summary>
 public sealed class JiraSource : SourceBase, ICountable
 {
-    // whole issues a search request carries (rendered text and comments make a hundred a few megabytes at most)
+    // whole issues a search request carries at most (rendered text and comments make a hundred a few megabytes at most)
     private const int IssuesPerRequest = 100;
 
     // issue heads (key, summary, times) a request carries: Jira's own cap, jira.search.views.default.max
@@ -27,8 +28,6 @@ public sealed class JiraSource : SourceBase, ICountable
     // issues read whole and kept for the opens and listings that follow (each a few kilobytes as JSON)
     private const int IssuesKept = 2_000;
 
-    // an issue read alone brings the hundred numbered around it, the way a client goes through a project's folders
-    private const int IssuesAround = 100;
 
     private static readonly string[] AllFields = ["*all"];
     private static readonly string[] HeadFields = ["summary", "created", "updated"];
@@ -38,6 +37,9 @@ public sealed class JiraSource : SourceBase, ICountable
     private readonly CancellationTokenSource _stopping = new();
     private readonly ConcurrentDictionary<string, (JiraIssue Issue, long At)> _issues = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, Lazy<Task>> _reading = new(StringComparer.OrdinalIgnoreCase);
+
+    // whole issues asked for at once: as many as this server answers in a few seconds
+    private readonly RequestSizer _wholeIssues = new(smallest: 1, start: 10, largest: IssuesPerRequest);
     private AtlassianSession? _session;
     private AtlassianApi? _api;
     private RequestCache? _cache;
@@ -292,10 +294,11 @@ public sealed class JiraSource : SourceBase, ICountable
         }, ct);
 
     /// <summary>
-    /// An issue whole (every field, Jira's rendering of its text, the fields' names), kept a refresh interval: read with
-    /// the issues numbered around it in one search, as a client goes on through a project's folders; read alone where
-    /// that search does not have it (moved to another project, or the server will not take the range). Null for an issue
-    /// that is not there (or not to this account).
+    /// An issue whole (every field, Jira's rendering of its text, the fields' names), kept a refresh interval: read alone,
+    /// unless another in its project was asked for moments ago, when the issues numbered around it come with it in one search,
+    /// as a client going straight through a project's folders asks for them next; as many as the server answers in a few
+    /// seconds (<see cref="_wholeIssues"/>), and alone for a while after that fails. Null for an issue that is not there (or not
+    /// to this account).
     /// </summary>
     internal async Task<JiraIssue?> IssueAsync(string key, CancellationToken ct)
     {
@@ -307,22 +310,31 @@ public sealed class JiraSource : SourceBase, ICountable
         if (JiraScope.IssueKey().Match(key) is { Success: true } match && long.TryParse(match.Groups["number"].Value, out var number))
         {
             var project = match.Groups["project"].Value.ToUpperInvariant();
-            var first = (number - 1) / IssuesAround * IssuesAround + 1;
-            var block = $"{project}:{first}";
-            // one read of a block however many ask for issues in it at once
-            var reading = _reading.GetOrAdd(block, _ => new Lazy<Task>(() => ReadAroundAsync(project, first, first + IssuesAround - 1))).Value;
-            try
+            var now = Stopwatch.GetTimestamp();
+            var goingThrough = _askedIn.TryGetValue(project, out var asked) && Stopwatch.GetElapsedTime(asked, now) < TogetherWithin;
+            _askedIn[project] = now;
+            if (goingThrough && now >= Volatile.Read(ref _readAloneUntil))
             {
-                await reading.WaitAsync(ct).ConfigureAwait(false);
-            }
-            catch (VfsException ex) when (ex.Error is not VfsError.Unavailable)
-            {
-                Logger.LogDebug("jira: the issues around {Key} could not be read together ({Error}); reading it alone", key, ex.Message);
-            }
+                var size = _wholeIssues.Size;
+                var first = (number - 1) / size * size + 1;
+                var block = $"{project}:{first}:{size}";
 
-            if (Fresh(key) is { } around)
-            {
-                return around;
+                // one read of a block however many ask for issues in it at once
+                var reading = _reading.GetOrAdd(block, b => new Lazy<Task>(() => ReadAroundAsync(b, project, first, first + size - 1))).Value;
+                try
+                {
+                    await reading.WaitAsync(ct).ConfigureAwait(false);
+                }
+                catch (VfsException ex)
+                {
+                    Volatile.Write(ref _readAloneUntil, Stopwatch.GetTimestamp() + (long)(TimeSpan.FromMinutes(10).TotalSeconds * Stopwatch.Frequency));
+                    Logger.LogDebug("jira: the issues around {Key} could not be read together ({Error}); reading issues alone for a while", key, ex.Message);
+                }
+
+                if (Fresh(key) is { } around)
+                {
+                    return around;
+                }
             }
         }
 
@@ -340,22 +352,28 @@ public sealed class JiraSource : SourceBase, ICountable
     }
 
     /// <summary>The issues numbered <paramref name="first"/> to <paramref name="last"/> in a project, read whole in one search and kept.</summary>
-    private async Task ReadAroundAsync(string project, long first, long last)
+    private async Task ReadAroundAsync(string block, string project, long first, long last)
     {
         await Task.Yield();
         try
         {
             var jql = $"project = {JiraScope.Quote(project)} AND issuekey >= {project}-{first} AND issuekey <= {project}-{last}";
-            await foreach (var (issue, names) in SearchAsync(jql, AllFields, full: true, IssuesPerRequest, _stopping.Token, validate: false).ConfigureAwait(false))
+            await foreach (var (issue, names) in SearchWholeAsync(jql, _stopping.Token, validate: false).ConfigureAwait(false))
             {
                 Remember(JiraIssue.Parse(issue, names));
             }
         }
         finally
         {
-            _reading.TryRemove($"{project}:{first}", out _);
+            _reading.TryRemove(block, out _);
         }
     }
+
+    private static readonly TimeSpan TogetherWithin = TimeSpan.FromSeconds(10);
+
+    // when an issue in each project was last asked for
+    private readonly ConcurrentDictionary<string, long> _askedIn = new(StringComparer.OrdinalIgnoreCase);
+    private long _readAloneUntil;
 
     private JiraIssue? Fresh(string key)
         => _issues.TryGetValue(key, out var kept) && Stopwatch.GetElapsedTime(kept.At) < Refresh ? kept.Issue : null;
@@ -442,13 +460,27 @@ public sealed class JiraSource : SourceBase, ICountable
     /// it, as <see cref="JiraIssue.Parse"/> does.
     /// </summary>
     internal async IAsyncEnumerable<(JsonElement Issue, IReadOnlyDictionary<string, string> Names)> SearchAsync(
-        string condition, string[] fields, bool full, int pageSize, [EnumeratorCancellation] CancellationToken ct, bool validate = true)
+        string condition, string[] fields, bool full, int pageSize, [EnumeratorCancellation] CancellationToken ct, bool validate = true, RequestSizer? sizer = null)
     {
         string? last = null;
         while (true)
         {
             var where = string.Join(" AND ", new[] { condition, last is null ? "" : $"id > {last}" }.Where(s => s.Length > 0));
-            using var doc = await SearchPageAsync((where.Length == 0 ? "" : where + " ") + "ORDER BY id ASC", fields, pageSize, full ? ["renderedFields", "names"] : null, validate, ct).ConfigureAwait(false);
+            var size = sizer?.Size ?? pageSize;
+            var started = Stopwatch.GetTimestamp();
+            JsonDocument page;
+            try
+            {
+                page = await SearchPageAsync((where.Length == 0 ? "" : where + " ") + "ORDER BY id ASC", fields, size, full ? ["renderedFields", "names"] : null, validate, ct).ConfigureAwait(false);
+            }
+            catch (VfsException)
+            {
+                sizer?.Failed(size);
+                throw;
+            }
+
+            sizer?.Took(Stopwatch.GetElapsedTime(started), size);
+            using var doc = page;
             var names = full ? JiraIssue.NamesOf(doc.RootElement) : new Dictionary<string, string>(StringComparer.Ordinal);
             var issues = doc.RootElement.Arr("issues").ToList();
             foreach (var issue in issues)
@@ -465,6 +497,10 @@ public sealed class JiraSource : SourceBase, ICountable
             last = issues[^1].Str("id");
         }
     }
+
+    /// <summary>Every issue a condition finds, whole, in as many at once as the server answers in a few seconds.</summary>
+    private IAsyncEnumerable<(JsonElement Issue, IReadOnlyDictionary<string, string> Names)> SearchWholeAsync(string condition, CancellationToken ct, bool validate = true)
+        => SearchAsync(condition, AllFields, full: true, IssuesPerRequest, ct, validate, _wholeIssues);
 
     /// <summary>One search request (POSTed: a query of a hundred keys does not fit an address).</summary>
     private Task<JsonDocument> SearchPageAsync(string jql, string[] fields, int maxResults, string[]? expand, bool validate, CancellationToken ct)
@@ -577,7 +613,7 @@ public sealed class JiraSource : SourceBase, ICountable
         }
 
         var count = 0;
-        await foreach (var (json, names) in SearchAsync(folder.Condition(this), AllFields, full: true, IssuesPerRequest, ct).ConfigureAwait(false))
+        await foreach (var (json, names) in SearchWholeAsync(folder.Condition(this), ct).ConfigureAwait(false))
         {
             entries.Add(await ListIssueAsync(path, JiraIssue.Parse(json, names), listings, ct).ConfigureAwait(false));
             count++;
@@ -633,7 +669,7 @@ public sealed class JiraSource : SourceBase, ICountable
         var condition = folder.Condition(this);
         var since = (condition.Length == 0 ? "" : condition + " AND ") + $"updated >= -{minutes}m";
         var changed = new List<JiraIssue>();
-        await foreach (var (json, names) in SearchAsync(since, AllFields, full: true, IssuesPerRequest, ct).ConfigureAwait(false))
+        await foreach (var (json, names) in SearchWholeAsync(since, ct).ConfigureAwait(false))
         {
             changed.Add(JiraIssue.Parse(json, names));
         }
@@ -679,7 +715,7 @@ public sealed class JiraSource : SourceBase, ICountable
 
         foreach (var batch in missing.Chunk(IssuesPerRequest))
         {
-            await foreach (var (json, names) in SearchAsync($"key in ({string.Join(", ", batch)})", AllFields, full: true, IssuesPerRequest, ct, validate: false).ConfigureAwait(false))
+            await foreach (var (json, names) in SearchWholeAsync($"key in ({string.Join(", ", batch)})", ct, validate: false).ConfigureAwait(false))
             {
                 changed.Add(JiraIssue.Parse(json, names));
             }
