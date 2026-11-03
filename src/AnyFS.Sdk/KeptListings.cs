@@ -35,9 +35,11 @@ public sealed class KeptListings : IAsyncDisposable
     private readonly TimeProvider _time;
     private readonly CancellationTokenSource _stopping = new();
     private readonly TaskCompletionSource _firstWalk = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource _everyFolder = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _gate = new();
     private Task _walking = Task.CompletedTask;
     private bool _started;
+    private bool _restored;
     private bool _disposed;
 
     // the count's state after the last walk ended (an EnumerationState), -1 before the first has
@@ -92,6 +94,7 @@ public sealed class KeptListings : IAsyncDisposable
                 Cache.Restore(folder, listing, saved.Stamps?.GetValueOrDefault(folder));
             }
 
+            _restored = saved.Listings.Count > 0;
             _fullWalkAt = saved.FullWalkAt;
             _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run answer at once, {Stamped:N0} of them stamped; the rest are listed afresh as they are opened", _options.Name, saved.Listings.Count, saved.Stamps?.Count ?? 0);
         }
@@ -166,15 +169,36 @@ public sealed class KeptListings : IAsyncDisposable
     {
         lock (_gate)
         {
-            if (_started || _disposed || !_options.Keep)
-            {
-                return;
-            }
-
-            _started = true;
-            var stopping = _stopping.Token;
-            _walking = Task.Run(() => LoopAsync(stopping), CancellationToken.None);
+            _everyFolder.TrySetResult();
+            StartLoop();
         }
+    }
+
+    /// <summary>
+    /// With listings kept, starts walks that go through the folders asked for and no others, for a source that reads nothing
+    /// nobody asked for until the count is asked for: one every <see cref="KeptListingsOptions.WalkEvery"/>, and the first at once
+    /// where an earlier run saved listings to check. Each checks a stamped folder by its stamp and lists the rest afresh, and
+    /// asks a folder whose listing failed again. From the count on (<see cref="CountAsync"/>), the walks go into every folder.
+    /// Nothing once they have started, or without keeping.
+    /// </summary>
+    public void StartWalksOfHeld()
+    {
+        lock (_gate)
+        {
+            StartLoop();
+        }
+    }
+
+    private void StartLoop()
+    {
+        if (_started || _disposed || !_options.Keep)
+        {
+            return;
+        }
+
+        _started = true;
+        var stopping = _stopping.Token;
+        _walking = Task.Run(() => LoopAsync(stopping), CancellationToken.None);
     }
 
     /// <summary>
@@ -219,20 +243,23 @@ public sealed class KeptListings : IAsyncDisposable
     /// As above; unless <paramref name="full"/>, a stamped folder whose stamp still holds (<see cref="KeptListingsOptions.StampOf"/>)
     /// is kept with everything held below it, counted, and not listed.
     /// </summary>
-    public async Task<bool> WalkAsync(SourceCounters counters, bool full, CancellationToken ct)
+    public Task<bool> WalkAsync(SourceCounters counters, bool full, CancellationToken ct) => WalkAsync(counters, full, heldAlone: false, ct);
+
+    /// <summary>The walk; with <paramref name="heldAlone"/>, through the folders asked for and no others.</summary>
+    private async Task<bool> WalkAsync(SourceCounters counters, bool full, bool heldAlone, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(counters);
         using var inFlight = new SemaphoreSlim(_options.MaxInFlight, _options.MaxInFlight);
         var walk = new Walk(counters, inFlight, full);
-        void StartPart(string path)
+        void StartPart(string path, bool held)
         {
             lock (walk.Parts)
             {
-                walk.Parts.Add(Task.Run(() => WalkPartAsync(path, walk, StartPart, ct), CancellationToken.None));
+                walk.Parts.Add(Task.Run(() => WalkPartAsync(path, held, walk, StartPart, ct), CancellationToken.None));
             }
         }
 
-        StartPart("");
+        StartPart("", heldAlone);
         Exception? failure = null;
         while (true)
         {
@@ -300,18 +327,41 @@ public sealed class KeptListings : IAsyncDisposable
         Save();
     }
 
-    /// <summary>The walks: the first counting into the source's counters, then one every <see cref="KeptListingsOptions.WalkEvery"/> after the last ended.</summary>
+    // how long after the source starts a walk of what an earlier run saved begins: a count, asked for at once, makes it one of every folder
+    private static readonly TimeSpan CountComesWithin = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// The walks: those of what is held until the count is asked for (<see cref="StartWalksOfHeld"/>), then the first of every
+    /// folder counting into the source's counters, and one every <see cref="KeptListingsOptions.WalkEvery"/> after the last ended.
+    /// </summary>
     private async Task LoopAsync(CancellationToken ct)
     {
-        var first = true;
+        if (!_everyFolder.Task.IsCompleted)
+        {
+            // with nothing saved, nothing is held that a walk could check yet
+            var first = _restored ? CountComesWithin : _options.WalkEvery;
+            try
+            {
+                await (first > TimeSpan.Zero ? Task.WhenAny(_everyFolder.Task, Task.Delay(first, _time, ct)) : _everyFolder.Task.WaitAsync(ct)).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                _firstWalk.TrySetResult();
+                return;
+            }
+        }
+
+        var counted = false;
         while (!ct.IsCancellationRequested)
         {
-            var counters = first ? _counters : new SourceCounters();
+            var everyFolder = _everyFolder.Task.IsCompleted;
+            var counting = everyFolder && !counted;
+            var counters = counting ? _counters : new SourceCounters();
             var started = _time.GetTimestamp();
             try
             {
                 var full = FullWalkDue;
-                var whole = await WalkAsync(counters, full, ct).ConfigureAwait(false);
+                var whole = await WalkAsync(counters, full, !everyFolder, ct).ConfigureAwait(false);
                 if (full || _fullWalkAt is null)
                 {
                     _fullWalkAt = _time.GetUtcNow();
@@ -319,23 +369,33 @@ public sealed class KeptListings : IAsyncDisposable
 
                 // what this walk could not list stays as it is until the next one, which begins a WalkEvery from now
                 Cache.RenewFailures();
-                var state = whole ? EnumerationState.Complete : EnumerationState.Unknown;
-                _counters.Set(counters.FilesKnown, counters.DirectoriesKnown, state);
-                _walked = (int)state;
                 var seconds = _time.GetElapsedTime(started).TotalSeconds;
                 var (listed, kept, failed) = _lastWalk;
                 var how = kept > 0 ? $"listed {listed:N0} folders afresh and kept {kept:N0} whose stamps hold" : failed > 0 ? $"listed {listed:N0} folders" : "listed every folder";
-                if (whole)
+                if (!everyFolder)
                 {
-                    _logger.LogInformation("{Name}: walked every folder in {Seconds:F0} s ({How}): {Files:N0} files in {Folders:N0} folders", _options.Name, seconds, how, counters.FilesKnown, counters.DirectoriesKnown);
-                }
-                else if (failed > 0)
-                {
-                    _logger.LogInformation("{Name}: walked in {Seconds:F0} s ({How}): {Files:N0} files in {Folders:N0} folders, and {Failed:N0} folders could not be listed, which the next walk asks for again", _options.Name, seconds, how, counters.FilesKnown, counters.DirectoriesKnown, failed);
+                    if (listed + kept + failed > 0)
+                    {
+                        _logger.LogInformation("{Name}: checked the folders asked for in {Seconds:F0} s: listed {Listed:N0} afresh, kept {Kept:N0} whose stamps hold, and {Failed:N0} could not be listed", _options.Name, seconds, listed, kept, failed);
+                    }
                 }
                 else
                 {
-                    _logger.LogInformation("{Name}: walked in {Seconds:F0} s ({How}): {Files:N0} files in {Folders:N0} folders, and the folders it leaves out are listed when opened", _options.Name, seconds, how, counters.FilesKnown, counters.DirectoriesKnown);
+                    var state = whole ? EnumerationState.Complete : EnumerationState.Unknown;
+                    _counters.Set(counters.FilesKnown, counters.DirectoriesKnown, state);
+                    _walked = (int)state;
+                    if (whole)
+                    {
+                        _logger.LogInformation("{Name}: walked every folder in {Seconds:F0} s ({How}): {Files:N0} files in {Folders:N0} folders", _options.Name, seconds, how, counters.FilesKnown, counters.DirectoriesKnown);
+                    }
+                    else if (failed > 0)
+                    {
+                        _logger.LogInformation("{Name}: walked in {Seconds:F0} s ({How}): {Files:N0} files in {Folders:N0} folders, and {Failed:N0} folders could not be listed, which the next walk asks for again", _options.Name, seconds, how, counters.FilesKnown, counters.DirectoriesKnown, failed);
+                    }
+                    else
+                    {
+                        _logger.LogInformation("{Name}: walked in {Seconds:F0} s ({How}): {Files:N0} files in {Folders:N0} folders, and the folders it leaves out are listed when opened", _options.Name, seconds, how, counters.FilesKnown, counters.DirectoriesKnown);
+                    }
                 }
 
                 Save();
@@ -347,31 +407,42 @@ public sealed class KeptListings : IAsyncDisposable
             catch (Exception ex)
             {
                 // a count that broke off is a lower bound
-                _walked = (int)EnumerationState.Unknown;
-                if (first)
+                if (everyFolder)
                 {
-                    _counters.SetState(EnumerationState.Unknown);
+                    _walked = (int)EnumerationState.Unknown;
+                    if (counting)
+                    {
+                        _counters.SetState(EnumerationState.Unknown);
+                    }
                 }
 
                 _logger.LogWarning(ex, "{Name}: walking every folder failed", _options.Name);
             }
             finally
             {
-                if (first)
+                if (counting)
                 {
-                    first = false;
+                    counted = true;
                     _firstWalk.TrySetResult();
                 }
             }
 
-            if (_options.WalkEvery <= TimeSpan.Zero)
-            {
-                break;
-            }
-
             try
             {
-                await Task.Delay(_options.WalkEvery, _time, ct).ConfigureAwait(false);
+                if (_options.WalkEvery > TimeSpan.Zero)
+                {
+                    // a count asked for meanwhile does not wait for the next walk's time
+                    var next = Task.Delay(_options.WalkEvery, _time, ct);
+                    await (everyFolder ? next : Task.WhenAny(next, _everyFolder.Task)).ConfigureAwait(false);
+                }
+                else if (everyFolder)
+                {
+                    break;
+                }
+                else
+                {
+                    await _everyFolder.Task.WaitAsync(ct).ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -383,24 +454,30 @@ public sealed class KeptListings : IAsyncDisposable
     }
 
     /// <summary>One part's share of a walk (<see cref="WalkAsync(SourceCounters, bool, CancellationToken)"/>): its folders, <see cref="KeptListingsOptions.Parallelism"/> at a time; the parts below it start walks of their own.</summary>
-    private async Task WalkPartAsync(string root, Walk walk, Action<string> startPart, CancellationToken ct)
+    private async Task WalkPartAsync(string root, bool rootHeldAlone, Walk walk, Action<string, bool> startPart, CancellationToken ct)
     {
-        var pending = Channel.CreateUnbounded<string>();
+        var pending = Channel.CreateUnbounded<(string Folder, bool HeldAlone)>();
         var outstanding = 1;
-        pending.Writer.TryWrite(root);
+        pending.Writer.TryWrite((root, rootHeldAlone));
 
-        void Enqueue(string child)
+        void Enqueue(string child, bool heldAlone)
         {
             Interlocked.Increment(ref outstanding);
-            pending.Writer.TryWrite(child);
+            pending.Writer.TryWrite((child, heldAlone));
         }
 
         async Task WorkerAsync()
         {
-            await foreach (var folder in pending.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            await foreach (var (folder, heldAlone) in pending.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
                 try
                 {
+                    // nobody has asked for it, and nothing says to read what nobody asked for
+                    if (heldAlone && !Cache.Asked(folder))
+                    {
+                        continue;
+                    }
+
                     IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>? tree;
                     IReadOnlyList<VfsEntry> entries;
                     await walk.InFlight.WaitAsync(ct).ConfigureAwait(false);
@@ -411,11 +488,11 @@ public sealed class KeptListings : IAsyncDisposable
                         var (read, stamp) = await StampAsync(folder, held, ct).ConfigureAwait(false);
                         if (!walk.Full && read && held is not null && stamp == held)
                         {
-                            await KeepHeldAsync(folder, walk, Enqueue, ct).ConfigureAwait(false);
+                            await KeepHeldAsync(folder, heldAlone, walk, Enqueue, ct).ConfigureAwait(false);
                             continue;
                         }
 
-                        tree = await TreeOfAsync(folder, walk, ct).ConfigureAwait(false);
+                        tree = heldAlone ? null : await TreeOfAsync(folder, walk, ct).ConfigureAwait(false);
                         entries = tree is null ? await Cache.RefreshAsync(folder, stamp, ct).ConfigureAwait(false) : [];
                         if (tree is not null)
                         {
@@ -441,7 +518,7 @@ public sealed class KeptListings : IAsyncDisposable
 
                     var hasFolders = entries.Any(e => e.IsDirectory);
                     var partsBelow = hasFolders && _options.PartsBelow is { } parts && await parts(folder, ct).ConfigureAwait(false);
-                    var leftOut = hasFolders && _options.LeftOut is { } left ? await left(folder, ct).ConfigureAwait(false) : null;
+                    var leftOut = hasFolders && !heldAlone && _options.LeftOut is { } left ? await left(folder, ct).ConfigureAwait(false) : null;
                     long files = 0;
                     var folders = 0;
                     foreach (var entry in entries)
@@ -453,20 +530,25 @@ public sealed class KeptListings : IAsyncDisposable
                         }
 
                         folders++;
-                        if (leftOut?.Contains(entry.Name) == true)
+                        var child = VfsPath.Join(folder, entry.Name);
+                        var isLeftOut = leftOut?.Contains(entry.Name) == true;
+                        if (isLeftOut)
                         {
+                            // not worth a walk, but what has been opened of it is held like the rest, and is checked like the rest
                             walk.LeftSomeOut = true;
-                            continue;
+                            if (!Cache.Asked(child))
+                            {
+                                continue;
+                            }
                         }
 
-                        var child = VfsPath.Join(folder, entry.Name);
                         if (partsBelow)
                         {
-                            startPart(child);
+                            startPart(child, heldAlone || isLeftOut);
                         }
                         else
                         {
-                            Enqueue(child);
+                            Enqueue(child, heldAlone || isLeftOut);
                         }
                     }
 
@@ -549,9 +631,10 @@ public sealed class KeptListings : IAsyncDisposable
     /// <summary>
     /// Keeps a folder's listing and every listing held below it as they are (a walk found its stamp holds), counting them;
     /// a folder below it with no listing held (never listed, or let go) is walked as usual, unless it is one a walk leaves
-    /// out (<see cref="KeptListingsOptions.LeftOut"/>).
+    /// out (<see cref="KeptListingsOptions.LeftOut"/>) or the walk goes through what is held alone, where only one whose listing
+    /// failed is.
     /// </summary>
-    private async Task KeepHeldAsync(string folder, Walk walk, Action<string> enqueue, CancellationToken ct)
+    private async Task KeepHeldAsync(string folder, bool heldAlone, Walk walk, Action<string, bool> enqueue, CancellationToken ct)
     {
         var held = Cache.Under(folder);
         foreach (var (path, listing) in held)
@@ -577,6 +660,12 @@ public sealed class KeptListings : IAsyncDisposable
                     continue;
                 }
 
+                if (heldAlone)
+                {
+                    enqueue(child, true);
+                    continue;
+                }
+
                 if (!asked)
                 {
                     asked = true;
@@ -586,10 +675,11 @@ public sealed class KeptListings : IAsyncDisposable
                 if (leftOut?.Contains(entry.Name) == true)
                 {
                     walk.LeftSomeOut = true;
+                    enqueue(child, true);
                     continue;
                 }
 
-                enqueue(child);
+                enqueue(child, false);
             }
 
             walk.Counters.Add(files, folders);

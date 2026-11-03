@@ -73,6 +73,140 @@ public class KeptListingsTests
     }
 
     [TestMethod]
+    public async Task WalksOfWhatIsHeldGoIntoNothingNobodyAskedFor()
+    {
+        var counters = new SourceCounters();
+        await using var kept = Kept(counters, new KeptListingsOptions { WalkEvery = TimeSpan.FromMilliseconds(50) });
+        await kept.Cache.GetAsync("", CancellationToken.None);
+        await kept.Cache.GetAsync("docs", CancellationToken.None);
+        _tree["docs"].Add(VfsEntry.File("new.txt", 4));
+
+        kept.StartWalksOfHeld();
+        await UntilAsync(() => kept.Cache.Held("docs")!.Count == 4, "the walk lists afresh what was asked for");
+        await UntilAsync(() => Listed("docs") >= 3, "and again each interval");
+        Assert.AreEqual(0, Listed("photos"), "nobody asked for it");
+        Assert.AreEqual(0, Listed("docs/sub"), "nor for this");
+        Assert.AreEqual(0, counters.FilesKnown, "no count without the count");
+    }
+
+    [TestMethod]
+    public async Task AWalkOfWhatIsHeldKeepsByStampAndAsksAgainWhatFailed()
+    {
+        _stamps["docs"] = "v1";
+        _failing["photos"] = new VfsException(VfsError.AccessDenied, "refused");
+        var options = new KeptListingsOptions { WalkEvery = TimeSpan.FromMilliseconds(50), StampOf = StampOf, FailureKeptFor = _ => TimeSpan.FromMinutes(30) };
+        await using var kept = Kept(new SourceCounters(), options);
+        await kept.Cache.GetAsync("", CancellationToken.None);
+        await kept.Cache.GetAsync("docs", CancellationToken.None);
+        await kept.Cache.GetAsync("docs/sub", CancellationToken.None);
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await kept.Cache.GetAsync("photos", CancellationToken.None));
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await kept.Cache.GetAsync("photos", CancellationToken.None));
+        Assert.AreEqual(1, Listed("photos"), "the failure answers");
+
+        // the refusal gone, and docs/sub changed below a stamp that holds
+        _failing.Clear();
+        _tree["docs/sub"].Add(VfsEntry.File("d.txt", 4));
+        kept.StartWalksOfHeld();
+        await UntilAsync(() => kept.Cache.Held("photos") is not null, "the walk asks again what failed");
+        Assert.AreEqual(1, Listed("docs"), "its stamp holds");
+        Assert.AreEqual(1, Listed("docs/sub"), "below a stamp that holds");
+        Assert.AreEqual(1, kept.Cache.Held("docs/sub")!.Count);
+
+        // the stamp moves: what is held below it is listed afresh too
+        _stamps["docs"] = "v2";
+        await UntilAsync(() => kept.Cache.Held("docs/sub")!.Count == 2, "the walk after the stamp moved");
+    }
+
+    [TestMethod]
+    public async Task TheCountTurnsWalksOfWhatIsHeldIntoWalksOfEveryFolder()
+    {
+        var counters = new SourceCounters();
+        await using var kept = Kept(counters, new KeptListingsOptions { WalkEvery = TimeSpan.FromMilliseconds(50) });
+        await kept.Cache.GetAsync("", CancellationToken.None);
+        kept.StartWalksOfHeld();
+        await UntilAsync(() => Listed("") >= 2, "a walk of what is held");
+        Assert.AreEqual(0, Listed("docs"));
+
+        await kept.CountAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.AreEqual(1, Listed("docs/sub"), "every folder now");
+        Assert.AreEqual((6L, 3L, EnumerationState.Complete), (counters.FilesKnown, counters.DirectoriesKnown, counters.State));
+    }
+
+    [TestMethod]
+    public async Task TheCountDoesNotWaitForTheNextWalkOfWhatIsHeld()
+    {
+        var counters = new SourceCounters();
+        await using var kept = Kept(counters, new KeptListingsOptions { WalkEvery = TimeSpan.FromMinutes(30) });
+        await kept.Cache.GetAsync("", CancellationToken.None);
+        kept.StartWalksOfHeld();
+        await Task.Delay(50);
+        Assert.AreEqual(1, Listed(""), "nothing saved: nothing to check yet");
+
+        await kept.CountAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.AreEqual(6, counters.FilesKnown);
+    }
+
+    [TestMethod]
+    public async Task WhatAnEarlierRunSavedIsCheckedAsTheSourceStarts()
+    {
+        var file = TempFile();
+        try
+        {
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.FromMinutes(30), SaveTo = file, SaveKey = "jane@contoso.com" };
+            await using (var first = Kept(new SourceCounters(), options))
+            {
+                await first.Cache.GetAsync("", CancellationToken.None);
+                await first.Cache.GetAsync("docs", CancellationToken.None);
+            }
+
+            _listed.Clear();
+            _tree["docs"].Add(VfsEntry.File("new.txt", 4));
+            await using var next = Kept(new SourceCounters(), options);
+            next.StartWalksOfHeld();
+            await UntilAsync(() => next.Cache.Held("docs")!.Count == 4, "the first walk, half an hour before the next");
+            Assert.AreEqual(0, Listed("photos"), "nobody asked for it");
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [TestMethod]
+    public async Task ACountAskedForAsTheSourceStartsIsItsFirstWalk()
+    {
+        var counters = new SourceCounters();
+        await using var kept = Kept(counters, new KeptListingsOptions { WalkEvery = TimeSpan.Zero });
+        kept.StartWalksOfHeld();
+        await kept.CountAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.AreEqual(1, Listed(""), "no walk of what is held before it");
+        Assert.AreEqual(6, counters.FilesKnown);
+    }
+
+    [TestMethod]
+    public async Task AFolderLeftOutIsWalkedAsFarAsItHasBeenOpened()
+    {
+        _tree["docs/sub"] = [VfsEntry.Directory("deep"), VfsEntry.Directory("deeper")];
+        _tree["docs/sub/deep"] = [VfsEntry.File("c.txt", 3)];
+        _tree["docs/sub/deeper"] = [VfsEntry.File("e.txt", 5)];
+        var options = new KeptListingsOptions
+        {
+            WalkEvery = TimeSpan.Zero,
+            LeftOut = (folder, _) => ValueTask.FromResult<IReadOnlySet<string>?>(folder == "docs" ? new HashSet<string> { "sub" } : null),
+        };
+        await using var kept = Kept(new SourceCounters(), options);
+        await kept.CountAsync(CancellationToken.None);
+        Assert.AreEqual(0, Listed("docs/sub"), "not opened: not walked into");
+
+        await kept.Cache.GetAsync("docs/sub", CancellationToken.None);
+        await kept.Cache.GetAsync("docs/sub/deep", CancellationToken.None);
+        await kept.WalkAsync(new SourceCounters(), CancellationToken.None);
+        Assert.AreEqual(2, Listed("docs/sub"), "opened: walked, so a change there shows like any other");
+        Assert.AreEqual(2, Listed("docs/sub/deep"));
+        Assert.AreEqual(0, Listed("docs/sub/deeper"), "not opened");
+    }
+
+    [TestMethod]
     public async Task WhatCannotBeReadAtOnceIsWalkedFolderByFolder()
     {
         var asked = 0;

@@ -250,6 +250,23 @@ public class ListingCacheTests
     }
 
     [TestMethod]
+    public async Task AskedIsWhatIsHeldOrWhatFailedAndIsKeptSo()
+    {
+        _failing["docs/sub"] = new VfsException(VfsError.AccessDenied, "refused");
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time) { FailureKeptFor = _ => TimeSpan.FromMinutes(1) };
+        Assert.IsFalse(cache.Asked("docs"));
+        await cache.GetAsync("docs", CancellationToken.None);
+        Assert.IsTrue(cache.Asked("docs"));
+
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await cache.GetAsync("docs/sub", CancellationToken.None));
+        Assert.IsTrue(cache.Asked("docs/sub"), "its failure is kept");
+        Assert.IsFalse(cache.Asked("nope"));
+
+        cache.ForgetFailures();
+        Assert.IsFalse(cache.Asked("docs/sub"), "let go");
+    }
+
+    [TestMethod]
     public async Task EachListingFromTheUpstreamSaysWhy()
     {
         var told = new System.Collections.Concurrent.ConcurrentQueue<string>();

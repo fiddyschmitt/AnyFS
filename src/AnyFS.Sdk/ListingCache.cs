@@ -92,6 +92,9 @@ public sealed class ListingCache
     /// <summary>The listing held of <paramref name="path"/> as it is, nothing asked of the upstream and nothing listed afresh; null where none is held.</summary>
     public IReadOnlyList<VfsEntry>? Held(string path) => _entries.TryGetValue(path, out var held) && !IsExpired(held) ? held.List : null;
 
+    /// <summary>Whether <paramref name="path"/> has been asked for: a listing of it is held, or its listing failed and that is kept (<see cref="FailureKeptFor"/>).</summary>
+    public bool Asked(string path) => Held(path) is not null || _failures.ContainsKey(path);
+
     /// <summary>The listing of <paramref name="path"/> (a normalised directory path), from the cache when fresh.</summary>
     public ValueTask<IReadOnlyList<VfsEntry>> GetAsync(string path, CancellationToken ct)
     {
