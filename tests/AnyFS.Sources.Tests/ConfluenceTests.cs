@@ -624,8 +624,9 @@ public class ConfluenceTests
         Assert.AreEqual(stamp, await source.StampAsync("AnyFS Lab (ANYFS)", stamp, CancellationToken.None));
         fake.AddComment(fake.PageTitled("Onboarding"), "other", "<p>New.</p>", new DateTimeOffset(2026, 10, 30, 9, 0, 0, TimeSpan.Zero));
         Assert.AreNotEqual(stamp, await source.StampAsync("AnyFS Lab (ANYFS)", stamp, CancellationToken.None));
-        var now = await source.StampAsync("AnyFS Lab (ANYFS)", stamp, CancellationToken.None);
-        Assert.AreEqual(now, await source.StampAsync("AnyFS Lab (ANYFS)/AnyFS Lab Home", null, CancellationToken.None), "a page's folder goes by its space");
+        fake.Requests.Clear();
+        Assert.IsNull(await source.StampAsync("AnyFS Lab (ANYFS)/AnyFS Lab Home", null, CancellationToken.None), "a page's folder goes by its space, and asks nothing");
+        Assert.AreEqual(0, fake.Count("/rest/api/search"));
         Assert.IsNull(await source.StampAsync("", null, CancellationToken.None), "the list of spaces has none");
     }
 

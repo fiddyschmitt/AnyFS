@@ -636,11 +636,12 @@ public class JiraTests
         var stamp = await source.StampAsync("AnyFS Lab (ANYFS)", null, CancellationToken.None);
         Assert.AreEqual($"{fake.IssueAt("ANYFS-1").Updated.UtcTicks}|5", stamp);
 
-        // an issue changes: the project's stamp moves with it
+        // an issue changes: the project's stamp moves with it; the issue's folder goes by the project's and asks nothing
         fake.IssueAt("ANYFS-2").Updated = JiraSeed.Day.AddDays(3);
         Assert.AreNotEqual(stamp, await source.StampAsync("AnyFS Lab (ANYFS)", stamp, CancellationToken.None));
-        Assert.AreEqual(JiraSeed.Day.AddDays(3).UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            await source.StampAsync("AnyFS Lab (ANYFS)/ANYFS-2 Fix_ path _C__temp_a_b__ _fails_ _ sometimes", null, CancellationToken.None));
+        fake.Requests.Clear();
+        Assert.IsNull(await source.StampAsync("AnyFS Lab (ANYFS)/ANYFS-2 Fix_ path _C__temp_a_b__ _fails_ _ sometimes", null, CancellationToken.None));
+        Assert.AreEqual(0, fake.Requests.Count);
     }
 
     [TestMethod]

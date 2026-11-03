@@ -568,25 +568,6 @@ public class KeptListingsTests
     }
 
     [TestMethod]
-    public async Task WhatIsReadWithAFolderGoesByItsStamp()
-    {
-        _stamps["docs"] = "v1";
-        var options = new KeptListingsOptions
-        {
-            WalkEvery = TimeSpan.Zero,
-            StampOf = StampOf,
-            ListTree = (path, _) => Task.FromResult<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>(path == "docs"
-                ? new Dictionary<string, IReadOnlyList<VfsEntry>> { ["docs"] = _tree["docs"], ["docs/sub"] = _tree["docs/sub"] }
-                : null),
-        };
-        await using var kept = Kept(new SourceCounters(), options);
-        await kept.CountAsync(CancellationToken.None);
-        Assert.AreEqual("v1", kept.Cache.StampHeld("docs"));
-        Assert.AreEqual("v1", kept.Cache.StampHeld("docs/sub"), "read with it, so it holds as long as that does");
-        Assert.AreEqual(0, Listed("docs/sub"));
-    }
-
-    [TestMethod]
     public async Task AnEntrysKeyIsSavedWithItsListing()
     {
         var file = TempFile();

@@ -624,27 +624,22 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     /// <summary>One walk now (a test's: the walks after the count come by the clock), stamps kept unless <paramref name="full"/>.</summary>
     internal Task<bool> WalkAsync(SourceCounters counters, bool full, CancellationToken ct) => Kept.WalkAsync(counters, full, ct);
 
-    // a few seconds, or the refresh interval where that is shorter
-    private TimeSpan StampKeptFor => Refresh < TimeSpan.FromSeconds(5) ? Refresh : TimeSpan.FromSeconds(5);
-
     /// <summary>
     /// A folder's stamp (<see cref="KeptListingsOptions.StampOf"/>): a space's folder has its newest change and its content
     /// count by CQL (pages, blog posts, comments and attachments alike), one search with one result, so a space nothing changed
-    /// in is kept whole; a page that is the source's root the same over itself and the pages below it. A folder below one of
-    /// those goes by its stamp, as asked moments ago. With the day, so that what no search shows (a page moved, a label added)
-    /// is read again within a day however quiet the space. The folders above the spaces have none.
+    /// in is kept whole; a page that is the source's root the same over itself and the pages below it. With the day, so that what
+    /// no search shows (a page moved, a label added) is read again within a day however quiet the space. The folders above the
+    /// spaces have none, and those below one go by its stamp.
     /// </summary>
     internal async ValueTask<string?> StampAsync(string path, string? held, CancellationToken ct)
     {
-        // the space (or the page that is the source) the folder is in: the top of the path, its names in the spaces' list
+        // the space, or the page that is the source: at the top of the path, its names in the spaces' list
         CoNode node = _root ?? throw VfsException.Unavailable("Confluence is not signed in to yet");
-        var below = false;
         foreach (var segment in VfsPath.Split(VfsPath.Normalize(path)))
         {
             if (node is ConfluenceSpaceFolder or ConfluencePageFolder)
             {
-                below = true;
-                break;
+                return null;
             }
 
             if (node is not CoFolder folder || await Guard(() => folder.FindAsync(this, segment, ct)).ConfigureAwait(false) is not { } found)
@@ -666,22 +661,11 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             return null;
         }
 
-        // the folder at the top of it asked afresh (a walk's, and a test's); a folder below it as asked moments ago: a client going
-        // through a space asks for its folders by the thousand, and one search answers them all
-        var key = $"stamp:{cql}";
-        if (!below)
-        {
-            Cache.Forget(key);
-        }
-
-        return (await Cache.GetAsync(key, StampKeptFor, async c =>
-        {
-            using var doc = await Api.GetAsync($"search?cql={Uri.EscapeDataString(cql + " order by lastmodified desc")}&limit=1&excerpt=none", c).ConfigureAwait(false);
-            var newest = doc.RootElement.Arr("results").FirstOrDefault();
-            var when = newest.Str("lastModified") ?? newest.Obj("content").Obj("version").Str("when");
-            var count = doc.RootElement.Has("totalSize") ? doc.RootElement.Long("totalSize") : doc.RootElement.Long("size");
-            return new Box<string>($"{when}|{count}|{DateTimeOffset.UtcNow:yyyy-MM-dd}");
-        }, ct).ConfigureAwait(false)).Value;
+        using var doc = await Api.GetAsync($"search?cql={Uri.EscapeDataString(cql + " order by lastmodified desc")}&limit=1&excerpt=none", ct).ConfigureAwait(false);
+        var newest = doc.RootElement.Arr("results").FirstOrDefault();
+        var when = newest.Str("lastModified") ?? newest.Obj("content").Obj("version").Str("when");
+        var count = doc.RootElement.Has("totalSize") ? doc.RootElement.Long("totalSize") : doc.RootElement.Long("size");
+        return $"{when}|{count}|{DateTimeOffset.UtcNow:yyyy-MM-dd}";
     }
 
     /// <summary>

@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -541,8 +540,8 @@ public sealed class JiraSource : SourceBase, ICountable
     /// <summary>
     /// A folder's stamp for the walks (<see cref="KeptListingsOptions.StampOf"/>): a folder of issues (a project, the
     /// scope's root) has its newest update and its issue count, one search with one result, so a project nothing changed
-    /// in (no issue edited, commented, added, moved or deleted) is kept whole; an issue's folder its update time. Any other
-    /// folder none (the server's projects are a request to list).
+    /// in (no issue edited, commented, added, moved or deleted) is kept whole. Any other folder none: the server's projects
+    /// are a request to list, and what is below a project goes by the project's.
     /// </summary>
     internal async ValueTask<string?> StampAsync(string path, string? held, CancellationToken ct)
     {
@@ -558,12 +557,6 @@ public sealed class JiraSource : SourceBase, ICountable
             using var doc = await SearchPageAsync((folder.Condition(this) is { Length: > 0 } c ? c + " " : "") + "ORDER BY updated DESC", ["updated"], 1, null, validate: true, ct).ConfigureAwait(false);
             var newest = doc.RootElement.Arr("issues").FirstOrDefault().Obj("fields").Date("updated");
             return $"{newest?.UtcTicks ?? 0}|{doc.RootElement.Long("total")}";
-        }
-
-        if (segments.Count == issuesDepth + 1 && JiraScope.KeyOfFolder(segments[^1]) is { } key)
-        {
-            using var doc = await Api.FindAsync($"issue/{Uri.EscapeDataString(key)}?fields=updated", ct).ConfigureAwait(false);
-            return doc is null ? "gone" : (doc.RootElement.Obj("fields").Date("updated")?.UtcTicks ?? 0).ToString(CultureInfo.InvariantCulture);
         }
 
         return null;
