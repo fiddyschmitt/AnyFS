@@ -65,8 +65,9 @@ public sealed class KeptListings : IAsyncDisposable
         _logger = logger;
         _time = time ?? TimeProvider.System;
         void Listing(string path, string why) => _logger.LogDebug("{Name}: listing '{Path}' from the service: {Why}", _options.Name, path, why);
+        var untilNextWalk = _options.WalkEvery > TimeSpan.Zero ? _options.WalkEvery : new KeptListingsOptions().WalkEvery;
         Cache = _options.Keep
-            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { OnListing = Listing, StampOf = _options.StampOf, FailureKeptFor = _options.FailureKeptFor }
+            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { OnListing = Listing, StampOf = _options.StampOf, FailureKeptFor = _options.KeepFailures ? _ => untilNextWalk : null }
             : new ListingCache(_options.UnkeptFor, lister, time: _time) { OnListing = Listing, StampOf = _options.StampOf };
         if (_options.Keep && _options.SaveTo is { } saved)
         {
@@ -724,11 +725,12 @@ public sealed record KeptListingsOptions
     public TimeSpan WalkEvery { get; init; } = TimeSpan.FromMinutes(30);
 
     /// <summary>
-    /// With listings kept, how long a folder whose listing failed answers with that failure at once, by the failure
-    /// (<see cref="ListingCache.FailureKeptFor"/>), counted from the end of a walk that met it, so <see cref="WalkEvery"/> holds it until
-    /// the next walk, which lists it again. Null (the default) asks whenever asked.
+    /// With listings kept, whether a folder whose listing failed answers with that failure at once until the next walk, which
+    /// lists it again, so a client that lists the tree over and over pays for it once; where no walk is to come
+    /// (<see cref="WalkEvery"/> zero), for as long as the walks' usual interval. <see cref="ListingCache.ForgetFailures"/> lets
+    /// them all go (a sign-in renewed), and a folder not found is never kept so. Off (the default) asks whenever asked.
     /// </summary>
-    public Func<VfsException, TimeSpan?>? FailureKeptFor { get; init; }
+    public bool KeepFailures { get; init; }
 
     /// <summary>Folders listed at a time in a walk: in each part, where <see cref="PartsBelow"/> makes parts.</summary>
     public int Parallelism { get; init; } = TreeCount.DefaultParallelism;

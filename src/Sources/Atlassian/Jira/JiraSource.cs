@@ -15,7 +15,8 @@ namespace AnyFS.Sources.Atlassian.Jira;
 /// folder per issue with its <c>issue.md</c> (fields, description and comments as Markdown) and its attachments. Names are
 /// compared in either case, as Windows does. Folder listings are kept (the SDK's <see cref="KeptListings"/>), and a change
 /// shows when a walk comes to it: the walks go through the folders opened, or with "Count files on start" through the whole
-/// tree, a project's issues in bulk; a project whose newest change and issue count have not moved is kept as it was.
+/// tree, a project's issues in bulk; a project whose newest change and issue count have not moved is kept as it was. A folder
+/// whose listing failed stays so until the next walk.
 /// </summary>
 public sealed class JiraSource : SourceBase, ICountable
 {
@@ -111,7 +112,7 @@ public sealed class JiraSource : SourceBase, ICountable
             MaxInFlight = walking,
             ListTree = ListTreeAsync,
             StampOf = StampAsync,
-            FailureKeptFor = ex => ex.Error != VfsError.Unavailable && _settings.WalkEvery > TimeSpan.Zero ? _settings.WalkEvery : _settings.Refresh,
+            KeepFailures = true,
             Name = "jira",
 
             // the listings last run saw open at once at the next start: for the same installation, account and scope, the
@@ -120,6 +121,7 @@ public sealed class JiraSource : SourceBase, ICountable
             SaveKey = $"{_session.Address.Server}|{_session.User?.Name}|{Scope.Kind}:{Scope.Value}|{_settings.Shape}|md{JiraDocuments.Format}",
         });
 
+        _session.Renewed += _kept.Cache.ForgetFailures;
         _kept.StartWalksOfHeld();
         Logger.LogInformation("jira: serving {Scope} {Value} on {Server} as {User}", Scope.Kind.ToString().ToLowerInvariant(), Scope.Value, _session.Address.Server, _session.User?.Name);
     }

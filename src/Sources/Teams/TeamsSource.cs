@@ -81,11 +81,9 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             StampOf = StampAsync,
             Name = "teams",
 
-            // a folder that cannot be listed answers so at once for a while, so a search over the whole tree pays for it once,
-            // not on every pass: a service's answer (a group's site the account cannot open, an error it gave) for a walk
-            // interval, the walks asking again; no answer (a service not reached, a token not handed out yet) for the refresh
-            // interval
-            FailureKeptFor = ex => ex.Error != VfsError.Unavailable && _settings.WalkEvery > TimeSpan.Zero ? _settings.WalkEvery : _settings.Refresh,
+            // a folder that cannot be listed answers so at once until the next walk, so a search over the whole tree pays for it
+            // once, not on every pass; a token handed out since lets those go (SeekTokens)
+            KeepFailures = true,
 
             // the listings last run saw open at once at the next start: for the same account and cloud, the same settings
             // that shape the tree, and the same Markdown (a file's size is a fact about how it is written)
@@ -312,7 +310,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         {
             if (_unlisted.TryAdd(normalized, 0))
             {
-                Logger.LogInformation("teams: '{Path}' could not be listed ({Error}); answered so for a while, the walks asking again", normalized, ex.Message);
+                Logger.LogInformation("teams: '{Path}' could not be listed ({Error}); answered so until the next walk", normalized, ex.Message);
             }
 
             throw;

@@ -114,7 +114,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             MaxInFlight = walking,
             ListTree = ListTreeAsync,
             StampOf = StampAsync,
-            FailureKeptFor = _ => _settings.FailureKeptFor,
+            KeepFailures = true,
             Name = "confluence",
             SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
             SaveKey = $"{_session.Address.Server}|{_session.User?.Name}|{Scope}|{_settings.Shape}|md{ConfluenceDocuments.Format}",

@@ -456,7 +456,6 @@ public class ConfluenceTests
         var again = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, home));
         Assert.AreEqual(first.Message, again.Message, "answered at once as it failed");
         Assert.AreEqual(times, asked, "nothing asked");
-        Assert.AreEqual(TimeSpan.FromMinutes(30), settings.FailureKeptFor);
 
         // the walk lists it again, and it comes back
         await source.WalkAsync(new SourceCounters(), full: true, CancellationToken.None);

@@ -86,10 +86,4 @@ public sealed class ConfluenceSettings : IAtlassianSettings
     internal string Shape => $"{Comments}|{Attachments}|{BlogPosts}|{PersonalSpaces}|{ArchivedSpaces}";
 
     internal TimeSpan WalkEvery => TimeSpan.FromMinutes(Math.Clamp(WalkMinutes, 0, 7 * 24 * 60));
-
-    /// <summary>
-    /// How long a folder whose listing failed answers so at once: until the next walk lists it again, whatever the failure;
-    /// where no walk comes ("Count files on start" off, or walks turned off), as long as the walks' usual interval.
-    /// </summary>
-    internal TimeSpan FailureKeptFor => WalkEvery > TimeSpan.Zero ? WalkEvery : TimeSpan.FromMinutes(30);
 }

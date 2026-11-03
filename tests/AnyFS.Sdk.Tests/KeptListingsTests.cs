@@ -94,7 +94,7 @@ public class KeptListingsTests
     {
         _stamps["docs"] = "v1";
         _failing["photos"] = new VfsException(VfsError.AccessDenied, "refused");
-        var options = new KeptListingsOptions { WalkEvery = TimeSpan.FromMilliseconds(50), StampOf = StampOf, FailureKeptFor = _ => TimeSpan.FromMinutes(30) };
+        var options = new KeptListingsOptions { WalkEvery = TimeSpan.FromMilliseconds(50), StampOf = StampOf, KeepFailures = true };
         await using var kept = Kept(new SourceCounters(), options);
         await kept.Cache.GetAsync("", CancellationToken.None);
         await kept.Cache.GetAsync("docs", CancellationToken.None);

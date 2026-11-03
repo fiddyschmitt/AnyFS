@@ -44,7 +44,7 @@ public sealed class JiraSettings : IAtlassianSettings
     public int RefreshSeconds { get; set; } = 60;
 
     [Setting(KeptListings.KeepSetting, Advanced = true, Order = 11,
-        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once and going through them again asks nothing of Jira; a change shows after the next walk (below). With 'Count files on start', the count walks the folders first and keeps what it finds. Off: each folder is asked for as it is opened.")]
+        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once and going through them again asks nothing of Jira; a change shows after the next walk (below). A folder that could not be listed shows empty until then. With 'Count files on start', the count walks the folders first and keeps what it finds. Off: each folder is asked for as it is opened.")]
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 12,

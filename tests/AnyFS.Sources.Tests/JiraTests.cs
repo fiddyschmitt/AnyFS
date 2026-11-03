@@ -453,6 +453,63 @@ public class JiraTests
     }
 
     [TestMethod]
+    public async Task AFolderWhoseListingFailedStaysSoUntilTheNextWalk()
+    {
+        var fake = JiraSeed.Lab();
+        var settings = JiraSeed.Settings(fake, "/projects/ANYFS");
+        await using var source = await StartAsync(fake, settings);
+        var issue = (await NamesAsync(source, "")).Single(n => n.StartsWith("ANYFS-1 ", StringComparison.Ordinal));
+
+        // a service that does not answer, not only a refusal
+        var failing = true;
+        var asked = 0;
+        fake.Fault = r =>
+        {
+            if (failing && r.Url.AbsolutePath.Contains("/rest/api/2/issue/", StringComparison.Ordinal))
+            {
+                asked++;
+                return FakeAtlassian.Response.Html("<html>busy</html>");
+            }
+
+            return null;
+        };
+        var first = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, issue));
+        Assert.AreEqual(VfsError.Unavailable, first.Error);
+        var times = asked;
+        Assert.IsTrue(times > 0);
+        failing = false;
+        var again = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, issue));
+        Assert.AreEqual(first.Message, again.Message, "answered at once as it failed");
+        Assert.AreEqual(times, asked, "nothing asked");
+
+        // the walk lists it again, and it comes back
+        await source.WalkAsync(new SourceCounters(), full: true, CancellationToken.None);
+        CollectionAssert.Contains(await NamesAsync(source, issue), "issue.md");
+    }
+
+    [TestMethod]
+    public async Task ASignInRenewedLetsGoOfTheFoldersThatFailed()
+    {
+        var fake = JiraSeed.Lab();
+        var standIn = fake.StandIn((_, _) => Task.FromResult<IReadOnlyList<SessionCookie>>([fake.SessionFor("tester")]));
+        var settings = new JiraSettings { Address = fake.Server + "/projects/ANYFS", SignInMethod = AtlassianSignInChoices.WebSession };
+        await using var source = await StartAsync(fake, settings, standIn: standIn);
+        var issue = (await NamesAsync(source, "")).Single(n => n.StartsWith("ANYFS-1 ", StringComparison.Ordinal));
+
+        var failing = true;
+        fake.Fault = r => failing && r.Url.AbsolutePath.Contains("/rest/api/2/issue/", StringComparison.Ordinal) ? FakeAtlassian.Response.Message(403, "Refused") : null;
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, issue));
+        failing = false;
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, issue));
+
+        // the session lapses, and the next request that finds out renews it
+        var other = (await NamesAsync(source, "")).Single(n => n.StartsWith("ANYFS-2 ", StringComparison.Ordinal));
+        fake.EndSessions();
+        await NamesAsync(source, other);
+        CollectionAssert.Contains(await NamesAsync(source, issue), "issue.md", "listed again");
+    }
+
+    [TestMethod]
     public async Task AnIssueTheRangeCannotFindIsReadAlone()
     {
         var fake = JiraSeed.Lab();

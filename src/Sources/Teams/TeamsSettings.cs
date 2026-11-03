@@ -148,7 +148,7 @@ public sealed class TeamsSettings
     public int RefreshSeconds { get; set; } = 60;
 
     [Setting(KeptListings.KeepSetting, Advanced = true, Order = 15,
-        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once and going through them again asks nothing of Teams; a change, a new message among them, shows after the next walk (below). The walks go through the teams, channels and chats from the start. Off: each folder is asked for as it is opened.")]
+        Hint = "Answer from what AnyFS last saw of each folder, so folders open at once and going through them again asks nothing of Teams; a change, a new message among them, shows after the next walk (below). A folder that could not be listed shows empty until then. The walks go through the teams, channels and chats from the start. Off: each folder is asked for as it is opened.")]
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 16,
