@@ -205,7 +205,9 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             }
 
             var children = await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false);
-            node = children.FirstOrDefault(c => c.Name.Equals(segment, StringComparison.OrdinalIgnoreCase)) ?? throw VfsException.NotFound(path);
+            node = children.FirstOrDefault(c => c.Name.Equals(segment, StringComparison.OrdinalIgnoreCase))
+                ?? children.OfType<TicketFolder>().FirstOrDefault(t => TicketFolder.SameTicket(t.Name, segment))
+                ?? throw VfsException.NotFound(path);
         }
 
         return node;

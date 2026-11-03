@@ -24,6 +24,10 @@ internal sealed class TicketFolder(GlProject project, GlTicket ticket, bool merg
 
     public GlTicket Ticket { get; } = ticket;
 
+    /// <summary>Whether two folder names are one ticket's: the number says, as a listing kept until the next walk still gives the title it had.</summary>
+    public static bool SameTicket(string name, string other)
+        => name.IndexOf(' ', StringComparison.Ordinal) is var end and > 1 && other.StartsWith(name[..(end + 1)], StringComparison.Ordinal);
+
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
         var notes = await source.NotesAsync(project, Ticket, mergeRequest, ct).ConfigureAwait(false);

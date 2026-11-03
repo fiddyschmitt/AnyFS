@@ -80,7 +80,11 @@ internal abstract class JiraIssuesFolder(string name, DateTimeOffset? modified =
         return children;
     }
 
-    /// <summary>An issue by the key its folder's name starts with, read alone (with the issues around it), not by listing them all.</summary>
+    /// <summary>
+    /// An issue by the key its folder's name starts with, read alone (or with the issues around it), not by listing them all. The
+    /// key alone says which: a listing kept until the next walk still gives the name the issue had before its summary changed,
+    /// and a client opens what it was shown. One moved away answers with its new key, and is not here.
+    /// </summary>
     public override async Task<JiNode?> FindAsync(JiraSource source, string name, CancellationToken ct)
     {
         if (JiraScope.KeyOfFolder(name) is not { } key)
@@ -89,9 +93,7 @@ internal abstract class JiraIssuesFolder(string name, DateTimeOffset? modified =
         }
 
         var issue = await source.IssueAsync(key, ct).ConfigureAwait(false);
-        return issue is not null && JiraDocuments.FolderName(issue.Key, issue.Summary).Equals(name, StringComparison.OrdinalIgnoreCase)
-            ? new JiraIssueFolder(issue)
-            : null;
+        return issue is not null && issue.Key.Equals(key, StringComparison.OrdinalIgnoreCase) ? new JiraIssueFolder(issue) : null;
     }
 }
 

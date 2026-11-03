@@ -699,6 +699,23 @@ public class GitLabTicketTests
         return buffer;
     }
 
+    [TestMethod]
+    public async Task AnIssueRetitledSinceItsFolderWasListedStillOpensByItsNumber()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake, s => s.RefreshSeconds = 1);
+        CollectionAssert.Contains((await ListAsync(source, "issues")).Select(e => e.Name).ToList(), "#1 Install fails on Debian");
+
+        // a listing kept until the next walk gives the old title; what the client was shown opens
+        var issue = fake.ProjectAt("anyfs/docs").IssueList[0];
+        issue.Title = "A new title";
+        issue.Updated = DateTimeOffset.UtcNow;
+        await Task.Delay(TimeSpan.FromSeconds(1.2));
+        CollectionAssert.Contains((await ListAsync(source, "issues")).Select(e => e.Name).ToList(), "#1 Install fails on Debian");
+        StringAssert.StartsWith(System.Text.Encoding.UTF8.GetString(await ReadAsync(source, First + "/issue.md")), "# #1 A new title");
+        await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync("issues/#99 Nothing/issue.md", VfsOpenMode.Read, CancellationToken.None));
+    }
+
     private const string First = "issues/#1 Install fails on Debian";
 
     [TestMethod]

@@ -519,11 +519,19 @@ public class JiraTests
     }
 
     [TestMethod]
-    public async Task AStaleNameIsNotFound()
+    public async Task AnIssueIsFoundByItsKeySoAListingKeptSinceItsSummaryChangedStillOpens()
     {
         var fake = JiraSeed.Lab();
-        await using var source = await StartAsync(fake, JiraSeed.Settings(fake, "/projects/ANYFS"));
-        await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync("ANYFS-1 An old summary/issue.md", VfsOpenMode.Read, CancellationToken.None));
+        var settings = JiraSeed.Settings(fake, "/projects/ANYFS");
+        settings.RefreshSeconds = 1;
+        await using var source = await StartAsync(fake, settings);
+        var listed = (await NamesAsync(source, "")).Single(n => n.StartsWith("ANYFS-1 ", StringComparison.Ordinal));
+        await TextAsync(source, $"{listed}/issue.md");
+
+        fake.IssueAt("ANYFS-1").Summary = "A new summary";
+        await Task.Delay(TimeSpan.FromSeconds(1.2));
+        CollectionAssert.Contains(await NamesAsync(source, ""), listed, "the listing as it is kept until the next walk");
+        StringAssert.StartsWith(await TextAsync(source, $"{listed}/issue.md"), "# ANYFS-1 A new summary", "what the client was shown opens, as it is now");
         await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync("ANYFS-99 Nothing/issue.md", VfsOpenMode.Read, CancellationToken.None));
     }
 
