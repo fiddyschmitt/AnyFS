@@ -214,8 +214,9 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   its own (SharePoint's sites, four folders of each at a time, 64 listings in flight in all);
   `LeftOut` names folders not worth a walk, listed when opened (GitLab's issues, a request or more
   each), which makes the count a lower bound; `ListTree` hands it a whole subtree at once where you
-  have a quicker way than folder by folder (GitLab lists a repository a hundred entries a request);
-  everything it hands over is kept with the folder's stamp.
+  have a quicker way than folder by folder (GitLab lists a repository a hundred entries a request),
+  and where it fails the rest of that walk goes folder by folder; everything it hands over is kept
+  with the folder's stamp. A folder that could not be listed makes the count a lower bound too.
   `SaveTo` saves the listings to a file in your state folder when a walk ends and when the source
   stops, and reads them back at the next start, so every folder opens at once from the first moment;
   `SaveKey` says what they were saved for (the account, the server, the settings that shape the tree

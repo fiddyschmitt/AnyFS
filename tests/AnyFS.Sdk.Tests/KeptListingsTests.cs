@@ -18,6 +18,7 @@ public class KeptListingsTests
     };
 
     private readonly ConcurrentDictionary<string, int> _listed = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, VfsException> _failing = new(StringComparer.Ordinal);
     private TaskCompletionSource? _gate;
 
     private int Listed(string path) => _listed.GetValueOrDefault(path);
@@ -28,6 +29,11 @@ public class KeptListingsTests
         if (_gate is { } gate)
         {
             await gate.Task.WaitAsync(ct);
+        }
+
+        if (_failing.TryGetValue(path, out var failure))
+        {
+            throw failure;
         }
 
         if (!_tree.TryGetValue(path, out var entries))
@@ -55,6 +61,57 @@ public class KeptListingsTests
     }
 
     private static string TempFile() => Path.Combine(Path.GetTempPath(), $"anyfs-kept-{Guid.NewGuid():N}.json.gz");
+
+    private static async Task UntilAsync(Func<bool> done, string what)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (!done())
+        {
+            Assert.IsTrue(DateTime.UtcNow < deadline, what);
+            await Task.Delay(10);
+        }
+    }
+
+    [TestMethod]
+    public async Task WhatCannotBeReadAtOnceIsWalkedFolderByFolder()
+    {
+        var asked = 0;
+        var counters = new SourceCounters();
+        var options = new KeptListingsOptions
+        {
+            WalkEvery = TimeSpan.Zero,
+            Parallelism = 1,
+            ListTree = (folder, _) =>
+            {
+                if (folder is "docs" or "photos")
+                {
+                    Interlocked.Increment(ref asked);
+                    throw new VfsException(VfsError.Unavailable, "too much at once");
+                }
+
+                return Task.FromResult<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>(null);
+            },
+        };
+        await using var kept = Kept(counters, options);
+        await kept.CountAsync(CancellationToken.None);
+        Assert.AreEqual(1, asked, "not asked again this walk");
+        Assert.AreEqual((1, 1, 1), (Listed("docs"), Listed("docs/sub"), Listed("photos")), "each listed alone");
+        Assert.AreEqual((6L, EnumerationState.Complete), (counters.FilesKnown, counters.State), "nothing left out");
+    }
+
+    [TestMethod]
+    public async Task AFolderThatFailsMakesTheCountALowerBoundAndTheNextWalkAsksAgain()
+    {
+        _failing["photos"] = new VfsException(VfsError.Unavailable, "no answer");
+        var counters = new SourceCounters();
+        await using var kept = Kept(counters, new KeptListingsOptions { WalkEvery = TimeSpan.FromMilliseconds(50) });
+        await kept.CountAsync(CancellationToken.None);
+        Assert.AreEqual(4, counters.FilesKnown);
+        Assert.AreEqual(EnumerationState.Unknown, counters.State, "what could not be listed may hold more");
+
+        _failing.Clear();
+        await UntilAsync(() => counters.FilesKnown == 6 && counters.State == EnumerationState.Complete, "the next walk");
+    }
 
     [TestMethod]
     public async Task TheCountWalksEveryFolderAndKeepsWhatItListed()

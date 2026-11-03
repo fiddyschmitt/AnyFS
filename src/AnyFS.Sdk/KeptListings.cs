@@ -212,7 +212,7 @@ public sealed class KeptListings : IAsyncDisposable
     /// <see cref="KeptListingsOptions.MaxInFlight"/> in all, every folder whatever its stamp. A folder that cannot be listed
     /// is left out, with what is below it, and logged; anything else that fails ends the walk.
     /// </summary>
-    /// <returns>Whether it went into every folder: false where <see cref="KeptListingsOptions.LeftOut"/> kept it out of some.</returns>
+    /// <returns>Whether it went into every folder: false where <see cref="KeptListingsOptions.LeftOut"/> kept it out of some, or one could not be listed.</returns>
     public Task<bool> WalkAsync(SourceCounters counters, CancellationToken ct) => WalkAsync(counters, full: true, ct);
 
     /// <summary>
@@ -266,12 +266,12 @@ public sealed class KeptListings : IAsyncDisposable
             ExceptionDispatchInfo.Throw(failure);
         }
 
-        _lastWalk = (walk.Listed, walk.Kept);
-        return !walk.LeftSomeOut;
+        _lastWalk = (walk.Listed, walk.Kept, walk.Failed);
+        return !walk.LeftSomeOut && walk.Failed == 0;
     }
 
-    // how many folders the last walk listed afresh, and how many it kept as they were by their stamps (for the log)
-    private (long Listed, long Kept) _lastWalk;
+    // how many folders the last walk listed afresh, how many it kept as they were by their stamps, and how many it could not list (for the log)
+    private (long Listed, long Kept, long Failed) _lastWalk;
 
     /// <summary>
     /// Whether a walk now lists every folder whatever its stamp: one each <see cref="KeptListingsOptions.FullWalkEvery"/>
@@ -323,11 +323,15 @@ public sealed class KeptListings : IAsyncDisposable
                 _counters.Set(counters.FilesKnown, counters.DirectoriesKnown, state);
                 _walked = (int)state;
                 var seconds = _time.GetElapsedTime(started).TotalSeconds;
-                var (listed, kept) = _lastWalk;
-                var how = kept > 0 ? $"listed {listed:N0} folders afresh and kept {kept:N0} whose stamps hold" : "listed every folder";
+                var (listed, kept, failed) = _lastWalk;
+                var how = kept > 0 ? $"listed {listed:N0} folders afresh and kept {kept:N0} whose stamps hold" : failed > 0 ? $"listed {listed:N0} folders" : "listed every folder";
                 if (whole)
                 {
                     _logger.LogInformation("{Name}: walked every folder in {Seconds:F0} s ({How}): {Files:N0} files in {Folders:N0} folders", _options.Name, seconds, how, counters.FilesKnown, counters.DirectoriesKnown);
+                }
+                else if (failed > 0)
+                {
+                    _logger.LogInformation("{Name}: walked in {Seconds:F0} s ({How}): {Files:N0} files in {Folders:N0} folders, and {Failed:N0} folders could not be listed, which the next walk asks for again", _options.Name, seconds, how, counters.FilesKnown, counters.DirectoriesKnown, failed);
                 }
                 else
                 {
@@ -411,7 +415,7 @@ public sealed class KeptListings : IAsyncDisposable
                             continue;
                         }
 
-                        tree = _options.ListTree is { } listTree ? await listTree(folder, ct).ConfigureAwait(false) : null;
+                        tree = await TreeOfAsync(folder, walk, ct).ConfigureAwait(false);
                         entries = tree is null ? await Cache.RefreshAsync(folder, stamp, ct).ConfigureAwait(false) : [];
                         if (tree is not null)
                         {
@@ -474,6 +478,12 @@ public sealed class KeptListings : IAsyncDisposable
                 }
                 catch (Exception ex)
                 {
+                    // one gone since its parent was listed is nothing left out
+                    if (ex is not VfsException { Error: VfsError.NotFound or VfsError.NotADirectory })
+                    {
+                        Interlocked.Increment(ref walk.Failed);
+                    }
+
                     _logger.LogDebug("{Name}: the walk left out '{Folder}': {Error}", _options.Name, folder, ex.Message);
                 }
                 finally
@@ -487,6 +497,30 @@ public sealed class KeptListings : IAsyncDisposable
         }
 
         await Task.WhenAll(Enumerable.Range(0, _options.Parallelism).Select(_ => Task.Run(WorkerAsync, CancellationToken.None))).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The listings of a folder and of every folder below it at once (<see cref="KeptListingsOptions.ListTree"/>); null where there
+    /// is no quicker way than folder by folder. Where that fails (too much at once for the upstream, or one thing in it that it
+    /// cannot give), the rest of this walk goes folder by folder, so what can be listed is.
+    /// </summary>
+    private async Task<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?> TreeOfAsync(string folder, Walk walk, CancellationToken ct)
+    {
+        if (_options.ListTree is not { } listTree || walk.FolderByFolder)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await listTree(folder, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            walk.FolderByFolder = true;
+            _logger.LogInformation("{Name}: '{Folder}' could not be read at once ({Error}); the walk goes on folder by folder", _options.Name, folder, ex.Message);
+            return null;
+        }
     }
 
     /// <summary>A folder's stamp now (<see cref="KeptListingsOptions.StampOf"/>, given the one held): whether it could be read, and what it is. Nothing without stamps; one that cannot be read is logged and counts as none.</summary>
@@ -562,7 +596,7 @@ public sealed class KeptListings : IAsyncDisposable
         }
     }
 
-    /// <summary>One walk's shared state: what it counts into, the listings in flight, its parts, whether it lists every folder whatever its stamp, and what it left out, listed and kept.</summary>
+    /// <summary>One walk's shared state: what it counts into, the listings in flight, its parts, whether it lists every folder whatever its stamp, and what it left out, listed, kept and could not list.</summary>
     private sealed class Walk(SourceCounters counters, SemaphoreSlim inFlight, bool full)
     {
         public SourceCounters Counters { get; } = counters;
@@ -575,9 +609,13 @@ public sealed class KeptListings : IAsyncDisposable
 
         public volatile bool LeftSomeOut;
 
+        public volatile bool FolderByFolder;
+
         public long Listed;
 
         public long Kept;
+
+        public long Failed;
     }
 }
 
