@@ -76,7 +76,12 @@ public sealed partial class OperationRowViewModel(long id) : ObservableObject
         Outcome = record.Outcome;
     }
 
-    public static string PathText(OperationRecord record) => !record.Kind.HasPath() ? "" : record.Path.Length == 0 ? "(root)" : record.Path;
+    /// <summary>The path asked for; a count, asked for none, says which folder it is up to while it runs.</summary>
+    public static string PathText(OperationRecord record)
+    {
+        var path = record.At ?? (record.Kind.HasPath() ? record.Path : null);
+        return path is null ? "" : path.Length == 0 ? "(root)" : path;
+    }
 
     public static string DurationText(OperationRecord record) => record.Duration.TotalSeconds.ToString("0.00", CultureInfo.CurrentCulture);
 
@@ -85,7 +90,7 @@ public sealed partial class OperationRowViewModel(long id) : ObservableObject
     {
         OperationKind.ReadFile or OperationKind.WriteFile => record.Bytes > 0 ? Format.Bytes(record.Bytes) : record.Detail ?? "",
         OperationKind.List => record.Items > 0 || record.Outcome == OperationOutcome.Succeeded ? $"{record.Items:N0} {(record.Items == 1 ? "entry" : "entries")}" : record.Detail ?? "",
-        OperationKind.Count => record.Items > 0 ? $"{record.Items:N0} files" : record.Detail ?? "",
+        OperationKind.Count => Format.Files(record.Items, complete: record.Outcome == OperationOutcome.Succeeded),
         _ => record.Detail ?? "",
     };
 

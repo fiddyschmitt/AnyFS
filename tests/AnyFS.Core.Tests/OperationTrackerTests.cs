@@ -50,6 +50,54 @@ public class OperationTrackerTests
     }
 
     [TestMethod]
+    public void ACountShowsItsRunningTotalAndItsFolderUntilItEnds()
+    {
+        var tracker = new OperationTracker(new FakeTime());
+        var finished = new List<OperationRecord>();
+        tracker.Finished += finished.Add;
+        var counters = new SourceCounters();
+        var op = tracker.Begin(Alpha, "alpha", OperationKind.Count, "");
+        op.Follow(counters);
+        var row = tracker.Recent().Single();
+        Assert.AreEqual(0, row.Items);
+        Assert.IsNull(row.At, "in no folder yet");
+
+        counters.Add(1200, 30);
+        using (counters.EnterFolder("group/project/files"))
+        {
+            row = tracker.Recent().Single();
+            Assert.AreEqual(1200, row.Items, "the total so far");
+            Assert.AreEqual("group/project/files", row.At);
+            Assert.AreEqual("", row.Path, "what was asked for has not changed");
+        }
+
+        using var stillIn = counters.EnterFolder("group/other");
+        counters.Add(34, 0);
+        op.Complete();
+        counters.Add(99, 0);
+        row = tracker.Recent().Single();
+        Assert.AreEqual(1234, row.Items, "the total as it ended stays");
+        Assert.IsNull(row.At, "a finished count is in no folder");
+        Assert.AreEqual(row, finished.Single());
+        Assert.AreEqual(1234, tracker.Stats().Sources.Single().Operations.Single(o => o.Kind == OperationKind.Count).Items, "counted once");
+    }
+
+    [TestMethod]
+    public void ACountThatFailsKeepsHowFarItGot()
+    {
+        var tracker = new OperationTracker(new FakeTime());
+        var counters = new SourceCounters();
+        var op = tracker.Begin(Alpha, "alpha", OperationKind.Count, "");
+        op.Follow(counters);
+        counters.Add(17, 2);
+        using var stillIn = counters.EnterFolder("group");
+        op.Fail(new IOException("gone"));
+        var row = tracker.Recent().Single();
+        Assert.AreEqual((OperationOutcome.Failed, "gone", 17L), (row.Outcome, row.Error, row.Items));
+        Assert.IsNull(row.At);
+    }
+
+    [TestMethod]
     public void OutcomesFollowTheException()
     {
         var tracker = new OperationTracker(new FakeTime());

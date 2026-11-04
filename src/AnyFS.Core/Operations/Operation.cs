@@ -10,7 +10,8 @@ namespace AnyFS.Core.Operations;
 /// <param name="Duration">So far, while it runs.</param>
 /// <param name="Error">Why it failed, or why it was cancelled when that is known.</param>
 /// <param name="Bytes">Read or written through the file handle so far.</param>
-/// <param name="Items">Entries a listing has given so far.</param>
+/// <param name="Items">Entries a listing has given so far, files a count has found so far.</param>
+/// <param name="At">While a count runs, the folder it is up to ("" for the root; <see cref="SourceCounters.CurrentFolder"/>); null when it is in none, and for anything else.</param>
 public sealed record OperationRecord(
     long Id,
     Guid SourceId,
@@ -23,7 +24,8 @@ public sealed record OperationRecord(
     OperationOutcome Outcome,
     string? Error,
     long Bytes,
-    long Items);
+    long Items,
+    string? At = null);
 
 /// <summary>
 /// An operation in flight, handed out by <see cref="OperationTracker.Begin"/>. The caller adds what goes by
@@ -41,6 +43,7 @@ public sealed class Operation
     private string? _error;
     private string? _detail;
     private (OperationOutcome Outcome, string? Error)? _noted;
+    private SourceCounters? _following;
 
     internal Operation(OperationTracker tracker, long id, Guid sourceId, string source, OperationKind kind, string path, string? detail, DateTimeOffset started, long startedAt)
     {
@@ -87,7 +90,7 @@ public sealed class Operation
 
     public long Bytes => Interlocked.Read(ref _bytes);
 
-    public long Items => Interlocked.Read(ref _items);
+    public long Items => Volatile.Read(ref _following)?.FilesKnown ?? Interlocked.Read(ref _items);
 
     public void AddBytes(long count)
     {
@@ -104,6 +107,13 @@ public sealed class Operation
             Interlocked.Add(ref _items, count);
         }
     }
+
+    /// <summary>
+    /// For an operation whose progress is a source's counters (a count, which goes on inside the source, out of the tracker's
+    /// sight): until it ends, <see cref="Items"/> is their running total and its record says which folder they are in, read each
+    /// time it is looked at. Their total as it ends stays on it.
+    /// </summary>
+    public void Follow(SourceCounters counters) => Volatile.Write(ref _following, counters);
 
     /// <summary>The call returned: the operation succeeded, unless a failure was <see cref="Note"/>d meanwhile.</summary>
     public void Complete() => End(null, null);
@@ -128,7 +138,12 @@ public sealed class Operation
     }
 
     internal OperationRecord Snapshot(TimeProvider time)
-        => new(Id, SourceId, Source, Kind, Path, Detail, Started, Duration(time), Outcome, Error, Bytes, Items);
+    {
+        // before the outcome: a row read as running says where it was, and one that has ended says nowhere
+        var at = Volatile.Read(ref _following)?.CurrentFolder;
+        var outcome = Outcome;
+        return new(Id, SourceId, Source, Kind, Path, Detail, Started, Duration(time), outcome, Error, Bytes, Items, outcome == OperationOutcome.Running ? at : null);
+    }
 
     internal TimeSpan Duration(TimeProvider time)
         => IsFinished ? time.GetElapsedTime(StartedAt, FinishedAt) : time.GetElapsedTime(StartedAt);
@@ -162,6 +177,14 @@ public sealed class Operation
             }
 
             _error = error;
+
+            // what it had reached stays, whatever the counters go on to do
+            if (Volatile.Read(ref _following) is { } following)
+            {
+                Interlocked.Exchange(ref _items, following.FilesKnown);
+                Volatile.Write(ref _following, null);
+            }
+
             FinishedAt = _tracker.Timestamp();
             Volatile.Write(ref _outcome, (int)outcome.Value);
         }

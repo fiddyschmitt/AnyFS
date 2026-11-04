@@ -67,6 +67,29 @@ public class SourceRunnerTests
     }
 
     [TestMethod]
+    public async Task ACountingSourcesRowSaysHowFarItHasGot()
+    {
+        // a source that counts itself walks inside itself, out of the tracker's sight: its one row says where it is up to
+        var tracker = new OperationTracker();
+        var gate = new TaskCompletionSource();
+        await using var runner = Runner(new MemoryPluginSettings(), countOnStart: true, plugin: new SelfCountingPlugin { Gate = gate, InFolder = "group/project/files", CountedBeforeGate = 7 }, operations: tracker);
+        runner.Start();
+        await Wait.UntilAsync(() => tracker.Recent().Any(r => r.Kind == OperationKind.Count && r.At is not null), what: "the count's row in a folder");
+        var row = tracker.Recent().Single(r => r.Kind == OperationKind.Count);
+        Assert.AreEqual(OperationOutcome.Running, row.Outcome);
+        Assert.AreEqual("group/project/files", row.At);
+        Assert.AreEqual(7, row.Items, "the total so far");
+        Assert.AreEqual(1, tracker.Recent().Count(r => r.Kind == OperationKind.Count), "still one row");
+
+        gate.SetResult();
+        await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready after counting");
+        await Wait.UntilAsync(() => tracker.Recent().Single(r => r.Kind == OperationKind.Count).Outcome == OperationOutcome.Succeeded, what: "the count over");
+        row = tracker.Recent().Single(r => r.Kind == OperationKind.Count);
+        Assert.AreEqual(9, row.Items, "the total as it ended");
+        Assert.IsNull(row.At);
+    }
+
+    [TestMethod]
     public async Task StartsAndBecomesReady()
     {
         await using var runner = Runner(new MemoryPluginSettings());
@@ -314,6 +337,11 @@ public class SourceRunnerTests
         /// <summary>Counts what it can and says the count is not whole (Unknown).</summary>
         public bool PartOnly { get; init; }
 
+        /// <summary>With <see cref="Gate"/>: the folder it says it is in while held, and what it has counted by then.</summary>
+        public string? InFolder { get; init; }
+
+        public long CountedBeforeGate { get; init; }
+
         public string TypeId => "selfcount";
 
         public string DisplayName => "Self-counting";
@@ -358,7 +386,12 @@ public class SourceRunnerTests
             if (plugin.Gate is { } gate)
             {
                 Context.ReportProgress("Counting: 1 of 2 messages", 0.5);
-                await gate.Task.WaitAsync(ct);
+                Counters.Add(plugin.CountedBeforeGate, 0);
+                using (plugin.InFolder is { } folder ? Counters.EnterFolder(folder) : null)
+                {
+                    await gate.Task.WaitAsync(ct);
+                }
+
                 Counters.Add(2, 0);
                 return;
             }

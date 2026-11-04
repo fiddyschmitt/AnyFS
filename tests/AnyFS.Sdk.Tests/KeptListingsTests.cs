@@ -19,6 +19,7 @@ public class KeptListingsTests
 
     private readonly ConcurrentDictionary<string, int> _listed = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, VfsException> _failing = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, TaskCompletionSource> _held = new(StringComparer.Ordinal);
     private TaskCompletionSource? _gate;
 
     private int Listed(string path) => _listed.GetValueOrDefault(path);
@@ -29,6 +30,11 @@ public class KeptListingsTests
         if (_gate is { } gate)
         {
             await gate.Task.WaitAsync(ct);
+        }
+
+        if (_held.TryGetValue(path, out var held))
+        {
+            await held.Task.WaitAsync(ct);
         }
 
         if (_failing.TryGetValue(path, out var failure))
@@ -70,6 +76,89 @@ public class KeptListingsTests
             Assert.IsTrue(DateTime.UtcNow < deadline, what);
             await Task.Delay(10);
         }
+    }
+
+    [TestMethod]
+    public async Task TheCountSaysWhichFolderItHasBeenInLongest()
+    {
+        var counters = new SourceCounters();
+        _held[""] = new TaskCompletionSource();
+        _held["docs"] = new TaskCompletionSource();
+        _held["photos"] = new TaskCompletionSource();
+        await using var kept = Kept(counters, new KeptListingsOptions { WalkEvery = TimeSpan.Zero, Parallelism = 2, MaxInFlight = 2 });
+        var counting = kept.CountAsync(CancellationToken.None);
+        await UntilAsync(() => Listed("") == 1, "the root asked for");
+        Assert.AreEqual("", counters.CurrentFolder, "the root, while it is listed");
+        _held[""].SetResult();
+        await UntilAsync(() => Listed("docs") == 1 && Listed("photos") == 1, "both folders asked for");
+
+        // whichever of the two a worker went into first stays while the other ends, and the total goes on
+        var longest = counters.CurrentFolder;
+        Assert.IsTrue(longest is "docs" or "photos", $"in '{longest}'");
+        var other = longest == "docs" ? "photos" : "docs";
+        var before = counters.FilesKnown;
+        _held[other].SetResult();
+        await UntilAsync(() => counters.FilesKnown > before, "the other folder counted");
+        Assert.AreEqual(longest, counters.CurrentFolder, "the slow one is what shows");
+        _held[longest!].SetResult();
+        await counting;
+        Assert.IsNull(counters.CurrentFolder, "the count is over");
+        Assert.AreEqual(6, counters.FilesKnown);
+    }
+
+    [TestMethod]
+    public async Task AFolderIsWhereTheCountIsFromItsStampOn()
+    {
+        var counters = new SourceCounters();
+        var stamp = new TaskCompletionSource();
+        await using var kept = Kept(counters, new KeptListingsOptions
+        {
+            WalkEvery = TimeSpan.Zero,
+            StampOf = async (path, _, ct) =>
+            {
+                if (path == "docs")
+                {
+                    await stamp.Task.WaitAsync(ct);
+                }
+
+                return null;
+            },
+        });
+        var counting = kept.CountAsync(CancellationToken.None);
+        await UntilAsync(() => counters.CurrentFolder == "docs", "in docs, while its stamp is read");
+        Assert.AreEqual(0, Listed("docs"), "nothing listed of it yet");
+        stamp.SetResult();
+        await counting;
+        Assert.IsNull(counters.CurrentFolder);
+    }
+
+    [TestMethod]
+    public async Task AWalkAfterTheCountDoesNotSayItIsTheCount()
+    {
+        var counters = new SourceCounters();
+        await using var kept = Kept(counters, new KeptListingsOptions { WalkEvery = TimeSpan.FromMilliseconds(30) });
+        await kept.CountAsync(CancellationToken.None);
+        var listed = Listed("docs");
+        _held["docs"] = new TaskCompletionSource();
+        try
+        {
+            await UntilAsync(() => Listed("docs") > listed, "the next walk in docs");
+            Assert.IsNull(counters.CurrentFolder, "it counts aside");
+        }
+        finally
+        {
+            _held["docs"].SetResult();
+        }
+    }
+
+    [TestMethod]
+    public async Task AFolderThatCannotBeListedLeavesTheCountInNoFolder()
+    {
+        var counters = new SourceCounters();
+        _failing["docs"] = new VfsException(VfsError.AccessDenied, "refused");
+        await using var kept = Kept(counters);
+        await kept.CountAsync(CancellationToken.None);
+        Assert.IsNull(counters.CurrentFolder);
     }
 
     [TestMethod]

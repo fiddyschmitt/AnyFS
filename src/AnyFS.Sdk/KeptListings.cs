@@ -234,7 +234,8 @@ public sealed class KeptListings : IAsyncDisposable
 
     /// <summary>
     /// One walk: every folder listed afresh into <see cref="Cache"/>, counting files and folders into
-    /// <paramref name="counters"/> as it goes, <see cref="KeptListingsOptions.Parallelism"/> folders at a time (in each part,
+    /// <paramref name="counters"/> as it goes and saying there which folder it is in
+    /// (<see cref="SourceCounters.CurrentFolder"/>), <see cref="KeptListingsOptions.Parallelism"/> folders at a time (in each part,
     /// all parts at once, where <see cref="KeptListingsOptions.PartsBelow"/> makes parts) and at most
     /// <see cref="KeptListingsOptions.MaxInFlight"/> in all, every folder whatever its stamp. A folder that cannot be listed
     /// is left out, with what is below it, and logged; anything else that fails ends the walk.
@@ -507,6 +508,7 @@ public sealed class KeptListings : IAsyncDisposable
                     IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>? tree;
                     IReadOnlyList<VfsEntry> entries;
                     await walk.InFlight.WaitAsync(ct).ConfigureAwait(false);
+                    using var at = walk.Counters.EnterFolder(folder);
                     try
                     {
                         // the folder's stamp first: one whose stamp holds keeps its listing and every listing held below it

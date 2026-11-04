@@ -282,6 +282,60 @@ public class OperationsTabTests
     }
 
     [TestMethod]
+    public void ACountSaysWhereItIsUpToOnItsOneRow()
+    {
+        var counters = new SourceCounters();
+        var count = Begin(Alpha, OperationKind.Count, "");
+        count.Follow(counters);
+        _tab.Refresh();
+        var row = _tab.Rows.Single();
+        Assert.AreEqual("", row.Path, "in no folder yet");
+        Assert.AreEqual("0+ files", row.Detail, "nothing yet, and not the end of it");
+
+        using (counters.EnterFolder(""))
+        {
+            _tab.Refresh();
+            Assert.AreEqual("(root)", row.Path);
+        }
+
+        counters.Add(1200, 7);
+        using (counters.EnterFolder("group/app/files"))
+        {
+            _tab.Refresh();
+            Assert.AreSame(row, _tab.Rows.Single(), "the same row, moving");
+            Assert.AreEqual("group/app/files", row.Path);
+            Assert.AreEqual($"{1200:N0}+ files", row.Detail, "as the source's tile says it");
+            Assert.AreEqual("Running", row.Result);
+            StringAssert.Contains(_tab.AsText(), "group/app/files", "what is shown is what is copied");
+        }
+
+        count.Complete();
+        _tab.Refresh();
+        Assert.AreEqual("", row.Path, "a count that is over is in no folder");
+        Assert.AreEqual($"{1200:N0} files", row.Detail);
+        Assert.AreEqual("OK", row.Result);
+    }
+
+    [TestMethod]
+    public void ACountThatDidNotFinishSaysItsTotalWasNotTheEndOfIt()
+    {
+        var counters = new SourceCounters();
+        var count = Begin(Alpha, OperationKind.Count, "");
+        count.Follow(counters);
+        counters.Add(1, 0);
+        count.Fail(new IOException("gone"));
+        _tab.Refresh();
+        Assert.AreEqual("1+ files", _tab.Rows.Single().Detail);
+        Assert.AreEqual("gone", _tab.Rows.Single().Result);
+
+        var empty = Begin(Beta, OperationKind.Count, "");
+        empty.Follow(new SourceCounters());
+        empty.Complete();
+        _tab.Refresh();
+        Assert.AreEqual("0 files", _tab.Rows.Single(r => r.Source == "beta").Detail, "a count that found nothing says so");
+    }
+
+    [TestMethod]
     public void RowTextsReadWell()
     {
         var root = Begin(Alpha, OperationKind.List, "");

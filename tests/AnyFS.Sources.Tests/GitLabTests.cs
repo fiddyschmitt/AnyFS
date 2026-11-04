@@ -641,6 +641,47 @@ public class GitLabSourceTests
         Assert.AreEqual(VfsError.NotSupported, ex.Error);
     }
 
+    /// <summary>Holds a project's whole repository until told, as a big one takes its time.</summary>
+    private sealed class HoldingTrees(HttpMessageHandler inner, TaskCompletionSource hold) : DelegatingHandler(inner)
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath.EndsWith("/repository/tree", StringComparison.Ordinal))
+            {
+                await hold.Task.WaitAsync(cancellationToken);
+            }
+
+            return await base.SendAsync(request, cancellationToken);
+        }
+    }
+
+    [TestMethod]
+    public async Task TheCountSaysWhichFolderOfWhichProjectItIsIn()
+    {
+        var fake = GitLabSeed.Lab();
+        var hold = new TaskCompletionSource();
+        var source = new GitLabSource(GitLabSeed.Settings(fake.Server), new GitLabStandIn(() => new HoldingTrees(fake.Handler(), hold)));
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        await using var _s = source;
+        Assert.IsNull(source.Counters.CurrentFolder, "no count yet");
+
+        var counting = source.CountFilesAsync(CancellationToken.None);
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (source.Counters.CurrentFolder is not { } at || !at.EndsWith("/files", StringComparison.Ordinal))
+        {
+            Assert.IsTrue(DateTime.UtcNow < deadline, $"the count is in '{source.Counters.CurrentFolder}'");
+            await Task.Delay(5);
+        }
+
+        // a project's files, while its repository is read
+        var folder = source.Counters.CurrentFolder!;
+        Assert.IsNotNull(await source.StatAsync(VfsPath.Parent(folder), CancellationToken.None), $"{folder} is a folder of the source");
+        hold.SetResult();
+        await counting;
+        Assert.IsNull(source.Counters.CurrentFolder, "the count is over");
+        Assert.IsTrue(source.Counters.FilesKnown > 0);
+    }
+
     [TestMethod]
     public async Task TheCountWalksTheTreeAndKeepsWhatItFoundSoFoldersOpenAtOnce()
     {

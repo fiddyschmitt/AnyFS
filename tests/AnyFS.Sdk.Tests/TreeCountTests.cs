@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using AnyFS.Sdk.Testing;
 
 namespace AnyFS.Sdk.Tests;
@@ -42,6 +43,16 @@ public class TreeCountTests
             while ((seen = Volatile.Read(ref target)) < value && Interlocked.CompareExchange(ref target, value, seen) != seen)
             {
             }
+        }
+    }
+
+    private static async Task UntilAsync(Func<bool> done, string what)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(15);
+        while (!done())
+        {
+            Assert.IsTrue(DateTime.UtcNow < deadline, what);
+            await Task.Delay(5);
         }
     }
 
@@ -112,6 +123,110 @@ public class TreeCountTests
         await cts.CancelAsync();
         await Assert.ThrowsAsync<OperationCanceledException>(() => walk);
         Assert.IsTrue(tree.Listed.Count < 85, "it did not run to the end");
+    }
+
+    [TestMethod]
+    public void TheFolderACountIsInIsTheOneItWentIntoFirstOfThoseStillGoing()
+    {
+        var counters = new SourceCounters();
+        Assert.IsNull(counters.CurrentFolder, "no count going");
+        var first = counters.EnterFolder("first");
+        var second = counters.EnterFolder("second");
+        var third = counters.EnterFolder("third");
+        Assert.AreEqual("first", counters.CurrentFolder);
+        second.Dispose();
+        Assert.AreEqual("first", counters.CurrentFolder, "one done meanwhile changes nothing");
+        first.Dispose();
+        first.Dispose();
+        Assert.AreEqual("third", counters.CurrentFolder, "the oldest left");
+        third.Dispose();
+        Assert.IsNull(counters.CurrentFolder, "none left");
+        using (counters.EnterFolder(""))
+        {
+            Assert.AreEqual("", counters.CurrentFolder, "the root is a folder too");
+        }
+
+        Assert.IsNull(counters.CurrentFolder);
+    }
+
+    [TestMethod]
+    public async Task ManyThreadsGoingInAndOutOfFoldersLeaveNothingBehind()
+    {
+        var counters = new SourceCounters();
+        var stop = false;
+        var reader = Task.Run(() =>
+        {
+            while (!Volatile.Read(ref stop))
+            {
+                _ = counters.CurrentFolder;
+            }
+        });
+        await Task.WhenAll(Enumerable.Range(0, 32).Select(thread => Task.Run(() =>
+        {
+            for (var i = 0; i < 20_000; i++)
+            {
+                using (counters.EnterFolder($"t{thread}"))
+                {
+                    Assert.IsNotNull(counters.CurrentFolder, "at least this one");
+                }
+            }
+        })));
+        Volatile.Write(ref stop, true);
+        await reader;
+        Assert.IsNull(counters.CurrentFolder);
+    }
+
+    [TestMethod]
+    public async Task TheCountSaysWhichFolderItHasBeenInLongest()
+    {
+        var gates = new Dictionary<string, TaskCompletionSource> { [""] = new(), ["a"] = new(), ["b"] = new() };
+        var asked = new ConcurrentDictionary<string, bool>();
+        var counters = new SourceCounters();
+        var walk = TreeCount.CountAsync(
+            async (dir, ct) =>
+            {
+                asked[dir] = true;
+                await gates[dir].Task.WaitAsync(ct);
+                return (1L, dir.Length == 0 ? (IReadOnlyList<string>)["a", "b"] : []);
+            },
+            counters, parallelism: 2, skipped: null, CancellationToken.None);
+        await UntilAsync(() => asked.ContainsKey(""), "the root asked for");
+        Assert.AreEqual("", counters.CurrentFolder, "the root, while it is listed");
+        gates[""].SetResult();
+        await UntilAsync(() => asked.ContainsKey("a") && asked.ContainsKey("b"), "both folders asked for");
+
+        // whichever of the two a worker went into first stays while the other ends; the total goes on
+        var longest = counters.CurrentFolder;
+        Assert.IsTrue(longest is "a" or "b", $"in '{longest}'");
+        gates[longest == "a" ? "b" : "a"].SetResult();
+        await UntilAsync(() => counters.FilesKnown == 2, "the other folder counted");
+        Assert.AreEqual(longest, counters.CurrentFolder, "the slow one is what shows");
+        gates[longest!].SetResult();
+        await walk;
+        Assert.IsNull(counters.CurrentFolder, "the count is over");
+    }
+
+    [TestMethod]
+    public async Task ACountThatStopsIsInNoFolder()
+    {
+        var skipped = new SourceCounters();
+        await TreeCount.CountAsync(
+            (dir, _) => dir.Length == 0 ? Task.FromResult((0L, (IReadOnlyList<string>)["locked"])) : throw VfsException.AccessDenied(dir),
+            skipped, parallelism: 2, skipped: null, CancellationToken.None);
+        Assert.IsNull(skipped.CurrentFolder, "a folder that could not be listed");
+
+        var broken = new SourceCounters();
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => TreeCount.CountAsync((_, _) => throw new InvalidOperationException("broken"), broken, parallelism: 2, skipped: null, CancellationToken.None));
+        Assert.IsNull(broken.CurrentFolder, "a walk that broke");
+
+        using var cts = new CancellationTokenSource();
+        var cancelled = new SourceCounters();
+        var tree = new SlowTree();
+        var walk = TreeCount.CountAsync(tree.ListAsync, cancelled, parallelism: 4, skipped: null, cts.Token);
+        await UntilAsync(() => cancelled.CurrentFolder is not null, "in a folder");
+        await cts.CancelAsync();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => walk);
+        Assert.IsNull(cancelled.CurrentFolder, "a walk cancelled");
     }
 
     [TestMethod]

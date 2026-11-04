@@ -65,7 +65,8 @@ public interface ISourcePlugin
 /// A source that counts its own tree when "Count files on start" is on, instead of the host's generic
 /// directory-by-directory walk: it knows a faster way (Mirror walks every configured path at once).
 /// Update <see cref="ISource.Counters"/> as you go (the tile shows the running total, and what
-/// <see cref="ISourceContext.ReportProgress"/> says meanwhile); the host sets the state to
+/// <see cref="ISourceContext.ReportProgress"/> says meanwhile; the count's row in the Operations tab shows the total and the
+/// folder you say you are in, <see cref="SourceCounters.EnterFolder"/>); the host sets the state to
 /// <see cref="EnumerationState.Complete"/> when the task finishes, unless the source set it otherwise itself
 /// (<see cref="EnumerationState.Unknown"/>: some of it could not be counted). It is asked whenever the option is on, even
 /// when the source says <see cref="EnumerationState.Complete"/> as its start ends, so that it knows the option is
@@ -98,6 +99,9 @@ public sealed class SourceCounters
     private long _directories;
     private int _state;
 
+    // the folders a count is in now, the one it went into first at the head
+    private readonly LinkedList<string> _folders = new();
+
     public long FilesKnown => Interlocked.Read(ref _files);
 
     public long DirectoriesKnown => Interlocked.Read(ref _directories);
@@ -118,6 +122,50 @@ public sealed class SourceCounters
     }
 
     public void SetState(EnumerationState state) => Volatile.Write(ref _state, (int)state);
+
+    /// <summary>
+    /// While a count goes on, where it is up to: the folder it has been in longest of those it is in now ("" for the root), null
+    /// when it is in none. A slow folder stays here until it is done, while the total goes on growing from the others. The count's
+    /// row in the Operations tab shows it.
+    /// </summary>
+    public string? CurrentFolder
+    {
+        get
+        {
+            lock (_folders)
+            {
+                return _folders.First?.Value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// A count has gone into a folder, until what this returns is disposed (<see cref="CurrentFolder"/>). <see cref="TreeCount"/>
+    /// and <see cref="KeptListings"/> do this for their walks; call it from a walk of your own. A walk that is no count of
+    /// the source's counts into counters of its own, and does not show. Cheap enough to call for every folder of a fast disk.
+    /// </summary>
+    public IDisposable EnterFolder(string folder)
+    {
+        ArgumentNullException.ThrowIfNull(folder);
+        lock (_folders)
+        {
+            return new FolderEntered(this, _folders.AddLast(folder));
+        }
+    }
+
+    private sealed class FolderEntered(SourceCounters counters, LinkedListNode<string> node) : IDisposable
+    {
+        public void Dispose()
+        {
+            lock (counters._folders)
+            {
+                if (node.List is not null)
+                {
+                    counters._folders.Remove(node);
+                }
+            }
+        }
+    }
 }
 
 public enum ComponentHealth

@@ -17,9 +17,9 @@ public static class TreeCount
 
     /// <summary>
     /// Counts the tree from the root into <paramref name="counters"/>: each folder's files and subfolders are added as its
-    /// listing completes, with up to <paramref name="parallelism"/> listings at once. A folder whose listing throws
-    /// <see cref="VfsException"/> is skipped, its subtree with it, and reported to <paramref name="skipped"/>; any other
-    /// exception stops the walk and is thrown.
+    /// listing completes, with up to <paramref name="parallelism"/> listings at once, and they say which folder it is in
+    /// (<see cref="SourceCounters.CurrentFolder"/>). A folder whose listing throws <see cref="VfsException"/> is skipped, its
+    /// subtree with it, and reported to <paramref name="skipped"/>; any other exception stops the walk and is thrown.
     /// </summary>
     /// <param name="listFolder">Lists one folder ("" for the root): how many files it holds, and the names of the folders in it to walk next (each counted as a folder).</param>
     public static async Task CountAsync(Func<string, CancellationToken, Task<(long Files, IReadOnlyList<string> Folders)>> listFolder, SourceCounters counters, int parallelism, Action<string, VfsException>? skipped, CancellationToken ct)
@@ -39,6 +39,7 @@ public static class TreeCount
             {
                 try
                 {
+                    using var at = counters.EnterFolder(dir);
                     var (files, folders) = await listFolder(dir, stop.Token).ConfigureAwait(false);
                     foreach (var folder in folders)
                     {
