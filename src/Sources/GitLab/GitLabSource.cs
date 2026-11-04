@@ -94,7 +94,8 @@ public sealed partial class GitLabSource : SourceBase, ICountable
                 using (project)
                 {
                     Scope = ScopeKind.Project;
-                    _root = new ProjectFolder(GlProject.Parse(project.RootElement), "");
+                    // nothing lists the root again, so what this says of it is asked for afresh as it ages
+                    _root = new ProjectFolder(GlProject.Parse(project.RootElement) with { Whole = false }, "");
                 }
             }
             else if (await _api.FindAsync($"groups/{GitLabAddress.Id(path)}?with_projects=false", ct).ConfigureAwait(false) is { } group)
@@ -305,8 +306,15 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             return new GroupContents(subgroups, projects);
         }, ct);
 
+    /// <summary>
+    /// A project's default branch and features: with listings kept, as the listing it was found in told them, where that told
+    /// them all (a group's does), so a walk of thousands of projects need not ask for each. The next walk lists that folder again.
+    /// </summary>
+    internal Task<GlProject> ProjectAsync(GlProject listed, CancellationToken ct)
+        => listed.Whole && _settings.Keeps ? Task.FromResult(listed) : ProjectAsync(listed.Id, ct);
+
     /// <summary>A project as it stands now (its default branch, its features), asked again once the refresh interval has passed.</summary>
-    internal Task<GlProject> ProjectAsync(long id, CancellationToken ct)
+    private Task<GlProject> ProjectAsync(long id, CancellationToken ct)
         => Cache.GetAsync($"project:{id}", Refresh, async c =>
         {
             using var doc = await Api.GetAsync($"projects/{id}", c).ConfigureAwait(false);
@@ -316,7 +324,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     /// <summary>The default branch's head (its commit and when it was made), or null for a project with no commits.</summary>
     internal async Task<GlRef?> HeadAsync(GlProject project, CancellationToken ct)
     {
-        var current = await ProjectAsync(project.Id, ct).ConfigureAwait(false);
+        var current = await ProjectAsync(project, ct).ConfigureAwait(false);
         if (current.EmptyRepo || string.IsNullOrEmpty(current.DefaultBranch))
         {
             return null;

@@ -712,6 +712,39 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
+    public async Task AWalkDoesNotAskForEachProjectAGroupListedWhole()
+    {
+        var fake = GitLabSeed.Lab();
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"));
+        await using var _s = source;
+        await source.CountFilesAsync(CancellationToken.None);
+        var asked = fake.Requests.Where(r => System.Text.RegularExpressions.Regex.IsMatch(r, @"^GET /api/v4/projects/\d+(\?|$)")).ToList();
+        Assert.AreEqual(0, asked.Count, "a group's listing tells all of them: " + string.Join("; ", asked.Take(5)));
+        Assert.IsNotNull(await source.StatAsync("tools/app/files/README.md", CancellationToken.None));
+    }
+
+    [TestMethod]
+    public async Task AWalkOfASourceOfOneProjectSeesItChange()
+    {
+        // nothing above the root lists it again: what its start was told of it would stand for good
+        var fake = GitLabSeed.Lab();
+        var team = fake.AddGroup("team", "Team", null, fake.UserNamed("tester"));
+        var project = fake.AddProject(team, "later", "Later");
+        var settings = GitLabSeed.Settings(fake.Server + "/team/later");
+        settings.RefreshSeconds = 1;
+        var (source, _) = await StartAsync(fake, settings);
+        await using var _s = source;
+        Assert.AreEqual(0, (await ListAsync(source, "files")).Count, "no commits yet");
+
+        project.Commit("main", new Dictionary<string, byte[]> { ["a.txt"] = Encoding.UTF8.GetBytes("a") });
+        await Task.Delay(1100);
+
+        // as a walk goes: the root, then what is in it
+        await source.Listings.RefreshAsync("", null, CancellationToken.None);
+        Assert.AreEqual("a.txt", (await source.Listings.RefreshAsync("files", null, CancellationToken.None)).Single().Name);
+    }
+
+    [TestMethod]
     public async Task AFolderNamedSinceItsParentWasLastListedIsStillFound()
     {
         var fake = GitLabSeed.Lab();

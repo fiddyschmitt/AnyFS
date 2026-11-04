@@ -214,7 +214,7 @@ internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(n
 
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
-        var project = await source.ProjectAsync(Project.Id, ct).ConfigureAwait(false);
+        var project = await source.ProjectAsync(Project, ct).ConfigureAwait(false);
         var settings = source.Settings;
         var sections = new List<GlNode>();
         if (project.RepositoryReadable)

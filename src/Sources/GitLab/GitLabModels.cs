@@ -79,6 +79,9 @@ internal sealed record GlProject(
     /// </summary>
     public bool RepositoryReadable => Repository && !string.IsNullOrEmpty(DefaultBranch);
 
+    /// <summary>Whether this is all GitLab tells of a project: the API's simple form leaves out its features and more.</summary>
+    public bool Whole { get; init; }
+
     public static GlProject Parse(JsonElement e)
     {
         var ns = e.Obj("namespace");
@@ -98,7 +101,10 @@ internal sealed record GlProject(
             On(e, "merge_requests_access_level", "merge_requests_enabled"),
             On(e, "wiki_access_level", "wiki_enabled"),
             On(e, "builds_access_level", "jobs_enabled"),
-            On(e, "releases_access_level", null));
+            On(e, "releases_access_level", null))
+        {
+            Whole = e.TryGetProperty("repository_access_level", out _),
+        };
     }
 
     /// <summary>
