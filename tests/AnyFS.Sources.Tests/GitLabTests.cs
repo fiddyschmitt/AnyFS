@@ -682,6 +682,53 @@ public class GitLabSourceTests
         Assert.IsTrue(source.Counters.FilesKnown > 0);
     }
 
+    /// <summary>Every answer a little late, so a walk outlasts a short refresh interval, as a big server's outlasts the usual one.</summary>
+    private sealed class LateAnswers(HttpMessageHandler inner, int ms) : DelegatingHandler(inner)
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            await Task.Delay(ms, cancellationToken);
+            return await base.SendAsync(request, cancellationToken);
+        }
+    }
+
+    [TestMethod]
+    public async Task AWalkAsksForAGroupOnceHoweverLongItTakes()
+    {
+        // each folder used to be found by asking for what is above it again once the refresh interval had passed: a group of
+        // thousands of projects, its 35 pages, every minute, and a walk that hardly moved once those took longer than the minute
+        var fake = GitLabSeed.Lab();
+        var settings = GitLabSeed.Settings(fake.Server + "/anyfs");
+        settings.RefreshSeconds = 1;
+        settings.Concurrency = 2;
+        var source = new GitLabSource(settings, new GitLabStandIn(() => new LateAnswers(fake.Handler(), 60)));
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        await using var _s = source;
+        var clock = Stopwatch.StartNew();
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.IsTrue(clock.Elapsed > TimeSpan.FromSeconds(3), $"the walk outlasted the interval: {clock.Elapsed}");
+        var groups = fake.Requests.Where(r => r.Contains("/groups/", StringComparison.Ordinal) && r.Contains("/projects?", StringComparison.Ordinal)).ToList();
+        Assert.AreEqual(2, groups.Count, "anyfs and anyfs/tools, once each: " + string.Join("; ", groups.Take(8)));
+    }
+
+    [TestMethod]
+    public async Task AFolderNamedSinceItsParentWasLastListedIsStillFound()
+    {
+        var fake = GitLabSeed.Lab();
+        var team = fake.AddGroup("team", "Team", null, fake.UserNamed("tester"));
+        fake.AddProject(team, "first", "First").Commit("main", new Dictionary<string, byte[]> { ["a.txt"] = Encoding.UTF8.GetBytes("a") });
+        var settings = GitLabSeed.Settings(fake.Server + "/team");
+        settings.RefreshSeconds = 1;
+        var (source, _) = await StartAsync(fake, settings);
+        await using var _s = source;
+        Assert.AreEqual("first", (await ListAsync(source, "")).Single().Name);
+
+        fake.AddProject(team, "newer", "Newer").Commit("main", new Dictionary<string, byte[]> { ["b.txt"] = Encoding.UTF8.GetBytes("bb") });
+        await Task.Delay(1100);
+        await using var file = await source.OpenAsync("newer/files/b.txt", VfsOpenMode.Read, CancellationToken.None);
+        Assert.AreEqual(2, file.Length, "not in what the group last listed: it is asked for again");
+    }
+
     [TestMethod]
     public async Task TheCountShowsEachFolderItGoesThrough()
     {

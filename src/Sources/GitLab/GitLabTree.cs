@@ -30,6 +30,12 @@ internal abstract class GlFolder(string name, DateTimeOffset? modified = null, D
     /// </summary>
     public virtual bool Walked => true;
 
+    /// <summary>
+    /// Whether what it last listed is good for finding the folders in it (<see cref="GitLabSource.ResolveAsync"/>): the way down to a
+    /// project, whose folders ask for what they hold themselves. Not an issue's, say: its folders are made from what was listed.
+    /// </summary>
+    public virtual bool FoundFromLastListing => false;
+
     public abstract Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct);
 }
 
@@ -62,6 +68,8 @@ internal sealed class TextFile(string name, byte[] content, DateTimeOffset? modi
 /// </summary>
 internal sealed class ServerRoot() : GlFolder("")
 {
+    public override bool FoundFromLastListing => true;
+
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
         => NamespaceFolder.Children(await source.ServerListingAsync(ct).ConfigureAwait(false), "");
 }
@@ -69,6 +77,8 @@ internal sealed class ServerRoot() : GlFolder("")
 /// <summary>A namespace on the way to projects the server's listing names, itself no group the listing names.</summary>
 internal sealed class NamespaceFolder(string fullPath, string name) : GlFolder(name)
 {
+    public override bool FoundFromLastListing => true;
+
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
         => Children(await source.ServerListingAsync(ct).ConfigureAwait(false), fullPath);
 
@@ -161,6 +171,8 @@ internal sealed class GroupFolder(GlGroup group, string name) : GlFolder(name, n
 {
     public GlGroup Group { get; } = group;
 
+    public override bool FoundFromLastListing => true;
+
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
         var (subgroups, projects) = await source.GroupContentsAsync(Group, ct).ConfigureAwait(false);
@@ -197,6 +209,8 @@ internal sealed class GroupFolder(GlGroup group, string name) : GlFolder(name, n
 internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(name, project.LastActivity, project.Created)
 {
     public GlProject Project { get; } = project;
+
+    public override bool FoundFromLastListing => true;
 
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {

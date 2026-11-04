@@ -20,6 +20,10 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     // GraphQL size queries (a hundred files each) at once for one folder or one whole tree
     private const int SizeQueriesAtOnce = 4;
 
+    // how many folders' last listings are remembered at most (ResolveAsync); past that they start again
+    private const int MostFoldersRemembered = 200_000;
+
+    private readonly ConcurrentDictionary<string, IReadOnlyList<GlNode>> _lastListed = new(StringComparer.OrdinalIgnoreCase);
     private readonly GitLabSettings _settings;
     private readonly GitLabStandIn? _standIn;
     private readonly CancellationTokenSource _stopping = new();
@@ -170,10 +174,27 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             throw VfsException.NotADirectory(path);
         }
 
-        foreach (var child in await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false))
+        foreach (var child in await ListedAsync(folder, VfsPath.Normalize(path), ct).ConfigureAwait(false))
         {
             yield return child.Entry;
         }
+    }
+
+    /// <summary>A folder's children, through the caches below, remembered as what the folder last listed.</summary>
+    private async Task<IReadOnlyList<GlNode>> ListedAsync(GlFolder folder, string path, CancellationToken ct)
+    {
+        var children = await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false);
+        if (_settings.Keeps && folder.FoundFromLastListing)
+        {
+            if (_lastListed.Count >= MostFoldersRemembered)
+            {
+                _lastListed.Clear();
+            }
+
+            _lastListed[path] = children;
+        }
+
+        return children;
     }
 
     public override async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct)
@@ -187,8 +208,13 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         return node is GlFile file ? await Guard(() => file.OpenAsync(this, ct)).ConfigureAwait(false) : throw VfsException.IsADirectory(path);
     }
 
-    /// <summary>The node at <paramref name="path"/>, found a listing at a time from the root (each through the caches).</summary>
-    private async Task<GlNode> ResolveAsync(string path, CancellationToken ct)
+    /// <summary>
+    /// The node at <paramref name="path"/>, found a listing at a time from the root: with listings kept, on the way down to a
+    /// project, from what each folder last listed where that names it, so that a folder deep in a big group does not ask for
+    /// the group's thousands of projects again each time the refresh interval has passed; else through the caches. A listing
+    /// that took longer to read than the interval was stale as it arrived, and a walk through such a group hardly moved.
+    /// </summary>
+    internal async Task<GlNode> ResolveAsync(string path, CancellationToken ct)
     {
         GlNode node = _root ?? throw VfsException.Unavailable("GitLab is not signed in to yet");
         var normalized = VfsPath.Normalize(path);
@@ -197,6 +223,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             return node;
         }
 
+        var at = "";
         foreach (var segment in VfsPath.Split(normalized))
         {
             if (node is not GlFolder folder)
@@ -204,14 +231,17 @@ public sealed partial class GitLabSource : SourceBase, ICountable
                 throw VfsException.NotADirectory(path);
             }
 
-            var children = await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false);
-            node = children.FirstOrDefault(c => c.Name.Equals(segment, StringComparison.OrdinalIgnoreCase))
-                ?? children.OfType<TicketFolder>().FirstOrDefault(t => TicketFolder.SameTicket(t.Name, segment))
-                ?? throw VfsException.NotFound(path);
+            var known = _settings.Keeps && _lastListed.TryGetValue(at, out var last) ? Child(last, segment) : null;
+            node = known ?? Child(await ListedAsync(folder, at, ct).ConfigureAwait(false), segment) ?? throw VfsException.NotFound(path);
+            at = VfsPath.Join(at, segment);
         }
 
         return node;
     }
+
+    private static GlNode? Child(IReadOnlyList<GlNode> children, string name)
+        => children.FirstOrDefault(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            ?? children.OfType<TicketFolder>().FirstOrDefault(t => TicketFolder.SameTicket(t.Name, name));
 
     /// <summary>Runs a request to GitLab, marking the source Degraded while GitLab cannot be reached and Ready again once it answers.</summary>
     private async Task<T> Guard<T>(Func<Task<T>> work)
@@ -459,8 +489,8 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             return null;
         }
 
-        var left = (await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false))
-            .OfType<GlFolder>().Where(f => !f.Walked).Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
+        var children = _settings.Keeps && _lastListed.TryGetValue(VfsPath.Normalize(path), out var last) ? last : await ListedAsync(folder, VfsPath.Normalize(path), ct).ConfigureAwait(false);
+        var left = children.OfType<GlFolder>().Where(f => !f.Walked).Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
         return left.Count == 0 ? null : left;
     }
 
