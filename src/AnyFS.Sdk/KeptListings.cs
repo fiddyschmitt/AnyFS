@@ -497,6 +497,7 @@ public sealed class KeptListings : IAsyncDisposable
         {
             await foreach (var (folder, heldAlone) in pending.Reader.ReadAllAsync(ct).ConfigureAwait(false))
             {
+                CountedFolder? at = null;
                 try
                 {
                     // nobody has asked for it, and nothing says to read what nobody asked for
@@ -508,7 +509,7 @@ public sealed class KeptListings : IAsyncDisposable
                     IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>? tree;
                     IReadOnlyList<VfsEntry> entries;
                     await walk.InFlight.WaitAsync(ct).ConfigureAwait(false);
-                    using var at = walk.Counters.EnterFolder(folder);
+                    at = walk.Counters.EnterFolder(folder);
                     try
                     {
                         // the folder's stamp first: one whose stamp holds keeps its listing and every listing held below it
@@ -516,6 +517,7 @@ public sealed class KeptListings : IAsyncDisposable
                         var (read, stamp) = await StampAsync(folder, held, ct).ConfigureAwait(false);
                         if (!walk.Full && read && held is not null && stamp == held)
                         {
+                            at.Kept();
                             await KeepHeldAsync(folder, heldAlone, walk, Enqueue, ct).ConfigureAwait(false);
                             continue;
                         }
@@ -529,7 +531,12 @@ public sealed class KeptListings : IAsyncDisposable
                             {
                                 Cache.Keep(path, listing, path == folder ? stamp : null);
                                 walk.Counters.Add(listing.Count(e => !e.IsDirectory), listing.Count(e => e.IsDirectory));
+                                at.Listed(listing.Count);
                             }
+                        }
+                        else
+                        {
+                            at.Listed(entries.Count);
                         }
                     }
                     finally
@@ -581,8 +588,9 @@ public sealed class KeptListings : IAsyncDisposable
 
                     walk.Counters.Add(files, folders);
                 }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                catch (OperationCanceledException ex) when (ct.IsCancellationRequested)
                 {
+                    at?.Failed(ex, ct);
                     throw;
                 }
                 catch (Exception ex)
@@ -593,10 +601,12 @@ public sealed class KeptListings : IAsyncDisposable
                         Interlocked.Increment(ref walk.Failed);
                     }
 
+                    at?.Failed(ex, ct);
                     _logger.LogDebug("{Name}: the walk left out '{Folder}': {Error}", _options.Name, folder, ex.Message);
                 }
                 finally
                 {
+                    at?.Dispose();
                     if (Interlocked.Decrement(ref outstanding) == 0)
                     {
                         pending.Writer.TryComplete();

@@ -311,13 +311,19 @@ internal sealed class AddressBooks
                 continue;
             }
 
+            using var at = counters.EnterFolder(VfsPath.Join(MailNames.AddressBooksFolder, folder.Name));
             try
             {
-                using var at = counters.EnterFolder(VfsPath.Join(MailNames.AddressBooksFolder, folder.Name));
-                await MembersAsync(folder.List, ct).ConfigureAwait(false);
+                at.Listed((await MembersAsync(folder.List, ct).ConfigureAwait(false)).Count);
+            }
+            catch (OperationCanceledException ex) when (ct.IsCancellationRequested || _stopping.IsCancellationRequested)
+            {
+                at.Failed(ex, ct.IsCancellationRequested ? ct : _stopping);
+                throw;
             }
             catch (Exception ex) when (!ct.IsCancellationRequested && !_stopping.IsCancellationRequested)
             {
+                at.Failed(ex, ct);
                 _logger.LogWarning("outlook: the address list {List} of {Mailbox} could not be read for the count; it is read when opened: {Error}", folder.List.Name, _mailbox, ex.Message);
             }
         }

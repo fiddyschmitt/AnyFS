@@ -101,6 +101,7 @@ public sealed class SourceCounters
 
     // the folders a count is in now, the one it went into first at the head
     private readonly LinkedList<string> _folders = new();
+    private IFolderWatcher? _watcher;
 
     public long FilesKnown => Interlocked.Read(ref _files);
 
@@ -140,32 +141,86 @@ public sealed class SourceCounters
     }
 
     /// <summary>
-    /// A count has gone into a folder, until what this returns is disposed (<see cref="CurrentFolder"/>). <see cref="TreeCount"/>
-    /// and <see cref="KeptListings"/> do this for their walks; call it from a walk of your own. A walk that is no count of
-    /// the source's counts into counters of its own, and does not show. Cheap enough to call for every folder of a fast disk.
+    /// Who is told of each folder a count goes into: set by the host while it shows a source's count (each folder is a row
+    /// of the Operations tab), null otherwise. A source has no need of it.
     /// </summary>
-    public IDisposable EnterFolder(string folder)
+    public IFolderWatcher? FolderWatcher
     {
-        ArgumentNullException.ThrowIfNull(folder);
-        lock (_folders)
-        {
-            return new FolderEntered(this, _folders.AddLast(folder));
-        }
+        get => Volatile.Read(ref _watcher);
+        set => Volatile.Write(ref _watcher, value);
     }
 
-    private sealed class FolderEntered(SourceCounters counters, LinkedListNode<string> node) : IDisposable
+    /// <summary>
+    /// A count has gone into a folder, until what this returns is disposed (<see cref="CurrentFolder"/>, and a row of the
+    /// Operations tab). <see cref="TreeCount"/> and <see cref="KeptListings"/> do this for their walks; call it from a walk of
+    /// your own. A walk that is no count of the source's counts into counters of its own, and does not show. Cheap enough to
+    /// call for every folder of a fast disk.
+    /// </summary>
+    public CountedFolder EnterFolder(string folder)
     {
-        public void Dispose()
+        ArgumentNullException.ThrowIfNull(folder);
+        var watched = FolderWatcher?.Entered(folder);
+        lock (_folders)
         {
-            lock (counters._folders)
-            {
-                if (node.List is not null)
-                {
-                    counters._folders.Remove(node);
-                }
-            }
+            return new CountedFolder(_folders, _folders.AddLast(folder), watched);
         }
     }
+}
+
+/// <summary>A folder a count is in, from <see cref="SourceCounters.EnterFolder"/>: say how it went, and dispose it when it is done.</summary>
+public sealed class CountedFolder : IDisposable
+{
+    private readonly LinkedList<string> _folders;
+    private readonly LinkedListNode<string> _node;
+    private readonly IWatchedFolder? _watched;
+
+    internal CountedFolder(LinkedList<string> folders, LinkedListNode<string> node, IWatchedFolder? watched)
+    {
+        _folders = folders;
+        _node = node;
+        _watched = watched;
+    }
+
+    /// <summary>How many entries the folder holds, or all those below it where it was read at once.</summary>
+    public void Listed(long entries) => _watched?.Listed(entries);
+
+    /// <summary>The folder was not read: what was held of it still holds.</summary>
+    public void Kept() => _watched?.Kept();
+
+    /// <summary>The folder could not be read; <paramref name="ct"/> tells a count stopped from a failure.</summary>
+    public void Failed(Exception error, CancellationToken ct = default) => _watched?.Failed(error, ct);
+
+    public void Dispose()
+    {
+        lock (_folders)
+        {
+            if (_node.List is not null)
+            {
+                _folders.Remove(_node);
+            }
+        }
+
+        _watched?.Done();
+    }
+}
+
+/// <summary>Who follows a count's folders (<see cref="SourceCounters.FolderWatcher"/>): the host.</summary>
+public interface IFolderWatcher
+{
+    /// <summary>A count has gone into a folder ("" for the root); what this returns hears how it goes.</summary>
+    IWatchedFolder Entered(string folder);
+}
+
+/// <summary>One folder of a count, as its watcher hears of it: what <see cref="CountedFolder"/> is told, then <see cref="Done"/>.</summary>
+public interface IWatchedFolder
+{
+    void Listed(long entries);
+
+    void Kept();
+
+    void Failed(Exception error, CancellationToken ct);
+
+    void Done();
 }
 
 public enum ComponentHealth

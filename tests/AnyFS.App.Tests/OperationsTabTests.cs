@@ -317,6 +317,66 @@ public class OperationsTabTests
     }
 
     [TestMethod]
+    public void ACountStaysAboveTheFoldersItGoesThroughWhateverTheSort()
+    {
+        var count = Begin(Alpha, OperationKind.Count, "");
+        count.Follow(new SourceCounters());
+        var folders = Enumerable.Range(0, OperationsTabViewModel.MaxRows + 5).Select(i => Begin(Alpha, OperationKind.CountFolder, $"group/p{i:0000}", TimeSpan.FromMilliseconds(1))).ToList();
+        _tab.Refresh();
+        Assert.AreEqual("Count files", _tab.Rows[0].Operation, "at the top, newest first or not, and not what the cap on rows cuts");
+        Assert.AreEqual($"group/p{OperationsTabViewModel.MaxRows + 4:0000}", _tab.Rows[1].Path, "then the newest");
+        Assert.AreEqual(OperationsTabViewModel.MaxRows, _tab.Rows.Count);
+
+        foreach (var column in Enum.GetNames<OperationColumn>())
+        {
+            _tab.SortCommand.Execute(column);
+            Assert.AreEqual("Count files", _tab.Rows[0].Operation, $"sorted by {column}");
+            _tab.SortCommand.Execute(column);
+            Assert.AreEqual("Count files", _tab.Rows[0].Operation, $"sorted by {column}, the other way");
+        }
+
+        foreach (var folder in folders)
+        {
+            folder.Complete();
+        }
+
+        _tab.Refresh();
+        Assert.AreEqual("Count files", _tab.Rows[0].Operation);
+    }
+
+    [TestMethod]
+    public void AFolderOfACountSaysHowItWent()
+    {
+        var listed = Begin(Alpha, OperationKind.CountFolder, "group/a/files");
+        listed.AddItems(12);
+        listed.Complete();
+        var one = Begin(Alpha, OperationKind.CountFolder, "group/b");
+        one.AddItems(1);
+        one.Complete();
+        var kept = Begin(Alpha, OperationKind.CountFolder, "group/c");
+        kept.Detail = "kept as it was";
+        kept.Complete();
+        var running = Begin(Alpha, OperationKind.CountFolder, "group/d");
+        var refused = Begin(Alpha, OperationKind.CountFolder, "group/e");
+        refused.Fail(VfsException.AccessDenied("group/e"));
+        var root = Begin(Alpha, OperationKind.CountFolder, "");
+        _tab.Refresh();
+        var rows = _tab.Rows.ToDictionary(r => r.Path);
+        Assert.AreEqual("Count folder", rows["group/a/files"].Operation);
+        Assert.AreEqual("12 entries", rows["group/a/files"].Detail);
+        Assert.AreEqual("OK", rows["group/a/files"].Result);
+        Assert.AreEqual("1 entry", rows["group/b"].Detail);
+        Assert.AreEqual("kept as it was", rows["group/c"].Detail);
+        Assert.AreEqual("", rows["group/d"].Detail);
+        Assert.AreEqual("Running", rows["group/d"].Result);
+        Assert.AreEqual("access to 'group/e' was denied", rows["group/e"].Result);
+        Assert.AreEqual(OperationOutcome.Failed, rows["group/e"].Outcome);
+        Assert.IsTrue(rows.ContainsKey("(root)"), "the root is named as for any path");
+        running.Complete();
+        root.Complete();
+    }
+
+    [TestMethod]
     public void ACountThatDidNotFinishSaysItsTotalWasNotTheEndOfIt()
     {
         var counters = new SourceCounters();

@@ -91,6 +91,7 @@ public sealed partial class OperationRowViewModel(long id) : ObservableObject
         OperationKind.ReadFile or OperationKind.WriteFile => record.Bytes > 0 ? Format.Bytes(record.Bytes) : record.Detail ?? "",
         OperationKind.List => record.Items > 0 || record.Outcome == OperationOutcome.Succeeded ? $"{record.Items:N0} {(record.Items == 1 ? "entry" : "entries")}" : record.Detail ?? "",
         OperationKind.Count => Format.Files(record.Items, complete: record.Outcome == OperationOutcome.Succeeded),
+        OperationKind.CountFolder => record.Detail ?? (record.Items > 0 ? $"{record.Items:N0} {(record.Items == 1 ? "entry" : "entries")}" : ""),
         _ => record.Detail ?? "",
     };
 
@@ -331,7 +332,9 @@ public sealed partial class OperationsTabViewModel : ObservableObject
 
     /// <summary>
     /// The column's order, then newest first among equals, so a sort by Source still reads top-down in time. Started goes by
-    /// the id, which ascends in the order the operations began: two begun in one tick of the clock still have an order.
+    /// the id, which ascends in the order the operations began: two begun in one tick of the clock still have an order. A
+    /// count stays above the rest whatever the sort, and so within the cap on rows: the folders it goes through come and go
+    /// by the hundred, and would push it out of sight.
     /// </summary>
     private static Comparison<OperationRecord> Comparison(OperationColumn column, bool descending)
     {
@@ -347,6 +350,12 @@ public sealed partial class OperationsTabViewModel : ObservableObject
         };
         return (a, b) =>
         {
+            var counts = (b.Kind == OperationKind.Count).CompareTo(a.Kind == OperationKind.Count);
+            if (counts != 0)
+            {
+                return counts;
+            }
+
             var c = key(a, b);
             if (descending)
             {

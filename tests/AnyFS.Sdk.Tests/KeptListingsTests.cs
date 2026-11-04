@@ -152,6 +152,49 @@ public class KeptListingsTests
     }
 
     [TestMethod]
+    public async Task AWatcherHearsOfEveryFolderTheCountGoesThrough()
+    {
+        var watcher = new RecordingFolderWatcher();
+        var counters = new SourceCounters { FolderWatcher = watcher };
+        _failing["photos"] = new VfsException(VfsError.AccessDenied, "refused");
+        await using var kept = Kept(counters, new KeptListingsOptions { WalkEvery = TimeSpan.Zero, Parallelism = 1, MaxInFlight = 1 });
+        await kept.CountAsync(CancellationToken.None);
+        CollectionAssert.AreEquivalent(
+            new[] { "in (root)", "listed (root) 3", "done (root)", "in docs", "listed docs 3", "done docs", "in docs/sub", "listed docs/sub 1", "done docs/sub", "in photos", "failed photos: refused", "done photos" },
+            watcher.Lines.ToList(),
+            string.Join("; ", watcher.Lines));
+    }
+
+    [TestMethod]
+    public async Task AWatcherHearsOfAFolderReadWholeAndOfOneKeptByItsStamp()
+    {
+        _stamps["docs"] = "v1";
+        var options = new KeptListingsOptions
+        {
+            WalkEvery = TimeSpan.Zero,
+            Parallelism = 1,
+            MaxInFlight = 1,
+            StampOf = StampOf,
+            ListTree = (path, _) => Task.FromResult<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>(path != "photos" ? null : new Dictionary<string, IReadOnlyList<VfsEntry>>
+            {
+                ["photos"] = [VfsEntry.Directory("old"), VfsEntry.File("p1.jpg", 100)],
+                ["photos/old"] = [VfsEntry.File("p0.jpg", 50)],
+            }),
+        };
+        await using var kept = Kept(new SourceCounters(), options);
+
+        var first = new RecordingFolderWatcher();
+        await kept.WalkAsync(new SourceCounters { FolderWatcher = first }, full: false, CancellationToken.None);
+        CollectionAssert.Contains(first.Lines.ToList(), "listed photos 3", "the folder and what is below it, read at once: " + string.Join("; ", first.Lines));
+        CollectionAssert.Contains(first.Lines.ToList(), "listed docs 3");
+
+        var second = new RecordingFolderWatcher();
+        await kept.WalkAsync(new SourceCounters { FolderWatcher = second }, full: false, CancellationToken.None);
+        CollectionAssert.Contains(second.Lines.ToList(), "kept docs", "its stamp holds: " + string.Join("; ", second.Lines));
+        Assert.IsFalse(second.Lines.Contains("in docs/sub"), "what is held below it is kept with it");
+    }
+
+    [TestMethod]
     public async Task AFolderThatCannotBeListedLeavesTheCountInNoFolder()
     {
         var counters = new SourceCounters();

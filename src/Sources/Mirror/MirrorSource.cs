@@ -113,12 +113,14 @@ public sealed class MirrorSource : SourceBase, ICountable
             {
                 foreach (var (real, chain) in folders.GetConsumingEnumerable(ct))
                 {
+                    using var at = Counters.EnterFolder(chain);
+                    long entries = 0;
                     try
                     {
-                        using var at = Counters.EnterFolder(chain);
                         CountListing?.Invoke(root, real);
                         foreach (var entry in new DirectoryInfo(real).EnumerateFileSystemInfos("*", Enumeration))
                         {
+                            entries++;
                             if (entry.Attributes.HasFlag(FileAttributes.Directory))
                             {
                                 var childChain = chain.Length == 0 ? entry.Name : chain + "/" + entry.Name;
@@ -149,9 +151,17 @@ public sealed class MirrorSource : SourceBase, ICountable
                                 ct.ThrowIfCancellationRequested();
                             }
                         }
+
+                        at.Listed(entries);
+                    }
+                    catch (OperationCanceledException ex)
+                    {
+                        at.Failed(ex, ct);
+                        throw;
                     }
                     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                     {
+                        at.Failed(ex, ct);
                         Logger.LogDebug("mirror: count skipped {Path}: {Error}", real, ex.Message);
                     }
                     finally

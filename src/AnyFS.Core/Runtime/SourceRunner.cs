@@ -269,15 +269,22 @@ public sealed class SourceRunner : IAsyncDisposable
     /// The opt-in "Count files on start" walk (spec 6.8), with the spinner on: the source's own
     /// <see cref="ICountable.CountFilesAsync"/> when it has one, else the host's walk, several folders listed at a time.
     /// One Count operation in the tracker, over the source's own count or the walk's listings; it follows the source's
-    /// counters, so its row says how far it has got, which is all there is to see of a source that walks inside itself.
+    /// counters, so its row says how far it has got. A source that walks inside itself is out of the tracker's sight, so each
+    /// folder it says it is in gets a row of its own; the host's walk lists through the tracked source, which gives it those.
     /// </summary>
     private async Task CountAsync(ISource source, ICountable? countable, CancellationToken ct)
     {
         var healthy = Handle.Status;
         Handle.Status = new ComponentStatus(ComponentState.Enumerating, "Counting files");
         source.Counters.SetState(EnumerationState.InProgress);
-        var op = (source as TrackedSource)?.Begin(OperationKind.Count);
+        var tracked = source as TrackedSource;
+        var op = tracked?.Begin(OperationKind.Count);
         op?.Follow(source.Counters);
+        if (countable is not null)
+        {
+            source.Counters.FolderWatcher = tracked?.CountFolderRows();
+        }
+
         try
         {
             if (countable is not null)
@@ -298,6 +305,7 @@ public sealed class SourceRunner : IAsyncDisposable
         }
         finally
         {
+            source.Counters.FolderWatcher = null;
             if (source.Counters.State != EnumerationState.Complete)
             {
                 source.Counters.SetState(EnumerationState.Unknown);

@@ -110,8 +110,10 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   `Complete` or not, so that it knows the option is on (return at once when nothing is left); what
   it says with `Context.ReportProgress` while it counts shows on its tile ("Counting files: 1,200
   of 20,000"). Its count is one row in the Operations tab, showing the running total and the folder
-  it has been in longest of those it is in now: `Counters.EnterFolder(path)` says so for a walk of
-  your own, and `TreeCount` and `KeptListings` do it for theirs. When `CountFilesAsync` returns the
+  it has been in longest of those it is in now, with a row of its own for each folder it goes
+  through. For a walk of your own, `using var at = Counters.EnterFolder(path)` says which folder it
+  is in, and `at.Listed(entries)` and `at.Failed(error)` how it went; `TreeCount` and `KeptListings`
+  do it for theirs. When `CountFilesAsync` returns the
   count is `Complete`, unless the source set `Unknown` itself because some of it could not be
   counted. A source that is slow to list should keep what that walk finds, so its folders open at
   once afterwards: `KeptListings` (below) does the walk and the keeping, and its `CountAsync` is

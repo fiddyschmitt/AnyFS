@@ -211,7 +211,7 @@ internal static class Commands
     private static string Data(OperationKindStats o) => o.Kind switch
     {
         OperationKind.ReadFile or OperationKind.WriteFile => o.Bytes > 0 ? Format.Bytes(o.Bytes) : "",
-        OperationKind.List => o.Items > 0 ? $"{o.Items:N0} entries" : "",
+        OperationKind.List or OperationKind.CountFolder => o.Items > 0 ? $"{o.Items:N0} entries" : "",
         OperationKind.Count => o.Items > 0 ? $"{o.Items:N0} files" : "",
         _ => "",
     };

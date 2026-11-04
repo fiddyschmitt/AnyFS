@@ -312,6 +312,25 @@ public class OutlookItemListingTests
         }
     }
 
+    [TestMethod]
+    public async Task TheCountShowsEachBatchOfAFolderItGoesThrough()
+    {
+        var fake = WithMay(out _);
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            var watcher = new RecordingFolderWatcher();
+            source.Counters.FolderWatcher = watcher;
+            await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+            var lines = watcher.Lines.ToList();
+            var listed = lines.Where(l => l.StartsWith($"listed {May} ", StringComparison.Ordinal)).ToList();
+            Assert.IsTrue(listed.Count >= 2, string.Join("; ", lines));
+            Assert.AreEqual(20, listed.Sum(l => int.Parse(l.Split(' ')[^1], System.Globalization.CultureInfo.InvariantCulture)), "May's twenty messages: " + string.Join("; ", listed));
+            Assert.AreEqual(0, lines.Count(l => l.StartsWith("failed ", StringComparison.Ordinal)), string.Join("; ", lines));
+        }
+    }
+
     /// <summary>
     /// A count cut short as the source stops (the window closed while two mailboxes were counting, 26-Oct-2026) waits for
     /// the batches it had started: they gave their slots back after the pass had let the slots go, and each of those

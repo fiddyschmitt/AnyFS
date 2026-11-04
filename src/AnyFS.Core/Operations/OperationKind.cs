@@ -20,6 +20,8 @@ public enum OperationKind
     GetSpace,
     /// <summary>"Count files on start": the source's own count or the host's walk of its tree.</summary>
     Count,
+    /// <summary>One folder a source that counts itself is going through for its count (<see cref="Sdk.SourceCounters.EnterFolder"/>).</summary>
+    CountFolder,
     /// <summary><see cref="IAsyncDisposable.DisposeAsync"/> of the source.</summary>
     Stop,
 }
@@ -49,6 +51,7 @@ public static class OperationKindExtensions
         OperationKind.SetTimes => "Set times",
         OperationKind.GetSpace => "Get space",
         OperationKind.Count => "Count files",
+        OperationKind.CountFolder => "Count folder",
         OperationKind.Stop => "Stop",
         _ => kind.ToString(),
     };

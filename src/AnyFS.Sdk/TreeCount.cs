@@ -37,9 +37,9 @@ public static class TreeCount
         {
             await foreach (var dir in pending.Reader.ReadAllAsync(stop.Token).ConfigureAwait(false))
             {
+                using var at = counters.EnterFolder(dir);
                 try
                 {
-                    using var at = counters.EnterFolder(dir);
                     var (files, folders) = await listFolder(dir, stop.Token).ConfigureAwait(false);
                     foreach (var folder in folders)
                     {
@@ -48,13 +48,17 @@ public static class TreeCount
                     }
 
                     counters.Add(files, folders.Count);
+                    at.Listed(files + folders.Count);
                 }
                 catch (VfsException ex)
                 {
+                    at.Failed(ex, stop.Token);
                     skipped?.Invoke(dir, ex);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    at.Failed(ex, stop.Token);
+
                     // anything else ends the walk: the other workers stop at their next folder
                     await stop.CancelAsync().ConfigureAwait(false);
                     throw;

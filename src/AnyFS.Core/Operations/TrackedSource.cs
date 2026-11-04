@@ -38,6 +38,25 @@ public sealed class TrackedSource : ISource
     /// <summary>Begins an operation of this source, named as the source is now.</summary>
     public Operation Begin(OperationKind kind, string path = "", string? detail = null) => _tracker.Begin(_handle.Id, _handle.Name, kind, path, detail);
 
+    /// <summary>A row for each folder the source goes through in a count of its own, which its calls here do not show (<see cref="SourceCounters.FolderWatcher"/>).</summary>
+    public IFolderWatcher CountFolderRows() => new FolderRows(this);
+
+    private sealed class FolderRows(TrackedSource source) : IFolderWatcher
+    {
+        public IWatchedFolder Entered(string folder) => new FolderRow(source.Begin(OperationKind.CountFolder, folder));
+    }
+
+    private sealed class FolderRow(Operation op) : IWatchedFolder
+    {
+        public void Listed(long entries) => op.AddItems(entries);
+
+        public void Kept() => op.Detail = "kept as it was";
+
+        public void Failed(Exception error, CancellationToken ct) => op.Fail(error, ct);
+
+        public void Done() => op.Complete();
+    }
+
     public Task InitialiseAsync(ISourceContext context, CancellationToken ct)
         => TrackAsync(Begin(OperationKind.Start), () => Inner.InitialiseAsync(context, ct), ct);
 

@@ -683,6 +683,30 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
+    public async Task TheCountShowsEachFolderItGoesThrough()
+    {
+        var fake = GitLabSeed.Lab();
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"));
+        await using var _s = source;
+        var watcher = new RecordingFolderWatcher();
+        source.Counters.FolderWatcher = watcher;
+        await source.CountFilesAsync(CancellationToken.None);
+        var lines = watcher.Lines.ToList();
+        var shown = string.Join("; ", lines.Take(40));
+        foreach (var folder in new[] { "(root)", "docs", "docs/issues", "docs/wiki", "tools", "tools/app", "tools/app/files" })
+        {
+            CollectionAssert.Contains(lines, $"in {folder}", shown);
+            CollectionAssert.Contains(lines, $"done {folder}", shown);
+        }
+
+        Assert.AreEqual(lines.Count(l => l.StartsWith("in ", StringComparison.Ordinal)), lines.Count(l => l.StartsWith("done ", StringComparison.Ordinal)), "every folder gone into is done");
+        var whole = lines.Single(l => l.StartsWith("listed tools/app/files ", StringComparison.Ordinal));
+        Assert.IsTrue(long.Parse(whole.Split(' ')[^1], System.Globalization.CultureInfo.InvariantCulture) > 258, $"the repository read at once, every folder of it: {whole}");
+        Assert.AreEqual(0, lines.Count(l => l.StartsWith("in tools/app/files/", StringComparison.Ordinal)), "no row for each of its folders: they cost no request");
+        Assert.AreEqual(0, lines.Count(l => l.StartsWith("failed ", StringComparison.Ordinal)), string.Join("; ", lines.Where(l => l.StartsWith("failed ", StringComparison.Ordinal))));
+    }
+
+    [TestMethod]
     public async Task TheCountWalksTheTreeAndKeepsWhatItFoundSoFoldersOpenAtOnce()
     {
         var fake = GitLabSeed.Lab();

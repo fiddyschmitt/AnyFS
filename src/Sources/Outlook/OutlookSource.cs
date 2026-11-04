@@ -911,6 +911,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                     var failure = await MakeAsync(taken, keepFiles: false).ConfigureAwait(false);
                     if (Systemic(failure))
                     {
+                        at.Failed(failure!.SourceException, ct);
                         Interlocked.CompareExchange(ref stopped, failure, null);
                         return;
                     }
@@ -920,6 +921,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                         tried.UnionWith(taken.Select(t => t.Node.Item!.Id));
                     }
 
+                    at.Listed(taken.Count);
                     listed(taken.Count);
                 }
                 finally

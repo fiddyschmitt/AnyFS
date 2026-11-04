@@ -79,7 +79,12 @@ public class SourceRunnerTests
         Assert.AreEqual(OperationOutcome.Running, row.Outcome);
         Assert.AreEqual("group/project/files", row.At);
         Assert.AreEqual(7, row.Items, "the total so far");
-        Assert.AreEqual(1, tracker.Recent().Count(r => r.Kind == OperationKind.Count), "still one row");
+        Assert.AreEqual(1, tracker.Recent().Count(r => r.Kind == OperationKind.Count), "one row for the count");
+
+        // and one for the folder it is going through
+        var folder = tracker.Recent().Single(r => r.Kind == OperationKind.CountFolder);
+        Assert.AreEqual("group/project/files", folder.Path);
+        Assert.AreEqual(OperationOutcome.Running, folder.Outcome);
 
         gate.SetResult();
         await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready after counting");
@@ -87,6 +92,22 @@ public class SourceRunnerTests
         row = tracker.Recent().Single(r => r.Kind == OperationKind.Count);
         Assert.AreEqual(9, row.Items, "the total as it ended");
         Assert.IsNull(row.At);
+        folder = tracker.Recent().Single(r => r.Kind == OperationKind.CountFolder);
+        Assert.AreEqual(OperationOutcome.Succeeded, folder.Outcome);
+        Assert.IsNull(runner.Handle.Current!.Counters.FolderWatcher, "nothing is told of a folder once the count is over");
+    }
+
+    [TestMethod]
+    public async Task TheHostsWalkShowsItsListingsAndNoRowsBesideThem()
+    {
+        var tracker = new OperationTracker();
+        await using var runner = Runner(new MemoryPluginSettings { Files = "a.txt=A;b/c.txt=C" }, countOnStart: true, operations: tracker);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Current?.Counters.State == EnumerationState.Complete, what: "counted");
+        await Wait.UntilAsync(() => tracker.Recent().Any(r => r.Kind == OperationKind.Count && r.Outcome == OperationOutcome.Succeeded), what: "the count over");
+        var rows = tracker.Recent();
+        Assert.AreEqual(2, rows.Count(r => r.Kind == OperationKind.List), "the root and b");
+        Assert.AreEqual(0, rows.Count(r => r.Kind == OperationKind.CountFolder), "its listings are its folders' rows");
     }
 
     [TestMethod]

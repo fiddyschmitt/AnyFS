@@ -230,6 +230,25 @@ public class TreeCountTests
     }
 
     [TestMethod]
+    public async Task AWatcherHearsOfEveryFolderTheCountGoesThrough()
+    {
+        var watcher = new RecordingFolderWatcher();
+        var counters = new SourceCounters { FolderWatcher = watcher };
+        await TreeCount.CountAsync(
+            (dir, _) => dir switch
+            {
+                "" => Task.FromResult((1L, (IReadOnlyList<string>)["open", "locked"])),
+                "locked" => throw VfsException.AccessDenied("locked"),
+                _ => Task.FromResult((3L, (IReadOnlyList<string>)[])),
+            },
+            counters, parallelism: 1, skipped: null, CancellationToken.None);
+        CollectionAssert.AreEqual(
+            new[] { "in (root)", "listed (root) 3", "done (root)", "in open", "listed open 3", "done open", "in locked", "failed locked: access to 'locked' was denied", "done locked" },
+            watcher.Lines.ToList(),
+            string.Join("; ", watcher.Lines));
+    }
+
+    [TestMethod]
     public async Task ASourcesOwnListingIsWalked()
     {
         var plugin = new MemoryPlugin();
