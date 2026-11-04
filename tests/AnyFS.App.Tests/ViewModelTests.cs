@@ -32,12 +32,18 @@ public class ViewModelTests
             FakeMountProvider.Mounts.Clear();
         }
 
+        _installable = new InstallableProvider();
+        await StartAsync();
+    }
+
+    /// <summary>A fresh engine over the settings on disk, as a start of the app, and the window's view models over it.</summary>
+    private async Task StartAsync()
+    {
         var registry = new PluginRegistry();
         registry.AddBuiltIn(new MemoryPlugin());
         registry.AddBuiltIn(new QuickPlugin());
         registry.AddBuiltIn(new NamedPlugin());
         registry.AddBuiltIn(new FakeMountProvider());
-        _installable = new InstallableProvider();
         registry.AddBuiltIn(_installable);
         _engine = new AnyFsEngine(_paths, registry, NullLoggerFactory.Instance);
         _engine.Load();
@@ -47,6 +53,13 @@ public class ViewModelTests
         _clipboard = new FakeClipboard();
         _vm = new MainViewModel(_engine, _dialogs, _opener, _clipboard);
         _vm.Refresh();
+    }
+
+    /// <summary>Closes the app and starts it again on the same settings: what is on disk comes back as loaded, not added.</summary>
+    private async Task RestartAsync()
+    {
+        await _engine.DisposeAsync();
+        await StartAsync();
     }
 
     [TestCleanup]
@@ -340,6 +353,57 @@ public class ViewModelTests
         await _vm.Operations.Last;
         _vm.Refresh();
         Assert.AreEqual(1, Collections.Mounts.Count);
+    }
+
+    /// <param name="loaded">Whether the collection and its mount were there when the app started (the user's case, 4-Nov-2026), or added since.</param>
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task RenamingACollectionMovesEveryOpenButtonToTheNewPath(bool loaded)
+    {
+        var work = await AddCollectionAsync("work");
+        var source = await AddSourceAsync("alpha", "a.txt=A", path: "mem");
+        var mount = await AddMountAsync(9);
+        if (loaded)
+        {
+            await RestartAsync();
+            work = Collections.Collections.Single(c => c.Name == "work");
+            Collections.SelectedCollection = work;
+            await Wait.UntilAsync(() => _engine.FindSourceRunner(source.Id)!.Handle.IsUsable, what: "alpha ready again");
+            await Wait.UntilAsync(() => _engine.FindCollectionRunner(work.Id)!.Mounts.Single().Mount is not null, what: "the mount up again");
+            _vm.Refresh();
+            source = Collections.Sources.Single(s => s.Name == "alpha");
+            mount = Collections.Mounts.Single(m => m.Name == "Fake");
+        }
+
+        Assert.AreEqual("fake://9/work/", ((MountOpenAction.Browser)mount.OpenTargets.Single().Action).Url);
+
+        Collections.SelectedCollection = work;
+        _dialogs.OnCollection = d =>
+        {
+            Assert.AreEqual("work", d.Name);
+            d.Name = "workplace";
+            return Task.FromResult(true);
+        };
+        await Collections.EditCollectionCommand.ExecuteAsync(null);
+        _vm.Refresh();
+
+        Assert.AreEqual("workplace", work.Name);
+        Assert.AreSame(work, Collections.SelectedCollection, "the renamed collection stays selected");
+        foreach (var (tile, what) in new (TileViewModel, string)[] { (work, "collection"), (source, "source"), (mount, "mount") })
+        {
+            Assert.IsTrue(tile.HasOneOpenTarget, $"the {what} tile's button");
+            var target = tile.OpenTargets.Single();
+            Assert.AreEqual("fake://9/workplace/", ((MountOpenAction.Browser)target.Action).Url, $"the {what} tile opens the new path");
+            Assert.AreEqual("fake://9/workplace/", target.Detail, $"the {what} tile's flyout detail");
+        }
+
+        source.OpenSingleCommand.Execute(null);
+        var (action, subPath) = _opener.Opened.Single();
+        Assert.AreEqual("fake://9/workplace/", ((MountOpenAction.Browser)action).Url);
+        Assert.AreEqual("mem", subPath);
+        Assert.AreEqual("fake://9/workplace/", mount.StatusText, "the mount's status line is the new access path");
+        Assert.AreEqual("fake://9/workplace/", mount.AccessPaths.Single().Value);
     }
 
     private async Task AddMountAsync2(int port)

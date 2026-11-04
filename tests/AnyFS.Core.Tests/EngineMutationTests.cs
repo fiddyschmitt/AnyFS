@@ -372,6 +372,30 @@ public class EngineMutationTests
     }
 
     [TestMethod]
+    public async Task RenamingACollectionRestartsMountsLoadedAtStartUnderTheNewNameToo()
+    {
+        Guid id;
+        await using (var first = await StartedAsync())
+        {
+            var work = await first.AddCollectionAsync("work");
+            id = work.Id;
+            await first.AddMountAsync(work.Id, "fake", "fake", true, false, new FakeMountSettings { Port = 5 });
+        }
+
+        // the mount comes from collections.json this time, as the window's do after a start
+        await using var engine = await StartedAsync();
+        var before = LiveMount("work");
+        Assert.AreEqual("fake://5/work/", before.AccessPaths.Single().Value);
+
+        await engine.RenameCollectionAsync(id, "workplace");
+        Assert.IsTrue(before.Stopped);
+        var after = LiveMount("workplace");
+        Assert.AreEqual("fake://5/workplace/", after.AccessPaths.Single().Value, "the mount serves under the new name");
+        Assert.AreEqual("workplace", after.Context!.Collection.Name, "and is told the new name");
+        Assert.AreEqual("fake://5/workplace/", engine.Snapshot().Collections.Single().Mounts.Single().AccessPaths.Single().Value);
+    }
+
+    [TestMethod]
     public async Task DisablingACollectionStopsItsMountsAndEnablingStartsThem()
     {
         await using var engine = await StartedAsync();

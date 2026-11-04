@@ -574,6 +574,80 @@ public class HeadlessWindowTests
         }
     }
 
+    /// <summary>
+    /// A collection with a mount from the last run is renamed in the real window: the window picks the change up by itself, and
+    /// the Open containing folder buttons of its tile, its source's and its mount's point at the mount's new path (the user, 4-Nov-2026).
+    /// </summary>
+    [TestMethod]
+    public async Task RenamingACollectionFromTheLastRunMovesItsOpenButtonsInTheWindow()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "anyfs-tests", "window-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await Session.Dispatch(async () =>
+            {
+                var registry = new PluginRegistry();
+                registry.AddBuiltIn(new MemoryPlugin());
+                registry.AddBuiltIn(new FakeMountProvider());
+
+                // the last run: a collection, a source and a mount, saved
+                var earlier = GuiHost.Create(new GuiOptions(Path.Combine(root, "settings")), registry);
+                earlier.Start();
+                var work = await earlier.Engine.AddCollectionAsync("work");
+                var source = await earlier.Engine.AddSourceAsync("alpha", "memory", true, false, new MemoryPluginSettings { Files = "a.txt=A" });
+                await earlier.Engine.AddMembershipAsync(work.Id, source.Id, "mem", false);
+                await earlier.Engine.AddMountAsync(work.Id, "Fake", "fake", true, false, new FakeMountSettings { Port = 11 });
+                await earlier.ShutdownAsync();
+
+                var host = GuiHost.Create(new GuiOptions(Path.Combine(root, "settings")), registry);
+                host.Start();
+                var window = new MainWindow(host);
+                window.Show();
+                await Wait.UntilAsync(() => host.Engine.FindCollectionRunner(work.Id)?.Mounts.Single().Mount is not null, 15000, "the mount up");
+                window.ViewModel.Refresh();
+                window.ViewModel.Collections.SelectedCollection = window.ViewModel.Collections.Collections.Single(c => c.Id == work.Id);
+                await Task.Delay(300);
+                window.UpdateLayout();
+                Assert.AreEqual("fake://11/work/", Opens(window, work.Id));
+
+                await host.Engine.RenameCollectionAsync(work.Id, "workplace");
+
+                // the window's own timer picks the rename up: no Refresh here
+                await Wait.UntilAsync(() => Opens(window, work.Id) == "fake://11/workplace/", what: "the window to show the new path");
+                window.UpdateLayout();
+
+                // Collection 1's tile is there too, with nothing to open (no WinFsp in this registry): its button is the disabled one
+                var buttons = window.GetVisualDescendants().OfType<OpenButton>().Where(o => o.DataContext is TileViewModel { OpenTargets.Count: > 0 }).ToList();
+                Assert.AreEqual(3, buttons.Count, "the collection's, the source's and the mount's buttons were realised");
+                foreach (var button in buttons)
+                {
+                    var tile = (TileViewModel)button.DataContext!;
+                    Assert.IsTrue(tile.HasOneOpenTarget, tile.Name);
+                    Assert.AreEqual("fake://11/workplace/", ((MountOpenAction.Browser)tile.OpenTargets.Single().Action).Url, tile.Name);
+                    var visible = button.GetVisualDescendants().OfType<Button>().Single(b => b.IsVisible);
+                    Assert.IsTrue(visible.IsEnabled && ReferenceEquals(visible.Command, tile.OpenSingleCommand), $"{tile.Name}: one enabled button, the tile's own command");
+                }
+
+                await host.ShutdownAsync();
+                window.Close();
+                return true;
+            }, CancellationToken.None);
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+
+        static string? Opens(MainWindow window, Guid collectionId)
+            => (window.ViewModel.Collections.Collections.SingleOrDefault(c => c.Id == collectionId)?.OpenTargets.SingleOrDefault()?.Action as MountOpenAction.Browser)?.Url;
+    }
+
     [TestMethod]
     public async Task ASourcesIconShowsItsTypeAndTheOpenButtonsNoTooltip()
     {

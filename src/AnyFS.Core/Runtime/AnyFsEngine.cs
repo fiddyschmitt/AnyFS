@@ -1257,9 +1257,15 @@ public sealed class AnyFsEngine : IAsyncDisposable
             .Where(m => _handles.ContainsKey(m.Id))
             .Select(m => new CollectionSource(_handles[m.Id], m, Settings.FindSource(m.Id)!))
             .ToList();
-        var info = new CollectionInfo(definition.Id, definition.Name);
-        var mounts = definition.Mounts.Select(m => CreateMountRunner(m, info)).ToList();
-        return new CollectionRunner(definition, vfs, members, mounts, _loggerFactory.CreateLogger($"AnyFS.Collection.{definition.Name}"), _time);
+        // the mounts know the collection through its runner, whose name follows a rename, as the mounts added later do: given
+        // a copy of the name, a mount restarted for the rename came back under the old one (the user, 4-Nov-2026)
+        var runner = new CollectionRunner(definition, vfs, members, [], _loggerFactory.CreateLogger($"AnyFS.Collection.{definition.Name}"), _time);
+        foreach (var mount in definition.Mounts)
+        {
+            runner.AddMount(CreateMountRunner(mount, runner));
+        }
+
+        return runner;
     }
 
     private MountRunner CreateMountRunner(MountDefinition definition, ICollectionInfo collection)
@@ -1418,8 +1424,6 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
         return selected;
     }
-
-    private sealed record CollectionInfo(Guid Id, string Name) : ICollectionInfo;
 }
 
 /// <summary>Reads what a running <c>anyfs serve</c> (or window) left in state/status.json.</summary>
