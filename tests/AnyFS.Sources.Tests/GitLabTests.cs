@@ -43,6 +43,59 @@ internal static class GitLabSeed
         return fake;
     }
 
+    /// <summary>
+    /// What a server holds beyond the tester's memberships, as the Explore page lists it (the shapes the lab's probes
+    /// measured, GITLAB-NOTES): public and internal projects, archived ones and one marked for deletion, a group's private
+    /// subgroup the tester was invited into, projects that keep their features for their members, another's own projects.
+    /// </summary>
+    public static FakeGitLab WithOpenProjects(FakeGitLab fake)
+    {
+        var tester = fake.UserNamed("tester");
+        var other = fake.UserNamed("other");
+        FakeGitLab.Group Open(string path, FakeGitLab.Group? parent = null, string visibility = "public")
+        {
+            var group = fake.AddGroup(path, path, parent);
+            group.Visibility = visibility;
+            return group;
+        }
+
+        FakeGitLab.Project Add(FakeGitLab.Project project, string visibility = "public")
+        {
+            project.Visibility = visibility;
+            project.Commit("main", new Dictionary<string, byte[]> { ["README.md"] = Bytes($"# {project.Path}\n") });
+            return project;
+        }
+
+        var open = Open("open");
+        Add(fake.AddProject(open, "live", "Live"));
+        Add(fake.AddProject(open, "old", "Old")).Archived = true;
+        Add(fake.AddProject(open, "going-deletion_scheduled-5", "Going")).MarkedForDeletion = true;
+        Add(fake.AddProject(open, "inner", "Inner"), "internal");
+        Add(fake.AddProject(open, "closed", "Closed"), "private");
+        Add(fake.AddProject(open, "kept", "Kept")).MembersOnly = true;
+        Add(fake.AddProject(open, "mine", "Mine", tester)).MembersOnly = true;
+        var jobs = Add(fake.AddProject(open, "jobs", "Jobs"));
+        jobs.PublicJobs = false;
+        jobs.PipelineList.Add(new FakeGitLab.Pipeline(9, "main", "success", FirstCommit, FirstCommit));
+        var bare = fake.AddProject(open, "bare", "Bare");
+        bare.Visibility = "public";
+
+        Add(fake.AddProject(Open("team", open, "internal"), "deep", "Deep"), "internal");
+        var quiet = Open("quiet", open, "private");
+        Add(fake.AddProject(quiet, "invited", "Invited", tester), "private");
+        Add(fake.AddProject(quiet, "uninvited", "Uninvited"), "private");
+        var guest = Add(fake.AddProject(quiet, "guest", "Guest"), "private");
+        guest.Guests.Add(tester.Id);
+        guest.PipelineList.Add(new FakeGitLab.Pipeline(8, "main", "success", FirstCommit, FirstCommit));
+        guest.JobsOf[8] = [];
+
+        Add(fake.AddProject(Open("dusty"), "relic", "Relic")).Archived = true;
+        Open("barren");
+        Add(fake.AddPersonalProject(other, "theirs", "Theirs"));
+        Add(fake.AddPersonalProject(other, "hidden", "Hidden"), "private");
+        return fake;
+    }
+
     public static readonly DateTimeOffset FirstCommit = new(2026, 3, 1, 10, 0, 0, TimeSpan.Zero);
 
     /// <summary>The app's repository: names Windows refuses, twins in case, a file in LFS, a submodule, many files, branches and tags.</summary>
@@ -374,6 +427,48 @@ public class GitLabSourceTests
         Assert.AreEqual("notes\n", Encoding.UTF8.GetString(await ReadAsync(source, "tester/scratch/files/notes.txt")));
         CollectionAssert.AreEqual(Array.Empty<string>(), (await ListAsync(source, "anyfs/tools/empty/files")).Select(e => e.Name).ToArray(), "an empty repository's files are empty");
         Assert.IsNull(await source.StatAsync("hidden", CancellationToken.None));
+    }
+
+    /// <summary>Lists every folder from <paramref name="path"/> down as someone opening each would: a folder shown that GitLab refuses throws.</summary>
+    private static async Task OpenEveryFolderAsync(ISource source, string path)
+    {
+        foreach (var entry in await ListAsync(source, path))
+        {
+            if (entry.IsDirectory)
+            {
+                await OpenEveryFolderAsync(source, VfsPath.Join(path, entry.Name));
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task AProjectShowsOnlyTheFoldersTheAccountMayOpen()
+    {
+        var fake = GitLabSeed.WithOpenProjects(GitLabSeed.Lab());
+        async Task<string[]> FoldersOf(string project)
+        {
+            var (source, _) = await StartAsync(fake, GitLabSeed.Settings($"{fake.Server}/{project}"));
+            await using var _s = source;
+
+            // nothing shown is refused
+            await OpenEveryFolderAsync(source, "");
+            return (await ListAsync(source, "")).Select(e => e.Name).ToArray();
+        }
+
+        var all = new[] { "files", "branches", "tags", "issues", "merge requests" };
+        CollectionAssert.AreEqual(all, await FoldersOf("open/live"));
+        CollectionAssert.AreEqual(all, await FoldersOf("open/bare"), "an empty repository's folders, which are empty");
+        CollectionAssert.AreEqual(all, await FoldersOf("open/mine"), "a member of a project that keeps its features for its members has them");
+        CollectionAssert.AreEqual(Array.Empty<string>(), await FoldersOf("open/kept"), "every feature kept for the project's members");
+        CollectionAssert.AreEqual(all, await FoldersOf("open/jobs"), "no pipelines: they are kept from whoever is no member");
+        CollectionAssert.AreEqual(new[] { "issues", "pipelines" }, await FoldersOf("open/quiet/guest"), "a guest of a private project is kept from its code");
+
+        // and nothing is asked for where GitLab has said it is kept
+        Assert.AreEqual(0, fake.Count($"/projects/{fake.ProjectAt("open/kept").Id}/repository"));
+        Assert.AreEqual(0, fake.Count($"/projects/{fake.ProjectAt("open/quiet/guest").Id}/repository"));
+
+        var kept = await GitLabPlugin.TestAsync(GitLabSeed.Settings(fake.Server + "/open/kept"), new Progress<string>(), fake.StandIn(), CancellationToken.None);
+        StringAssert.Contains(kept.Message, "its repository is kept from this account");
     }
 
     [TestMethod]

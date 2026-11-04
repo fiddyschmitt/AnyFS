@@ -72,6 +72,13 @@ internal sealed record GlProject(
     bool Pipelines,
     bool Releases)
 {
+    /// <summary>
+    /// Whether this account may read the repository. GitLab names the default branch only to who may, "main" before the
+    /// first commit too (the lab, 19.5, 4-Nov-2026): someone who is no member of a project keeping its repository for its
+    /// members, or a guest of a private one, is told of none, and is refused its branches, tags and files.
+    /// </summary>
+    public bool RepositoryReadable => Repository && !string.IsNullOrEmpty(DefaultBranch);
+
     public static GlProject Parse(JsonElement e)
     {
         var ns = e.Obj("namespace");
@@ -95,14 +102,16 @@ internal sealed record GlProject(
     }
 
     /// <summary>
-    /// A feature is on unless its access level says "disabled" (or, on an older GitLab, its boolean says false). A feature
-    /// whose fields are missing (the API's simple form leaves them out) counts as on: asking it shows soon enough.
+    /// A feature is on unless its access level says "disabled" or its boolean says false: the level is how the project is
+    /// set ("private" being for its members), the boolean whether this account may use it, so it is false for a feature
+    /// kept from someone who is no member. A feature whose fields are missing (the API's simple form leaves them out)
+    /// counts as on: asking it shows soon enough.
     /// </summary>
     private static bool On(JsonElement e, string level, string? flag)
     {
-        if (e.Str(level) is { } value)
+        if (e.Str(level) is { } value && value.Equals("disabled", StringComparison.OrdinalIgnoreCase))
         {
-            return !value.Equals("disabled", StringComparison.OrdinalIgnoreCase);
+            return false;
         }
 
         return flag is null || !e.TryGetProperty(flag, out var v) || v.ValueKind != JsonValueKind.False;

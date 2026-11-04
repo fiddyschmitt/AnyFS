@@ -183,7 +183,7 @@ internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(n
         var project = await source.ProjectAsync(Project.Id, ct).ConfigureAwait(false);
         var settings = source.Settings;
         var sections = new List<GlNode>();
-        if (project.Repository)
+        if (project.RepositoryReadable)
         {
             sections.Add(new FilesFolder(project));
             if (settings.BranchesAndTags)
@@ -206,7 +206,7 @@ internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(n
                 sections.Add(new TicketsFolder(project, mergeRequests: false, "issues"));
             }
 
-            if (project.MergeRequests && project.Repository)
+            if (project.MergeRequests && project.RepositoryReadable)
             {
                 sections.Add(new TicketsFolder(project, mergeRequests: true, "merge requests"));
             }

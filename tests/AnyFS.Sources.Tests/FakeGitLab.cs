@@ -15,9 +15,10 @@ namespace AnyFS.Sources.Tests;
 /// repositories (commits as snapshots of files; branches and tags pointing at them; Git LFS objects), answered through
 /// <see cref="Handler"/> as GitLab 19 answered the lab's probes (GITLAB-NOTES): REST v4 with offset paging (Link, X-Total)
 /// and keyset paging for a tree, GraphQL's blob sizes, raw files, 401 for a refused sign-in, 404 for what an account may
-/// not see, 429 with Retry-After when told. Everything is private: an account sees what it or a group above it is a
-/// member of. The other features (wiki, issues, merge requests, pipelines, releases) and the sign-in pages are in the
-/// other parts of this class.
+/// not see, 429 with Retry-After when told. Everything is private unless a test opens it: an account sees what it or a
+/// group above it is a member of, and whatever is public or internal, as the lab answered a tester who is no member
+/// (GITLAB-NOTES, 4-Nov-2026). The other features (wiki, issues, merge requests, pipelines, releases) and the sign-in pages
+/// are in the other parts of this class.
 /// </summary>
 internal sealed partial class FakeGitLab
 {
@@ -57,6 +58,9 @@ internal sealed partial class FakeGitLab
 
     /// <summary>How many requests to answer 429 with Retry-After: 1 before answering again.</summary>
     public int ThrottleNext { get; set; }
+
+    /// <summary>Past how many records a listing no longer says how many there are: GitLab's X-Total stops at 10,000.</summary>
+    public int TotalsUpTo { get; set; } = 10_000;
 
     /// <summary>The project at a full path (for a test to change).</summary>
     public Project ProjectAt(string fullPath)
@@ -99,6 +103,9 @@ internal sealed partial class FakeGitLab
 
         public HashSet<long> Members { get; } = [];
 
+        /// <summary>"private", "internal" (every signed-in account) or "public".</summary>
+        public string Visibility { get; set; } = "private";
+
         public List<WikiPage> WikiPages { get; } = [];
 
         public Dictionary<string, byte[]> WikiUploads { get; } = new(StringComparer.Ordinal);
@@ -121,6 +128,22 @@ internal sealed partial class FakeGitLab
         public string DefaultBranch { get; set; } = "main";
 
         public HashSet<long> Members { get; } = [];
+
+        /// <summary>Members who are only guests: they see the project, its issues and its pipelines, not its code.</summary>
+        public HashSet<long> Guests { get; } = [];
+
+        /// <summary>"private", "internal" (every signed-in account) or "public".</summary>
+        public string Visibility { get; set; } = "private";
+
+        public bool Archived { get; set; }
+
+        public bool MarkedForDeletion { get; set; }
+
+        /// <summary>Its repository, issues, merge requests, wiki, pipelines and releases for its members alone ("Only project members"), though the project is open.</summary>
+        public bool MembersOnly { get; set; }
+
+        /// <summary>Whether those who are no members may see its pipelines.</summary>
+        public bool PublicJobs { get; set; } = true;
 
         public Dictionary<string, string> Branches { get; } = new(StringComparer.Ordinal);
 
@@ -264,9 +287,29 @@ internal sealed partial class FakeGitLab
         }
     }
 
-    private bool Sees(User user, Group group) => Lineage(group).Any(g => g.Members.Contains(user.Id));
+    /// <summary>A group an account sees: an open one, one it or a group above it is a member of, and the groups above a project it was invited to.</summary>
+    private bool Sees(User user, Group group)
+        => group.Visibility != "private" || IsMember(user, group)
+            || _projects.Any(p => p.Group is { } g && Lineage(g).Contains(group) && (p.Members.Contains(user.Id) || p.Guests.Contains(user.Id)));
 
-    private bool Sees(User user, Project project) => project.Members.Contains(user.Id) || project.Group is { } g && Sees(user, g);
+    private static bool IsMember(User user, Group group) => Lineage(group).Any(g => g.Members.Contains(user.Id));
+
+    private static bool Sees(User user, Project project) => project.Visibility != "private" || IsMember(user, project);
+
+    private static bool IsMember(User user, Project project)
+        => project.Members.Contains(user.Id) || project.Guests.Contains(user.Id) || project.Group is { } g && IsMember(user, g);
+
+    /// <summary>Who may read a project's code: a member above a guest; any account where the project is open and its repository not kept for members.</summary>
+    private static bool ReadsCode(User user, Project project)
+        => project.Members.Contains(user.Id) || project.Group is { } g && IsMember(user, g) || project.Visibility != "private" && !project.MembersOnly;
+
+    /// <summary>GitLab's filters on a listing of projects: with neither, the archived and those marked for deletion are listed too.</summary>
+    private static bool Passes(Project p, Request r)
+        => (r.Q("active") is not { } active || active == "true" == (!p.Archived && !p.MarkedForDeletion))
+            && (r.Q("archived") is not { } archived || archived == "true" == p.Archived);
+
+    /// <summary>A group a listing names: all_available, what the account sees; without it, where it is a member.</summary>
+    private bool Listed(User user, Group group, Request r) => r.Q("all_available") == "true" ? Sees(user, group) : IsMember(user, group);
 
     private static IEnumerable<Group> Lineage(Group group)
     {
@@ -371,13 +414,12 @@ internal sealed partial class FakeGitLab
             case ["user"]:
                 return Response.Json(UserJson(user));
             case ["groups"]:
-                var groups = _groups.Where(g => r.Q("min_access_level") is null ? Sees(user, g) : Lineage(g).Any(x => x.Members.Contains(user.Id))).OrderBy(g => g.Id);
-                return Paged(r, groups.Select(GroupJson));
+                return Paged(r, _groups.Where(g => Listed(user, g, r)).OrderBy(g => g.Id).Select(GroupJson));
             case ["groups", var id]:
                 return FindGroup(user, id) is { } group ? Response.Json(GroupJson(group)) : Response.NotFound("404 Group Not Found");
             case ["groups", var id, "subgroups"]:
                 return FindGroup(user, id) is { } parent
-                    ? Paged(r, _groups.Where(g => g.Parent == parent).OrderBy(g => g.Path, StringComparer.Ordinal).Select(GroupJson))
+                    ? Paged(r, _groups.Where(g => g.Parent == parent && Listed(user, g, r)).OrderBy(g => g.Path, StringComparer.Ordinal).Select(GroupJson))
                     : Response.NotFound("404 Group Not Found");
             case ["groups", var id, "wikis"]:
                 if (FindGroup(user, id) is not { } wikiGroup)
@@ -393,16 +435,17 @@ internal sealed partial class FakeGitLab
                 }
 
                 var deep = r.Q("include_subgroups") == "true";
-                return Paged(r, _projects.Where(p => p.Group is { } g && (g == owner || deep && Lineage(g).Contains(owner))).OrderBy(p => p.Path, StringComparer.Ordinal).Select(ProjectJson));
+                return Paged(r, _projects.Where(p => p.Group is { } g && (g == owner || deep && Lineage(g).Contains(owner)) && Sees(user, p) && Passes(p, r))
+                    .OrderBy(p => p.Path, StringComparer.Ordinal).Select(p => ProjectJson(user, p, r)));
             case ["projects"]:
-                return Paged(r, _projects.Where(p => Sees(user, p)).OrderBy(p => p.Id).Select(ProjectJson));
+                return Paged(r, _projects.Where(p => (r.Q("membership") == "true" ? IsMember(user, p) : Sees(user, p)) && Passes(p, r)).OrderBy(p => p.Id).Select(p => ProjectJson(user, p, r)));
             case ["projects", var id, .. var rest]:
                 if (FindProject(user, id) is not { } project)
                 {
                     return Response.NotFound("404 Project Not Found");
                 }
 
-                return rest.Length == 0 ? Response.Json(ProjectJson(project)) : ProjectRest(user, project, r, rest);
+                return rest.Length == 0 ? Response.Json(ProjectJson(user, project, r)) : ProjectRest(user, project, r, rest);
             default:
                 return Response.NotFound("404 Not Found");
         }
@@ -410,6 +453,12 @@ internal sealed partial class FakeGitLab
 
     private Response ProjectRest(User user, Project project, Request r, string[] rest)
     {
+        // the repository of who may not read the code: as the lab answered, branches 404 to one who is no member, the rest 403
+        if (rest is ["repository", ..] && !ReadsCode(user, project))
+        {
+            return rest is ["repository", "branches", ..] && !IsMember(user, project) ? Response.NotFound() : Response.Message(403, "403 Forbidden");
+        }
+
         switch (rest)
         {
             case ["repository", "branches"]:
@@ -566,7 +615,7 @@ internal sealed partial class FakeGitLab
     private Group? FindGroup(User user, string id)
     {
         var group = long.TryParse(id, out var n) ? _groups.FirstOrDefault(g => g.Id == n) : _groups.FirstOrDefault(g => g.FullPath == id);
-        return group is not null && (Sees(user, group) || _projects.Any(p => p.Group is { } pg && Lineage(pg).Contains(group) && Sees(user, p))) ? group : null;
+        return group is not null && Sees(user, group) ? group : null;
     }
 
     private Project? FindProject(User user, string id)
@@ -596,7 +645,12 @@ internal sealed partial class FakeGitLab
             next = start + perPage < items.Count ? External(With(r.Url, "page", (page + 1).ToString(CultureInfo.InvariantCulture))) : "";
         }
 
-        var headers = new Dictionary<string, string> { ["X-Total"] = items.Count.ToString(CultureInfo.InvariantCulture) };
+        var headers = new Dictionary<string, string>();
+        if (r.Q("pagination") != "keyset" && items.Count <= TotalsUpTo)
+        {
+            headers["X-Total"] = items.Count.ToString(CultureInfo.InvariantCulture);
+        }
+
         if (next.Length > 0)
         {
             headers["Link"] = $"<{next}>; rel=\"next\", <{r.Url.AbsoluteUri}>; rel=\"first\"";
@@ -696,14 +750,20 @@ internal sealed partial class FakeGitLab
         return null;
     }
 
-    /// <summary>A project's features beyond its repository: its wiki.</summary>
+    /// <summary>A project's features beyond its repository, as the lab answered an account they are kept from: its wiki here.</summary>
     private Response ProjectFeatures(User user, Project project, Request r, string[] rest)
     {
-        _ = user;
+        var kept = project.MembersOnly && !IsMember(user, project);
         switch (rest)
         {
             case ["wikis"]:
-                return project.Wiki ? Response.Json(WikiJson(project.WikiPages, r)) : Response.Message(403, "403 Forbidden");
+                return project.Wiki && !kept ? Response.Json(WikiJson(project.WikiPages, r)) : Response.Message(403, "403 Forbidden");
+            case ["issues"] when kept:
+                return Response.Json(new JsonArray());
+            case ["merge_requests", ..] when !ReadsCode(user, project):
+            case ["pipelines", ..] when kept || !project.PublicJobs && !IsMember(user, project):
+            case ["releases", ..] when kept:
+                return Response.Message(403, "403 Forbidden");
             default:
                 return Tickets(project, r, rest) ?? PipelinesAndReleases(project, r, rest) ?? Response.NotFound("404 Not Found");
         }
@@ -736,28 +796,56 @@ internal sealed partial class FakeGitLab
         ["name"] = g.Name,
         ["full_path"] = g.FullPath,
         ["parent_id"] = g.Parent?.Id,
+        ["visibility"] = g.Visibility,
         ["created_at"] = "2026-01-01T00:00:00Z",
     };
 
-    private JsonNode ProjectJson(Project p) => new JsonObject
+    /// <summary>
+    /// A project as GitLab tells this account of it. The default branch is named only to who may read the code, "main"
+    /// before the first commit too; the booleans say what this account may use, the access levels how the project is set;
+    /// the simple form has neither, nor whether the repository is empty.
+    /// </summary>
+    private JsonNode ProjectJson(User user, Project p, Request r)
     {
-        ["id"] = p.Id,
-        ["path"] = p.Path,
-        ["name"] = p.Name,
-        ["path_with_namespace"] = p.FullPath,
-        ["namespace"] = new JsonObject { ["full_path"] = p.NamespacePath, ["kind"] = p.Group is null ? "user" : "group" },
-        ["default_branch"] = p.EmptyRepo ? null : p.DefaultBranch,
-        ["empty_repo"] = p.EmptyRepo,
-        ["created_at"] = p.Created.ToString("O", CultureInfo.InvariantCulture),
-        ["last_activity_at"] = p.LastActivity.ToString("O", CultureInfo.InvariantCulture),
-        ["web_url"] = $"{Server}/{p.FullPath}",
-        ["repository_access_level"] = "enabled",
-        ["issues_access_level"] = p.Issues ? "enabled" : "disabled",
-        ["merge_requests_access_level"] = p.MergeRequests ? "enabled" : "disabled",
-        ["wiki_access_level"] = p.Wiki ? "enabled" : "disabled",
-        ["builds_access_level"] = p.Pipelines ? "enabled" : "disabled",
-        ["releases_access_level"] = "enabled",
-    };
+        var json = new JsonObject
+        {
+            ["id"] = p.Id,
+            ["path"] = p.Path,
+            ["name"] = p.Name,
+            ["path_with_namespace"] = p.FullPath,
+            ["namespace"] = new JsonObject { ["full_path"] = p.NamespacePath, ["kind"] = p.Group is null ? "user" : "group" },
+            ["created_at"] = p.Created.ToString("O", CultureInfo.InvariantCulture),
+            ["last_activity_at"] = p.LastActivity.ToString("O", CultureInfo.InvariantCulture),
+            ["web_url"] = $"{Server}/{p.FullPath}",
+            ["visibility"] = p.Visibility,
+        };
+        if (ReadsCode(user, p))
+        {
+            json["default_branch"] = p.DefaultBranch;
+        }
+
+        if (r.Q("simple") == "true")
+        {
+            return json;
+        }
+
+        var kept = p.MembersOnly && !IsMember(user, p);
+        string Level(bool on) => !on ? "disabled" : p.MembersOnly ? "private" : "enabled";
+        json["empty_repo"] = p.EmptyRepo;
+        json["archived"] = p.Archived;
+        json["marked_for_deletion_on"] = p.MarkedForDeletion ? "2026-11-04" : null;
+        json["repository_access_level"] = Level(true);
+        json["issues_access_level"] = Level(p.Issues);
+        json["issues_enabled"] = p.Issues && !kept;
+        json["merge_requests_access_level"] = Level(p.MergeRequests);
+        json["merge_requests_enabled"] = p.MergeRequests && !kept;
+        json["wiki_access_level"] = Level(p.Wiki);
+        json["wiki_enabled"] = p.Wiki && !kept;
+        json["builds_access_level"] = Level(p.Pipelines);
+        json["jobs_enabled"] = p.Pipelines && !kept;
+        json["releases_access_level"] = Level(true);
+        return json;
+    }
 
     private static JsonNode RefJson(Project p, string name, string commit, bool isDefault) => new JsonObject
     {

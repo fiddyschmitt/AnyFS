@@ -154,7 +154,7 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
                 using (found)
                 {
                     var project = GlProject.Parse(found.RootElement);
-                    var branch = project.EmptyRepo ? "an empty repository" : $"the default branch {project.DefaultBranch}";
+                    var branch = !project.RepositoryReadable ? "its repository is kept from this account" : project.EmptyRepo ? "an empty repository" : $"the default branch {project.DefaultBranch}";
                     return new TestResult(true, $"{who} The source shows the project {project.Name} ({project.FullPath}): {branch}.");
                 }
             }
