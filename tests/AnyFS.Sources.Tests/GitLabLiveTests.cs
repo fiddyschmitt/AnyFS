@@ -136,6 +136,54 @@ public class GitLabLiveTests
     }
 
     [TestMethod]
+    public async Task TheServerShowsEveryProjectTheTesterCanSeeActiveOrNot()
+    {
+        var (url, token) = Server();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(url, token, context);
+        async Task<List<string>> Names(string path) => (await ListAsync(source, path)).Select(e => e.Name).ToList();
+        CollectionAssert.IsSubsetOf(new[] { "anyfs", "open", "root" }, await Names(""));
+        var open = await Names("open");
+        CollectionAssert.IsSubsetOf(new[] { "quiet", "inner", "kept", "live", "old" }, open);
+        CollectionAssert.DoesNotContain(open, "closed", "private, and the tester is no member");
+        CollectionAssert.AreEqual(new[] { "invited" }, await Names("open/quiet"), "a private subgroup shows what the tester was invited to");
+
+        foreach (var project in new[] { "open/live", "open/old", "open/inner", "root/theirs", "open/quiet/invited" })
+        {
+            StringAssert.Contains(Encoding.UTF8.GetString(await HeadOfAsync(source, project + "/files/README.md")), "#", project);
+        }
+
+        // a project that keeps its features for its members shows no folder GitLab would refuse
+        CollectionAssert.AreEqual(Array.Empty<string>(), await Names("open/kept"));
+
+        // a public project's every feature, to someone who is no member, and nothing shown is refused
+        CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "wiki", "issues", "merge requests", "pipelines", "releases" }, await Names("open/live"));
+        await OpenEveryFolderAsync(source, "open");
+        await OpenEveryFolderAsync(source, "root");
+        StringAssert.Contains(Encoding.UTF8.GetString(await HeadOfAsync(source, "open/live/wiki/home.md")), "Home of a public project");
+    }
+
+    private static async Task<byte[]> HeadOfAsync(ISource source, string path)
+    {
+        await using var file = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
+        var buffer = new byte[Math.Min(file.Length, 4096)];
+        var read = await file.ReadFullyAsync(0, buffer, CancellationToken.None);
+        return buffer[..read];
+    }
+
+    /// <summary>Lists every folder from <paramref name="path"/> down, as someone opening each would: a folder shown that GitLab refuses throws.</summary>
+    private static async Task OpenEveryFolderAsync(ISource source, string path)
+    {
+        foreach (var entry in await ListAsync(source, path))
+        {
+            if (entry.IsDirectory)
+            {
+                await OpenEveryFolderAsync(source, VfsPath.Join(path, entry.Name));
+            }
+        }
+    }
+
+    [TestMethod]
     public async Task TheDocsWikiIsThereAsItsPagesMarkup()
     {
         var (url, token) = Server();

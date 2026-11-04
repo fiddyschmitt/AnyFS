@@ -46,6 +46,7 @@ The smoke test (`/opt/anyfs/smoke-test.sh`) checks these:
 | Group `anyfs` | the tester a Developer; subgroup `anyfs/tools` |
 | `anyfs/docs` | a wiki (nested pages, an AsciiDoc page, a page whose title is not ASCII, an attachment), four issues (attachments, comments, a milestone, a closed one, titles in other scripts and with every character Windows refuses), a merge request from `feature/docs` with a comment |
 | `anyfs/tools/app` | the E2E fixture tree (`tests/fixtures/MakeTree`) under `e2e/`, `large.bin` in Git LFS; branches `main` and `feature/x`; tags `v1.0` and `v1.1`; a pipeline per ref (`build` writes `out/` as artifacts, `test` after it); release `v1.0` with an uploaded file and a link |
+| Group `open`, public, and `root/theirs` | what the tester is no member of, as GitLab's Explore page lists it: `open/live` (public, with a wiki, an issue with an attachment, a branch, a merge request, a pipeline with artifacts and a release), `open/old` (public, archived), `open/inner` (internal), `open/kept` (public, its repository and other features for its members), `open/closed` (private, not to be seen), the private subgroup `open/quiet` with `invited` (the tester a Developer of it) and `uninvited` (not to be seen) |
 | Runner | `anyfs-lab`, an instance runner, shell executor, in its own container |
 
 The values in settings.yml are throwaway, for this lab only. SSH in as the other Linux machines are reached:

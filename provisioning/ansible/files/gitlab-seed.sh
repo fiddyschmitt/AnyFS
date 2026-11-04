@@ -274,3 +274,74 @@ for _ in $(seq 1 60); do
 done
 echo "pipeline on main: $status"
 [[ $status == success ]] || { echo "seed: the pipeline on main is $status" >&2; exit 1; }
+
+# --- What the tester is no member of, as GitLab's Explore page lists it (a server's address shows it all) ---------------
+open=$(lookup "groups/open" | jq -r .id) ||
+    { open=$(call POST groups --data name=Open --data path=open --data visibility=public | jq -r .id); echo "group open: made"; }
+quiet=$(lookup "groups/$(enc open/quiet)" | jq -r .id) ||
+    { quiet=$(call POST groups --data name=Quiet --data path=quiet --data "parent_id=$open" --data visibility=private | jq -r .id); echo "group open/quiet: made"; }
+
+# A project with a README, made once; its id in $made. Root's own where no namespace is given.
+seed_project() {   # full path, visibility, namespace id or "", extra curl arguments...
+    local full=$1 visibility=$2 namespace=$3 name=${1##*/}
+    shift 3
+    made=$(lookup "projects/$(enc "$full")" | jq -r .id) && return 0
+    made=$(call POST projects --data "name=$name" --data "path=$name" ${namespace:+--data "namespace_id=$namespace"} \
+        --data "visibility=$visibility" --data initialize_with_readme=true "$@" | jq -r .id)
+    echo "project $full: made"
+}
+
+seed_project open/inner internal "$open"
+seed_project open/closed private "$open"
+seed_project open/kept public "$open" --data repository_access_level=private --data issues_access_level=private --data merge_requests_access_level=private \
+    --data wiki_access_level=private --data builds_access_level=private --data releases_access_level=private
+seed_project open/old public "$open"
+[[ $(lookup "projects/$made" | jq -r .archived) == true ]] || { call POST "projects/$made/archive" >/dev/null; echo "open/old archived: made"; }
+seed_project open/quiet/invited private "$quiet"
+lookup "projects/$made/members/$tester" >/dev/null ||
+    { call POST "projects/$made/members" --data "user_id=$tester" --data access_level=30 >/dev/null; echo "$TESTER_USER a Developer of open/quiet/invited: made"; }
+seed_project open/quiet/uninvited private "$quiet"
+seed_project root/theirs public ""
+
+# open/live has every feature, for the tests to read as someone who is no member
+seed_project open/live public "$open"
+live=$made
+lookup "projects/$live/wikis/home" >/dev/null ||
+    { call POST "projects/$live/wikis" --data title=home --data format=markdown --data-urlencode "content=# Home of a public project" >/dev/null; echo "open/live wiki: made"; }
+if [[ $(lookup "projects/$live/issues?per_page=1" | jq length) == 0 ]]; then
+    printf 'Attached to a public issue.\n' >"$work/steps.txt"
+    steps=$(call POST "projects/$live/uploads" -F "file=@$work/steps.txt" | jq -r .markdown)
+    call POST "projects/$live/issues" --data "title=A public issue" --data-urlencode "description=See $steps" >/dev/null
+    call POST "projects/$live/issues/1/notes" --data "body=A comment." >/dev/null
+    echo "open/live issue: made"
+fi
+if ! lookup "projects/$live/repository/files/.gitlab-ci.yml?ref=main" >/dev/null; then
+    call POST "projects/$live/repository/files/.gitlab-ci.yml" --data branch=main --data "commit_message=A pipeline" \
+        --data-urlencode 'content=build:
+  script:
+    - mkdir -p out
+    - echo built > out/hello.txt
+  artifacts:
+    paths:
+      - out/
+' >/dev/null
+    echo "open/live pipeline: made"
+fi
+if ! lookup "projects/$live/repository/branches/$(enc feature/x)" >/dev/null; then
+    call POST "projects/$live/repository/branches" --data "branch=feature/x" --data ref=main >/dev/null
+    call POST "projects/$live/repository/files/feature.txt" --data "branch=feature/x" --data "commit_message=A change" --data "content=On a branch." >/dev/null
+    echo "open/live branch feature/x: made"
+fi
+if [[ $(lookup "projects/$live/merge_requests?state=all&per_page=1" | jq length) == 0 ]]; then
+    call POST "projects/$live/merge_requests" --data "source_branch=feature/x" --data target_branch=main --data "title=A public merge request" >/dev/null
+    echo "open/live merge request: made"
+fi
+lookup "projects/$live/releases/v1.0" >/dev/null ||
+    { call POST "projects/$live/releases" --data tag_name=v1.0 --data ref=main --data "name=Version 1.0" --data "description=A public release." >/dev/null; echo "open/live release v1.0: made"; }
+for _ in $(seq 1 60); do
+    status=$(lookup "projects/$live/pipelines?ref=main&per_page=1" | jq -r '.[0].status // "none"')
+    [[ $status == success || $status == failed || $status == canceled ]] && break
+    sleep 10
+done
+echo "open/live pipeline on main: $status"
+[[ $status == success ]] || { echo "seed: the pipeline on open/live is $status" >&2; exit 1; }
