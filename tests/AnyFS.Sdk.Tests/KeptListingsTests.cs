@@ -711,6 +711,52 @@ public class KeptListingsTests
     }
 
     [TestMethod]
+    public async Task AFolderLeftOutIsRememberedFromOneRunToTheNext()
+    {
+        // keeping a folder by its stamp, a walk has to know that one below it with no listing was left out on purpose: asking the
+        // source meant the source listing all above it again, thousands of times at every start of a big GitLab
+        var file = TempFile();
+        try
+        {
+            _stamps["docs"] = "v1";
+            var asked = 0;
+            var options = new KeptListingsOptions
+            {
+                WalkEvery = TimeSpan.Zero,
+                SaveTo = file,
+                SaveKey = "jane@contoso.com",
+                StampOf = StampOf,
+                LeftOut = (path, _) =>
+                {
+                    Interlocked.Increment(ref asked);
+                    return ValueTask.FromResult<IReadOnlySet<string>?>(path == "docs" ? new HashSet<string> { "sub" } : null);
+                },
+            };
+            await using (var first = Kept(new SourceCounters(), options))
+            {
+                await first.CountAsync(CancellationToken.None);
+            }
+
+            Assert.AreEqual(0, Listed("docs/sub"), "left out");
+            Assert.IsTrue(asked > 0);
+
+            _listed.Clear();
+            asked = 0;
+            var counters = new SourceCounters();
+            await using var next = Kept(counters, options);
+            await next.CountAsync(CancellationToken.None);
+            Assert.AreEqual(0, Listed("docs"), "its stamp holds: kept");
+            Assert.AreEqual(0, Listed("docs/sub"), "still left out");
+            Assert.AreEqual(1, asked, "only about what was listed afresh, the root: not about what was kept");
+            Assert.AreEqual(EnumerationState.Unknown, counters.State, "and the count says what it left out");
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [TestMethod]
     public async Task AnEntrysKeyIsSavedWithItsListing()
     {
         var file = TempFile();

@@ -836,11 +836,18 @@ public class GitLabSourceTests
         await first.DisposeAsync();
 
         // the next run: every project's activity and head hold, so nothing in them is asked again
+        fake.Requests.Clear();
         var (second, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"), context);
         await second.CountFilesAsync(CancellationToken.None);
-        Assert.AreEqual(notes, fake.Count("/notes"), "no issue or merge request read again");
+        Assert.AreEqual(0, fake.Count("/notes"), "no issue or merge request read again");
+        foreach (var feature in new[] { "/wikis?", "/pipelines", "/releases", "/repository/branches?", "/repository/tags" })
+        {
+            Assert.AreEqual(0, fake.Count($"/projects/{docs.Id}{feature}"), $"nor {feature}: what was left out below a folder kept is remembered");
+        }
+
         Assert.AreEqual(4, (await ListAsync(second, "docs/issues")).Count, "answered from what was kept");
         await second.DisposeAsync();
+        fake.Requests.Clear();
 
         // an issue raised in docs, and its activity moved: its issues are listed again, the new one's notes read, the rest kept
         docs.IssueList.Add(new FakeGitLab.Ticket(5, "A new question", "Asked today.", fake.AddUser("asker", "Ask Er"), docs.LastActivity.AddDays(1)));
@@ -848,7 +855,7 @@ public class GitLabSourceTests
         var (third, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"), context);
         await using var _t = third;
         await third.CountFilesAsync(CancellationToken.None);
-        Assert.AreEqual(notes + 1, fake.Count("/notes"), "the new issue's notes alone");
+        Assert.AreEqual(1, fake.Count("/notes"), "the new issue's notes alone");
         Assert.AreEqual(5, (await ListAsync(third, "docs/issues")).Count);
     }
 

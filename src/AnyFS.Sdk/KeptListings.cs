@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
@@ -50,6 +51,11 @@ public sealed class KeptListings : IAsyncDisposable
     // when the last walk that listed every folder whatever its stamp ended, or the first walk (saved with the listings); null before it
     private DateTimeOffset? _fullWalkAt;
 
+    // what a walk last left out of each folder it left some out of (KeptListingsOptions.LeftOut), saved with the listings: keeping a
+    // folder by its stamp, it knows without asking that one below it with no listing was left out on purpose. Asking cost a big
+    // GitLab the listing of everything above each of those at every start.
+    private readonly ConcurrentDictionary<string, IReadOnlySet<string>> _leftOut = new(StringComparer.Ordinal);
+
     /// <param name="lister">Lists one folder from the upstream ("" for the root), as for a <see cref="ListingCache"/>.</param>
     /// <param name="counters">The source's own counters: the first walk counts into them as it goes, and each walk sets its total there when done.</param>
     public KeptListings(Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> lister, SourceCounters counters, ILogger logger, KeptListingsOptions? options = null, TimeProvider? time = null)
@@ -96,6 +102,11 @@ public sealed class KeptListings : IAsyncDisposable
                 Cache.Restore(folder, listing, saved.Stamps?.GetValueOrDefault(folder));
             }
 
+            foreach (var (folder, names) in saved.LeftOut ?? [])
+            {
+                _leftOut[folder] = names.ToHashSet(StringComparer.Ordinal);
+            }
+
             _restored = saved.Listings.Count > 0;
             _fullWalkAt = saved.FullWalkAt;
             _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run answer at once, {Stamped:N0} of them stamped", _options.Name, saved.Listings.Count, saved.Stamps?.Count ?? 0);
@@ -124,6 +135,7 @@ public sealed class KeptListings : IAsyncDisposable
             {
                 Stamps = Cache.Stamps().ToDictionary(StringComparer.Ordinal),
                 FullWalkAt = _fullWalkAt,
+                LeftOut = _leftOut.ToArray().ToDictionary(p => p.Key, p => p.Value.ToList(), StringComparer.Ordinal),
             };
             if (Path.GetDirectoryName(path) is { Length: > 0 } folder)
             {
@@ -546,6 +558,15 @@ public sealed class KeptListings : IAsyncDisposable
                     var hasFolders = entries.Any(e => e.IsDirectory);
                     var partsBelow = hasFolders && _options.PartsBelow is { } parts && await parts(folder, ct).ConfigureAwait(false);
                     var leftOut = hasFolders && !heldAlone && _options.LeftOut is { } left ? await left(folder, ct).ConfigureAwait(false) : null;
+                    if (leftOut is { Count: > 0 })
+                    {
+                        _leftOut[folder] = leftOut;
+                    }
+                    else if (!heldAlone)
+                    {
+                        _leftOut.TryRemove(folder, out _);
+                    }
+
                     long files = 0;
                     var folders = 0;
                     var below = new List<(string Folder, bool HeldAlone)>();
@@ -761,7 +782,7 @@ public sealed class KeptListings : IAsyncDisposable
                 if (!asked)
                 {
                     asked = true;
-                    leftOut = _options.LeftOut is { } left ? await left(path, ct).ConfigureAwait(false) : null;
+                    leftOut = _leftOut.TryGetValue(path, out var known) ? known : _options.LeftOut is { } left ? await left(path, ct).ConfigureAwait(false) : null;
                 }
 
                 if (leftOut?.Contains(entry.Name) == true)
@@ -891,6 +912,8 @@ internal sealed record SavedListings(int Version, string Key, Dictionary<string,
     public Dictionary<string, string>? Stamps { get; init; }
 
     public DateTimeOffset? FullWalkAt { get; init; }
+
+    public Dictionary<string, List<string>>? LeftOut { get; init; }
 }
 
 [System.Text.Json.Serialization.JsonSerializable(typeof(SavedListings))]
