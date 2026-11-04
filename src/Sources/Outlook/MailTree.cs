@@ -11,6 +11,9 @@ internal abstract class TreeNode(string name)
     /// <summary>The folder the node is in (set as it is added); null for the root.</summary>
     public DirNode? Parent { get; private set; }
 
+    /// <summary>Where the node is in the tree, as the source's paths have it ("" for the root).</summary>
+    public string PathInTree => Parent is null ? "" : VfsPath.Join(Parent.PathInTree, Name);
+
     public abstract VfsEntry Entry { get; }
 
     /// <summary>The item an item's folder or a contact's file is made of; null for a folder.</summary>

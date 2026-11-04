@@ -294,9 +294,9 @@ internal sealed class AddressBooks
 
     /// <summary>
     /// Reads every list whose entries are not known yet, one at a time ("Count files on start": the source's count is then
-    /// all of them); a list that cannot be read is said and left to its first ask.
+    /// all of them, and <paramref name="counters"/> say which list it is reading); a list that cannot be read is said and left to its first ask.
     /// </summary>
-    public async Task ReadUnreadAsync(CancellationToken ct)
+    public async Task ReadUnreadAsync(SourceCounters counters, CancellationToken ct)
     {
         foreach (var folder in _folders)
         {
@@ -313,6 +313,7 @@ internal sealed class AddressBooks
 
             try
             {
+                using var at = counters.EnterFolder(VfsPath.Join(MailNames.AddressBooksFolder, folder.Name));
                 await MembersAsync(folder.List, ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (!ct.IsCancellationRequested && !_stopping.IsCancellationRequested)

@@ -81,6 +81,44 @@ public class OutlookAddressBookTests
     }
 
     [TestMethod]
+    public async Task TheCountSaysWhichAddressListItIsReading()
+    {
+        var fake = WithDirectory();
+        using var arrived = new SemaphoreSlim(0);
+        using var held = new ManualResetEventSlim();
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            fake.Intercept = (_, action) =>
+            {
+                if (action == "FindPeople")
+                {
+                    arrived.Release();
+                    held.Wait(TimeSpan.FromSeconds(30));
+                }
+
+                return null;
+            };
+            var counting = ((ICountable)source).CountFilesAsync(CancellationToken.None);
+            try
+            {
+                Assert.IsTrue(await arrived.WaitAsync(TimeSpan.FromSeconds(10)), "a list being read");
+                var folder = source.Counters.CurrentFolder;
+                Assert.IsNotNull(folder);
+                Assert.AreEqual(MailNames.AddressBooksFolder, VfsPath.Parent(folder), $"in '{folder}'");
+            }
+            finally
+            {
+                held.Set();
+            }
+
+            await counting;
+            Assert.IsNull(source.Counters.CurrentFolder, "the count is over");
+        }
+    }
+
+    [TestMethod]
     public async Task TheCountIsSoFarUntilEveryListIsReadAsCountingOnStartDoes()
     {
         var fake = WithDirectory();

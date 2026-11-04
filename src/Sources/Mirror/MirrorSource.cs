@@ -115,6 +115,7 @@ public sealed class MirrorSource : SourceBase, ICountable
                 {
                     try
                     {
+                        using var at = Counters.EnterFolder(chain);
                         CountListing?.Invoke(root, real);
                         foreach (var entry in new DirectoryInfo(real).EnumerateFileSystemInfos("*", Enumeration))
                         {

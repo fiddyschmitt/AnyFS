@@ -257,6 +257,26 @@ public class MirrorSourceTests
     }
 
     [TestMethod]
+    public async Task CountFilesSaysWhichFolderItIsIn()
+    {
+        var a = Path.Combine(_root, "A");
+        Directory.CreateDirectory(Path.Combine(a, "sub", "deep"));
+        File.WriteAllText(Path.Combine(a, "sub", "deep", "z.txt"), "z");
+        var source = await StartAsync(a, threads: 1, pathsInParallel: 1);
+        var seen = new List<string?>();
+        var chain = "";
+        source.CountListing = (root, _) =>
+        {
+            chain = root.ChainPath;
+            seen.Add(source.Counters.CurrentFolder);
+        };
+        Assert.IsNull(source.Counters.CurrentFolder);
+        await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+        CollectionAssert.AreEqual(new[] { chain, VfsPath.Join(chain, "sub"), VfsPath.Join(chain, "sub/deep") }, seen, "each folder of the source, as it is listed");
+        Assert.IsNull(source.Counters.CurrentFolder, "the count is over");
+    }
+
+    [TestMethod]
     public async Task CountFilesCountsAPathInsideAnotherOnceAndSkipsAnUnreachableOne()
     {
         var a = Path.Combine(_root, "A");

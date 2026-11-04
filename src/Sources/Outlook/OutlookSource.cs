@@ -724,7 +724,7 @@ public sealed class OutlookSource : SourceBase, ICountable
         {
             if (_books is { } books)
             {
-                await books.ReadUnreadAsync(ct).ConfigureAwait(false);
+                await books.ReadUnreadAsync(Counters, ct).ConfigureAwait(false);
             }
 
             await ListAllAsync(report: true, ct).ConfigureAwait(false);
@@ -907,6 +907,7 @@ public sealed class OutlookSource : SourceBase, ICountable
             {
                 try
                 {
+                    using var at = Counters.EnterFolder(taken[0].Node.Parent?.PathInTree ?? "");
                     var failure = await MakeAsync(taken, keepFiles: false).ConfigureAwait(false);
                     if (Systemic(failure))
                     {

@@ -272,6 +272,45 @@ public class OutlookItemListingTests
         }
     }
 
+    [TestMethod]
+    public async Task TheCountSaysWhichFolderOfTheMailboxItIsIn()
+    {
+        var fake = WithMay(out _);
+        using var arrived = new SemaphoreSlim(0);
+        using var held = new ManualResetEventSlim();
+        fake.Intercept = (_, action) =>
+        {
+            if (action == "GetItem")
+            {
+                arrived.Release();
+                held.Wait(TimeSpan.FromSeconds(30));
+            }
+
+            return null;
+        };
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            Assert.IsNull(source.Counters.CurrentFolder, "no count yet");
+            var counting = ((ICountable)source).CountFilesAsync(CancellationToken.None);
+            try
+            {
+                Assert.IsTrue(await arrived.WaitAsync(TimeSpan.FromSeconds(10)), "a batch is under way");
+                var folder = source.Counters.CurrentFolder;
+                Assert.IsFalse(string.IsNullOrEmpty(folder), "a folder of the mailbox, while its items are listed");
+                Assert.IsTrue((await source.StatAsync(folder, CancellationToken.None))?.IsDirectory, $"'{folder}' is a folder of the source");
+            }
+            finally
+            {
+                held.Set();
+            }
+
+            await counting;
+            Assert.IsNull(source.Counters.CurrentFolder, "the count is over");
+        }
+    }
+
     /// <summary>
     /// A count cut short as the source stops (the window closed while two mailboxes were counting, 26-Oct-2026) waits for
     /// the batches it had started: they gave their slots back after the pass had let the slots go, and each of those
