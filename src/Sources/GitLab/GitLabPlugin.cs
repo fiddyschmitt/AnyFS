@@ -60,6 +60,7 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
             nameof(GitLabSettings.BrowserPath) => s.EffectiveSignIn == GitLabSignIn.WebSession,
             nameof(GitLabSettings.OpenOnly) => s.IssuesAndMergeRequests,
             nameof(GitLabSettings.PipelinesKept) => s.Pipelines,
+            nameof(GitLabSettings.EveryProject) => !(s.Url is { } url && GitLabAddress.IsGitLabDotCom(url.Host)),
             _ => true,
         };
     }
@@ -140,13 +141,18 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
             progress.Report($"Signed in; asking GitLab what {(path.Length == 0 ? "the server" : path)} holds");
             if (path.Length == 0)
             {
-                long projects = 0;
-                await foreach (var _ in api.PagesAsync("projects?membership=true&simple=true&per_page=1", ct, total => projects = total).ConfigureAwait(false))
+                // GitLab gives the total up to 10,000 records
+                long? total = null;
+                var any = false;
+                await foreach (var _ in api.PagesAsync($"{s.ProjectsQuery}&per_page=1", ct, t => total = t).ConfigureAwait(false))
                 {
+                    any = true;
                     break;
                 }
 
-                return new TestResult(true, $"{who} The source shows the groups and projects you are a member of ({projects:N0} projects).");
+                var count = total is { } projects ? $"{projects:N0} projects" : any ? "over 10,000 projects" : "no projects";
+                var what = s.ShowsEveryProject ? "every group and project you can see" : "the groups and projects you are a member of";
+                return new TestResult(true, $"{who} The source shows {what} ({count}).");
             }
 
             if (await api.FindAsync($"projects/{GitLabAddress.Id(path)}", ct).ConfigureAwait(false) is { } found)

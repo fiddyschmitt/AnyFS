@@ -55,28 +55,29 @@ internal sealed class TextFile(string name, byte[] content, DateTimeOffset? modi
 }
 
 /// <summary>
-/// The whole server (spec 7.8): the groups the account is a member of and the namespaces of the projects it is a member of,
-/// never every public project of a big instance. A member group lists as GitLab lists it (all its subgroups and projects);
-/// a namespace the account reaches only through a project it was invited to shows just the way to that project.
+/// The whole server (spec 7.8): every group and project the account can see, or only those it is a member of
+/// (<see cref="GitLabSettings.ShowsEveryProject"/>). A group lists as GitLab lists it (the subgroups and projects the
+/// account can see); a namespace that is no group listed, someone's own or one the account reaches only through a project
+/// it was invited to, shows just the way to the projects in it.
 /// </summary>
 internal sealed class ServerRoot() : GlFolder("")
 {
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
-        => MembershipFolder.Children(await source.MembershipsAsync(ct).ConfigureAwait(false), "");
+        => NamespaceFolder.Children(await source.ServerListingAsync(ct).ConfigureAwait(false), "");
 }
 
-/// <summary>A namespace on the way to projects the account is a member of, though not of the namespace itself.</summary>
-internal sealed class MembershipFolder(string fullPath, string name) : GlFolder(name)
+/// <summary>A namespace on the way to projects the server's listing names, itself no group the listing names.</summary>
+internal sealed class NamespaceFolder(string fullPath, string name) : GlFolder(name)
 {
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
-        => Children(await source.MembershipsAsync(ct).ConfigureAwait(false), fullPath);
+        => Children(await source.ServerListingAsync(ct).ConfigureAwait(false), fullPath);
 
-    /// <summary>What is directly below <paramref name="prefix"/> ("" for the root): member groups, the namespaces on the way to deeper ones, the projects in it.</summary>
-    public static IReadOnlyList<GlNode> Children(Memberships memberships, string prefix)
+    /// <summary>What is directly below <paramref name="prefix"/> ("" for the root): the groups, the namespaces on the way to deeper ones, the projects in it.</summary>
+    public static IReadOnlyList<GlNode> Children(ServerListing listing, string prefix)
     {
         var below = prefix.Length == 0 ? "" : prefix + "/";
         var segments = new SortedDictionary<string, (GlGroup? Group, GlProject? Project)>(StringComparer.Ordinal);
-        foreach (var group in memberships.TopGroups)
+        foreach (var group in listing.TopGroups)
         {
             if (group.FullPath.StartsWith(below, StringComparison.Ordinal) && group.FullPath.Length > below.Length)
             {
@@ -93,9 +94,9 @@ internal sealed class MembershipFolder(string fullPath, string name) : GlFolder(
             }
         }
 
-        foreach (var project in memberships.Projects)
+        foreach (var project in listing.Projects)
         {
-            if (memberships.InMemberGroup(project.FullPath) || !project.FullPath.StartsWith(below, StringComparison.Ordinal))
+            if (listing.InTopGroup(project.FullPath) || !project.FullPath.StartsWith(below, StringComparison.Ordinal))
             {
                 continue;
             }
@@ -119,21 +120,40 @@ internal sealed class MembershipFolder(string fullPath, string name) : GlFolder(
             var (group, project) = segments[segment];
             return group is not null ? new GroupFolder(group, names[i])
                 : project is not null ? new ProjectFolder(project, names[i])
-                : (GlNode)new MembershipFolder(below + segment, names[i]);
+                : (GlNode)new NamespaceFolder(below + segment, names[i]);
         }).ToList();
     }
 }
 
-/// <summary>What the account is a member of on the whole server: the groups (the top-most of each line) and the projects.</summary>
-internal sealed class Memberships(IReadOnlyList<GlGroup> groups, IReadOnlyList<GlProject> projects)
+/// <summary>What the whole server shows: the groups (the top-most of each line) and the projects.</summary>
+internal sealed class ServerListing
 {
-    /// <summary>The member groups that no other member group holds: each lists all that is under it itself.</summary>
-    public IReadOnlyList<GlGroup> TopGroups { get; } = groups.Where(g => !groups.Any(o => o != g && g.FullPath.StartsWith(o.FullPath + "/", StringComparison.Ordinal))).ToList();
+    private readonly HashSet<string> _topPaths;
 
-    public IReadOnlyList<GlProject> Projects { get; } = projects;
+    public ServerListing(IReadOnlyList<GlGroup> groups, IReadOnlyList<GlProject> projects)
+    {
+        var paths = groups.Select(g => g.FullPath).ToHashSet(StringComparer.Ordinal);
+        TopGroups = groups.Where(g => !Above(g.FullPath).Any(paths.Contains)).ToList();
+        _topPaths = TopGroups.Select(g => g.FullPath).ToHashSet(StringComparer.Ordinal);
+        Projects = projects;
+    }
 
-    /// <summary>Whether a project's path is under a member group, which lists it itself.</summary>
-    public bool InMemberGroup(string projectPath) => TopGroups.Any(g => projectPath.StartsWith(g.FullPath + "/", StringComparison.Ordinal));
+    /// <summary>The groups that no other group listed holds: each lists all that is under it itself.</summary>
+    public IReadOnlyList<GlGroup> TopGroups { get; }
+
+    public IReadOnlyList<GlProject> Projects { get; }
+
+    /// <summary>Whether a project's path is under a top-most group, which lists it itself.</summary>
+    public bool InTopGroup(string projectPath) => Above(projectPath).Any(_topPaths.Contains);
+
+    /// <summary>The namespaces a path is under, the nearest first.</summary>
+    private static IEnumerable<string> Above(string path)
+    {
+        for (var slash = path.LastIndexOf('/'); slash > 0; slash = path.LastIndexOf('/', slash - 1))
+        {
+            yield return path[..slash];
+        }
+    }
 }
 
 /// <summary>A group: its subgroups and projects, as GitLab lists them to the account.</summary>

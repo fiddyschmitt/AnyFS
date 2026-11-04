@@ -3,7 +3,7 @@ namespace AnyFS.Sources.GitLab;
 /// <summary>What the address names, once the server has been asked (spec 7.8).</summary>
 internal enum ScopeKind
 {
-    /// <summary>The whole server: the groups and projects the account is a member of.</summary>
+    /// <summary>The whole server: every group and project the account can see, or only those it is a member of.</summary>
     Server,
 
     /// <summary>A group (or subgroup): its subgroups and projects.</summary>
@@ -77,4 +77,8 @@ internal sealed record GitLabAddress(Uri Server, string Path)
 
     /// <summary>A path's segments' URL-encoded form for the API's <c>:id</c> (<c>group%2Fproject</c>).</summary>
     public static string Id(string fullPath) => Uri.EscapeDataString(fullPath);
+
+    /// <summary>Whether a host is GitLab.com, whose public projects are millions and whose limits are its own.</summary>
+    public static bool IsGitLabDotCom(string host)
+        => host.Equals("gitlab.com", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".gitlab.com", StringComparison.OrdinalIgnoreCase);
 }

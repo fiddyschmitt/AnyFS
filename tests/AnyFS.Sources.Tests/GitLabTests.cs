@@ -414,7 +414,7 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
-    public async Task TheServerShowsWhatTheAccountIsAMemberOfAndNoMore()
+    public async Task TheServerShowsWhatTheAccountCanSeeAndNoMore()
     {
         var fake = GitLabSeed.Lab();
         var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server));
@@ -439,6 +439,36 @@ public class GitLabSourceTests
                 await OpenEveryFolderAsync(source, VfsPath.Join(path, entry.Name));
             }
         }
+    }
+
+    [TestMethod]
+    public async Task TheServerShowsEveryProjectTheAccountCanSeeActiveOrNot()
+    {
+        var fake = GitLabSeed.WithOpenProjects(GitLabSeed.Lab());
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server));
+        await using var _s = source;
+        async Task<string[]> Names(string path) => (await ListAsync(source, path)).Select(e => e.Name).ToArray();
+        CollectionAssert.AreEqual(new[] { "anyfs", "barren", "dusty", "elsewhere", "open", "other", "tester" }, await Names(""), "no hidden group; a group with nothing in it shows as GitLab lists it");
+        CollectionAssert.AreEqual(new[] { "quiet", "team", "bare", "going-deletion_scheduled-5", "inner", "jobs", "kept", "live", "mine", "old" }, await Names("open"));
+        CollectionAssert.AreEqual(new[] { "deep" }, await Names("open/team"));
+        CollectionAssert.AreEqual(new[] { "guest", "invited" }, await Names("open/quiet"), "a private subgroup shows what the account was invited to");
+        CollectionAssert.AreEqual(new[] { "relic" }, await Names("dusty"));
+        CollectionAssert.AreEqual(new[] { "theirs" }, await Names("other"), "another's own projects, those it can see");
+        CollectionAssert.AreEqual(new[] { "shared" }, await Names("elsewhere"));
+        CollectionAssert.AreEqual(new[] { "tools", "docs" }, await Names("anyfs"));
+
+        foreach (var (path, content) in new[] { ("open/live", "live"), ("open/old", "old"), ("open/going-deletion_scheduled-5", "going-deletion_scheduled-5"), ("dusty/relic", "relic"), ("open/inner", "inner"), ("open/team/deep", "deep"), ("other/theirs", "theirs"), ("open/quiet/invited", "invited") })
+        {
+            Assert.AreEqual($"# {content}\n", Encoding.UTF8.GetString(await ReadAsync(source, path + "/files/README.md")), path);
+        }
+
+        Assert.IsNull(await source.StatAsync("hidden", CancellationToken.None));
+        Assert.IsNull(await source.StatAsync("open/closed", CancellationToken.None));
+        Assert.IsNull(await source.StatAsync("open/quiet/uninvited", CancellationToken.None));
+        Assert.IsNull(await source.StatAsync("other/hidden", CancellationToken.None));
+
+        // nothing shown is refused
+        await OpenEveryFolderAsync(source, "");
     }
 
     [TestMethod]
@@ -469,6 +499,53 @@ public class GitLabSourceTests
 
         var kept = await GitLabPlugin.TestAsync(GitLabSeed.Settings(fake.Server + "/open/kept"), new Progress<string>(), fake.StandIn(), CancellationToken.None);
         StringAssert.Contains(kept.Message, "its repository is kept from this account");
+    }
+
+    [TestMethod]
+    public async Task WithEveryProjectOffTheServerShowsOnlyWhatTheAccountIsAMemberOf()
+    {
+        var fake = GitLabSeed.WithOpenProjects(GitLabSeed.Lab());
+        var settings = GitLabSeed.Settings(fake.Server);
+        settings.EveryProject = false;
+        var (source, _) = await StartAsync(fake, settings);
+        await using var _s = source;
+        async Task<string[]> Names(string path) => (await ListAsync(source, path)).Select(e => e.Name).ToArray();
+        CollectionAssert.AreEqual(new[] { "anyfs", "elsewhere", "open", "tester" }, await Names(""));
+        CollectionAssert.AreEqual(new[] { "mine", "quiet" }, await Names("open"), "just the way to the projects it was invited to");
+        CollectionAssert.AreEqual(new[] { "guest", "invited" }, await Names("open/quiet"));
+        CollectionAssert.AreEqual(new[] { "tools", "docs" }, await Names("anyfs"), "a member group lists as GitLab lists it");
+        Assert.AreEqual("# invited\n", Encoding.UTF8.GetString(await ReadAsync(source, "open/quiet/invited/files/README.md")));
+        Assert.IsNull(await source.StatAsync("open/live", CancellationToken.None));
+    }
+
+    [TestMethod]
+    [DataRow("https://gitlab.com")]
+    [DataRow("https://staging.gitlab.com")]
+    public async Task GitLabDotComShowsOnlyWhatTheAccountIsAMemberOf(string origin)
+    {
+        var fake = GitLabSeed.WithOpenProjects(GitLabSeed.Lab(origin));
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server));
+        await using var _s = source;
+        CollectionAssert.AreEqual(new[] { "anyfs", "elsewhere", "open", "tester" }, (await ListAsync(source, "")).Select(e => e.Name).ToArray(), "its public projects are millions");
+        Assert.AreEqual(0, fake.Count("projects?simple=true"), "they are never asked for");
+        Assert.IsFalse(new GitLabPlugin().IsVisible(new GitLabSettings { Address = origin }, nameof(GitLabSettings.EveryProject)));
+        Assert.IsTrue(new GitLabPlugin().IsVisible(new GitLabSettings { Address = "https://notgitlab.com" }, nameof(GitLabSettings.EveryProject)));
+    }
+
+    [TestMethod]
+    public async Task ListingsSavedWithTheOtherSettingAreNotReadBack()
+    {
+        var fake = GitLabSeed.WithOpenProjects(GitLabSeed.Lab());
+        using var context = new TestSourceContext();
+        var members = GitLabSeed.Settings(fake.Server);
+        members.EveryProject = false;
+        var (first, _) = await StartAsync(fake, members, context);
+        CollectionAssert.DoesNotContain((await ListAsync(first, "")).Select(e => e.Name).ToList(), "dusty");
+        await first.DisposeAsync();
+
+        var (second, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server), context);
+        await using var _s = second;
+        CollectionAssert.Contains((await ListAsync(second, "")).Select(e => e.Name).ToList(), "dusty", "the root of the last run would hide it until the next walk");
     }
 
     [TestMethod]
@@ -663,9 +740,28 @@ public class GitLabSourceTests
         StringAssert.Contains(result.Message, "as Test Er (tester) with an access token");
         StringAssert.Contains(result.Message, "the default branch main");
         var server = await GitLabPlugin.TestAsync(GitLabSeed.Settings(fake.Server), new Progress<string>(), fake.StandIn(), CancellationToken.None);
-        StringAssert.Contains(server.Message, "(5 projects)");
+        StringAssert.Contains(server.Message, "every group and project you can see (5 projects)");
         var refused = await GitLabPlugin.TestAsync(GitLabSeed.Settings(App(fake), "glpat-wrong"), new Progress<string>(), fake.StandIn(), CancellationToken.None);
         Assert.IsFalse(refused.Success);
+    }
+
+    [TestMethod]
+    public async Task TheTestButtonCountsWhatTheServerShows()
+    {
+        var fake = GitLabSeed.WithOpenProjects(GitLabSeed.Lab());
+        async Task<string> Says(bool every)
+        {
+            var settings = GitLabSeed.Settings(fake.Server);
+            settings.EveryProject = every;
+            return (await GitLabPlugin.TestAsync(settings, new Progress<string>(), fake.StandIn(), CancellationToken.None)).Message;
+        }
+
+        StringAssert.Contains(await Says(true), "every group and project you can see (18 projects)");
+        StringAssert.Contains(await Says(false), "the groups and projects you are a member of (8 projects)");
+
+        // past 10,000 GitLab no longer says how many
+        fake.TotalsUpTo = 16;
+        StringAssert.Contains(await Says(true), "(over 10,000 projects)");
     }
 }
 

@@ -38,7 +38,7 @@ internal sealed class GitLabApi : IDisposable
     /// limits (off by default), so it goes faster, still within what a crawl should ask of a shared server.
     /// </summary>
     public static RequestPace PaceFor(string host)
-        => host.Equals("gitlab.com", StringComparison.OrdinalIgnoreCase) || host.EndsWith(".gitlab.com", StringComparison.OrdinalIgnoreCase)
+        => GitLabAddress.IsGitLabDotCom(host)
             ? RequestPace.For("gitlab:" + host, burst: 100, perSecond: 25)
             : RequestPace.For("gitlab:" + host, burst: 200, perSecond: 50);
 

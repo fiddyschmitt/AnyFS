@@ -27,7 +27,7 @@ public sealed class GitLabSettings
     public const string Windows = WindowsAccount.WithPassword;
 
     [Setting("Address", Required = true, Primary = true, Order = 0, Placeholder = "https://gitlab.example.com/group/project",
-        Hint = "A GitLab server, a group on it or a project: its address as the browser shows it. A server shows the groups and projects you are a member of; a group its subgroups and projects; a project only itself. A page's address pasted here is cut back to its project's.")]
+        Hint = "A GitLab server, a group on it or a project: its address as the browser shows it. A server shows every group and project you can see, as GitLab's Explore page lists them; a group its subgroups and projects; a project only itself. A page's address pasted here is cut back to its project's.")]
     public string Address { get; set; } = "";
 
     [Setting("Sign in with", Order = 1, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [AccessTokenChoice, WebSession, WindowsCurrent, Windows],
@@ -92,6 +92,16 @@ public sealed class GitLabSettings
     [Setting("Requests at a time", Advanced = true, Order = 17, Hint = "How many requests AnyFS has open with the server at once.")]
     public int Concurrency { get; set; } = 8;
 
+    [Setting("Every project on the server", Advanced = true, Order = 18,
+        Hint = "With a server's address: every group and project you can see, as GitLab's Explore page lists them, those archived or marked for deletion too. Off: only the groups and projects you are a member of, for a server too big to list whole. GitLab.com always shows only yours, its public projects being millions.")]
+    public bool EveryProject { get; set; } = true;
+
+    /// <summary>Whether a server's address shows every project the account can see: not on GitLab.com, which holds millions.</summary>
+    internal bool ShowsEveryProject => EveryProject && !(Url is { } url && GitLabAddress.IsGitLabDotCom(url.Host));
+
+    /// <summary>The API's listing of the whole server's projects, in the simple form.</summary>
+    internal string ProjectsQuery => ShowsEveryProject ? "projects?simple=true" : "projects?membership=true&simple=true";
+
     internal GitLabSignIn EffectiveSignIn => SignInFrom(SignInMethod) ?? GitLabSignIn.AccessToken;
 
     internal static GitLabSignIn? SignInFrom(string? choice) => (choice ?? "").Trim() switch
@@ -149,7 +159,7 @@ public sealed class GitLabSettings
     internal bool Keeps => KeepListings && Refresh > TimeSpan.Zero;
 
     /// <summary>The settings that shape the tree, as one string: listings saved under another are not read back.</summary>
-    internal string Shape => $"{BranchesAndTags}|{Wiki}|{IssuesAndMergeRequests}|{Pipelines}|{Releases}|{OpenOnly}|{PipelinesKept}";
+    internal string Shape => $"{BranchesAndTags}|{Wiki}|{IssuesAndMergeRequests}|{Pipelines}|{Releases}|{OpenOnly}|{PipelinesKept}|{ShowsEveryProject}";
 
     internal TimeSpan WalkEvery => TimeSpan.FromMinutes(Math.Clamp(WalkMinutes, 0, 7 * 24 * 60));
 

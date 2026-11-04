@@ -231,24 +231,29 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
     // --- what the folders ask for --------------------------------------------------------------------------------------
 
-    /// <summary>The groups and projects the account is a member of, for the whole server: asked again every ten minutes at most.</summary>
-    internal Task<Memberships> MembershipsAsync(CancellationToken ct)
-        => Cache.GetAsync("memberships", Refresh < TimeSpan.FromMinutes(10) ? TimeSpan.FromMinutes(10) : Refresh, async c =>
+    /// <summary>
+    /// What the whole server shows: every group and project the account can see, as GitLab's Explore page lists them
+    /// (those archived or marked for deletion too, which GitLab leaves out only when asked to); or only what it is a member
+    /// of (<see cref="GitLabSettings.ShowsEveryProject"/>). Asked again every ten minutes at most.
+    /// </summary>
+    internal Task<ServerListing> ServerListingAsync(CancellationToken ct)
+        => Cache.GetAsync("server", Refresh < TimeSpan.FromMinutes(10) ? TimeSpan.FromMinutes(10) : Refresh, async c =>
         {
+            var every = _settings.ShowsEveryProject;
             var groups = new List<GlGroup>();
-            await foreach (var g in Api.PagesAsync("groups?min_access_level=10&per_page=100&order_by=id&sort=asc", c).ConfigureAwait(false))
+            await foreach (var g in Api.PagesAsync($"groups?{(every ? "all_available=true" : "min_access_level=10")}&per_page=100&order_by=id&sort=asc", c).ConfigureAwait(false))
             {
                 groups.Add(GlGroup.Parse(g));
             }
 
             var projects = new List<GlProject>();
-            await foreach (var p in Api.PagesAsync("projects?membership=true&simple=true&per_page=100&order_by=id&sort=asc&pagination=keyset", c).ConfigureAwait(false))
+            await foreach (var p in Api.PagesAsync($"{_settings.ProjectsQuery}&per_page=100&order_by=id&sort=asc&pagination=keyset", c).ConfigureAwait(false))
             {
                 projects.Add(GlProject.Parse(p));
             }
 
-            Logger.LogInformation("gitlab: {User} is a member of {Groups:N0} groups and {Projects:N0} projects", Session.User?.Username, groups.Count, projects.Count);
-            return new Memberships(groups, projects);
+            Logger.LogInformation("gitlab: {User} {Sees} {Groups:N0} groups and {Projects:N0} projects", Session.User?.Username, every ? "can see" : "is a member of", groups.Count, projects.Count);
+            return new ServerListing(groups, projects);
         }, ct);
 
     /// <summary>A group's subgroups and its own projects (not those shared with it, which show under their own groups).</summary>
