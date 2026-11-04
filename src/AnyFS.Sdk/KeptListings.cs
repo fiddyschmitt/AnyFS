@@ -1,7 +1,6 @@
 using System.IO.Compression;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
-using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sdk;
@@ -483,20 +482,14 @@ public sealed class KeptListings : IAsyncDisposable
     /// <summary>One part's share of a walk (<see cref="WalkAsync(SourceCounters, bool, CancellationToken)"/>): its folders, <see cref="KeptListingsOptions.Parallelism"/> at a time; the parts below it start walks of their own.</summary>
     private async Task WalkPartAsync(string root, bool rootHeldAlone, Walk walk, Action<string, bool> startPart, CancellationToken ct)
     {
-        var pending = Channel.CreateUnbounded<(string Folder, bool HeldAlone)>();
-        var outstanding = 1;
-        pending.Writer.TryWrite((root, rootHeldAlone));
-
-        void Enqueue(string child, bool heldAlone)
-        {
-            Interlocked.Increment(ref outstanding);
-            pending.Writer.TryWrite((child, heldAlone));
-        }
+        using var pending = new PendingFolders(_options.Parallelism);
+        pending.Add(root, rootHeldAlone);
 
         async Task WorkerAsync()
         {
-            await foreach (var (folder, heldAlone) in pending.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+            while (await pending.NextAsync(ct).ConfigureAwait(false) is { } next)
             {
+                var (folder, heldAlone) = next;
                 CountedFolder? at = null;
                 try
                 {
@@ -518,7 +511,7 @@ public sealed class KeptListings : IAsyncDisposable
                         if (!walk.Full && read && held is not null && stamp == held)
                         {
                             at.Kept();
-                            await KeepHeldAsync(folder, heldAlone, walk, Enqueue, ct).ConfigureAwait(false);
+                            await KeepHeldAsync(folder, heldAlone, walk, pending.Add, ct).ConfigureAwait(false);
                             continue;
                         }
 
@@ -555,6 +548,7 @@ public sealed class KeptListings : IAsyncDisposable
                     var leftOut = hasFolders && !heldAlone && _options.LeftOut is { } left ? await left(folder, ct).ConfigureAwait(false) : null;
                     long files = 0;
                     var folders = 0;
+                    var below = new List<(string Folder, bool HeldAlone)>();
                     foreach (var entry in entries)
                     {
                         if (!entry.IsDirectory)
@@ -582,10 +576,11 @@ public sealed class KeptListings : IAsyncDisposable
                         }
                         else
                         {
-                            Enqueue(child, heldAlone || isLeftOut);
+                            below.Add((child, heldAlone || isLeftOut));
                         }
                     }
 
+                    pending.AddAll(below);
                     walk.Counters.Add(files, folders);
                 }
                 catch (OperationCanceledException ex) when (ct.IsCancellationRequested)
@@ -607,15 +602,75 @@ public sealed class KeptListings : IAsyncDisposable
                 finally
                 {
                     at?.Dispose();
-                    if (Interlocked.Decrement(ref outstanding) == 0)
-                    {
-                        pending.Writer.TryComplete();
-                    }
+                    pending.Done();
                 }
             }
         }
 
         await Task.WhenAll(Enumerable.Range(0, _options.Parallelism).Select(_ => Task.Run(WorkerAsync, CancellationToken.None))).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The folders one part of a walk has still to go into: the last found first, those of one folder in the order it listed them,
+    /// so the walk has done with a folder and all that is below it before it goes on to the next. Level by level, a big tree's
+    /// walk came back to each folder long after what it had asked about it had aged out, and asked it all again.
+    /// </summary>
+    private sealed class PendingFolders(int workers) : IDisposable
+    {
+        private readonly Stack<(string Folder, bool HeldAlone)> _folders = new();
+        private readonly SemaphoreSlim _ready = new(0);
+        private int _outstanding;
+
+        public void Add(string folder, bool heldAlone)
+        {
+            Interlocked.Increment(ref _outstanding);
+            lock (_folders)
+            {
+                _folders.Push((folder, heldAlone));
+            }
+
+            _ready.Release();
+        }
+
+        public void AddAll(List<(string Folder, bool HeldAlone)> folders)
+        {
+            if (folders.Count == 0)
+            {
+                return;
+            }
+
+            Interlocked.Add(ref _outstanding, folders.Count);
+            lock (_folders)
+            {
+                for (var i = folders.Count - 1; i >= 0; i--)
+                {
+                    _folders.Push(folders[i]);
+                }
+            }
+
+            _ready.Release(folders.Count);
+        }
+
+        /// <summary>The next folder to go into; null once every folder is done, which is when no more can be found.</summary>
+        public async ValueTask<(string Folder, bool HeldAlone)?> NextAsync(CancellationToken ct)
+        {
+            await _ready.WaitAsync(ct).ConfigureAwait(false);
+            lock (_folders)
+            {
+                return _folders.TryPop(out var next) ? next : null;
+            }
+        }
+
+        /// <summary>One taken is done, with what it found added: the last of them ends every worker's wait.</summary>
+        public void Done()
+        {
+            if (Interlocked.Decrement(ref _outstanding) == 0)
+            {
+                _ready.Release(workers);
+            }
+        }
+
+        public void Dispose() => _ready.Dispose();
     }
 
     /// <summary>

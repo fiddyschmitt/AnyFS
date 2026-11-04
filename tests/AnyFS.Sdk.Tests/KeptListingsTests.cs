@@ -166,6 +166,17 @@ public class KeptListingsTests
     }
 
     [TestMethod]
+    public async Task AWalkHasDoneWithAFolderAndAllBelowItBeforeItGoesOnToTheNext()
+    {
+        // level by level, a big tree's walk came back to each folder after what it had asked about it had aged out, and asked it all again
+        var watcher = new RecordingFolderWatcher();
+        var counters = new SourceCounters { FolderWatcher = watcher };
+        await using var kept = Kept(counters, new KeptListingsOptions { WalkEvery = TimeSpan.Zero, Parallelism = 1, MaxInFlight = 1 });
+        await kept.CountAsync(CancellationToken.None);
+        CollectionAssert.AreEqual(new[] { "in (root)", "in docs", "in docs/sub", "in photos" }, watcher.Lines.Where(l => l.StartsWith("in ", StringComparison.Ordinal)).ToList(), string.Join("; ", watcher.Lines));
+    }
+
+    [TestMethod]
     public async Task AWatcherHearsOfAFolderReadWholeAndOfOneKeptByItsStamp()
     {
         _stamps["docs"] = "v1";
