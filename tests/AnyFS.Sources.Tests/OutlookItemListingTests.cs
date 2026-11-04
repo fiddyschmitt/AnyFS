@@ -66,8 +66,9 @@ public class OutlookItemListingTests
             Assert.AreEqual(20, folders.Count);
             CollectionAssert.AreEquivalent(new[] { "message.md", "message.eml", "attachments" }, (await OutlookFixtures.ListAsync(source, folders[0])).Select(e => e.Name).ToList());
 
-            // the folder with the fifteen after it in one request, and the next sixteen (the four left) ahead in another
-            for (var i = 0; i < 200 && fake.ItemsFetched < 20; i++)
+            // the folder with the fifteen after it in one request, and the next sixteen (the four left) ahead in another; nobody
+            // waits for those, and their attachments are the last thing they ask for
+            for (var i = 0; i < 200 && fake.AttachmentsFetched < 20; i++)
             {
                 await Task.Delay(10);
             }
