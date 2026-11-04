@@ -16,6 +16,7 @@ public sealed class RequestCache(CancellationToken stopping)
     public const int MaxEntries = 20_000;
 
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private int _trimming;
 
     private sealed class Entry(Func<Task<object>> start, long at, TimeSpan? ttl)
     {
@@ -85,14 +86,22 @@ public sealed class RequestCache(CancellationToken stopping)
 
     private void Trim()
     {
-        if (_entries.Count <= MaxEntries)
+        if (_entries.Count <= MaxEntries || Interlocked.Exchange(ref _trimming, 1) != 0)
         {
             return;
         }
 
-        foreach (var old in _entries.OrderBy(e => e.Value.At).Take(MaxEntries / 5).ToList())
+        try
         {
-            _entries.TryRemove(old);
+            // from a copy made whole: others go on asking, and sorting the dictionary itself as it grows throws
+            foreach (var old in _entries.ToArray().OrderBy(e => e.Value.At).Take(MaxEntries / 5))
+            {
+                _entries.TryRemove(old);
+            }
+        }
+        finally
+        {
+            Volatile.Write(ref _trimming, 0);
         }
     }
 }
