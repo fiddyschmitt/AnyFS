@@ -18,7 +18,7 @@
         <!-- on a line of their own: beside the file count and a narrow tile's button there is room for little of a bar, and less the more files there are -->
         <Panel Grid.Row="2" Grid.ColumnSpan="2">
           <ProgressBar Classes="tile" IsIndeterminate="True" IsVisible="{Binding Counting}" />
-          <ProgressBar Classes="tile" Minimum="0" Maximum="1" Value="{Binding Progress, Mode=OneWay, FallbackValue=0}" IsVisible="{Binding HasProgress}" />
+          <ProgressBar Classes="tile" Minimum="0" Maximum="1" Value="{Binding Progress, Mode=OneWay, FallbackValue=0, TargetNullValue=0}" IsVisible="{Binding HasProgress}" />
         </Panel>
         <!-- the count first: where a narrow tile has not room for both, the button's words give way, not the number -->
         <DockPanel Grid.Row="3" Grid.ColumnSpan="2" Margin="0,8,0,0">
@@ -65,7 +65,7 @@
           <!-- on a line of their own: beside the file count and a narrow tile's button there is room for little of a bar, and less the more files there are -->
           <Panel Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2">
             <ProgressBar Classes="tile" IsIndeterminate="True" IsVisible="{Binding Counting}" />
-            <ProgressBar Classes="tile" Minimum="0" Maximum="1" Value="{Binding Progress, Mode=OneWay, FallbackValue=0}" IsVisible="{Binding HasProgress}" />
+            <ProgressBar Classes="tile" Minimum="0" Maximum="1" Value="{Binding Progress, Mode=OneWay, FallbackValue=0, TargetNullValue=0}" IsVisible="{Binding HasProgress}" />
           </Panel>
           <ItemsControl Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" ItemsSource="{Binding Uses}" IsVisible="{Binding ShowUses}" Margin="0,4,0,0">
             <ItemsControl.ItemTemplate>
