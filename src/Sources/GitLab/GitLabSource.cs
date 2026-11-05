@@ -23,6 +23,13 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     // how many folders' last listings are remembered at most (ResolveAsync); past that they start again
     private const int MostFoldersRemembered = 200_000;
 
+    // a page of GitLab's listings at its largest
+    private const int ProjectsPage = 100;
+
+    // how many ranges of project ids for each that lists them at once (EveryProjectAsync): on the lab's 3,505 projects 1, 2, 4 and
+    // 8 took the same time within its noise, and the more of them, the less a cluster of ids holds up the rest
+    private const int RangesPerWalker = 4;
+
     private readonly ConcurrentDictionary<string, IReadOnlyList<GlNode>> _lastListed = new(StringComparer.OrdinalIgnoreCase);
     private readonly GitLabSettings _settings;
     private readonly GitLabStandIn? _standIn;
@@ -116,17 +123,14 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             throw new SourceFailedException($"Opening {(path.Length == 0 ? _session.Address.Server.Host : path)}: {ex.Message}", permanent: ex.Error == VfsError.AccessDenied, ex);
         }
 
-        // with no refresh interval nothing is kept: every listing asks, through the caches below; the walks take half the
-        // requests, so whoever browses meanwhile has the other half
-        var requests = Math.Clamp(_settings.Concurrency, 1, 64);
-        var walking = Math.Max(1, requests / 2);
+        // with no refresh interval nothing is kept: every listing asks, through the caches below
         _kept = new KeptListings(ListFolderAsync, Counters, Logger, new KeptListingsOptions
         {
             Keep = _settings.Keeps,
             UnkeptFor = TimeSpan.Zero,
             WalkEvery = _settings.WalkEvery,
-            Parallelism = walking,
-            MaxInFlight = walking,
+            Parallelism = Walkers,
+            MaxInFlight = Walkers,
             LeftOut = LeftOutAsync,
             ListTree = ListTreeAsync,
             StampOf = StampAsync,
@@ -260,6 +264,9 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         }
     }
 
+    /// <summary>How many walk at once: half the requests the source may make, so whoever browses meanwhile has the other half.</summary>
+    private int Walkers => Math.Max(1, Math.Clamp(_settings.Concurrency, 1, 64) / 2);
+
     // --- what the folders ask for --------------------------------------------------------------------------------------
 
     /// <summary>
@@ -277,15 +284,97 @@ public sealed partial class GitLabSource : SourceBase, ICountable
                 groups.Add(GlGroup.Parse(g));
             }
 
-            var projects = new List<GlProject>();
-            await foreach (var p in Api.PagesAsync($"{_settings.ProjectsQuery}&per_page=100&order_by=id&sort=asc&pagination=keyset", c).ConfigureAwait(false))
-            {
-                projects.Add(GlProject.Parse(p));
-            }
-
+            var projects = await EveryProjectAsync(c).ConfigureAwait(false);
             Logger.LogInformation("gitlab: {User} {Sees} {Groups:N0} groups and {Projects:N0} projects", Session.User?.Username, every ? "can see" : "is a member of", groups.Count, projects.Count);
             return new ServerListing(groups, projects);
         }, ct);
+
+    /// <summary>
+    /// Every project the account can see, in the order of their ids. Each page of GitLab's listing says where the next begins,
+    /// so its pages can only be asked one after another, and everything else on the server waits for this listing. Past the
+    /// first page, which is all a small server needs, the rest is asked in ranges of ids side by side, as many at once as a walk
+    /// may ask.
+    /// </summary>
+    private async Task<List<GlProject>> EveryProjectAsync(CancellationToken ct)
+    {
+        var query = $"{_settings.ProjectsQuery}&per_page={ProjectsPage}&order_by=id&sort=asc&pagination=keyset";
+        var projects = new List<GlProject>();
+        await using var pages = Api.PagesAsync(query, ct).GetAsyncEnumerator(ct);
+        while (projects.Count < ProjectsPage && await pages.MoveNextAsync().ConfigureAwait(false))
+        {
+            projects.Add(GlProject.Parse(pages.Current));
+        }
+
+        if (projects.Count == ProjectsPage && Walkers > 1 && await ProjectsInRangesAsync(query, projects[^1].Id, ct).ConfigureAwait(false) is { } rest)
+        {
+            projects.AddRange(rest);
+            return projects;
+        }
+
+        // a page at a time from where it got to
+        while (await pages.MoveNextAsync().ConfigureAwait(false))
+        {
+            projects.Add(GlProject.Parse(pages.Current));
+        }
+
+        return projects;
+    }
+
+    /// <summary>
+    /// The projects past an id, from up to the highest there is: that span cut in <see cref="RangesPerWalker"/> times as many
+    /// ranges as walkers, so that a range of many projects does not leave the others idle, and each walked to its end. Null
+    /// where the server does not keep to the ranges (<c>id_after</c>, <c>id_before</c>): no project is then counted twice.
+    /// </summary>
+    private async Task<List<GlProject>?> ProjectsInRangesAsync(string query, long after, CancellationToken ct)
+    {
+        long highest = 0;
+        await foreach (var project in Api.PagesAsync($"{_settings.ProjectsQuery}&per_page=1&order_by=id&sort=desc&pagination=keyset", ct).ConfigureAwait(false))
+        {
+            highest = project.Long("id");
+            break;
+        }
+
+        if (highest <= after)
+        {
+            return [];
+        }
+
+        var ranges = (int)Math.Min(Walkers * RangesPerWalker, highest - after);
+        var found = new List<GlProject>[ranges];
+        try
+        {
+            await Parallel.ForEachAsync(Enumerable.Range(0, ranges), new ParallelOptions { MaxDegreeOfParallelism = Walkers, CancellationToken = ct }, async (i, c) =>
+            {
+                var from = after + ((highest - after) * i / ranges);
+                var to = after + ((highest - after) * (i + 1) / ranges);
+
+                // the last is open at its end: a project made since the highest was asked for is in it
+                var last = i == ranges - 1;
+                var projects = new List<GlProject>();
+                await foreach (var e in Api.PagesAsync($"{query}&id_after={from}{(last ? "" : $"&id_before={to + 1}")}", c).ConfigureAwait(false))
+                {
+                    var project = GlProject.Parse(e);
+                    if (project.Id <= from || (!last && project.Id > to))
+                    {
+                        throw new RangeNotKeptException();
+                    }
+
+                    projects.Add(project);
+                }
+
+                found[i] = projects;
+            }).ConfigureAwait(false);
+        }
+        catch (RangeNotKeptException)
+        {
+            Logger.LogInformation("gitlab: {Host} does not keep to a range of project ids; they are listed a page at a time", Api.Address.Server.Host);
+            return null;
+        }
+
+        return found.SelectMany(f => f).ToList();
+    }
+
+    private sealed class RangeNotKeptException : Exception;
 
     /// <summary>A group's subgroups and its own projects (not those shared with it, which show under their own groups).</summary>
     internal Task<GroupContents> GroupContentsAsync(GlGroup group, CancellationToken ct)

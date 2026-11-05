@@ -429,6 +429,221 @@ public class GitLabSourceTests
         Assert.IsNull(await source.StatAsync("hidden", CancellationToken.None));
     }
 
+    /// <summary>How many listings of every project were being answered at once, each taking a moment; what it is told when one is asked.</summary>
+    private sealed class ProjectListings(HttpMessageHandler inner, Action<string>? asked = null, Func<string, bool>? refuse = null) : DelegatingHandler(inner)
+    {
+        private int _now;
+        private int _most;
+
+        public int Most => Volatile.Read(ref _most);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (!request.RequestUri!.AbsolutePath.EndsWith("/api/v4/projects", StringComparison.Ordinal))
+            {
+                return await base.SendAsync(request, cancellationToken);
+            }
+
+            if (refuse?.Invoke(request.RequestUri.Query) == true)
+            {
+                return new HttpResponseMessage(System.Net.HttpStatusCode.Forbidden) { Content = new StringContent("""{"message":"403 Forbidden"}""") };
+            }
+
+            var now = Interlocked.Increment(ref _now);
+            int most;
+            while (now > (most = Volatile.Read(ref _most)) && Interlocked.CompareExchange(ref _most, now, most) != most)
+            {
+            }
+
+            try
+            {
+                await Task.Delay(10, cancellationToken);
+                var response = await base.SendAsync(request, cancellationToken);
+                asked?.Invoke(request.RequestUri.Query);
+                return response;
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _now);
+            }
+        }
+    }
+
+    private static async Task<(GitLabSource Source, ProjectListings Listings)> StartCountingListingsAsync(FakeGitLab fake, GitLabSettings settings, Action<string>? asked = null, Func<string, bool>? refuse = null)
+    {
+        var listings = new ProjectListings(fake.Handler(), asked, refuse);
+        var source = new GitLabSource(settings, new GitLabStandIn(() => listings));
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        return (source, listings);
+    }
+
+    private static List<long> ProjectsAdded(FakeGitLab fake, int count, int gapEvery = 0, int gap = 0)
+    {
+        var tester = fake.UserNamed("tester");
+        var many = fake.AddGroup("many", "Many", null, tester);
+        var ids = new List<long>();
+        for (var i = 0; i < count; i++)
+        {
+            if (gapEvery > 0 && i % gapEvery == 0)
+            {
+                fake.SkipIds(gap);
+            }
+
+            ids.Add(fake.AddProject(many, $"p{i:0000}", $"Project {i}").Id);
+        }
+
+        return ids;
+    }
+
+    [TestMethod]
+    public async Task ASmallServersProjectsAreOnePageAsTheyAlwaysWere()
+    {
+        var fake = GitLabSeed.Lab();
+        var (source, listings) = await StartCountingListingsAsync(fake, GitLabSeed.Settings(fake.Server));
+        await using var _s = source;
+        Assert.IsTrue((await source.ServerListingAsync(CancellationToken.None)).Projects.Count > 0);
+        Assert.AreEqual(1, fake.Count("GET /api/v4/projects?"), "the one page it takes: " + string.Join("; ", fake.Requests.Where(r => r.Contains("/projects?", StringComparison.Ordinal))));
+        Assert.AreEqual(1, listings.Most);
+    }
+
+    [TestMethod]
+    public async Task ManyProjectsAreListedInRangesOfIdsSideBySide()
+    {
+        var fake = GitLabSeed.Lab();
+        var added = ProjectsAdded(fake, 2_000);
+        var settings = GitLabSeed.Settings(fake.Server);
+        var (source, listings) = await StartCountingListingsAsync(fake, settings);
+        await using var _s = source;
+        var listed = (await source.ServerListingAsync(CancellationToken.None)).Projects.Select(p => p.Id).ToList();
+
+        CollectionAssert.AreEqual(listed.OrderBy(id => id).ToList(), listed, "in the order of their ids, as a single listing gives them");
+        Assert.AreEqual(listed.Count, listed.Distinct().Count(), "none twice");
+        CollectionAssert.IsSubsetOf(added, listed, "none left out");
+        Assert.AreEqual(4, listings.Most, "as many at once as a walk may ask: half of Concurrency 8, the other half for whoever browses");
+
+        var asked = fake.Requests.Where(r => r.StartsWith("GET /api/v4/projects?", StringComparison.Ordinal)).ToList();
+        Assert.AreEqual(1, asked.Count(r => r.Contains("sort=desc", StringComparison.Ordinal)), "the highest id, asked for once");
+        var ranges = asked.Where(r => !r.Contains("sort=desc", StringComparison.Ordinal) && r.Contains("id_after=", StringComparison.Ordinal)).ToList();
+        Assert.AreEqual(15, ranges.Select(r => r.Split('?', '&').FirstOrDefault(p => p.StartsWith("id_before=", StringComparison.Ordinal))).Where(b => b is not null).Distinct().Count(), "sixteen ranges, the last with no end");
+        Assert.IsTrue(ranges.Any(r => !r.Contains("id_before=", StringComparison.Ordinal)), "the last is open at its end");
+        Assert.IsTrue(asked.Count <= 2 + (listed.Count / 100) + 16, $"the first page, the highest id, then a page of a hundred and a part page for each range at most: {asked.Count}");
+    }
+
+    [TestMethod]
+    public async Task ProjectsFarApartInTheirIdsAreAllListedOnce()
+    {
+        var fake = GitLabSeed.Lab();
+        var added = ProjectsAdded(fake, 450, gapEvery: 50, gap: 100_000);
+        var (source, _) = await StartCountingListingsAsync(fake, GitLabSeed.Settings(fake.Server));
+        await using var _s = source;
+        var listed = (await source.ServerListingAsync(CancellationToken.None)).Projects.Select(p => p.Id).ToList();
+        Assert.AreEqual(listed.Count, listed.Distinct().Count(), "none twice");
+        CollectionAssert.IsSubsetOf(added, listed, "none left out");
+        CollectionAssert.AreEqual(listed.OrderBy(id => id).ToList(), listed);
+    }
+
+    [TestMethod]
+    public async Task ProjectsMostlyInOneCornerOfTheirIdsAreAllListedOnce()
+    {
+        var fake = GitLabSeed.Lab();
+        var tester = fake.UserNamed("tester");
+        var many = fake.AddGroup("many", "Many", null, tester);
+        var added = new List<long>();
+        for (var i = 0; i < 700; i++)
+        {
+            added.Add(fake.AddProject(many, $"p{i:0000}", $"Project {i}").Id);
+        }
+
+        fake.SkipIds(5_000_000);
+        added.Add(fake.AddProject(many, "far-away", "Far away").Id);
+        var (source, _) = await StartCountingListingsAsync(fake, GitLabSeed.Settings(fake.Server));
+        await using var _s = source;
+        var listed = (await source.ServerListingAsync(CancellationToken.None)).Projects.Select(p => p.Id).ToList();
+        Assert.AreEqual(listed.Count, listed.Distinct().Count(), "none twice");
+        CollectionAssert.IsSubsetOf(added, listed, "none left out");
+    }
+
+    [TestMethod]
+    public async Task ExactlyOnePageOfProjectsAsksForNoRanges()
+    {
+        var fake = GitLabSeed.Lab();
+        var (first, _) = await StartCountingListingsAsync(fake, GitLabSeed.Settings(fake.Server));
+        var already = (await first.ServerListingAsync(CancellationToken.None)).Projects.Count;
+        await first.DisposeAsync();
+
+        ProjectsAdded(fake, 100 - already);
+        var (source, _) = await StartCountingListingsAsync(fake, GitLabSeed.Settings(fake.Server));
+        await using var _s = source;
+        var before = fake.Requests.Count;
+        Assert.AreEqual(100, (await source.ServerListingAsync(CancellationToken.None)).Projects.Count);
+        var asked = fake.Requests.Skip(before).Where(r => r.StartsWith("GET /api/v4/projects?", StringComparison.Ordinal)).ToList();
+        Assert.AreEqual(0, asked.Count(r => r.Contains("id_before=", StringComparison.Ordinal) || r.Contains("id_after=", StringComparison.Ordinal)), string.Join("; ", asked));
+    }
+
+    [TestMethod]
+    public async Task WithOnlyOneWalkerTheProjectsArePagedOneAfterAnother()
+    {
+        var fake = GitLabSeed.Lab();
+        var added = ProjectsAdded(fake, 450);
+        var settings = GitLabSeed.Settings(fake.Server);
+        settings.Concurrency = 3;
+        var (source, listings) = await StartCountingListingsAsync(fake, settings);
+        await using var _s = source;
+        var listed = (await source.ServerListingAsync(CancellationToken.None)).Projects.Select(p => p.Id).ToList();
+        CollectionAssert.IsSubsetOf(added, listed);
+        Assert.AreEqual(1, listings.Most);
+        Assert.AreEqual(0, fake.Count("sort=desc"), "nothing to ask for the highest id for");
+        Assert.AreEqual(0, fake.Count("id_before="));
+    }
+
+    [TestMethod]
+    public async Task AServerThatDoesNotKeepToARangeIsListedAPageAtATimeWithNoneTwice()
+    {
+        var fake = GitLabSeed.Lab();
+        fake.KeepsToIdBefore = false;
+        var added = ProjectsAdded(fake, 2_000);
+        var (source, _) = await StartCountingListingsAsync(fake, GitLabSeed.Settings(fake.Server));
+        await using var _s = source;
+        var listed = (await source.ServerListingAsync(CancellationToken.None)).Projects.Select(p => p.Id).ToList();
+        Assert.AreEqual(listed.Count, listed.Distinct().Count(), "none twice");
+        CollectionAssert.IsSubsetOf(added, listed, "none left out");
+        CollectionAssert.AreEqual(listed.OrderBy(id => id).ToList(), listed);
+    }
+
+    [TestMethod]
+    public async Task AProjectMadeAsTheyAreListedPastTheHighestIsListedToo()
+    {
+        var fake = GitLabSeed.Lab();
+        ProjectsAdded(fake, 450);
+        var tester = fake.UserNamed("tester");
+        var late = fake.AddGroup("late", "Late", null, tester);
+        var made = 0L;
+        var (source, _) = await StartCountingListingsAsync(fake, GitLabSeed.Settings(fake.Server), query =>
+        {
+            if (query.Contains("sort=desc", StringComparison.Ordinal))
+            {
+                made = fake.AddProject(late, "late", "Late").Id;
+            }
+        });
+        await using var _s = source;
+        var listed = (await source.ServerListingAsync(CancellationToken.None)).Projects.Select(p => p.Id).ToList();
+        Assert.AreNotEqual(0, made);
+        CollectionAssert.Contains(listed, made, "the last range is open at its end");
+    }
+
+    [TestMethod]
+    public async Task ARefusedRangeFailsTheListingAndTheNextAskStartsAgain()
+    {
+        var fake = GitLabSeed.Lab();
+        var added = ProjectsAdded(fake, 450);
+        var refuse = true;
+        var (source, _) = await StartCountingListingsAsync(fake, GitLabSeed.Settings(fake.Server), refuse: query => refuse && query.Contains("id_before=", StringComparison.Ordinal));
+        await using var _s = source;
+        await Assert.ThrowsExactlyAsync<VfsException>(() => source.ServerListingAsync(CancellationToken.None));
+        refuse = false;
+        CollectionAssert.IsSubsetOf(added, (await source.ServerListingAsync(CancellationToken.None)).Projects.Select(p => p.Id).ToList());
+    }
+
     /// <summary>Lists every folder from <paramref name="path"/> down as someone opening each would: a folder shown that GitLab refuses throws.</summary>
     private static async Task OpenEveryFolderAsync(ISource source, string path)
     {

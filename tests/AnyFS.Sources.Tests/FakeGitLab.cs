@@ -62,6 +62,18 @@ internal sealed partial class FakeGitLab
     /// <summary>Past how many records a listing no longer says how many there are: GitLab's X-Total stops at 10,000.</summary>
     public int TotalsUpTo { get; set; } = 10_000;
 
+    /// <summary>Whether a keyset listing keeps to its <c>id_before</c>: false stands for a server that goes on past it.</summary>
+    public bool KeepsToIdBefore { get; set; } = true;
+
+    /// <summary>Leaves a gap in the ids the next records are given, as deleted projects and other kinds of record do.</summary>
+    public void SkipIds(int count)
+    {
+        lock (_gate)
+        {
+            _nextId += count;
+        }
+    }
+
     /// <summary>The project at a full path (for a test to change).</summary>
     public Project ProjectAt(string fullPath)
     {
@@ -624,7 +636,7 @@ internal sealed partial class FakeGitLab
         return project is not null && Sees(user, project) ? project : null;
     }
 
-    /// <summary>A listing a page at a time: <c>page</c> and <c>per_page</c>, the Link header's next page, X-Total; keyset (<c>id_after</c>) for projects.</summary>
+    /// <summary>A listing a page at a time: <c>page</c> and <c>per_page</c>, the Link header's next page, X-Total; keyset (<c>id_after</c>, <c>id_before</c>, <c>sort</c>) for projects.</summary>
     private Response Paged(Request r, IEnumerable<JsonNode> all)
     {
         var items = all.ToList();
@@ -633,6 +645,16 @@ internal sealed partial class FakeGitLab
         string next;
         if (r.Q("pagination") == "keyset")
         {
+            if (KeepsToIdBefore && long.TryParse(r.Q("id_before"), out var before))
+            {
+                items = items.Where(i => i["id"]!.GetValue<long>() < before).ToList();
+            }
+
+            if (r.Q("sort") == "desc")
+            {
+                items.Reverse();
+            }
+
             var after = long.TryParse(r.Q("id_after"), out var a) ? a : long.MinValue;
             start = items.FindIndex(i => i["id"]!.GetValue<long>() > after);
             start = start < 0 ? items.Count : start;
