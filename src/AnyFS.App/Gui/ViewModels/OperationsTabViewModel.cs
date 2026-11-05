@@ -13,12 +13,21 @@ namespace AnyFS.App.Gui.ViewModels;
 public enum OperationColumn
 {
     Started,
+    AskedOf,
     Source,
     Operation,
     Path,
     Duration,
     Detail,
     Result,
+}
+
+/// <summary>Whose operations the tab shows: what AnyFS was asked, what the sources really asked of what is behind them, or either.</summary>
+public enum OperationAskedOfFilter
+{
+    Either,
+    AnyFS,
+    Source,
 }
 
 /// <summary>One row: an operation as it stands, its texts made once per refresh so the list only redraws what changed.</summary>
@@ -35,13 +44,25 @@ public sealed partial class OperationRowViewModel(long id) : ObservableObject
     public partial string StartedFull { get; set; } = "";
 
     [ObservableProperty]
+    public partial string AskedOf { get; set; } = "";
+
+    [ObservableProperty]
     public partial string Source { get; set; } = "";
 
     [ObservableProperty]
     public partial string Operation { get; set; } = "";
 
+    /// <summary>All of what was asked for: the tooltip's, and what is copied.</summary>
     [ObservableProperty]
     public partial string Path { get; set; } = "";
+
+    /// <summary>What the column shows of it (<see cref="PathShownText"/>).</summary>
+    [ObservableProperty]
+    public partial string PathShown { get; set; } = "";
+
+    /// <summary>A server's address, which keeps its start when it is too long for the column; any other path keeps its end.</summary>
+    [ObservableProperty]
+    public partial bool IsAddress { get; set; }
 
     [ObservableProperty]
     public partial string Duration { get; set; } = "";
@@ -67,14 +88,19 @@ public sealed partial class OperationRowViewModel(long id) : ObservableObject
         var started = record.Started.ToLocalTime();
         Started = started.ToString("HH:mm:ss.f", CultureInfo.CurrentCulture);
         StartedFull = started.ToString("d MMM yyyy HH:mm:ss.fff", CultureInfo.CurrentCulture);
+        AskedOf = AskedOfText(record);
         Source = record.Source;
-        Operation = record.Kind.Describe();
+        Operation = record.Name;
         Path = PathText(record);
+        PathShown = PathShownText(record);
+        IsAddress = PathShown.Length != Path.Length;
         Duration = DurationText(record);
         Detail = DetailText(record);
         Result = ResultText(record);
         Outcome = record.Outcome;
     }
+
+    public static string AskedOfText(OperationRecord record) => record.AskedOf == OperationAskedOf.Source ? "Source" : "AnyFS";
 
     /// <summary>The path asked for; a count, asked for none, says which folder it is up to while it runs.</summary>
     public static string PathText(OperationRecord record)
@@ -83,12 +109,30 @@ public sealed partial class OperationRowViewModel(long id) : ObservableObject
         return path is null ? "" : path.Length == 0 ? "(root)" : path;
     }
 
+    /// <summary>
+    /// What the Path column shows: <see cref="PathText"/>, and of a server's address what comes after the server, since it is
+    /// what was asked that tells one row from the next. The whole address is in the tooltip and in what is copied.
+    /// </summary>
+    public static string PathShownText(OperationRecord record)
+    {
+        var path = PathText(record);
+        if (record.Kind != OperationKind.Upstream)
+        {
+            return path;
+        }
+
+        var scheme = path.IndexOf("://", StringComparison.Ordinal);
+        var slash = scheme < 0 ? -1 : path.IndexOf('/', scheme + 3);
+        return slash < 0 ? path : path[slash..];
+    }
+
     public static string DurationText(OperationRecord record) => record.Duration.TotalSeconds.ToString("0.00", CultureInfo.CurrentCulture);
 
-    /// <summary>What went by: bytes through a file handle, entries of a listing, files counted, else what the operation said.</summary>
+    /// <summary>What went by: bytes through a file handle or to and from a server, entries of a listing, files counted, else what the operation said.</summary>
     public static string DetailText(OperationRecord record) => record.Kind switch
     {
         OperationKind.ReadFile or OperationKind.WriteFile => record.Bytes > 0 ? Format.Bytes(record.Bytes) : record.Detail ?? "",
+        OperationKind.Upstream => record.Items > 0 ? $"{record.Items:N0} {(record.Items == 1 ? "entry" : "entries")}" : record.Bytes > 0 ? Format.Bytes(record.Bytes) : "",
         OperationKind.List => record.Items > 0 || record.Outcome == OperationOutcome.Succeeded ? $"{record.Items:N0} {(record.Items == 1 ? "entry" : "entries")}" : record.Detail ?? "",
         OperationKind.Count => Format.Files(record.Items, complete: record.Outcome == OperationOutcome.Succeeded),
         OperationKind.CountFolder => record.Detail ?? (record.Items > 0 ? $"{record.Items:N0} {(record.Items == 1 ? "entry" : "entries")}" : ""),
@@ -98,7 +142,7 @@ public sealed partial class OperationRowViewModel(long id) : ObservableObject
     public static string ResultText(OperationRecord record) => record.Outcome switch
     {
         OperationOutcome.Running => "Running",
-        OperationOutcome.Succeeded => "OK",
+        OperationOutcome.Succeeded => record.Answer ?? "OK",
         OperationOutcome.Cancelled => record.Error is null ? "Cancelled" : $"Cancelled: {record.Error}",
         _ => WithoutPath(record.Error, record.Path) ?? "Failed",
     };
@@ -125,9 +169,10 @@ public sealed partial class SourceFilterViewModel(Guid id, Action<SourceFilterVi
 }
 
 /// <summary>
-/// The Operations tab (spec 11.5): every operation asked of a source, as it runs and for five seconds after it ends,
-/// newest first, each column sortable; filtered by source, by how long they have taken, and to failures. The window
-/// refreshes it four times a second while it is the tab shown, so the durations tick.
+/// The Operations tab (spec 11.5): every operation asked of a source, and everything it asked of its server, as it runs and
+/// for five seconds after it ends, newest first, each column sortable; filtered by who was asked, by source, by how long
+/// they have taken, and to failures. The window refreshes it four times a second while it is the tab shown, so the durations
+/// tick.
 /// </summary>
 public sealed partial class OperationsTabViewModel : ObservableObject
 {
@@ -179,6 +224,30 @@ public sealed partial class OperationsTabViewModel : ObservableObject
     [ObservableProperty]
     public partial bool FailuresOnly { get; set; }
 
+    /// <summary>Whose operations are shown and summed up: either side's to begin with (the user, 5-Nov-2026).</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(AskedOfEither), nameof(AskedOfAnyFS), nameof(AskedOfSource))]
+    public partial OperationAskedOfFilter AskedOf { get; set; }
+
+    /// <summary>For the radio buttons: ticking one chooses it, and unticking one as another is ticked says nothing.</summary>
+    public bool AskedOfEither
+    {
+        get => AskedOf == OperationAskedOfFilter.Either;
+        set => Choose(value, OperationAskedOfFilter.Either);
+    }
+
+    public bool AskedOfAnyFS
+    {
+        get => AskedOf == OperationAskedOfFilter.AnyFS;
+        set => Choose(value, OperationAskedOfFilter.AnyFS);
+    }
+
+    public bool AskedOfSource
+    {
+        get => AskedOf == OperationAskedOfFilter.Source;
+        set => Choose(value, OperationAskedOfFilter.Source);
+    }
+
     /// <summary>"Operations longer than x seconds": empty, or not a number, shows them all.</summary>
     [ObservableProperty]
     public partial string LongerThanText { get; set; } = "";
@@ -197,6 +266,9 @@ public sealed partial class OperationsTabViewModel : ObservableObject
 
     [ObservableProperty]
     public partial string StartedHeader { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string AskedOfHeader { get; set; } = "";
 
     [ObservableProperty]
     public partial string SourceHeader { get; set; } = "";
@@ -286,12 +358,13 @@ public sealed partial class OperationsTabViewModel : ObservableObject
     public string AsText()
     {
         var text = new StringBuilder();
-        text.AppendLine("Started\tSource\tOperation\tPath\tDuration (s)\tDetail\tResult");
+        text.AppendLine("Started\tAsked of\tSource\tOperation\tPath\tDuration (s)\tDetail\tResult");
         foreach (var record in _shown)
         {
             text.Append(record.Started.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture)).Append('\t')
+                .Append(OperationRowViewModel.AskedOfText(record)).Append('\t')
                 .Append(record.Source).Append('\t')
-                .Append(record.Kind.Describe()).Append('\t')
+                .Append(record.Name).Append('\t')
                 .Append(OperationRowViewModel.PathText(record)).Append('\t')
                 .Append(record.Duration.TotalSeconds.ToString("0.000", CultureInfo.InvariantCulture)).Append('\t')
                 .Append(OperationRowViewModel.DetailText(record)).Append('\t')
@@ -311,13 +384,30 @@ public sealed partial class OperationsTabViewModel : ObservableObject
 
     partial void OnFailuresOnlyChanged(bool value) => Refresh();
 
+    partial void OnAskedOfChanged(OperationAskedOfFilter value) => Refresh();
+
     partial void OnIsPausedChanged(bool value) => Refresh();
 
     partial void OnIsActiveChanged(bool value) => Refresh();
 
+    private void Choose(bool ticked, OperationAskedOfFilter filter)
+    {
+        if (ticked)
+        {
+            AskedOf = filter;
+        }
+    }
+
+    private bool IsShown(OperationAskedOf asked) => AskedOf switch
+    {
+        OperationAskedOfFilter.AnyFS => asked == OperationAskedOf.AnyFS,
+        OperationAskedOfFilter.Source => asked == OperationAskedOf.Source,
+        _ => true,
+    };
+
     private bool Passes(OperationRecord record)
     {
-        if (_hidden.Contains(record.SourceId))
+        if (!IsShown(record.AskedOf) || _hidden.Contains(record.SourceId))
         {
             return false;
         }
@@ -341,8 +431,9 @@ public sealed partial class OperationsTabViewModel : ObservableObject
         Comparison<OperationRecord> key = column switch
         {
             OperationColumn.Started => (a, b) => a.Id.CompareTo(b.Id),
+            OperationColumn.AskedOf => (a, b) => a.AskedOf.CompareTo(b.AskedOf),
             OperationColumn.Source => (a, b) => string.Compare(a.Source, b.Source, StringComparison.CurrentCultureIgnoreCase),
-            OperationColumn.Operation => (a, b) => string.Compare(a.Kind.Describe(), b.Kind.Describe(), StringComparison.CurrentCultureIgnoreCase),
+            OperationColumn.Operation => (a, b) => string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase),
             OperationColumn.Path => (a, b) => string.Compare(OperationRowViewModel.PathText(a), OperationRowViewModel.PathText(b), StringComparison.CurrentCultureIgnoreCase),
             OperationColumn.Duration => (a, b) => a.Duration.CompareTo(b.Duration),
             OperationColumn.Detail => (a, b) => string.Compare(OperationRowViewModel.DetailText(a), OperationRowViewModel.DetailText(b), StringComparison.CurrentCultureIgnoreCase),
@@ -366,14 +457,29 @@ public sealed partial class OperationsTabViewModel : ObservableObject
         };
     }
 
+    /// <summary>The session's counts, of the side or sides shown: with the server's alone shown, how many requests it has been asked.</summary>
     private string Summarise(OperationStatsSnapshot stats)
     {
-        var text = new StringBuilder();
-        text.Append(CultureInfo.CurrentCulture, $"{stats.Running:N0} running");
-        text.Append(CultureInfo.CurrentCulture, $" · {stats.Finished:N0} finished this session");
-        if (stats.Failed > 0)
+        long running = 0, finished = 0, failed = 0;
+        foreach (var source in stats.Sources)
         {
-            text.Append(CultureInfo.CurrentCulture, $", {stats.Failed:N0} failed");
+            foreach (var kind in source.Operations)
+            {
+                if (IsShown(kind.Kind.AskedOf()))
+                {
+                    running += kind.Running;
+                    finished += kind.Finished;
+                    failed += kind.Failed;
+                }
+            }
+        }
+
+        var text = new StringBuilder();
+        text.Append(CultureInfo.CurrentCulture, $"{running:N0} running");
+        text.Append(CultureInfo.CurrentCulture, $" · {finished:N0} finished this session");
+        if (failed > 0)
+        {
+            text.Append(CultureInfo.CurrentCulture, $", {failed:N0} failed");
         }
 
         if (_matching > MaxRows)
@@ -392,6 +498,7 @@ public sealed partial class OperationsTabViewModel : ObservableObject
     private void UpdateHeaders()
     {
         StartedHeader = Header("Started", OperationColumn.Started);
+        AskedOfHeader = Header("Asked of", OperationColumn.AskedOf);
         SourceHeader = Header("Source", OperationColumn.Source);
         OperationHeader = Header("Operation", OperationColumn.Operation);
         PathHeader = Header("Path", OperationColumn.Path);

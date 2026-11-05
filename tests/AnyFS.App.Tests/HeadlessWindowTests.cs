@@ -141,8 +141,8 @@ public class HeadlessWindowTests
 
                 // every header sorts, through its binding and parameter
                 var headers = window.GetVisualDescendants().OfType<Button>().Where(b => b.Classes.Contains("colhead")).ToList();
-                Assert.AreEqual(7, headers.Count);
-                foreach (var (header, title) in headers.Zip(new[] { "Started", "Source", "Operation", "Path", "Duration (s)", "Detail", "Result" }))
+                Assert.AreEqual(8, headers.Count);
+                foreach (var (header, title) in headers.Zip(new[] { "Started", "Asked of", "Source", "Operation", "Path", "Duration (s)", "Detail", "Result" }))
                 {
                     StringAssert.StartsWith(header.Content?.ToString(), title);
                     Assert.IsTrue(header.Command!.CanExecute(header.CommandParameter));
@@ -168,6 +168,28 @@ public class HeadlessWindowTests
                 failures.IsChecked = true;
                 Assert.IsTrue(tab.Rows.All(r => r.Outcome == OperationOutcome.Failed));
                 failures.IsChecked = false;
+
+                // who was asked, as the radio buttons choose it, with a request of the server's among the rows
+                host.Engine.Operations.Begin(definition.Id, "alpha", OperationKind.Upstream, "https://server.test/tree", what: "GET").Complete();
+                tab.Refresh();
+                RadioButton Asked(string name) => window.GetVisualDescendants().OfType<RadioButton>().Single(r => r.Name == name);
+                Assert.IsTrue(Asked("AskedOfEither").IsChecked, "what was asked of either, to begin with");
+                Assert.IsTrue(tab.Rows.Any(r => r.AskedOf == "Source") && tab.Rows.Any(r => r.AskedOf == "AnyFS"));
+                Asked("AskedOfSource").IsChecked = true;
+                Assert.AreEqual(OperationAskedOfFilter.Source, tab.AskedOf);
+                Assert.IsFalse(Asked("AskedOfEither").IsChecked, "one at a time");
+                CollectionAssert.AreEqual(new[] { "https://server.test/tree" }, tab.Rows.Select(r => r.Path).ToList());
+                await Task.Delay(100);
+                window.UpdateLayout();
+                var request = rows.ContainerFromIndex(0)!.GetVisualDescendants().OfType<TextBlock>().Select(t => t.Text).ToList();
+                CollectionAssert.Contains(request, "Source");
+                CollectionAssert.Contains(request, "GET");
+                CollectionAssert.Contains(request, "/tree");
+                Asked("AskedOfAnyFS").IsChecked = true;
+                Assert.AreEqual(OperationAskedOfFilter.AnyFS, tab.AskedOf);
+                Assert.IsTrue(tab.Rows.All(r => r.AskedOf == "AnyFS") && tab.Rows.Count > 0);
+                Asked("AskedOfEither").IsChecked = true;
+                Assert.AreEqual(OperationAskedOfFilter.Either, tab.AskedOf);
 
                 var filters = window.GetVisualDescendants().OfType<ItemsControl>().Single(i => i.Name == "SourceFilters");
                 await Task.Delay(100);

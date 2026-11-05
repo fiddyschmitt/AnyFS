@@ -256,15 +256,186 @@ public class OperationsTabTests
         await _tab.CopyCommand.ExecuteAsync(null);
         var lines = _clipboard.Texts.Single().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.TrimEnd('\r')).ToList();
         Assert.AreEqual(2, lines.Count, "a header and the one row shown");
-        Assert.AreEqual("Started\tSource\tOperation\tPath\tDuration (s)\tDetail\tResult", lines[0]);
+        Assert.AreEqual("Started\tAsked of\tSource\tOperation\tPath\tDuration (s)\tDetail\tResult", lines[0]);
         var cells = lines[1].Split('\t');
-        Assert.AreEqual(7, cells.Length);
-        Assert.AreEqual("alpha", cells[1]);
-        Assert.AreEqual("Read file", cells[2]);
-        Assert.AreEqual("docs/a.txt", cells[3]);
-        Assert.AreEqual("1.500", cells[4]);
-        Assert.AreEqual("3 KB", cells[5]);
-        Assert.AreEqual("OK", cells[6]);
+        Assert.AreEqual(8, cells.Length);
+        Assert.AreEqual("AnyFS", cells[1]);
+        Assert.AreEqual("alpha", cells[2]);
+        Assert.AreEqual("Read file", cells[3]);
+        Assert.AreEqual("docs/a.txt", cells[4]);
+        Assert.AreEqual("1.500", cells[5]);
+        Assert.AreEqual("3 KB", cells[6]);
+        Assert.AreEqual("OK", cells[7]);
+    }
+
+    private Operation Asked(Guid source, string what, string address, TimeSpan? ago = null)
+    {
+        var op = _tracker.Begin(source, source == Alpha ? "alpha" : "beta", OperationKind.Upstream, address, what: what);
+        if (ago is { } by)
+        {
+            _time.Advance(by);
+        }
+
+        return op;
+    }
+
+    [TestMethod]
+    public void TheListFiltersByWhoWasAsked()
+    {
+        Begin(Alpha, OperationKind.List, "docs");
+        var request = Asked(Alpha, "GET", "https://server.test/tree");
+        _tab.Refresh();
+        Assert.AreEqual(OperationAskedOfFilter.Either, _tab.AskedOf, "what was asked of either, to begin with");
+        Assert.IsTrue(_tab.AskedOfEither);
+        CollectionAssert.AreEqual(new[] { "https://server.test/tree", "docs" }, Paths());
+        CollectionAssert.AreEqual(new[] { "Source", "AnyFS" }, _tab.Rows.Select(r => r.AskedOf).ToList());
+
+        _tab.AskedOfAnyFS = true;
+        Assert.AreEqual(OperationAskedOfFilter.AnyFS, _tab.AskedOf);
+        CollectionAssert.AreEqual(new[] { "docs" }, Paths());
+        Assert.IsFalse(_tab.AskedOfEither);
+        Assert.IsFalse(_tab.AskedOfSource);
+
+        _tab.AskedOfSource = true;
+        CollectionAssert.AreEqual(new[] { "https://server.test/tree" }, Paths());
+        Assert.IsFalse(_tab.AskedOfAnyFS);
+
+        // the radio buttons untick what was ticked as they tick another: that alone chooses nothing
+        _tab.AskedOfAnyFS = false;
+        _tab.AskedOfEither = false;
+        Assert.AreEqual(OperationAskedOfFilter.Source, _tab.AskedOf);
+
+        _tab.FailuresOnly = true;
+        Assert.AreEqual(0, _tab.Rows.Count, "with the other filters");
+        Assert.AreEqual("No operations match the filters.", _tab.EmptyText);
+        request.Note("503 Service Unavailable");
+        request.Complete();
+        _tab.Refresh();
+        CollectionAssert.AreEqual(new[] { "https://server.test/tree" }, Paths(), "a refusal is a failure");
+        _tab.FailuresOnly = false;
+
+        _tab.Sources.Single(s => s.Name == "alpha").IsChecked = false;
+        Assert.AreEqual(0, _tab.Rows.Count, "a source unticked takes its requests with it");
+        _tab.Sources.Single(s => s.Name == "alpha").IsChecked = true;
+
+        _tab.AskedOfEither = true;
+        CollectionAssert.AreEqual(new[] { "https://server.test/tree", "docs" }, Paths());
+    }
+
+    [TestMethod]
+    public void TheSummaryCountsTheSideShown()
+    {
+        var list = Begin(Alpha, OperationKind.List, "docs");
+        list.Complete();
+        Begin(Alpha, OperationKind.Stat, "a");
+        var one = Asked(Alpha, "GET", "https://server.test/one");
+        one.Note("404 Not Found");
+        one.Complete();
+        Asked(Beta, "GET", "https://server.test/two").Complete();
+        Asked(Beta, "GET", "https://server.test/three").Complete();
+        Asked(Beta, "GET", "https://server.test/four");
+        _tab.Refresh();
+        Assert.AreEqual("2 running · 4 finished this session, 1 failed", _tab.Summary);
+        _tab.AskedOfAnyFS = true;
+        Assert.AreEqual("1 running · 1 finished this session", _tab.Summary);
+        _tab.AskedOfSource = true;
+        Assert.AreEqual("1 running · 3 finished this session, 1 failed", _tab.Summary, "how many requests the servers have had");
+    }
+
+    [TestMethod]
+    public void TheCapOnRowsComesAfterTheFilter()
+    {
+        for (var i = 0; i < OperationsTabViewModel.MaxRows + 10; i++)
+        {
+            Begin(Alpha, OperationKind.Stat, $"f{i}");
+        }
+
+        Asked(Alpha, "GET", "https://server.test/older");
+        for (var i = 0; i < OperationsTabViewModel.MaxRows + 10; i++)
+        {
+            Begin(Alpha, OperationKind.Stat, $"g{i}");
+        }
+
+        _tab.Refresh();
+        Assert.IsFalse(Paths().Contains("https://server.test/older"), "out of sight among the rest");
+        _tab.AskedOfSource = true;
+        CollectionAssert.AreEqual(new[] { "https://server.test/older" }, Paths());
+        Assert.IsFalse(_tab.Summary.Contains("showing", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void WhatASourceAskedReadsAsItWasAsked()
+    {
+        var running = Asked(Alpha, "GET", "https://server.test/big", TimeSpan.FromSeconds(1));
+        running.AddBytes(2048);
+        running.Answer = "200 OK";
+        var ok = Asked(Alpha, "POST", "https://server.test/api/graphql");
+        ok.AddBytes(3 * 1024);
+        ok.Answer = "200 OK";
+        ok.Complete();
+        var refused = Asked(Alpha, "GET", "https://server.test/gone");
+        refused.AddBytes(10);
+        refused.Note("404 Not Found");
+        refused.Complete();
+        var broke = Asked(Alpha, "GET", "https://server.test/broke");
+        broke.Fail(new HttpRequestException("no route to host"));
+        var listing = Asked(Alpha, "SFTP list", "/home/x");
+        listing.AddItems(12);
+        listing.Complete();
+        var empty = Asked(Alpha, "SFTP stat", "/home/y");
+        empty.Complete();
+        _tab.Refresh();
+        var rows = _tab.Rows.ToDictionary(r => r.Path);
+
+        var row = rows["https://server.test/big"];
+        Assert.AreEqual(("Source", "GET", "2 KB", "Running", OperationOutcome.Running), (row.AskedOf, row.Operation, row.Detail, row.Result, row.Outcome), "the bytes go up while it runs");
+        row = rows["https://server.test/api/graphql"];
+        Assert.AreEqual(("POST", "3 KB", "200 OK", OperationOutcome.Succeeded), (row.Operation, row.Detail, row.Result, row.Outcome));
+        row = rows["https://server.test/gone"];
+        Assert.AreEqual(("10 B", "404 Not Found", OperationOutcome.Failed), (row.Detail, row.Result, row.Outcome));
+        row = rows["https://server.test/broke"];
+        Assert.AreEqual(("", "no route to host", OperationOutcome.Failed), (row.Detail, row.Result, row.Outcome));
+        row = rows["/home/x"];
+        Assert.AreEqual(("SFTP list", "12 entries", "OK"), (row.Operation, row.Detail, row.Result), "where nothing was said it is as for anything else");
+        row = rows["/home/y"];
+        Assert.AreEqual(("", "OK"), (row.Detail, row.Result));
+
+        // of an address the column shows what was asked, and keeps its start; all of it is in the tooltip and what is copied
+        row = rows["https://server.test/api/graphql"];
+        Assert.AreEqual(("/api/graphql", true), (row.PathShown, row.IsAddress));
+        row = rows["/home/x"];
+        Assert.AreEqual(("/home/x", false), (row.PathShown, row.IsAddress), "a path on the server keeps its end, as any path does");
+        var mirrored = Asked(Alpha, "Get metadata", @"C:\mirrored\docs\a.txt");
+        mirrored.Complete();
+        var anyfs = Begin(Alpha, OperationKind.List, "docs/x://y");
+        anyfs.Complete();
+        _tab.Refresh();
+        row = _tab.Rows.Single(r => r.Path == @"C:\mirrored\docs\a.txt");
+        Assert.AreEqual((@"C:\mirrored\docs\a.txt", false), (row.PathShown, row.IsAddress));
+        row = _tab.Rows.Single(r => r.Path == "docs/x://y");
+        Assert.AreEqual(("docs/x://y", false), (row.PathShown, row.IsAddress), "only what a source asked is an address");
+
+        var text = _tab.AsText();
+        StringAssert.Contains(text, "\tSource\talpha\tPOST\thttps://server.test/api/graphql\t");
+        StringAssert.Contains(text, "\t3 KB\t200 OK");
+    }
+
+    [TestMethod]
+    public void WhatWasAskedSortsByWhoWasAskedAndByWhatWasAsked()
+    {
+        Asked(Alpha, "PUT", "https://server.test/put");
+        Begin(Alpha, OperationKind.List, "listed");
+        Asked(Alpha, "GET", "https://server.test/get");
+        _tab.Refresh();
+        _tab.SortCommand.Execute("AskedOf");
+        Assert.AreEqual("Asked of ▲", _tab.AskedOfHeader);
+        CollectionAssert.AreEqual(new[] { "AnyFS", "Source", "Source" }, _tab.Rows.Select(r => r.AskedOf).ToList());
+        Assert.AreEqual("https://server.test/get", _tab.Rows[1].Path, "newest first among equals");
+        _tab.SortCommand.Execute("AskedOf");
+        CollectionAssert.AreEqual(new[] { "Source", "Source", "AnyFS" }, _tab.Rows.Select(r => r.AskedOf).ToList());
+
+        _tab.SortCommand.Execute("Operation");
+        CollectionAssert.AreEqual(new[] { "GET", "List folder", "PUT" }, _tab.Rows.Select(r => r.Operation).ToList(), "by the words shown");
     }
 
     [TestMethod]
