@@ -9,9 +9,10 @@ namespace AnyFS.Sources.Common;
 /// and worker together: so many a second on average, with up to a burst at once after a quiet spell (a token bucket), so a
 /// folder opened in a hurry is not kept waiting while a crawl stays within what the service allows; and when the service
 /// throttles all the same (429 or 503 with Retry-After: a person's browser and other apps share its limit), none at all
-/// until the time it gave has passed, as Microsoft and GitLab ask of a client with many threads. Requests wait their turn,
-/// oldest first, rather than fail. Each service gives its own numbers: SharePoint Online's and Graph's are
-/// <c>MicrosoftPace</c>'s (spec 7.3), GitLab's its source's (spec 7.8).
+/// until the time it gave has passed, as Microsoft asks of a client with many threads. Requests wait their turn,
+/// oldest first, rather than fail. Only Microsoft 365 gives numbers of its own, <c>MicrosoftPace</c>'s (spec 7.3, within
+/// what SharePoint Online and Graph publish); every other service is <see cref="Unpaced"/>: asked as fast as its settings
+/// allow, and held only when it asks (the user, 5-Nov-2026: no caps that are not in the settings).
 /// </summary>
 public sealed class RequestPace
 {
@@ -20,7 +21,7 @@ public sealed class RequestPace
 
     private static readonly ConcurrentDictionary<string, RequestPace> Paces = new(StringComparer.OrdinalIgnoreCase);
 
-    private readonly TokenBucketRateLimiter _limiter;
+    private readonly TokenBucketRateLimiter? _limiter;
     private long _heldUntil;   // UTC ticks
 
     /// <param name="burst">How many may go at once, after a quiet spell.</param>
@@ -38,19 +39,37 @@ public sealed class RequestPace
         });
     }
 
+    private RequestPace()
+    {
+    }
+
     /// <summary>
     /// The pace for <paramref name="key"/> (a service's host, or an account), shared by all that ask for it. The first to
     /// ask sets its numbers: a key belongs to one service, which always gives the same.
     /// </summary>
     public static RequestPace For(string key, int burst, int perSecond) => Paces.GetOrAdd(key, _ => new RequestPace(burst, perSecond));
 
+    /// <summary>
+    /// No pace for <paramref name="key"/>: requests go as fast as whoever makes them allows, and are held only after a throttled
+    /// answer (<see cref="Hold"/>), which every request of the service then waits out together.
+    /// </summary>
+    public static RequestPace Unpaced(string key) => Paces.GetOrAdd(key, _ => new RequestPace());
+
+    /// <summary>Whether requests go at a pace of their own, or only as fast as they are made.</summary>
+    public bool IsPaced => _limiter is not null;
+
     /// <summary>Sets the pace for <paramref name="key"/>: a test's stand-in service, which need not be spared as the real one must.</summary>
     internal static void Use(string key, RequestPace pace) => Paces[key] = pace;
 
-    /// <summary>Waits for a request's turn: past any hold, then for a token, then past a hold that began meanwhile.</summary>
+    /// <summary>Waits for a request's turn: past any hold, then for a token where there is a pace, then past a hold that began meanwhile.</summary>
     public async ValueTask WaitAsync(CancellationToken ct)
     {
         await PastHoldAsync(ct).ConfigureAwait(false);
+        if (_limiter is null)
+        {
+            return;
+        }
+
         using (await _limiter.AcquireAsync(1, ct).ConfigureAwait(false))
         {
         }

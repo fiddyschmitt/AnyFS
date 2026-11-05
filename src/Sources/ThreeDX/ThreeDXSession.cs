@@ -88,7 +88,6 @@ internal sealed class ThreeDXSession : IDisposable
             AllowAutoRedirect = false,
             AutomaticDecompression = DecompressionMethods.All,
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-            MaxConnectionsPerServer = 32,
 
             // the web session's single sign-on goes as the person only to the organisation's own servers; a Windows account to any that asks
             Credentials = Method == ThreeDXSignIn.WebSession ? new OwnServersOnly(credentials, Space) : credentials,

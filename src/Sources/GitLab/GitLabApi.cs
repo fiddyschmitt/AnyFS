@@ -9,11 +9,13 @@ using Microsoft.Extensions.Logging;
 namespace AnyFS.Sources.GitLab;
 
 /// <summary>
-/// GitLab's REST API (v4) and GraphQL, as the source asks them (spec 7.8): every request at the server's pace
-/// (<see cref="RequestPace"/>, by host) with at most so many open at once; a throttled answer (429, 503 with
-/// Retry-After) held and tried again; a server error or a dropped connection tried again twice; a refusal of the sign-in
-/// (401) renewed once through the session and tried again; pages followed by their Link header, offset and keyset alike;
-/// errors as <see cref="VfsException"/>s by status.
+/// GitLab's REST API (v4) and GraphQL, as the source asks them (spec 7.8): at most so many requests open at once (the
+/// settings' projects at a time times the requests at a time per project), and no pace of AnyFS's own: until 5-Nov-2026 a
+/// server of one's own was asked at most 50 a second (GitLab.com 25) whatever the settings said, which held the user's 3,500
+/// projects to a few requests in flight. A throttled answer (429, 503 with Retry-After) holds every request of the server
+/// (<see cref="RequestPace.Unpaced"/>, by host) and is tried again; a server error or a dropped connection tried again twice;
+/// a refusal of the sign-in (401) renewed once through the session and tried again; pages followed by their Link header, offset
+/// and keyset alike; errors as <see cref="VfsException"/>s by status.
 /// </summary>
 internal sealed class GitLabApi : IDisposable
 {
@@ -25,34 +27,16 @@ internal sealed class GitLabApi : IDisposable
     private readonly SemaphoreSlim _gate;
     private readonly ILogger _logger;
 
-    /// <summary>What a server of one's own is asked a second unless the settings say otherwise ("Requests a second").</summary>
-    public const int DefaultPerSecond = 50;
-
-    public GitLabApi(GitLabSession session, int concurrency, ILogger logger, int perSecond = DefaultPerSecond)
+    public GitLabApi(GitLabSession session, int concurrency, ILogger logger)
     {
         _session = session;
-        _pace = PaceFor(session.Address.Server.Host, perSecond);
-        _gate = new SemaphoreSlim(Math.Clamp(concurrency, 1, 64));
+        _pace = HoldsFor(session.Address.Server.Host);
+        _gate = new SemaphoreSlim(Math.Clamp(concurrency, 1, 64 * 64));
         _logger = logger;
     }
 
-    /// <summary>
-    /// A server's pace: GitLab.com allows an account 2,000 API requests a minute, so it goes at 25 whatever the settings say;
-    /// a server of one's own sets its own limits (off by default), so it goes at "Requests a second" (<paramref name="perSecond"/>,
-    /// 50 unless set: what a crawl should ask of a shared server, and what held the user's 3,500 projects to a few requests in
-    /// flight at 32 allowed at a time, 5-Nov-2026), with a burst of four seconds' worth. A pace is shared by host and number:
-    /// two sources of one server set differently each keep theirs.
-    /// </summary>
-    public static RequestPace PaceFor(string host, int perSecond = DefaultPerSecond)
-    {
-        if (GitLabAddress.IsGitLabDotCom(host))
-        {
-            return RequestPace.For("gitlab:" + host, burst: 100, perSecond: 25);
-        }
-
-        perSecond = Math.Clamp(perSecond, 1, 1000);
-        return RequestPace.For(perSecond == DefaultPerSecond ? "gitlab:" + host : $"gitlab:{host}:{perSecond}", burst: perSecond * 4, perSecond: perSecond);
-    }
+    /// <summary>The holds a server asks for (429, 503 with Retry-After), shared by every source and client of that host; no pace besides.</summary>
+    public static RequestPace HoldsFor(string host) => RequestPace.Unpaced("gitlab:" + host);
 
     public GitLabAddress Address => _session.Address;
 

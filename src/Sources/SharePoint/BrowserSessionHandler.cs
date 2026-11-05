@@ -60,7 +60,6 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
             UseCookies = true,
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
             AutomaticDecompression = DecompressionMethods.All,
-            MaxConnectionsPerServer = 32,
             AllowAutoRedirect = false,
         }, watcher);
     }

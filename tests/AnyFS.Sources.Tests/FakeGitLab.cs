@@ -37,7 +37,6 @@ internal sealed partial class FakeGitLab
         ExternalUrl = Origin + Root;
 
         // the source paces itself for a real server; a suite of thousands of requests need not wait
-        RequestPace.Use("gitlab:" + new Uri(Origin).Host, new RequestPace(burst: 1_000_000, perSecond: 1_000));
     }
 
     public string Origin { get; }

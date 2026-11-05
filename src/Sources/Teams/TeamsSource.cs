@@ -68,9 +68,9 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         _cache = new RequestCache(_stopping.Token);
         _root = new RootFolder();
 
-        // the walks take half the requests, so whoever browses meanwhile has the other half
-        var requests = Math.Clamp(_settings.Concurrency, 1, 32);
-        var walking = Math.Max(1, requests / 2);
+        // the walk may have all of "Requests at a time" in flight (until 5-Nov-2026 half, the rest kept back for browsing, which
+        // the service's gate shares out anyway)
+        var walking = Math.Clamp(_settings.Concurrency, 1, 64);
         _kept = new KeptListings(ListFolderAsync, Counters, Logger, new KeptListingsOptions
         {
             Keep = _settings.Keeps,

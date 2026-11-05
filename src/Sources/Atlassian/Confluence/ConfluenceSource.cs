@@ -103,8 +103,9 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             throw new SourceFailedException($"Opening {(Scope.Kind == ConfluenceScopeKind.Server ? _session.Address.Base.Host : "the address")}: {ex.Message}", permanent: ex.Error is VfsError.AccessDenied or VfsError.NotFound, ex);
         }
 
-        var requests = Math.Clamp(_settings.Concurrency, 1, 64);
-        var walking = Math.Max(1, requests / 2);
+        // the walk may have all of "Requests at a time" in flight (until 5-Nov-2026 half, the rest kept back for browsing, which
+        // the API's gate shares out anyway)
+        var walking = Math.Clamp(_settings.Concurrency, 1, 64);
         _kept = new KeptListings(ListFolderAsync, Counters, Logger, new KeptListingsOptions
         {
             Keep = _settings.Keeps,
@@ -521,7 +522,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     private async Task PeopleAsync(IEnumerable<string> keys, CancellationToken ct)
     {
         var missing = keys.Where(k => !_people.ContainsKey(k)).Distinct(StringComparer.Ordinal).ToList();
-        await Parallel.ForEachAsync(missing, new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct }, async (key, c) =>
+        await Parallel.ForEachAsync(missing, new ParallelOptions { MaxDegreeOfParallelism = Math.Clamp(_settings.Concurrency, 1, 64), CancellationToken = ct }, async (key, c) =>
         {
             try
             {

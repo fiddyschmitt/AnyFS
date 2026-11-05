@@ -34,11 +34,12 @@ public abstract class SharePointSource : SourceBase, ICountable
     /// <summary>The folder beside the tenant's root site's libraries that holds the tenant's other sites, one folder each.</summary>
     public const string SitesFolder = "Sites";
 
-    /// <summary>Folders of one site listed at a time in a walk of the tree (<see cref="WalkAsync"/>); every site is walked at once.</summary>
-    internal const int WalkPerSite = 4;
-
-    /// <summary>Listings in flight in a walk in all, whatever the number of sites: SharePoint throttles a client that asks too much at once.</summary>
-    internal const int WalkInFlight = 64;
+    /// <summary>
+    /// Folders of one site listed at a time in a walk of the tree (<see cref="WalkAsync"/>): "Requests at a time per site", 4 unless
+    /// set (until 5-Nov-2026 a fixed 4, with 64 in flight in all); every site is walked at once, and SharePoint Online's pace
+    /// (<see cref="MicrosoftPace"/>) bounds what is asked of it whatever the number.
+    /// </summary>
+    protected virtual int WalkPerSite => SharePointSettings.DefaultWalkPerSite;
 
     // search finds a new site only minutes after it is made, so asking more often than this gains nothing
     private static readonly TimeSpan OtherSitesTtl = TimeSpan.FromMinutes(5);
@@ -161,8 +162,8 @@ public abstract class SharePointSource : SourceBase, ICountable
         {
             Keep = KeepListings,
             WalkEvery = WalkEvery,
-            Parallelism = WalkPerSite,
-            MaxInFlight = WalkInFlight,
+            Parallelism = Math.Clamp(WalkPerSite, 1, 64),
+            MaxInFlight = int.MaxValue,
             PartsBelow = HoldsSitesAsync,
             StampOf = StampAsync,
             Name = "sharepoint",

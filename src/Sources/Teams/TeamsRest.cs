@@ -38,8 +38,11 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         Timeout = TimeSpan.FromSeconds(100),
     };
 
-    private readonly SemaphoreSlim _inFlight = new(Math.Clamp(concurrency, 1, 32), Math.Clamp(concurrency, 1, 32));
-    private readonly RequestPace _pace = RequestPace.For("teams", burst: 40, perSecond: 8);
+    private readonly SemaphoreSlim _inFlight = new(Math.Clamp(concurrency, 1, 64), Math.Clamp(concurrency, 1, 64));
+
+    // no pace of AnyFS's own (until 5-Nov-2026 at most 8 a second whatever the settings said): a service that asks AnyFS to wait
+    // (429, 503 with Retry-After) is waited for, by every request of it together
+    private readonly RequestPace _pace = RequestPace.Unpaced("teams");
     private Services? _services;
 
     public string Account { get; set; } = "";

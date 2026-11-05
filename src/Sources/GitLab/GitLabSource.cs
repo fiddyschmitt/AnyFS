@@ -17,9 +17,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 {
     private static readonly TimeSpan SaveEvery = TimeSpan.FromMinutes(5);
 
-    // GraphQL size queries (a hundred files each) at once for one folder or one whole tree
-    private const int SizeQueriesAtOnce = 4;
-
     // how many folders' last listings are remembered at most (ResolveAsync); past that they start again
     private const int MostFoldersRemembered = 200_000;
 
@@ -83,7 +80,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     {
         _session = new GitLabSession(_settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
         await _session.SignInAsync(interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
-        _api = new GitLabApi(_session, _settings.Concurrency, Logger, _settings.RequestsPerSecond);
+        _api = new GitLabApi(_session, Requests, Logger);
         _listings = new RequestCache(_stopping.Token);
         _trees = new TreeStore(Path.Combine(Context.StateDirectory, TreeStore.FileName), Logger);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
@@ -131,10 +128,10 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             UnkeptFor = TimeSpan.Zero,
             WalkEvery = _settings.WalkEvery,
 
-            // a server's or a group's walk goes through "Projects at a time" projects at once, each a part of its own with its
-            // share of the requests at a time listing its folders together; one project's walk has them all
-            Parallelism = Scope == ScopeKind.Project ? Requests : WorkersPerProject,
-            MaxInFlight = Requests,
+            // a server's or a group's walk goes through "Projects at a time" projects at once, each a part of its own with
+            // "Requests at a time per project" of its folders listed together; one project's walk is one part with the same
+            Parallelism = RequestsPerProject,
+            MaxInFlight = Scope == ScopeKind.Project ? RequestsPerProject : Requests,
             PartsBelow = Scope == ScopeKind.Project ? null : HoldsProjectsAsync,
             PartsAtOnce = ProjectsAtATime,
             LeftOut = LeftOutAsync,
@@ -270,9 +267,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         }
     }
 
-    /// <summary>"Requests at a time" (1 to 64): what the API client has open at once, and what a walk's listings may have in flight in all.</summary>
-    private int Requests => Math.Clamp(_settings.Concurrency, 1, 64);
-
     /// <summary>
     /// "Projects at a time" (1 to 64): how many projects a server's or a group's walk goes through at once, each a part of its own
     /// (the user, 5-Nov-2026, a server of 3,500 projects counting slowly at 32 requests: "how many projects to do simultaneously").
@@ -281,11 +275,14 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     /// </summary>
     private int ProjectsAtATime => Math.Clamp(_settings.ProjectsAtATime, 1, 64);
 
-    /// <summary>Folders listed at a time within one project's part: its share of the requests at a time.</summary>
-    private int WorkersPerProject => Math.Max(1, Requests / ProjectsAtATime);
+    /// <summary>"Requests at a time per project" (1 to 64): folders listed at once within one project's part, and the whole of a source of one project.</summary>
+    private int RequestsPerProject => Math.Clamp(_settings.RequestsPerProject, 1, 64);
 
-    /// <summary>How many range listings of the projects go at once (<see cref="ProjectsInRangesAsync"/>): half the requests the source may make.</summary>
-    private int Walkers => Math.Max(1, Requests / 2);
+    /// <summary>What the API client has open with the server at most: the projects at a time times the requests at a time per project.</summary>
+    private int Requests => ProjectsAtATime * RequestsPerProject;
+
+    /// <summary>How many range listings of the projects go at once (<see cref="ProjectsInRangesAsync"/>): as many as projects at a time.</summary>
+    private int Walkers => ProjectsAtATime;
 
     /// <summary>Whether what a folder holds is walked as parts of their own: the server's root, a namespace on the way to projects and a group hold projects, and groups that hold more.</summary>
     private async ValueTask<bool> HoldsProjectsAsync(string folder, CancellationToken ct)
@@ -516,7 +513,8 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         {
             try
             {
-                await Parallel.ForEachAsync(paths.Chunk(100), new ParallelOptions { MaxDegreeOfParallelism = SizeQueriesAtOnce, CancellationToken = ct }, async (batch, c) =>
+                // GraphQL size queries (a hundred files each) for one folder or one whole tree: a project's requests at a time at once
+                await Parallel.ForEachAsync(paths.Chunk(100), new ParallelOptions { MaxDegreeOfParallelism = RequestsPerProject, CancellationToken = ct }, async (batch, c) =>
                 {
                     var variables = new JsonObject
                     {

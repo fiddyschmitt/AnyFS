@@ -338,7 +338,7 @@ public sealed class OutlookSource : SourceBase, ICountable
             var url = s.EwsUrl!;
             var who = WindowsAccount.Name(s.IsWindowsCurrent, s.EffectiveSignIn == OutlookSignIn.Windows ? s.Username : null);
             var endpoint = standIn is null ? url : new Uri(standIn.Origin, url.PathAndQuery);
-            var soap = new SoapEwsService(endpoint, WindowsAccount.Credentials(s.IsWindowsCurrent, s.Username, s.Password), s.TrustAnyCertificate, standIn?.Handler(), $"{url.Host}|{who}", logger, watcher);
+            var soap = new SoapEwsService(endpoint, WindowsAccount.Credentials(s.IsWindowsCurrent, s.Username, s.Password), s.TrustAnyCertificate, standIn?.Handler(), $"{url.Host}|{who}", logger, watcher, s.Concurrency);
             progress($"Signing in to {url.Host} as {who}");
             // the organisation's address books over NSPI, where the real server is reached (a test's stand-in does not speak it)
             var directory = standIn is null ? await ServerAddressBookAsync(s, soap, url.Host, who, logger, ct, watcher).ConfigureAwait(false) : null;
@@ -365,7 +365,7 @@ public sealed class OutlookSource : SourceBase, ICountable
 
         if (standIn is not null)
         {
-            var service = new OwaJsonService(standIn.Origin, address ?? standIn.Account, standIn.Token, standIn.Handler(), logger, watcher);
+            var service = new OwaJsonService(standIn.Origin, address ?? standIn.Account, standIn.Token, standIn.Handler(), logger, watcher, s.Concurrency);
             return (service, service, standIn.Account, "through the web session (a stand-in)");
         }
 
@@ -401,7 +401,7 @@ public sealed class OutlookSource : SourceBase, ICountable
 
             // a renewal shows no window: the source turns the lapse into Degraded and waits for a Retry
             return await session.TokenAsync(interactive: false, _ => { }, token).ConfigureAwait(false);
-        }, null, logger, watcher);
+        }, null, logger, watcher, s.Concurrency);
         _ = first;
         return (live, live, account, $"through the web session ({session.BrowserName}, {origin.Host})");
     }
@@ -461,7 +461,7 @@ public sealed class OutlookSource : SourceBase, ICountable
         }
 
         var graph = new GraphClient(signIn.Token, logger, OutlookPlugin.Service, handler: standIn?.Handler(), cloud: cloud, pace: MicrosoftPace.For(GraphEwsService.PaceKey(cloud, address)), watcher: watcher);
-        return (new GraphEwsService(graph, address, s.ShowHidden, logger), null, account, cloud.IsGlobal ? "with an app sign-in (Microsoft Graph)" : $"with an app sign-in (Microsoft Graph, {cloud.Name})");
+        return (new GraphEwsService(graph, address, s.ShowHidden, logger, s.Concurrency), null, account, cloud.IsGlobal ? "with an app sign-in (Microsoft Graph)" : $"with an app sign-in (Microsoft Graph, {cloud.Name})");
     }
 
     /// <summary>
@@ -527,7 +527,7 @@ public sealed class OutlookSource : SourceBase, ICountable
             }
 
             logger.LogInformation("outlook: {Host}'s address book is served over NSPI", host);
-            return new NspiAddressBook(book, http, MailboxPace.For($"{s.EwsUrl!.Host}|{who}"), logger);
+            return new NspiAddressBook(book, http, MailboxPace.For($"{s.EwsUrl!.Host}|{who}", s.Concurrency), logger);
         }
         catch (Exception ex) when (ex is HttpRequestException or SignInRequiredException or EwsException || ex is TaskCanceledException && !ct.IsCancellationRequested)
         {
@@ -828,13 +828,15 @@ public sealed class OutlookSource : SourceBase, ICountable
     }
 
     /// <summary>
-    /// One pass of <see cref="ListAllAsync"/> over <paramref name="todo"/>: each folder's items in batches, two at once;
-    /// tells <paramref name="listed"/> how many each batch took and marks them <paramref name="tried"/>. Stops at a failure
-    /// of the store as a whole and returns it (that batch's items left untried); null when it went through.
+    /// One pass of <see cref="ListAllAsync"/> over <paramref name="todo"/>: each folder's items in batches, "Requests at a time"
+    /// of them at once (each a request; until 5-Nov-2026 a fixed two); tells <paramref name="listed"/> how many each batch took
+    /// and marks them <paramref name="tried"/>. Stops at a failure of the store as a whole and returns it (that batch's items
+    /// left untried); null when it went through.
     /// </summary>
     private async Task<ExceptionDispatchInfo?> PassAsync(List<TreeNode> todo, HashSet<string> tried, Action<int> listed, CancellationToken ct)
     {
-        using var slots = new SemaphoreSlim(2, 2);
+        var atOnce = Math.Clamp(_settings.Concurrency, 1, 64);
+        using var slots = new SemaphoreSlim(atOnce, atOnce);
         var running = new List<Task>();
         ExceptionDispatchInfo? stopped = null;
         try

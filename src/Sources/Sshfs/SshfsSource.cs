@@ -18,9 +18,6 @@ namespace AnyFS.Sources.Sshfs;
 /// </summary>
 public sealed class SshfsSource : SourceBase, ICountable
 {
-    /// <summary>How many symbolic links in one listing are resolved at the same time.</summary>
-    private const int LinkResolveParallelism = 8;
-
     private readonly SshfsSettings _settings;
     private SftpPool? _pool;
     private ListingCache? _listings;
@@ -332,7 +329,7 @@ public sealed class SshfsSource : SourceBase, ICountable
                 return (files, (IReadOnlyList<string>)folders);
             }, token),
             Counters,
-            Math.Clamp(_settings.Connections * 4, 4, 32),
+            Math.Max(4, _settings.Connections * 4),
             (dir, ex) => Logger.LogDebug("sshfs: count skipped '{Dir}': {Error}", dir, ex.Message),
             ct).ConfigureAwait(false);
     }
@@ -421,8 +418,9 @@ public sealed class SshfsSource : SourceBase, ICountable
                 throw attributes is { IsDirectory: false } ? VfsException.NotADirectory(path) : VfsException.NotFound(path);
             }
 
-            // links need a stat each; several at once, the rest is immediate
-            using var gate = new SemaphoreSlim(LinkResolveParallelism, LinkResolveParallelism);
+            // links need a stat each; several at once (as many as the count walks, four a connection), the rest is immediate
+            var atOnce = Math.Max(4, _settings.Connections * 4);
+            using var gate = new SemaphoreSlim(atOnce, atOnce);
             var result = await Task.WhenAll(items.Select(async item =>
             {
                 if (!item.IsSymbolicLink)

@@ -47,7 +47,6 @@ public sealed class GraphClient : IDisposable
         {
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
             AutomaticDecompression = DecompressionMethods.All,
-            MaxConnectionsPerServer = 32,
         };
         _http = new HttpClient(UpstreamRequestsHandler.Around(handler, watcher), disposeHandler: true) { Timeout = RequestTimeout };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(GraphClient).Assembly.GetName().Version?.ToString(3) ?? "0"}");

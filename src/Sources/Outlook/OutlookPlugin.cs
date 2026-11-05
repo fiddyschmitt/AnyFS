@@ -186,6 +186,11 @@ public sealed class OutlookPlugin : ISourcePlugin, IValidatable, ITestable, ISet
         {
             yield return new ValidationMessage("Look for changes every must be between 0 (at the start only) and 10080 minutes (a week).", nameof(OutlookSettings.RefreshMinutes));
         }
+
+        if (s.Concurrency is < 1 or > 64)
+        {
+            yield return new ValidationMessage("Requests at a time must be between 1 and 64.", nameof(OutlookSettings.Concurrency));
+        }
     }
 
     public Task<TestResult> TestAsync(object settings, IProgress<string> progress, CancellationToken ct) => TestAsync(settings, progress, null, ct);

@@ -28,7 +28,6 @@ internal abstract class FakeAtlassian
         Version = version;
 
         // the source paces itself for a real server; a suite of thousands of requests need not wait
-        RequestPace.Use($"{(typeId == "jira" ? "Jira" : "Confluence")}:{new Uri(Origin).Authority}", new RequestPace(burst: 1_000_000, perSecond: 1_000));
     }
 
     public string Origin { get; }

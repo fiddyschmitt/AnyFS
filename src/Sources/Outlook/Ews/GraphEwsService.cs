@@ -41,10 +41,10 @@ internal sealed class GraphEwsService : IEwsService, IDisposable
 
     /// <param name="mailbox">The mailbox's address: whose pace the requests go at.</param>
     /// <param name="showHidden">Ask for the hidden mail folders too.</param>
-    public GraphEwsService(GraphClient graph, string mailbox, bool showHidden, ILogger logger)
+    public GraphEwsService(GraphClient graph, string mailbox, bool showHidden, ILogger logger, int concurrency = MailboxPace.DefaultConcurrent)
     {
         _graph = graph;
-        _pace = MailboxPace.For(mailbox);
+        _pace = MailboxPace.For(mailbox, concurrency);
         _hidden = showHidden;
         _logger = logger;
     }

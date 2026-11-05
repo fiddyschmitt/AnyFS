@@ -89,18 +89,15 @@ public sealed class GitLabSettings
         Hint = "With folder listings kept: how long after one walk the next begins. The walks are what checks kept folders for changes, so this is how long a change can take to show. 0 walks once, at the start. Without 'Count files on start' a walk goes only through the folders that have been opened; with it, through every group and project, each project's default branch whole (a hundred files a request), its issues, merge requests, pipelines, wiki and releases, and of each branch's or tag's repository only what has been opened. A project whose activity and head have not moved since the last walk is kept as it was, so a walk over a quiet server asks for little; once a day everything is listed again.")]
     public int WalkMinutes { get; set; } = 30;
 
-    [Setting("Requests at a time", Advanced = true, Order = 17, Hint = "How many requests AnyFS has open with the server at once: a walk's listings share them with any browsing meanwhile.")]
-    public int Concurrency { get; set; } = 8;
+    [Setting("Projects at a time", Advanced = true, Order = 17,
+        Hint = "How many projects a walk goes through at once, each one's folders listed together. A server with thousands of projects and the capacity to answer counts faster with more; a server that asks AnyFS to wait (429) is waited for however many are set.")]
+    public int ProjectsAtATime { get; set; } = 8;
 
-    [Setting("Projects at a time", Advanced = true, Order = 18,
-        Hint = "How many projects a walk goes through at once, each one's folders listed together with its share of the requests at a time. A server with thousands of projects and the capacity to answer counts faster with more of each: half the requests at a time, say, and the requests a second up.")]
-    public int ProjectsAtATime { get; set; } = 4;
+    [Setting("Requests at a time per project", Advanced = true, Order = 18,
+        Hint = "How many requests AnyFS has open with the server at once for each project a walk is in, and for a source of one project in all; times the projects at a time, what it has open with the server at most, which any browsing meanwhile shares.")]
+    public int RequestsPerProject { get; set; } = 8;
 
-    [Setting("Requests a second", Advanced = true, Order = 19,
-        Hint = "How many requests a second AnyFS asks of the server at most, on average, so a shared server is spared: at 50 a server that answers in 50 ms has only a few in flight however many are allowed at a time. A server of your own sets its own limit, off unless its administrator turned one on, and holds AnyFS back for as long as it asks when it does. GitLab.com allows 2,000 a minute an account and goes at 25 whatever this says.")]
-    public int RequestsPerSecond { get; set; } = 50;
-
-    [Setting("Every project on the server", Advanced = true, Order = 20,
+    [Setting("Every project on the server", Advanced = true, Order = 19,
         Hint = "With a server's address: every group and project you can see, as GitLab's Explore page lists them, those archived or marked for deletion too. Off: only the groups and projects you are a member of, for a server too big to list whole. GitLab.com always shows only yours, its public projects being millions.")]
     public bool EveryProject { get; set; } = true;
 

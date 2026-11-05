@@ -20,8 +20,14 @@ internal sealed class MailboxPace
         _concurrent = new SemaphoreSlim(concurrent, concurrent);
     }
 
-    /// <summary>The pace for a mailbox (its address), shared by all that ask for it.</summary>
-    public static MailboxPace For(string mailbox) => Paces.GetOrAdd(mailbox, _ => new MailboxPace(4));
+    /// <summary>Requests at a time per mailbox unless the settings say otherwise: a handful, within Exchange's per-mailbox limits.</summary>
+    public const int DefaultConcurrent = 4;
+
+    /// <summary>
+    /// The pace for a mailbox (its address), shared by all that ask for it, with <paramref name="concurrent"/> requests at a time
+    /// ("Requests at a time"): the first to ask sets it, so two sources of one mailbox set differently go at the first's.
+    /// </summary>
+    public static MailboxPace For(string mailbox, int concurrent = DefaultConcurrent) => Paces.GetOrAdd(mailbox, _ => new MailboxPace(Math.Clamp(concurrent, 1, 64)));
 
     /// <summary>Waits for a request's turn: past any hold, then for one of the slots.</summary>
     public async Task<IDisposable> EnterAsync(CancellationToken ct)

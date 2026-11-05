@@ -48,7 +48,7 @@ public class SharePointWalkTests
 
         foreach (var site in new[] { "", "/sites/Axle", "/teams/Ops", "/Foo" })
         {
-            Assert.IsTrue(store.MostAtOnce(site) <= SharePointSource.WalkPerSite, $"{site}: {store.MostAtOnce(site)} at once");
+            Assert.IsTrue(store.MostAtOnce(site) <= SharePointSettings.DefaultWalkPerSite, $"{site}: {store.MostAtOnce(site)} at once");
         }
 
         Assert.IsTrue(store.MostAtOnce("") > 1, "a site's folders are listed several at a time");

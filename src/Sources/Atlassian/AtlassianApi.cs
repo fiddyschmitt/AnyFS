@@ -27,9 +27,9 @@ internal sealed class AtlassianApi : IDisposable
     {
         _session = session;
 
-        // a server of one's own sets its own limits (rate limiting is off by default on Data Center): quick, still within
-        // what a crawl should ask of a shared server
-        _pace = RequestPace.For($"{session.Product}:{session.Address.Base.Authority}", burst: 100, perSecond: 25);
+        // no pace of AnyFS's own (until 5-Nov-2026 a server was asked at most 25 a second whatever the settings said): a server
+        // that asks AnyFS to wait (429, 503 with Retry-After) is waited for, by every request of it together
+        _pace = RequestPace.Unpaced($"{session.Product}:{session.Address.Base.Authority}");
         _gate = new SemaphoreSlim(Math.Clamp(concurrency, 1, 64));
         _logger = logger;
     }

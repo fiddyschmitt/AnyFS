@@ -44,10 +44,10 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
     /// <param name="handler">The handler requests go through: a test's fake; null for the network.</param>
     /// <param name="paceKey">Whose pace the calls share: the account and the server.</param>
     /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
-    public SoapEwsService(Uri url, ICredentials credentials, bool trustAnyCertificate, HttpMessageHandler? handler, string paceKey, ILogger logger, IUpstreamWatcher? watcher = null)
+    public SoapEwsService(Uri url, ICredentials credentials, bool trustAnyCertificate, HttpMessageHandler? handler, string paceKey, ILogger logger, IUpstreamWatcher? watcher = null, int concurrency = MailboxPace.DefaultConcurrent)
     {
         _url = url;
-        _pace = MailboxPace.For(paceKey);
+        _pace = MailboxPace.For(paceKey, concurrency);
         _logger = logger;
         if (handler is null)
         {

@@ -61,11 +61,11 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
     /// <param name="token">The bearer; true asks for a fresh one after a 401.</param>
     /// <param name="handler">The handler requests go through: a test's fake; null for the network.</param>
     /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
-    public OwaJsonService(Uri origin, string mailbox, Func<bool, CancellationToken, Task<string>> token, HttpMessageHandler? handler, ILogger logger, IUpstreamWatcher? watcher = null)
+    public OwaJsonService(Uri origin, string mailbox, Func<bool, CancellationToken, Task<string>> token, HttpMessageHandler? handler, ILogger logger, IUpstreamWatcher? watcher = null, int concurrency = MailboxPace.DefaultConcurrent)
     {
         _origin = origin;
         _token = token;
-        _pace = MailboxPace.For(mailbox);
+        _pace = MailboxPace.For(mailbox, concurrency);
         _logger = logger;
         _http = new HttpClient(UpstreamRequestsHandler.Around(handler ?? new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, UseCookies = false }, watcher)) { Timeout = TimeSpan.FromSeconds(120) };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 Edg/140.0.0.0");

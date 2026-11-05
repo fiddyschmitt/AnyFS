@@ -527,7 +527,7 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
-    public async Task CountFilesWalksTheConversationsTooAndTakesHalfTheRequests()
+    public async Task CountFilesWalksTheConversationsTooWithTheRequestsAtATime()
     {
         var fake = Seed();
         await using var source = await StartAsync(fake, s => s.Concurrency = 6);
@@ -536,7 +536,7 @@ public class TeamsSourceTests
         // the walk lists the team, its channels and the chats, and reads each conversation, so the count is exact
         Assert.IsTrue(fake.MessageCalls > 0, "the conversations read");
         Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
-        Assert.IsTrue(fake.MostMessageCallsAtOnce <= 3, $"half of six requests at most to the walk: {fake.MostMessageCallsAtOnce}");
+        Assert.IsTrue(fake.MostMessageCallsAtOnce <= 6, $"six requests at a time at most, the walk's to use (until 5-Nov-2026 half): {fake.MostMessageCallsAtOnce}");
 
         // a conversation walked is not read again when opened
         var calls = fake.MessageCalls;
@@ -1142,7 +1142,7 @@ public class TeamsSourceTests
 
         fake.Post(delta.Id, Jane, "Jane Doe", "<p>Delta</p>", newest);
         fake.MessagesHold[delta.Id] = hold.Task;
-        await using var source = await StartAsync(fake, s => s.Concurrency = 4, newest: 50, pageSize: 50);
+        await using var source = await StartAsync(fake, s => s.Concurrency = 2, newest: 50, pageSize: 50);
         string Asked()
         {
             lock (fake.OlderAsked)

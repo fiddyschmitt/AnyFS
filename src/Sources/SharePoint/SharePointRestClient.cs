@@ -65,7 +65,6 @@ internal sealed partial class SharePointRestClient : IDisposable
                 PreAuthenticate = true,
                 PooledConnectionLifetime = TimeSpan.FromMinutes(10),
                 AutomaticDecompression = DecompressionMethods.All,
-                MaxConnectionsPerServer = 32,
                 AllowAutoRedirect = false,
             };
             if (trustAnyCertificate)

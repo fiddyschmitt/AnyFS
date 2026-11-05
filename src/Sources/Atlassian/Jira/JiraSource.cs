@@ -99,8 +99,9 @@ public sealed class JiraSource : SourceBase, ICountable
             throw new SourceFailedException($"Opening the {Scope.Kind.ToString().ToLowerInvariant()} {Scope.Value}: {ex.Message}", permanent: ex.Error is VfsError.AccessDenied or VfsError.NotFound, ex);
         }
 
-        var requests = Math.Clamp(_settings.Concurrency, 1, 64);
-        var walking = Math.Max(1, requests / 2);
+        // the walk may have all of "Requests at a time" in flight (until 5-Nov-2026 half, the rest kept back for browsing, which
+        // the API's gate shares out anyway)
+        var walking = Math.Clamp(_settings.Concurrency, 1, 64);
         _kept = new KeptListings(ListFolderAsync, Counters, Logger, new KeptListingsOptions
         {
             Keep = _settings.Keeps,

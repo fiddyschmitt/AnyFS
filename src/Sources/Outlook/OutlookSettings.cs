@@ -89,6 +89,10 @@ public sealed class OutlookSettings
         Hint = "Accept an Exchange server's HTTPS certificate whatever it is (a lab with a self-signed one). Off for a real server.")]
     public bool TrustAnyCertificate { get; set; }
 
+    [Setting("Requests at a time", Advanced = true, Order = 16,
+        Hint = "How many requests AnyFS has open with Exchange at once for the mailbox, listing and reading alike. Exchange allows a mailbox a handful at a time (its own limits, per app and mailbox) and asks AnyFS to wait past them, which it does. Microsoft 365 is also asked 600 requests a minute at most whatever this says.")]
+    public int Concurrency { get; set; } = 4;
+
     /// <summary>The first field trimmed, or null when there is none.</summary>
     internal string? File => string.IsNullOrWhiteSpace(Path) ? null : Path.Trim().Trim('"');
 

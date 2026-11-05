@@ -69,7 +69,6 @@ internal sealed class GitLabSession : IDisposable
                 AllowAutoRedirect = false,
                 AutomaticDecompression = DecompressionMethods.All,
                 PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-                MaxConnectionsPerServer = 32,
             };
             if (settings.TrustAnyCertificate)
             {

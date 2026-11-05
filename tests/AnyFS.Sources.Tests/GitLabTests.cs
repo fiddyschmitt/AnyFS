@@ -277,7 +277,7 @@ public class GitLabNamesTests
         Assert.IsFalse(plugin.Validate(GitLabSeed.Settings("https://gitlab.example.com")).Any(m => m.IsError));
         Assert.IsTrue(plugin.Validate(new GitLabSettings { Address = "https://gitlab.example.com" }).Any(m => m.Property == nameof(GitLabSettings.AccessToken)), "a token is needed");
         Assert.IsTrue(plugin.Validate(GitLabSeed.Settings("gitlab")).Any(m => m.Property == nameof(GitLabSettings.Address)));
-        Assert.IsTrue(plugin.Validate(new GitLabSettings { Address = "https://h", AccessToken = "t", Concurrency = 0 }).Any(m => m.Property == nameof(GitLabSettings.Concurrency)));
+        Assert.IsTrue(plugin.Validate(new GitLabSettings { Address = "https://h", AccessToken = "t", RequestsPerProject = 0 }).Any(m => m.Property == nameof(GitLabSettings.RequestsPerProject)));
         Assert.IsTrue(plugin.IsVisible(new GitLabSettings(), nameof(GitLabSettings.AccessToken)));
         Assert.IsFalse(plugin.IsVisible(new GitLabSettings(), nameof(GitLabSettings.Username)));
     }
@@ -512,6 +512,7 @@ public class GitLabSourceTests
         var fake = GitLabSeed.Lab();
         var added = ProjectsAdded(fake, 2_000);
         var settings = GitLabSeed.Settings(fake.Server);
+        settings.ProjectsAtATime = 4;
         var (source, listings) = await StartCountingListingsAsync(fake, settings);
         await using var _s = source;
         var listed = (await source.ServerListingAsync(CancellationToken.None)).Projects.Select(p => p.Id).ToList();
@@ -519,7 +520,7 @@ public class GitLabSourceTests
         CollectionAssert.AreEqual(listed.OrderBy(id => id).ToList(), listed, "in the order of their ids, as a single listing gives them");
         Assert.AreEqual(listed.Count, listed.Distinct().Count(), "none twice");
         CollectionAssert.IsSubsetOf(added, listed, "none left out");
-        Assert.IsTrue(listings.Most is > 1 and <= 4, $"side by side, and no more at once than a walk may ask, half of Concurrency 8, the other half for whoever browses: {listings.Most}");
+        Assert.IsTrue(listings.Most is > 1 and <= 4, $"side by side, as many at once as projects at a time: {listings.Most}");
 
         var asked = fake.Requests.Where(r => r.StartsWith("GET /api/v4/projects?", StringComparison.Ordinal)).ToList();
         Assert.AreEqual(1, asked.Count(r => r.Contains("sort=desc", StringComparison.Ordinal)), "the highest id, asked for once");
@@ -586,7 +587,7 @@ public class GitLabSourceTests
         var fake = GitLabSeed.Lab();
         var added = ProjectsAdded(fake, 450);
         var settings = GitLabSeed.Settings(fake.Server);
-        settings.Concurrency = 3;
+        settings.ProjectsAtATime = 1;
         var (source, listings) = await StartCountingListingsAsync(fake, settings);
         await using var _s = source;
         var listed = (await source.ServerListingAsync(CancellationToken.None)).Projects.Select(p => p.Id).ToList();
@@ -961,7 +962,7 @@ public class GitLabSourceTests
         var fake = GitLabSeed.Lab();
         var settings = GitLabSeed.Settings(fake.Server);
         settings.ProjectsAtATime = 2;
-        settings.Concurrency = 8;
+        settings.RequestsPerProject = 4;
         var watch = new ProjectsInFlight(fake.Handler(), 30);
         var source = new GitLabSource(settings, new GitLabStandIn(() => watch));
         await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
@@ -977,7 +978,7 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
-    public void ProjectsAtATimeAndRequestsASecondAreValidatedLikeTheRequests()
+    public void ProjectsAtATimeAndRequestsPerProjectAreValidated()
     {
         var plugin = new GitLabPlugin();
         var settings = GitLabSeed.Settings("https://gitlab.example.test/");
@@ -985,43 +986,39 @@ public class GitLabSourceTests
         Assert.IsTrue(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.ProjectsAtATime)));
         settings.ProjectsAtATime = 65;
         Assert.IsTrue(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.ProjectsAtATime)));
-        settings.ProjectsAtATime = 4;
+        settings.ProjectsAtATime = 8;
         Assert.IsFalse(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.ProjectsAtATime)));
-        settings.RequestsPerSecond = 0;
-        Assert.IsTrue(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.RequestsPerSecond)));
-        settings.RequestsPerSecond = 1001;
-        Assert.IsTrue(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.RequestsPerSecond)));
-        settings.RequestsPerSecond = 200;
-        Assert.IsFalse(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.RequestsPerSecond)));
+        settings.RequestsPerProject = 0;
+        Assert.IsTrue(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.RequestsPerProject)));
+        settings.RequestsPerProject = 65;
+        Assert.IsTrue(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.RequestsPerProject)));
+        settings.RequestsPerProject = 8;
+        Assert.IsFalse(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.RequestsPerProject)));
     }
 
     [TestMethod]
-    public async Task TheServersPaceIsTheRequestsASecondSetAndGitLabDotComsIsItsOwn()
+    public async Task AServerIsAskedAsFastAsTheSettingsAllowAndWaitedForOnlyWhenItAsks()
     {
         // 50 a second, the pace until 5-Nov-2026 whatever the settings said, held a server that answers in 50 ms to a few requests
-        // in flight however many were allowed at a time: now it is set, and GitLab.com's stays what its limit allows
-        var own = GitLabApi.PaceFor("gitlab.example.test", 200);
-        var again = GitLabApi.PaceFor("gitlab.example.test", 200);
-        Assert.AreSame(own, again, "one pace for a server at one setting");
-        Assert.AreNotSame(own, GitLabApi.PaceFor("gitlab.example.test"), "another setting, another pace");
-        Assert.AreSame(GitLabApi.PaceFor("gitlab.com", 200), GitLabApi.PaceFor("gitlab.com"), "GitLab.com's is its own whatever is set");
-
-        // through 200 a second 100 requests pass well within a second; through 2 a second, past the burst of 8, they do not
+        // in flight however many were allowed at a time (the user: no caps that are not in the settings)
+        var holds = GitLabApi.HoldsFor("gitlab.example.test");
+        Assert.AreSame(holds, GitLabApi.HoldsFor("gitlab.example.test"), "one for a server, shared");
+        Assert.IsFalse(holds.IsPaced);
         var clock = Stopwatch.StartNew();
-        for (var i = 0; i < 100; i++)
+        for (var i = 0; i < 1000; i++)
         {
-            await own.WaitAsync(CancellationToken.None);
+            await holds.WaitAsync(CancellationToken.None);
         }
 
-        Assert.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(1), $"100 through at 200 a second took {clock.Elapsed}");
-        var slow = GitLabApi.PaceFor("slow.example.test", 2);
+        Assert.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(1), $"1,000 through at no pace took {clock.Elapsed}");
+
+        // a 429 with Retry-After holds every request of the server for that long
+        using var throttled = new HttpResponseMessage(System.Net.HttpStatusCode.TooManyRequests);
+        throttled.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromMilliseconds(400));
+        Assert.IsNotNull(holds.Hold(throttled));
         clock.Restart();
-        for (var i = 0; i < 12; i++)
-        {
-            await slow.WaitAsync(CancellationToken.None);
-        }
-
-        Assert.IsTrue(clock.Elapsed >= TimeSpan.FromSeconds(1.5), $"12 through at 2 a second with a burst of 8 took {clock.Elapsed}");
+        await holds.WaitAsync(CancellationToken.None);
+        Assert.IsTrue(clock.Elapsed >= TimeSpan.FromMilliseconds(300), $"held as asked: {clock.Elapsed}");
     }
 
     [TestMethod]
@@ -1032,7 +1029,8 @@ public class GitLabSourceTests
         var fake = GitLabSeed.Lab();
         var settings = GitLabSeed.Settings(fake.Server + "/anyfs");
         settings.RefreshSeconds = 1;
-        settings.Concurrency = 2;
+        settings.ProjectsAtATime = 1;
+        settings.RequestsPerProject = 2;
         var source = new GitLabSource(settings, new GitLabStandIn(() => new LateAnswers(fake.Handler(), 60)));
         await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
         await using var _s = source;

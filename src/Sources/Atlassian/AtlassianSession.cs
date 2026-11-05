@@ -73,7 +73,6 @@ internal sealed class AtlassianSession : IDisposable
                 AllowAutoRedirect = false,
                 AutomaticDecompression = DecompressionMethods.All,
                 PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-                MaxConnectionsPerServer = 32,
             };
             if (settings.TrustAnyCertificate)
             {

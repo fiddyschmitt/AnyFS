@@ -88,6 +88,13 @@ public sealed class SharePointSettings
         Hint = "Accept the server's HTTPS certificate whatever it is (a lab with a self-signed one). Off for a real server.")]
     public bool TrustAnyCertificate { get; set; }
 
+    [Setting("Requests at a time per site", Advanced = true, Order = 19,
+        Hint = "Folders of one site a walk lists at once; every site at once besides. SharePoint Online is asked 600 requests a minute at most whatever this says, within what Microsoft allows an account; a server of your own is asked as fast as this allows.")]
+    public int WalkPerSite { get; set; } = DefaultWalkPerSite;
+
+    /// <summary>"Requests at a time per site" unless set: a few, every site at once besides.</summary>
+    public const int DefaultWalkPerSite = 4;
+
     [Setting("Connections", Advanced = true, Order = 20, Hint = "Parallel downloads per open file.")]
     public int Connections { get; set; } = 4;
 
@@ -509,6 +516,11 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
             yield return new ValidationMessage("No browser at that path; leave it empty to find Edge or Chrome automatically.", nameof(SharePointSettings.BrowserPath), IsError: false);
         }
 
+        if (s.WalkPerSite is < 1 or > 64)
+        {
+            yield return new ValidationMessage("Requests at a time per site must be between 1 and 64.", nameof(SharePointSettings.WalkPerSite));
+        }
+
         if (s.Connections is < 1 or > 16)
         {
             yield return new ValidationMessage("Connections must be between 1 and 16.", nameof(SharePointSettings.Connections));
@@ -874,6 +886,8 @@ public sealed class SharePointSiteSource : SharePointSource
     protected override bool KeepListings => _settings.KeepListings;
 
     protected override TimeSpan WalkEvery => TimeSpan.FromMinutes(Math.Max(0, _settings.WalkMinutes));
+
+    protected override int WalkPerSite => _settings.WalkPerSite;
 
     private protected override Task<IDocumentStore> ConnectAsync(CancellationToken ct)
     {
