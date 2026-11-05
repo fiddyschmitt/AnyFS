@@ -48,6 +48,10 @@ public sealed class SourceRunner : IAsyncDisposable
     private ComponentHealth? _pendingHealth;
     private string? _pendingHealthDetail;
 
+    // while a count goes on, under _gate: what it last said of itself, and the status that follows it
+    private ComponentStatus? _counting;
+    private ComponentStatus? _afterCount;
+
     public SourceRunner(
         SourceDefinition definition,
         ISourcePlugin? plugin,
@@ -184,23 +188,47 @@ public sealed class SourceRunner : IAsyncDisposable
 
     internal void OnProgress(string message, double? fraction)
     {
-        // while it starts, and while it counts its own files ("Counting files: 1,200 of 20,000 messages")
-        if (Handle.Status.State is ComponentState.Starting or ComponentState.Enumerating)
+        lock (_gate)
         {
-            Handle.Status = new ComponentStatus(Handle.Status.State, message, fraction);
+            // while it starts, and while it counts its own files ("Counting files: 1,200 of 20,000 messages")
+            if (Handle.Status.State is ComponentState.Starting or ComponentState.Enumerating)
+            {
+                Handle.Status = new ComponentStatus(Handle.Status.State, message, fraction);
+            }
+
+            // kept while the source is unwell too, when the tile is not showing it: the count goes on all the same
+            if (_counting is not null)
+            {
+                _counting = new ComponentStatus(ComponentState.Enumerating, message, fraction);
+            }
         }
     }
 
     internal void OnHealth(ComponentHealth health, string? detail)
     {
-        if (Handle.Current is null)
+        lock (_gate)
         {
-            _pendingHealth = health;
-            _pendingHealthDetail = detail;
-            return;
-        }
+            if (Handle.Current is null)
+            {
+                _pendingHealth = health;
+                _pendingHealthDetail = detail;
+                return;
+            }
 
-        Handle.Status = StatusFor(health, detail);
+            var status = StatusFor(health, detail);
+            if (_counting is { } counting)
+            {
+                // a count outlasts a moment's ill health: unwell shows at once, and well again the tile goes back to
+                // how far the count has got, with what was reported following the count
+                _afterCount = status;
+                if (health == ComponentHealth.Ready)
+                {
+                    status = counting;
+                }
+            }
+
+            Handle.Status = status;
+        }
     }
 
     private static ComponentStatus StatusFor(ComponentHealth health, string? detail) => health switch
@@ -276,8 +304,13 @@ public sealed class SourceRunner : IAsyncDisposable
     /// </summary>
     private async Task CountAsync(ISource source, ICountable? countable, CancellationToken ct)
     {
-        var healthy = Handle.Status;
-        Handle.Status = new ComponentStatus(ComponentState.Enumerating, "Counting files");
+        lock (_gate)
+        {
+            _afterCount = Handle.Status;
+            _counting = new ComponentStatus(ComponentState.Enumerating, "Counting files");
+            Handle.Status = _counting;
+        }
+
         source.Counters.SetState(EnumerationState.InProgress);
         var tracked = source as TrackedSource;
         var op = tracked?.Begin(OperationKind.Count);
@@ -313,9 +346,15 @@ public sealed class SourceRunner : IAsyncDisposable
                 source.Counters.SetState(EnumerationState.Unknown);
             }
 
-            if (Handle.Status.State == ComponentState.Enumerating)
+            lock (_gate)
             {
-                Handle.Status = healthy;
+                if (Handle.Status.State == ComponentState.Enumerating)
+                {
+                    Handle.Status = _afterCount!;
+                }
+
+                _counting = null;
+                _afterCount = null;
             }
         }
     }

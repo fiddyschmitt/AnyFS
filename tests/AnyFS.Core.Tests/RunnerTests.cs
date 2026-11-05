@@ -401,9 +401,97 @@ public class SourceRunnerTests
         Assert.AreEqual(0, unasked.Counted);
     }
 
+    [TestMethod]
+    public async Task ACountGoesOnThroughAMomentsIllHealthAndItsTileGoesBackToIt()
+    {
+        // the server stops answering for a moment and the walk goes on: unwell shows at once, and once it answers again the
+        // count's words and bar are back, as far on as the count has got, and Ready follows only when it ends
+        var gate = new TaskCompletionSource();
+        var plugin = new SelfCountingPlugin { Gate = gate };
+        await using var runner = Runner(new MemoryPluginSettings(), countOnStart: true, plugin: plugin);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Status.Text == "Counting: 1 of 2 messages", what: "the count says how far it has got");
+        var context = plugin.Context!;
+
+        context.ReportHealth(ComponentHealth.Degraded, "the server is not answering");
+        Assert.AreEqual(new ComponentStatus(ComponentState.Degraded, "the server is not answering"), runner.Handle.Status);
+
+        context.ReportProgress("Counting: 2 of 4 messages", 0.5);
+        Assert.AreEqual(ComponentState.Degraded, runner.Handle.Status.State, "what is wrong stays on show while the count goes on");
+
+        context.ReportHealth(ComponentHealth.Ready);
+        Assert.AreEqual(new ComponentStatus(ComponentState.Enumerating, "Counting: 2 of 4 messages", 0.5), runner.Handle.Status);
+
+        context.ReportProgress("Counting: 3 of 4 messages", 0.75);
+        Assert.AreEqual(new ComponentStatus(ComponentState.Enumerating, "Counting: 3 of 4 messages", 0.75), runner.Handle.Status);
+
+        gate.SetResult();
+        await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready once the count has ended");
+        Assert.IsNull(runner.Handle.Status.Progress);
+    }
+
+    [TestMethod]
+    public async Task ASourceStillUnwellAsItsCountEndsStaysUnwellAndThenIsSimplyWell()
+    {
+        var gate = new TaskCompletionSource();
+        var plugin = new SelfCountingPlugin { Gate = gate };
+        await using var runner = Runner(new MemoryPluginSettings(), countOnStart: true, plugin: plugin);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Status.Text == "Counting: 1 of 2 messages", what: "the count says how far it has got");
+        var context = plugin.Context!;
+        context.ReportHealth(ComponentHealth.Degraded, "the server is not answering");
+        gate.SetResult();
+        await Wait.UntilAsync(() => runner.Handle.Current?.Counters.State == EnumerationState.Complete, what: "the count over");
+        Assert.AreEqual(new ComponentStatus(ComponentState.Degraded, "the server is not answering"), runner.Handle.Status);
+
+        context.ReportHealth(ComponentHealth.Ready);
+        await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready, the count over");
+
+        // nothing brings the count's words back now: not the next time it is well, nor a report of progress
+        context.ReportHealth(ComponentHealth.Degraded, "the server is not answering again");
+        context.ReportHealth(ComponentHealth.Ready);
+        Assert.AreEqual(ComponentState.Ready, runner.Handle.Status.State);
+        context.ReportProgress("Counting: 2 of 2 messages", 1);
+        Assert.AreEqual(ComponentStatus.ReadyStatus, runner.Handle.Status);
+    }
+
+    [TestMethod]
+    public async Task ASourceUnwellAsItsCountBeganAndWellByItsEndEndsWell()
+    {
+        var gate = new TaskCompletionSource();
+        var plugin = new SelfCountingPlugin { Gate = gate, UnwellAtStart = true };
+        await using var runner = Runner(new MemoryPluginSettings(), countOnStart: true, plugin: plugin);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Status.Text == "Counting: 1 of 2 messages", what: "the count says how far it has got");
+        plugin.Context!.ReportHealth(ComponentHealth.Ready);
+        Assert.AreEqual(ComponentState.Enumerating, runner.Handle.Status.State);
+        gate.SetResult();
+        await Wait.UntilAsync(() => runner.Handle.Status.State != ComponentState.Enumerating, what: "the count's end");
+        Assert.AreEqual(ComponentState.Ready, runner.Handle.Status.State, "the last it was told, not how it was as the count began");
+    }
+
+    [TestMethod]
+    public async Task ASourceUnwellAsItsCountBeganAndNotHeardFromSinceIsUnwellAgainAsItEnds()
+    {
+        var gate = new TaskCompletionSource();
+        var plugin = new SelfCountingPlugin { Gate = gate, UnwellAtStart = true };
+        await using var runner = Runner(new MemoryPluginSettings(), countOnStart: true, plugin: plugin);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Status.Text == "Counting: 1 of 2 messages", what: "the count says how far it has got");
+        gate.SetResult();
+        await Wait.UntilAsync(() => runner.Handle.Status.State != ComponentState.Enumerating, what: "the count's end");
+        Assert.AreEqual(new ComponentStatus(ComponentState.Degraded, "unwell from the start"), runner.Handle.Status);
+    }
+
     private sealed class SelfCountingPlugin : ISourcePlugin
     {
         public int Counted;
+
+        /// <summary>The source's context, for a test to speak as the source.</summary>
+        public ISourceContext? Context { get; set; }
+
+        /// <summary>Reports itself Degraded as it starts.</summary>
+        public bool UnwellAtStart { get; init; }
 
         /// <summary>Whether the source's count is exact as its start ends (42 files, 3 folders).</summary>
         public bool CompleteAtStart { get; init; }
@@ -441,6 +529,12 @@ public class SourceRunnerTests
     {
         protected override Task OnInitialiseAsync(CancellationToken ct)
         {
+            plugin.Context = Context;
+            if (plugin.UnwellAtStart)
+            {
+                Context.ReportHealth(ComponentHealth.Degraded, "unwell from the start");
+            }
+
             if (plugin.CompleteAtStart)
             {
                 Counters.Set(42, 3, EnumerationState.Complete);
