@@ -37,6 +37,7 @@ public partial class MainWindow : Window
     public MainWindow(GuiHost host)
     {
         _host = host;
+        RunAheadOfTheSources();
         InitializeComponent();
         var clipboard = new AvaloniaClipboard(this);
         var dialogs = new AvaloniaDialogs(this, clipboard);
@@ -60,6 +61,25 @@ public partial class MainWindow : Window
     }
 
     public MainViewModel ViewModel { get; }
+
+    /// <summary>
+    /// The window's thread is set above the pool's threads, which the sources' work runs on. While every source counts its
+    /// files at a start, that work fills every processor of a small machine, and the window's thread, with little to do, waited
+    /// its turn behind them: on four processors with twenty-seven sources counting, the window answered in 4 to 5 ms on average
+    /// over the first minute and took 1.3 to 1.5 s to show itself; set above them, 3 ms and 0.7 s (the user, 5-Nov-2026: "I
+    /// expect the UI to be snappy"; `spikes/UiStartup`). On Windows a thread's priority is its own; elsewhere the request may
+    /// be ignored, which costs nothing.
+    /// </summary>
+    private static void RunAheadOfTheSources()
+    {
+        try
+        {
+            Thread.CurrentThread.Priority = ThreadPriority.AboveNormal;
+        }
+        catch (Exception ex) when (ex is PlatformNotSupportedException or ThreadStateException or UnauthorizedAccessException)
+        {
+        }
+    }
 
     /// <summary>
     /// Every second, from outside, how long the window's thread takes to get to a probe: a long wait is logged with how much

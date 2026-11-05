@@ -43,6 +43,11 @@ public class HeadlessWindowTests
                 var host = GuiHost.Create(new GuiOptions(Path.Combine(root, "settings")), registry);
                 host.Start();
                 var window = new MainWindow(host);
+                if (OperatingSystem.IsWindows())
+                {
+                    Assert.AreEqual(ThreadPriority.AboveNormal, Thread.CurrentThread.Priority, "the window's thread runs ahead of the sources' (spec 11.6)");
+                }
+
                 window.Show();
                 await Task.Delay(500);
                 window.ViewModel.Refresh();
