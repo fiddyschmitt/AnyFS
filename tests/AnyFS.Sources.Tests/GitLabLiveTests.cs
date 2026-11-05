@@ -63,6 +63,29 @@ public class GitLabLiveTests
         return Convert.ToHexStringLower(sha.GetHashAndReset());
     }
 
+    /// <summary>The list a count measures itself against is the projects its walk comes to, as a real GitLab lists both.</summary>
+    [TestMethod]
+    [Timeout(600_000)]
+    [DataRow("", DisplayName = "the whole server")]
+    [DataRow("/anyfs", DisplayName = "a group")]
+    public async Task ACountGoesThroughEveryProjectOnItsList(string below)
+    {
+        var (url, token) = Server();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(url + below, token, context);
+        await source.CountFilesAsync(CancellationToken.None);
+        List<string> said;
+        lock (context.Progress)
+        {
+            said = context.Progress.Where(p => p.Fraction is not null && p.Message.StartsWith("Counting files: ", StringComparison.Ordinal)).Select(p => p.Message).ToList();
+        }
+
+        Assert.IsTrue(said.Count > 0, "it knew how many there were");
+        var last = said[^1]["Counting files: ".Length..].Split(' ');
+        Assert.AreEqual(last[2], last[0], $"came to all of them: {said[^1]}");
+        Assert.AreEqual(int.Parse(last[2], System.Globalization.NumberStyles.AllowThousands, System.Globalization.CultureInfo.CurrentCulture), said.Count, $"each once: {said[^1]}");
+    }
+
     [TestMethod]
     [Timeout(600_000)]
     public async Task EveryRequestOfTheServerIsARowThatEnds()

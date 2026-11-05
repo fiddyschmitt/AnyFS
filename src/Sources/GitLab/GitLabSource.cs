@@ -41,6 +41,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     private KeptListings? _kept;
     private SpoolCache? _spool;
     private GlFolder? _root;
+    private ProjectsCounted? _counted;
     private Task _saving = Task.CompletedTask;
     private volatile bool _graphQlRefused;
     private bool _degraded;
@@ -547,9 +548,76 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     /// and keeps the listings, so they open at once afterwards: each project's default branch whole, a hundred entries a
     /// request (<see cref="ListTreeAsync"/>); with listings kept, a walk again every "Walk every folder every" minutes. It
     /// leaves out the folders that cost requests of their own (<see cref="GlFolder.Walked"/>), so the count ends as a lower
-    /// bound ("+").
+    /// bound ("+"). A server's or a group's count says how far it has got through the list of its projects; the walk comes to
+    /// each in turn, and all that is below one before the next, so that is how far through the walk it is too.
     /// </summary>
-    public Task CountFilesAsync(CancellationToken ct) => Kept.CountAsync(ct);
+    public async Task CountFilesAsync(CancellationToken ct)
+    {
+        if (Scope != ScopeKind.Project)
+        {
+            Context.ReportProgress("Counting files: listing the projects");
+            Volatile.Write(ref _counted, new ProjectsCounted(Context, await ProjectsToCountAsync(ct).ConfigureAwait(false)));
+        }
+
+        try
+        {
+            await Kept.CountAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            Volatile.Write(ref _counted, null);
+        }
+    }
+
+    /// <summary>How many projects a count goes through: what the server lists, the walk's first step in any case, or what GitLab says a group has. Null where it says nothing: past 10,000, or a listing that failed, which the walk meets for itself.</summary>
+    private async Task<long?> ProjectsToCountAsync(CancellationToken ct)
+    {
+        try
+        {
+            if (_root is not GroupFolder { Group: var group })
+            {
+                return (await ServerListingAsync(ct).ConfigureAwait(false)).Projects.Count;
+            }
+
+            long? total = null;
+            await foreach (var _ in Api.PagesAsync($"groups/{group.Id}/projects?include_subgroups=true&with_shared=false&simple=true&per_page=1", ct, t => total = t).ConfigureAwait(false))
+            {
+                break;
+            }
+
+            return total;
+        }
+        catch (VfsException ex)
+        {
+            Logger.LogDebug("gitlab: how many projects there are to count is not known: {Error}", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>How far a count has got through the projects: each said once as the walk comes to it (or someone opens it first), and how much of the list is behind it.</summary>
+    private sealed class ProjectsCounted(ISourceContext context, long? total)
+    {
+        private readonly ConcurrentDictionary<long, bool> _reached = new();
+
+        public long? Total => total;
+
+        public void Reached(GlProject project)
+        {
+            if (_reached.TryAdd(project.Id, true))
+            {
+                long count = _reached.Count;
+                if (total is > 0 and var known)
+                {
+                    // the one it has come to is not behind it yet: the bar is full only as the count ends
+                    context.ReportProgress($"Counting files: {Math.Min(count, known):N0} of {known:N0} projects", (double)Math.Min(count - 1, known - 1) / known);
+                }
+                else
+                {
+                    context.ReportProgress($"Counting files: {count:N0} projects so far");
+                }
+            }
+        }
+    }
 
     /// <summary>The listings as kept, for tests.</summary>
     internal ListingCache Listings => Kept.Cache;
@@ -567,6 +635,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         switch (await ResolveAsync(path, ct).ConfigureAwait(false))
         {
             case ProjectFolder project:
+                Volatile.Read(ref _counted)?.Reached(project.Project);
                 var head = project.Project.Repository ? await HeadAsync(project.Project, ct).ConfigureAwait(false) : null;
                 return $"{project.Project.LastActivity?.UtcTicks ?? 0}|{head?.Commit}";
             case TicketFolder ticket:

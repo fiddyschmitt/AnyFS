@@ -922,8 +922,9 @@ public class GitLabSourceTests
         var clock = Stopwatch.StartNew();
         await source.CountFilesAsync(CancellationToken.None);
         Assert.IsTrue(clock.Elapsed > TimeSpan.FromSeconds(3), $"the walk outlasted the interval: {clock.Elapsed}");
-        var groups = fake.Requests.Where(r => r.Contains("/groups/", StringComparison.Ordinal) && r.Contains("/projects?", StringComparison.Ordinal)).ToList();
+        var groups = fake.Requests.Where(r => r.Contains("/groups/", StringComparison.Ordinal) && r.Contains("/projects?", StringComparison.Ordinal) && r.Contains("include_subgroups=false", StringComparison.Ordinal)).ToList();
         Assert.AreEqual(2, groups.Count, "anyfs and anyfs/tools, once each: " + string.Join("; ", groups.Take(8)));
+        Assert.AreEqual(1, fake.Count("include_subgroups=true"), "and how many projects there are to go through, once");
     }
 
     [TestMethod]
@@ -1028,6 +1029,116 @@ public class GitLabSourceTests
         StringAssert.StartsWith(throttled.Answer, "429");
         Assert.IsTrue(asked.Count(r => r.Target == throttled.Target) >= 2, "the same request again, each go a row: " + string.Join("; ", asked));
         Assert.IsFalse(asked.Last(r => r.Target == throttled.Target).Refused);
+    }
+
+    /// <summary>What a count said of the projects, in the order it said it: the number it had come to and the fraction behind it.</summary>
+    private static List<(string Message, double? Fraction)> ProjectProgress(TestSourceContext context)
+    {
+        lock (context.Progress)
+        {
+            return context.Progress.Where(p => p.Message.StartsWith("Counting files", StringComparison.Ordinal)).ToList();
+        }
+    }
+
+    [TestMethod]
+    public async Task AServersCountSaysHowFarThroughItsProjectsItIs()
+    {
+        var fake = GitLabSeed.Lab();
+        var (source, context) = await StartAsync(fake, GitLabSeed.Settings(fake.Server));
+        await using var _s = source;
+        Assert.AreEqual(0, ProjectProgress(context).Count, "nothing said before the count");
+        await source.CountFilesAsync(CancellationToken.None);
+
+        var total = (await source.ServerListingAsync(CancellationToken.None)).Projects.Count;
+        Assert.IsTrue(total > 1);
+        var said = ProjectProgress(context);
+        Assert.AreEqual(("Counting files: listing the projects", (double?)null), said[0], "no list yet, and nothing to measure against");
+        Assert.AreEqual(total + 1, said.Count, "each project said once: " + string.Join("; ", said.Select(s => s.Message)));
+        Assert.AreEqual($"Counting files: 1 of {total:N0} projects", said[1].Message);
+        Assert.AreEqual(0d, said[1].Fraction, "the one it has come to is not behind it yet");
+        Assert.AreEqual($"Counting files: {total:N0} of {total:N0} projects", said[^1].Message);
+        Assert.AreEqual((double)(total - 1) / total, said[^1].Fraction!.Value, 0.0001, "the bar is full only as the count ends");
+        for (var i = 2; i < said.Count; i++)
+        {
+            Assert.IsTrue(said[i].Fraction >= said[i - 1].Fraction, "it only goes forward");
+        }
+
+        await ListAsync(source, "anyfs");
+        await ListAsync(source, "anyfs/docs");
+        Assert.AreEqual(said.Count, ProjectProgress(context).Count, "nothing more said once the count is over");
+    }
+
+    [TestMethod]
+    public async Task AServersCountOverWhatIsKeptStillGoesThroughItsProjects()
+    {
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        var (first, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server), context);
+        await first.CountFilesAsync(CancellationToken.None);
+        await first.DisposeAsync();
+
+        using var again = new TestSourceContext();
+        foreach (var file in Directory.EnumerateFiles(context.StateDirectory))
+        {
+            File.Copy(file, Path.Combine(again.StateDirectory, Path.GetFileName(file)));
+        }
+
+        var (second, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server), again);
+        await using var _s = second;
+        await second.CountFilesAsync(CancellationToken.None);
+        var total = (await second.ServerListingAsync(CancellationToken.None)).Projects.Count;
+        Assert.AreEqual($"Counting files: {total:N0} of {total:N0} projects", ProjectProgress(again)[^1].Message, "a project kept as it was is one gone through");
+    }
+
+    [TestMethod]
+    public async Task AGroupsCountSaysHowFarThroughItsProjectsItIs()
+    {
+        var fake = GitLabSeed.Lab();
+        var (source, context) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"));
+        await using var _s = source;
+        await source.CountFilesAsync(CancellationToken.None);
+        var said = ProjectProgress(context);
+        var last = said[^1];
+        StringAssert.EndsWith(last.Message, " projects");
+        var parts = last.Message["Counting files: ".Length..].Split(' ');
+        Assert.AreEqual(parts[0], parts[2], "every project of the group and its subgroups come to: " + last.Message);
+        Assert.IsTrue(int.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture) >= 3, last.Message);
+        Assert.IsNotNull(last.Fraction);
+        Assert.IsTrue(fake.Requests.Any(r => r.Contains("include_subgroups=true&with_shared=false", StringComparison.Ordinal)), "shared projects show under their own groups, so they are not counted here");
+    }
+
+    [TestMethod]
+    public async Task AGroupOfMoreThanGitLabCountsSaysHowManySoFar()
+    {
+        var fake = GitLabSeed.Lab();
+        fake.TotalsUpTo = 1;
+        var (source, context) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"));
+        await using var _s = source;
+        await source.CountFilesAsync(CancellationToken.None);
+        var last = ProjectProgress(context)[^1];
+        StringAssert.EndsWith(last.Message, " projects so far");
+        Assert.IsNull(last.Fraction, "nothing to measure against: the bar goes on and on");
+    }
+
+    [TestMethod]
+    public async Task AProjectsCountHasNoListOfProjectsToGoThrough()
+    {
+        var fake = GitLabSeed.Lab();
+        var (source, context) = await StartAsync(fake, GitLabSeed.Settings(App(fake)));
+        await using var _s = source;
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(0, ProjectProgress(context).Count, string.Join("; ", context.Progress.Select(p => p.Message)));
+    }
+
+    [TestMethod]
+    public async Task ACountWhoseListOfProjectsFailsGoesOnWithoutOne()
+    {
+        var fake = GitLabSeed.Lab();
+        var (source, _) = await StartCountingListingsAsync(fake, GitLabSeed.Settings(fake.Server), refuse: _ => true);
+        await using var _s = source;
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(0, source.Counters.FilesKnown, "it found nothing, as a walk does whose root does not list");
+        Assert.AreEqual(EnumerationState.Unknown, source.Counters.State);
     }
 
     [TestMethod]
