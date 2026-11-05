@@ -13,6 +13,12 @@
   <Style Selector="Border.tile:pointerover">
     <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseMediumLowBrush}" />
   </Style>
+  <Style Selector="ProgressBar.tile">
+    <Setter Property="Height" Value="4" />
+    <Setter Property="MinWidth" Value="0" />
+    <Setter Property="HorizontalAlignment" Value="Stretch" />
+    <Setter Property="Margin" Value="0,6,0,0" />
+  </Style>
   <Style Selector="ListBox.tiles">
     <Setter Property="Background" Value="Transparent" />
     <Setter Property="Padding" Value="0,0,4,0" />

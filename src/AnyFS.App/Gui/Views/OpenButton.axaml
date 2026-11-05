@@ -3,20 +3,21 @@
              xmlns:vm="using:AnyFS.App.Gui.ViewModels"
              x:Class="AnyFS.App.Gui.Views.OpenButton"
              x:DataType="vm:TileViewModel">
-  <!-- Open containing folder (spec 11.1): one mount opens it; several show a flyout; none is disabled; no tooltip (the user, 23-Oct-2026) -->
+  <!-- Open containing folder (spec 11.1): one mount opens it; several show a flyout; none is disabled; no tooltip (the user, 23-Oct-2026).
+       Its words trim where a tile has not room for them beside the file count (a grid, as a StackPanel would give them all the room they ask for). -->
   <Panel>
     <Button Command="{Binding OpenSingleCommand}" IsVisible="{Binding HasOneOpenTarget}">
-      <StackPanel Orientation="Horizontal" Spacing="6">
+      <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
         <PathIcon Classes="small" Data="{StaticResource IconFolderOpen}" />
-        <TextBlock Text="Open containing folder" />
-      </StackPanel>
+        <TextBlock Grid.Column="1" Text="Open containing folder" TextTrimming="CharacterEllipsis" />
+      </Grid>
     </Button>
     <Button IsVisible="{Binding HasManyOpenTargets}">
-      <StackPanel Orientation="Horizontal" Spacing="6">
+      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6">
         <PathIcon Classes="small" Data="{StaticResource IconFolderOpen}" />
-        <TextBlock Text="Open containing folder" />
-        <PathIcon Width="10" Height="10" Data="{StaticResource IconChevronDown}" />
-      </StackPanel>
+        <TextBlock Grid.Column="1" Text="Open containing folder" TextTrimming="CharacterEllipsis" />
+        <PathIcon Grid.Column="2" Width="10" Height="10" Data="{StaticResource IconChevronDown}" />
+      </Grid>
       <Button.Flyout>
         <MenuFlyout ItemsSource="{Binding OpenTargets}">
           <MenuFlyout.ItemContainerTheme>
@@ -29,10 +30,10 @@
       </Button.Flyout>
     </Button>
     <Button IsEnabled="False" IsVisible="{Binding HasNoOpenTarget}">
-      <StackPanel Orientation="Horizontal" Spacing="6">
+      <Grid ColumnDefinitions="Auto,*" ColumnSpacing="6">
         <PathIcon Classes="small" Data="{StaticResource IconFolderOpen}" />
-        <TextBlock Text="Open containing folder" />
-      </StackPanel>
+        <TextBlock Grid.Column="1" Text="Open containing folder" TextTrimming="CharacterEllipsis" />
+      </Grid>
     </Button>
   </Panel>
 </UserControl>

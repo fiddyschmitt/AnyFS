@@ -115,8 +115,15 @@ public sealed partial class CollectionTileViewModel : TileViewModel
     [ObservableProperty]
     public partial string FilesText { get; set; } = "";
 
+    /// <summary>Counting with no way of telling how far it has got: the bar that goes on and on.</summary>
     [ObservableProperty]
     public partial bool Counting { get; set; }
+
+    /// <summary>How far its sources have got on average, where each of those counting can tell; else null.</summary>
+    [ObservableProperty]
+    public partial double? Progress { get; set; }
+
+    public bool HasProgress => Progress is not null;
 
     public void Update(CollectionStatus status, IReadOnlyList<OpenTargetViewModel> targets)
     {
@@ -133,13 +140,17 @@ public sealed partial class CollectionTileViewModel : TileViewModel
             {
                 FilesText = "—";
                 Counting = false;
+                Progress = null;
             }
             else
             {
                 FilesText = Format.Files(enabledSources.Sum(s => s.Files), enabledSources.All(s => s.FilesComplete));
-                Counting = enabledSources.Any(s => s.Counting);
+                var counting = enabledSources.Where(s => s.Counting).ToList();
+                Progress = counting.Count > 0 && counting.All(s => s.Progress is not null) ? counting.Average(s => s.Progress!.Value) : null;
+                Counting = counting.Count > 0 && Progress is null;
             }
 
+            OnPropertyChanged(nameof(HasProgress));
             SetOpenTargets(targets);
         }
         finally
@@ -221,9 +232,11 @@ public sealed partial class SourceTileViewModel : TileViewModel
     [ObservableProperty]
     public partial string FilesText { get; set; } = "";
 
+    /// <summary>Starting or counting with no way of telling how far it has got: the bar that goes on and on.</summary>
     [ObservableProperty]
     public partial bool Counting { get; set; }
 
+    /// <summary>How far it has got, where it can tell: its bar in place of that one.</summary>
     [ObservableProperty]
     public partial double? Progress { get; set; }
 
@@ -256,7 +269,7 @@ public sealed partial class SourceTileViewModel : TileViewModel
             OnPropertyChanged(nameof(HasProgress));
             var running = status.State is not (nameof(ComponentState.Disabled) or nameof(ComponentState.Failed) or nameof(ComponentState.Starting));
             FilesText = status.Enabled && (running || status.Files > 0) ? Format.Files(status.Files, status.FilesComplete) : "—";
-            Counting = status.Counting;
+            Counting = status.Counting && status.Progress is null;
             CanRetry = status.Enabled && status.State is nameof(ComponentState.Failed) or nameof(ComponentState.Degraded);
             if (!uses.SequenceEqual(Uses))
             {
