@@ -93,6 +93,15 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   `Context.ReportHealth(ComponentHealth.Degraded, "root X unreachable")` and recovery with
   `ComponentHealth.Ready`.
 - Everything may be called concurrently from many threads.
+- What you ask of whatever is behind your source, a server, a folder, a file: `Context.UpstreamWatcher`
+  hears of it, and the Operations tab shows each as a row, under "Asked of: Source". Over HTTP, put
+  `UpstreamRequestsHandler.Around(handler, Context.UpstreamWatcher)` just above what sends the requests,
+  below anything of yours that retries, and each exchange shows with its address (anything secret in
+  the query left out, `UpstreamRequestsHandler.Shown`), what the server answered and the bytes, until
+  the answer has been read or the response disposed. Over anything else, wrap each call:
+  `await Context.UpstreamWatcher.AskAsync("LIST", path, () => client.ListAsync(path, ct), ct)`, or
+  `Ask` for one that blocks; for one that stays open, say `Asked(what, target)` yourself, and `Done()`
+  when it ends. A call answered from what you hold asks nothing, and is no row here.
 - Read-only is not your setting: say what you *can* do in `Capabilities`; the user decides per
   collection and per mount whether writes are allowed.
 - File counts: keep `Counters` up to date if you know your tree's size. When the user ticks

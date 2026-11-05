@@ -43,6 +43,11 @@ public sealed class TestSourceContext : ISourceContext, IDisposable
 
     public List<PromptRequest> Prompts { get; } = [];
 
+    /// <summary>What the source asked of whatever is behind it, as the host's Operations tab would show it.</summary>
+    public RecordingUpstreamWatcher UpstreamRequests { get; } = new();
+
+    public IUpstreamWatcher? UpstreamWatcher => UpstreamRequests;
+
     /// <summary>Recorded under a lock: a source may report from several tasks at once (Outlook's count).</summary>
     public void ReportProgress(string message, double? fraction = null)
     {
