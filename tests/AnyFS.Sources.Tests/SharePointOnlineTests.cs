@@ -441,7 +441,9 @@ public class SharePointOnlineLiveTests
         await UpstreamRequestRows.AllEndAsync(context);
         var asked = context.UpstreamRequests.Requests;
         Assert.IsTrue(asked.Count > 0);
-        Assert.IsTrue(asked.All(r => r.Answer is not null && r.Target.Contains("/v1.0/", StringComparison.Ordinal)), string.Join("; ", asked.Select(r => $"{r} {r.Answer}")));
+
+        // what a walk behind the listings had on its way when the source stopped was given up on: it has no answer, and says so
+        Assert.IsTrue(asked.All(r => (r.Answer is not null || r.Error is OperationCanceledException) && r.Target.Contains("/v1.0/", StringComparison.Ordinal)), string.Join("; ", asked.Select(r => $"{r} {r.Answer} {r.Error?.GetType().Name}")));
     }
 
     [TestMethod]

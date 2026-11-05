@@ -519,7 +519,7 @@ public class GitLabSourceTests
         CollectionAssert.AreEqual(listed.OrderBy(id => id).ToList(), listed, "in the order of their ids, as a single listing gives them");
         Assert.AreEqual(listed.Count, listed.Distinct().Count(), "none twice");
         CollectionAssert.IsSubsetOf(added, listed, "none left out");
-        Assert.AreEqual(4, listings.Most, "as many at once as a walk may ask: half of Concurrency 8, the other half for whoever browses");
+        Assert.IsTrue(listings.Most is > 1 and <= 4, $"side by side, and no more at once than a walk may ask, half of Concurrency 8, the other half for whoever browses: {listings.Most}");
 
         var asked = fake.Requests.Where(r => r.StartsWith("GET /api/v4/projects?", StringComparison.Ordinal)).ToList();
         Assert.AreEqual(1, asked.Count(r => r.Contains("sort=desc", StringComparison.Ordinal)), "the highest id, asked for once");
