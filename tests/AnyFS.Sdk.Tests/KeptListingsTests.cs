@@ -567,6 +567,73 @@ public class KeptListingsTests
     }
 
     [TestMethod]
+    public async Task PartsTakeTurnsAsManyAtATimeAsSetInTheOrderFound()
+    {
+        // four parts of two folders each; every listing takes a moment, so parts walking together overlap
+        var tree = new Dictionary<string, List<VfsEntry>>(StringComparer.Ordinal) { [""] = [] };
+        foreach (var part in new[] { "a", "b", "c", "d" })
+        {
+            tree[""].Add(VfsEntry.Directory(part));
+            tree[part] = [VfsEntry.Directory("x"), VfsEntry.Directory("y"), VfsEntry.File("f.txt", 1)];
+            tree[$"{part}/x"] = [VfsEntry.File("g.txt", 1)];
+            tree[$"{part}/y"] = [VfsEntry.File("h.txt", 1)];
+        }
+
+        // which parts have a listing in flight, and the most at once
+        var inFlight = new Dictionary<string, int>(StringComparer.Ordinal);
+        var started = new List<string>();
+        var most = 0;
+        async IAsyncEnumerable<VfsEntry> SlowAsync(string path, [EnumeratorCancellation] CancellationToken ct)
+        {
+            var part = path.Split('/')[0];
+            if (part.Length > 0)
+            {
+                lock (inFlight)
+                {
+                    if (!started.Contains(part))
+                    {
+                        started.Add(part);
+                    }
+
+                    inFlight[part] = inFlight.GetValueOrDefault(part) + 1;
+                    most = Math.Max(most, inFlight.Count);
+                }
+            }
+
+            try
+            {
+                await Task.Delay(15, ct);
+                foreach (var e in tree[path])
+                {
+                    yield return e;
+                }
+            }
+            finally
+            {
+                if (part.Length > 0)
+                {
+                    lock (inFlight)
+                    {
+                        if (--inFlight[part] == 0)
+                        {
+                            inFlight.Remove(part);
+                        }
+                    }
+                }
+            }
+        }
+
+        var counters = new SourceCounters();
+        var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, Parallelism = 2, PartsBelow = (folder, _) => ValueTask.FromResult(folder.Length == 0), PartsAtOnce = 2 };
+        await using var kept = new KeptListings(SlowAsync, counters, NullLogger.Instance, options);
+        await kept.CountAsync(CancellationToken.None);
+        Assert.AreEqual(12, counters.FilesKnown, "every part walked");
+        Assert.AreEqual(2, most, "two parts at a time, no more");
+        CollectionAssert.AreEquivalent(new[] { "a", "b" }, started.Take(2).ToList(), "the first two found go first");
+        Assert.IsTrue(started.IndexOf("c") < started.IndexOf("d"), $"then each in the order it was found: {string.Join(", ", started)}");
+    }
+
+    [TestMethod]
     public async Task TheWalksComeAgainAndShowTheirTotalWhenDone()
     {
         var counters = new SourceCounters();

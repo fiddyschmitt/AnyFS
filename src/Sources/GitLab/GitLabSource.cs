@@ -83,7 +83,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     {
         _session = new GitLabSession(_settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
         await _session.SignInAsync(interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
-        _api = new GitLabApi(_session, _settings.Concurrency, Logger);
+        _api = new GitLabApi(_session, _settings.Concurrency, Logger, _settings.RequestsPerSecond);
         _listings = new RequestCache(_stopping.Token);
         _trees = new TreeStore(Path.Combine(Context.StateDirectory, TreeStore.FileName), Logger);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
@@ -130,8 +130,13 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             Keep = _settings.Keeps,
             UnkeptFor = TimeSpan.Zero,
             WalkEvery = _settings.WalkEvery,
-            Parallelism = Walkers,
-            MaxInFlight = Walkers,
+
+            // a server's or a group's walk goes through "Projects at a time" projects at once, each a part of its own with its
+            // share of the requests at a time listing its folders together; one project's walk has them all
+            Parallelism = Scope == ScopeKind.Project ? Requests : WorkersPerProject,
+            MaxInFlight = Requests,
+            PartsBelow = Scope == ScopeKind.Project ? null : HoldsProjectsAsync,
+            PartsAtOnce = ProjectsAtATime,
             LeftOut = LeftOutAsync,
             ListTree = ListTreeAsync,
             StampOf = StampAsync,
@@ -265,8 +270,26 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         }
     }
 
-    /// <summary>How many walk at once: half the requests the source may make, so whoever browses meanwhile has the other half.</summary>
-    private int Walkers => Math.Max(1, Math.Clamp(_settings.Concurrency, 1, 64) / 2);
+    /// <summary>"Requests at a time" (1 to 64): what the API client has open at once, and what a walk's listings may have in flight in all.</summary>
+    private int Requests => Math.Clamp(_settings.Concurrency, 1, 64);
+
+    /// <summary>
+    /// "Projects at a time" (1 to 64): how many projects a server's or a group's walk goes through at once, each a part of its own
+    /// (the user, 5-Nov-2026, a server of 3,500 projects counting slowly at 32 requests: "how many projects to do simultaneously").
+    /// Before, the walkers took the projects off one stack, so a walker stayed with a project's folders one after another and the
+    /// requests at a time went half unused.
+    /// </summary>
+    private int ProjectsAtATime => Math.Clamp(_settings.ProjectsAtATime, 1, 64);
+
+    /// <summary>Folders listed at a time within one project's part: its share of the requests at a time.</summary>
+    private int WorkersPerProject => Math.Max(1, Requests / ProjectsAtATime);
+
+    /// <summary>How many range listings of the projects go at once (<see cref="ProjectsInRangesAsync"/>): half the requests the source may make.</summary>
+    private int Walkers => Math.Max(1, Requests / 2);
+
+    /// <summary>Whether what a folder holds is walked as parts of their own: the server's root, a namespace on the way to projects and a group hold projects, and groups that hold more.</summary>
+    private async ValueTask<bool> HoldsProjectsAsync(string folder, CancellationToken ct)
+        => await ResolveAsync(folder, ct).ConfigureAwait(false) is ServerRoot or NamespaceFolder or GroupFolder;
 
     // --- what the folders ask for --------------------------------------------------------------------------------------
 

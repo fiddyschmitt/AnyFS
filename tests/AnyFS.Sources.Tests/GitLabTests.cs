@@ -907,6 +907,123 @@ public class GitLabSourceTests
         }
     }
 
+    /// <summary>Every answer a little late, and which projects have a request in flight, so a walk's projects at a time can be seen.</summary>
+    private sealed class ProjectsInFlight(HttpMessageHandler inner, int ms) : DelegatingHandler(inner)
+    {
+        private readonly Dictionary<string, int> _inFlight = new(StringComparer.Ordinal);
+
+        public int Most { get; private set; }
+
+        /// <summary>Of each kind of request made of a project, how many of that project's were in flight with it at most: pipelines with the wiki and the releases, say.</summary>
+        public System.Collections.Concurrent.ConcurrentDictionary<string, int> AlongsideByKind { get; } = new(StringComparer.Ordinal);
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var match = System.Text.RegularExpressions.Regex.Match(request.RequestUri!.AbsolutePath, "/projects/([0-9]+)(?:/([a-z_]+))?");
+            var project = match.Success ? match.Groups[1].Value : null;
+            var kind = match.Success && match.Groups[2].Success ? match.Groups[2].Value : "project";
+            if (project is not null)
+            {
+                lock (_inFlight)
+                {
+                    _inFlight[project] = _inFlight.GetValueOrDefault(project) + 1;
+                    Most = Math.Max(Most, _inFlight.Count);
+                    AlongsideByKind.AddOrUpdate($"{project}:{kind}", _inFlight[project] - 1, (_, n) => Math.Max(n, _inFlight[project] - 1));
+                }
+            }
+
+            try
+            {
+                await Task.Delay(ms, cancellationToken);
+                return await base.SendAsync(request, cancellationToken);
+            }
+            finally
+            {
+                if (project is not null)
+                {
+                    lock (_inFlight)
+                    {
+                        if (--_inFlight[project] == 0)
+                        {
+                            _inFlight.Remove(project);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task AServersWalkGoesThroughAsManyProjectsAtATimeAsSet()
+    {
+        // the user, 5-Nov-2026: a server of 3,500 projects counting slowly however many requests at a time; the walkers took the
+        // projects off one stack, so each stayed with a project's folders one after another
+        var fake = GitLabSeed.Lab();
+        var settings = GitLabSeed.Settings(fake.Server);
+        settings.ProjectsAtATime = 2;
+        settings.Concurrency = 8;
+        var watch = new ProjectsInFlight(fake.Handler(), 30);
+        var source = new GitLabSource(settings, new GitLabStandIn(() => watch));
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        await using var _s = source;
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.IsTrue(source.Counters.FilesKnown > 0);
+        Assert.AreEqual(2, watch.Most, "two projects had requests in flight at once, no more and, with that many to go through, no fewer");
+
+        // a project's sections go together: its wiki, pipelines and releases were asked for with another of them in flight
+        var docs = fake.ProjectAt("anyfs/docs");
+        var sections = new[] { "wikis", "pipelines", "releases" }.Select(kind => watch.AlongsideByKind.GetValueOrDefault($"{docs.Id}:{kind}")).ToList();
+        Assert.IsTrue(sections.Max() >= 1, $"the sections of {docs.Id} were asked for together: {string.Join(", ", watch.AlongsideByKind.Where(p => p.Key.StartsWith($"{docs.Id}:", StringComparison.Ordinal)).Select(p => $"{p.Key}={p.Value}"))}");
+    }
+
+    [TestMethod]
+    public void ProjectsAtATimeAndRequestsASecondAreValidatedLikeTheRequests()
+    {
+        var plugin = new GitLabPlugin();
+        var settings = GitLabSeed.Settings("https://gitlab.example.test/");
+        settings.ProjectsAtATime = 0;
+        Assert.IsTrue(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.ProjectsAtATime)));
+        settings.ProjectsAtATime = 65;
+        Assert.IsTrue(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.ProjectsAtATime)));
+        settings.ProjectsAtATime = 4;
+        Assert.IsFalse(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.ProjectsAtATime)));
+        settings.RequestsPerSecond = 0;
+        Assert.IsTrue(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.RequestsPerSecond)));
+        settings.RequestsPerSecond = 1001;
+        Assert.IsTrue(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.RequestsPerSecond)));
+        settings.RequestsPerSecond = 200;
+        Assert.IsFalse(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.RequestsPerSecond)));
+    }
+
+    [TestMethod]
+    public async Task TheServersPaceIsTheRequestsASecondSetAndGitLabDotComsIsItsOwn()
+    {
+        // 50 a second, the pace until 5-Nov-2026 whatever the settings said, held a server that answers in 50 ms to a few requests
+        // in flight however many were allowed at a time: now it is set, and GitLab.com's stays what its limit allows
+        var own = GitLabApi.PaceFor("gitlab.example.test", 200);
+        var again = GitLabApi.PaceFor("gitlab.example.test", 200);
+        Assert.AreSame(own, again, "one pace for a server at one setting");
+        Assert.AreNotSame(own, GitLabApi.PaceFor("gitlab.example.test"), "another setting, another pace");
+        Assert.AreSame(GitLabApi.PaceFor("gitlab.com", 200), GitLabApi.PaceFor("gitlab.com"), "GitLab.com's is its own whatever is set");
+
+        // through 200 a second 100 requests pass well within a second; through 2 a second, past the burst of 8, they do not
+        var clock = Stopwatch.StartNew();
+        for (var i = 0; i < 100; i++)
+        {
+            await own.WaitAsync(CancellationToken.None);
+        }
+
+        Assert.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(1), $"100 through at 200 a second took {clock.Elapsed}");
+        var slow = GitLabApi.PaceFor("slow.example.test", 2);
+        clock.Restart();
+        for (var i = 0; i < 12; i++)
+        {
+            await slow.WaitAsync(CancellationToken.None);
+        }
+
+        Assert.IsTrue(clock.Elapsed >= TimeSpan.FromSeconds(1.5), $"12 through at 2 a second with a burst of 8 took {clock.Elapsed}");
+    }
+
     [TestMethod]
     public async Task AWalkAsksForAGroupOnceHoweverLongItTakes()
     {
@@ -921,7 +1038,7 @@ public class GitLabSourceTests
         await using var _s = source;
         var clock = Stopwatch.StartNew();
         await source.CountFilesAsync(CancellationToken.None);
-        Assert.IsTrue(clock.Elapsed > TimeSpan.FromSeconds(3), $"the walk outlasted the interval: {clock.Elapsed}");
+        Assert.IsTrue(clock.Elapsed > TimeSpan.FromSeconds(1.5), $"the walk outlasted the interval: {clock.Elapsed}");
         var groups = fake.Requests.Where(r => r.Contains("/groups/", StringComparison.Ordinal) && r.Contains("/projects?", StringComparison.Ordinal) && r.Contains("include_subgroups=false", StringComparison.Ordinal)).ToList();
         Assert.AreEqual(2, groups.Count, "anyfs and anyfs/tools, once each: " + string.Join("; ", groups.Take(8)));
         Assert.AreEqual(1, fake.Count("include_subgroups=true"), "and how many projects there are to go through, once");

@@ -25,22 +25,34 @@ internal sealed class GitLabApi : IDisposable
     private readonly SemaphoreSlim _gate;
     private readonly ILogger _logger;
 
-    public GitLabApi(GitLabSession session, int concurrency, ILogger logger)
+    /// <summary>What a server of one's own is asked a second unless the settings say otherwise ("Requests a second").</summary>
+    public const int DefaultPerSecond = 50;
+
+    public GitLabApi(GitLabSession session, int concurrency, ILogger logger, int perSecond = DefaultPerSecond)
     {
         _session = session;
-        _pace = PaceFor(session.Address.Server.Host);
+        _pace = PaceFor(session.Address.Server.Host, perSecond);
         _gate = new SemaphoreSlim(Math.Clamp(concurrency, 1, 64));
         _logger = logger;
     }
 
     /// <summary>
-    /// A server's pace: GitLab.com allows an account 2,000 API requests a minute; a server of one's own sets its own
-    /// limits (off by default), so it goes faster, still within what a crawl should ask of a shared server.
+    /// A server's pace: GitLab.com allows an account 2,000 API requests a minute, so it goes at 25 whatever the settings say;
+    /// a server of one's own sets its own limits (off by default), so it goes at "Requests a second" (<paramref name="perSecond"/>,
+    /// 50 unless set: what a crawl should ask of a shared server, and what held the user's 3,500 projects to a few requests in
+    /// flight at 32 allowed at a time, 5-Nov-2026), with a burst of four seconds' worth. A pace is shared by host and number:
+    /// two sources of one server set differently each keep theirs.
     /// </summary>
-    public static RequestPace PaceFor(string host)
-        => GitLabAddress.IsGitLabDotCom(host)
-            ? RequestPace.For("gitlab:" + host, burst: 100, perSecond: 25)
-            : RequestPace.For("gitlab:" + host, burst: 200, perSecond: 50);
+    public static RequestPace PaceFor(string host, int perSecond = DefaultPerSecond)
+    {
+        if (GitLabAddress.IsGitLabDotCom(host))
+        {
+            return RequestPace.For("gitlab:" + host, burst: 100, perSecond: 25);
+        }
+
+        perSecond = Math.Clamp(perSecond, 1, 1000);
+        return RequestPace.For(perSecond == DefaultPerSecond ? "gitlab:" + host : $"gitlab:{host}:{perSecond}", burst: perSecond * 4, perSecond: perSecond);
+    }
 
     public GitLabAddress Address => _session.Address;
 

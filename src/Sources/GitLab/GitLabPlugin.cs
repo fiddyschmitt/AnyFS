@@ -112,6 +112,16 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
             yield return new ValidationMessage("Use GitLab's answers for must be between 5 seconds and 86400 (a day).", nameof(GitLabSettings.RefreshSeconds));
         }
 
+        if (s.ProjectsAtATime is < 1 or > 64)
+        {
+            yield return new ValidationMessage("Projects at a time must be between 1 and 64.", nameof(GitLabSettings.ProjectsAtATime));
+        }
+
+        if (s.RequestsPerSecond is < 1 or > 1000)
+        {
+            yield return new ValidationMessage("Requests a second must be between 1 and 1,000.", nameof(GitLabSettings.RequestsPerSecond));
+        }
+
         if (s.Concurrency is < 1 or > 64)
         {
             yield return new ValidationMessage("Requests at a time must be between 1 and 64.", nameof(GitLabSettings.Concurrency));
@@ -135,7 +145,7 @@ public sealed class GitLabPlugin : ISourcePlugin, IValidatable, ITestable, ISett
         {
             using var session = new GitLabSession(s, NullLogger.Instance, standIn);
             await session.SignInAsync(interactive: true, progress.Report, ct).ConfigureAwait(false);
-            using var api = new GitLabApi(session, s.Concurrency, NullLogger.Instance);
+            using var api = new GitLabApi(session, s.Concurrency, NullLogger.Instance, s.RequestsPerSecond);
             var who = $"Signed in to {session.Address.Server.Host} as {session.User?.Name} ({session.User?.Username}) {session.How}.";
             var path = session.Address.Path;
             progress.Report($"Signed in; asking GitLab what {(path.Length == 0 ? "the server" : path)} holds");

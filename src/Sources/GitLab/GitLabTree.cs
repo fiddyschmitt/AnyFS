@@ -216,6 +216,19 @@ internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(n
     {
         var project = await source.ProjectAsync(Project, ct).ConfigureAwait(false);
         var settings = source.Settings;
+
+        // what the sections ask of the server, asked together: a walk comes to thousands of projects, and three answers waited
+        // for in turn cost three times the wait of one (5-Nov-2026). GitLab turns every project's wiki on; only one with pages
+        // shows. Most projects have no pipelines or releases: those folders show only where there are some.
+        var wiki = project.Wiki && settings.Wiki ? source.HasWikiPagesAsync(WikiOwner.Of(project), ct) : Task.FromResult(false);
+        var pipelines = settings.Pipelines && project.Pipelines && project.Repository
+            ? source.HasAnyAsync(async () => (await source.PipelinesAsync(project, ct).ConfigureAwait(false)).Count)
+            : Task.FromResult(false);
+        var releases = settings.Releases && project.Releases && project.Repository
+            ? source.HasAnyAsync(async () => (await source.ReleasesAsync(project, ct).ConfigureAwait(false)).Count)
+            : Task.FromResult(false);
+        await Task.WhenAll(wiki, pipelines, releases).ConfigureAwait(false);
+
         var sections = new List<GlNode>();
         if (project.RepositoryReadable)
         {
@@ -227,8 +240,7 @@ internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(n
             }
         }
 
-        // GitLab turns every project's wiki on; only one with pages shows
-        if (project.Wiki && settings.Wiki && await source.HasWikiPagesAsync(WikiOwner.Of(project), ct).ConfigureAwait(false))
+        if (wiki.Result)
         {
             sections.Add(new WikiFolder(WikiOwner.Of(project), "", "wiki"));
         }
@@ -246,15 +258,12 @@ internal sealed class ProjectFolder(GlProject project, string name) : GlFolder(n
             }
         }
 
-        // most projects have no pipelines or releases: those folders show only where there are some
-        if (settings.Pipelines && project.Pipelines && project.Repository
-            && await source.HasAnyAsync(async () => (await source.PipelinesAsync(project, ct).ConfigureAwait(false)).Count).ConfigureAwait(false))
+        if (pipelines.Result)
         {
             sections.Add(new PipelinesFolder(project, "pipelines"));
         }
 
-        if (settings.Releases && project.Releases && project.Repository
-            && await source.HasAnyAsync(async () => (await source.ReleasesAsync(project, ct).ConfigureAwait(false)).Count).ConfigureAwait(false))
+        if (releases.Result)
         {
             sections.Add(new ReleasesFolder(project, "releases"));
         }

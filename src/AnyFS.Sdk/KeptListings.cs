@@ -265,12 +265,15 @@ public sealed class KeptListings : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(counters);
         using var inFlight = new SemaphoreSlim(_options.MaxInFlight, _options.MaxInFlight);
-        var walk = new Walk(counters, inFlight, full) { HeldBelow = heldAlone && _options.ListTree is not null ? CountHeldBelow() : null };
+        using var partSlots = _options.PartsAtOnce > 0 ? new SemaphoreSlim(_options.PartsAtOnce, _options.PartsAtOnce) : null;
+        var walk = new Walk(counters, inFlight, full) { HeldBelow = heldAlone && _options.ListTree is not null ? CountHeldBelow() : null, PartSlots = partSlots };
         void StartPart(string path, bool held)
         {
+            // a part below the first takes its turn now, in the order the parts are found, and walks when it comes
+            var turn = path.Length > 0 ? partSlots?.WaitAsync(ct) : null;
             lock (walk.Parts)
             {
-                walk.Parts.Add(Task.Run(() => WalkPartAsync(path, held, walk, StartPart, ct), CancellationToken.None));
+                walk.Parts.Add(Task.Run(() => WalkPartAsync(path, held, turn, walk, StartPart, ct), CancellationToken.None));
             }
         }
 
@@ -491,8 +494,32 @@ public sealed class KeptListings : IAsyncDisposable
         _firstWalk.TrySetResult();
     }
 
-    /// <summary>One part's share of a walk (<see cref="WalkAsync(SourceCounters, bool, CancellationToken)"/>): its folders, <see cref="KeptListingsOptions.Parallelism"/> at a time; the parts below it start walks of their own.</summary>
-    private async Task WalkPartAsync(string root, bool rootHeldAlone, Walk walk, Action<string, bool> startPart, CancellationToken ct)
+    /// <summary>
+    /// One part's share of a walk (<see cref="WalkAsync(SourceCounters, bool, CancellationToken)"/>): its folders,
+    /// <see cref="KeptListingsOptions.Parallelism"/> at a time; the parts below it start walks of their own, each waiting its turn
+    /// where <see cref="KeptListingsOptions.PartsAtOnce"/> gives turns.
+    /// </summary>
+    private async Task WalkPartAsync(string root, bool rootHeldAlone, Task? turn, Walk walk, Action<string, bool> startPart, CancellationToken ct)
+    {
+        if (turn is not null)
+        {
+            await turn.ConfigureAwait(false);
+        }
+
+        try
+        {
+            await WalkPartCoreAsync(root, rootHeldAlone, walk, startPart, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (turn is not null)
+            {
+                walk.PartSlots!.Release();
+            }
+        }
+    }
+
+    private async Task WalkPartCoreAsync(string root, bool rootHeldAlone, Walk walk, Action<string, bool> startPart, CancellationToken ct)
     {
         using var pending = new PendingFolders(_options.Parallelism);
         pending.Add(root, rootHeldAlone);
@@ -811,6 +838,9 @@ public sealed class KeptListings : IAsyncDisposable
         /// <summary>In a walk of what is held, how many folders are held at each folder and below it (<see cref="ReadAtOnceFrom"/>); null otherwise.</summary>
         public Dictionary<string, int>? HeldBelow { get; init; }
 
+        /// <summary>The turns the parts below the first take (<see cref="KeptListingsOptions.PartsAtOnce"/>); null where every part walks at once.</summary>
+        public SemaphoreSlim? PartSlots { get; init; }
+
         public List<Task> Parts { get; } = [];
 
         public volatile bool LeftSomeOut;
@@ -856,9 +886,17 @@ public sealed record KeptListingsOptions
 
     /// <summary>
     /// Whether the folders in a folder are each walked as a part of their own, <see cref="Parallelism"/> folders of each at a
-    /// time and every part at once (SharePoint's sites, so a big site does not hold up the others); null for one part.
+    /// time and every part at once (SharePoint's sites, so a big site does not hold up the others), or <see cref="PartsAtOnce"/>
+    /// of them at once; null for one part.
     /// </summary>
     public Func<string, CancellationToken, ValueTask<bool>>? PartsBelow { get; init; }
+
+    /// <summary>
+    /// With <see cref="PartsBelow"/>, how many parts walk at once, the rest waiting their turn in the order they were found
+    /// (GitLab's projects: a server's walk goes through a few at a time, each one's folders together, and comes to each in turn);
+    /// zero, the default, walks every part at once. The part a walk starts from takes no turn.
+    /// </summary>
+    public int PartsAtOnce { get; init; }
 
     /// <summary>
     /// Of the folders in a folder, the names of those a walk does not go into, because listing them costs requests of their
