@@ -143,14 +143,15 @@ public sealed class MicrosoftCloud
     /// or DoD organisation is in the US Government cloud); the global cloud when that says nothing or cannot be read.
     /// </summary>
     /// <param name="handler">The handler the lookup goes through: a test's; null for the network.</param>
-    public static async Task<MicrosoftCloud> FindAsync(string address, HttpMessageHandler? handler, CancellationToken ct)
+    /// <param name="watcher">Who hears of its requests (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
+    public static async Task<MicrosoftCloud> FindAsync(string address, HttpMessageHandler? handler, CancellationToken ct, IUpstreamWatcher? watcher = null)
     {
         if (FromTenant(address[(address.LastIndexOf('@') + 1)..]) is { } known)
         {
             return known;
         }
 
-        return await MicrosoftRealm.LookupAsync(address, handler, ct).ConfigureAwait(false) is { IsUsGovernment: true } ? UsGovernment : Global;
+        return await MicrosoftRealm.LookupAsync(address, handler, ct, watcher).ConfigureAwait(false) is { IsUsGovernment: true } ? UsGovernment : Global;
     }
 
     /// <summary>The cloud to sign in to: the one chosen, else the one the site's address or the tenant's domain is in, else the global cloud.</summary>

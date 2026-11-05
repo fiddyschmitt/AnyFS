@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Globalization;
+using AnyFS.Sdk;
 using LibOutlook;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -15,7 +16,9 @@ namespace AnyFS.Sources.Outlook.Mail;
 /// A file damaged in places (a heap whose records name allocations it has not, as an OST of years had) is served all but
 /// those places, as XstReader serves one: a folder whose own properties do not read keeps what its parent's table gives
 /// of it, an item whose own properties do not read is listed as its folder's table lists it (opening it says why it
-/// cannot be), a table that does not read lists what it gave before the fault, and each such place is logged once.
+/// cannot be), a table that does not read lists what it gave before the fault, and each such place is logged once. What is
+/// asked of the file is told to a <see cref="IUpstreamWatcher"/>: its opening and reading of its folders, a folder's items, an
+/// item opened, an attachment's content.
 /// </summary>
 internal sealed class PstMailStore : IMailStore
 {
@@ -35,19 +38,26 @@ internal sealed class PstMailStore : IMailStore
     private const int MaxOccurrences = 10_000;
 
     private readonly int _monthsAhead;
+    private readonly IUpstreamWatcher? _watcher;
     private PstFile _pst;
     private NamedIds _ids;
 
     /// <param name="calendarMonthsAhead">How far ahead of today a recurring series without an end is listed.</param>
-    public PstMailStore(string path, bool includeHidden, ILogger? logger = null, int calendarMonthsAhead = 12)
+    /// <param name="watcher">Who hears of what is asked of the file (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
+    public PstMailStore(string path, bool includeHidden, ILogger? logger = null, int calendarMonthsAhead = 12, IUpstreamWatcher? watcher = null)
     {
         _path = path;
         _hidden = includeHidden;
         _logger = logger ?? NullLogger.Instance;
         _monthsAhead = calendarMonthsAhead;
-        _pst = PstFile.Open(path);
-        _ids = ReadNamedIds();
-        Folders = MapFolders(_pst.TopFolder);
+        _watcher = watcher;
+        (_pst, _ids, var folders) = _watcher.Ask("Open mail file", path, () =>
+        {
+            _pst = PstFile.Open(path);
+            _ids = ReadNamedIds();
+            return (_pst, _ids, MapFolders(_pst.TopFolder));
+        });
+        Folders = folders;
     }
 
     public string Name
@@ -74,20 +84,40 @@ internal sealed class PstMailStore : IMailStore
 
     private string FileName => Path.GetFileName(_path);
 
-    public Task<IReadOnlyList<MailItemSummary>> ItemsAsync(MailFolder folder, CancellationToken ct) => Task.FromResult(Items(folder));
+    public Task<IReadOnlyList<MailItemSummary>> ItemsAsync(MailFolder folder, CancellationToken ct)
+    {
+        var asked = _watcher?.Asked("List folder", $"{_path}: {folder.Name}");
+        try
+        {
+            var items = Items(folder);
+            asked?.AddEntries(items.Count);
+            return Task.FromResult(items);
+        }
+        catch (Exception ex)
+        {
+            asked?.Failed(ex, ct);
+            throw;
+        }
+        finally
+        {
+            asked?.Done();
+        }
+    }
 
-    public Task<MailItem?> OpenAsync(string itemId, CancellationToken ct) => Task.FromResult(Open(itemId));
+    public Task<MailItem?> OpenAsync(string itemId, CancellationToken ct) => Task.FromResult(_watcher.Ask("Read item", $"{_path}: item {itemId}", () => Open(itemId)));
 
     /// <summary>Reads the file's header and folders again (a file Outlook is writing).</summary>
     public Task RefreshAsync(CancellationToken ct)
     {
-        lock (_gate)
+        _watcher.Ask("Read folders", _path, () =>
         {
-            _pst.Refresh();
-            _ids = ReadNamedIds();
-            Folders = MapFolders(_pst.TopFolder);
-        }
-
+            lock (_gate)
+            {
+                _pst.Refresh();
+                _ids = ReadNamedIds();
+                Folders = MapFolders(_pst.TopFolder);
+            }
+        });
         return Task.CompletedTask;
     }
 
@@ -419,7 +449,7 @@ internal sealed class PstMailStore : IMailStore
                 Blank(a.ContentId),
                 a.IsInline,
                 embedded is not null ? 0 : a.Size,
-                _ => Task.FromResult(a.OpenContent()),
+                _ => Task.FromResult(_watcher.Ask("Read attachment", $"{_path}: item {id}: {name}", a.OpenContent)),
                 embedded is null ? null : _ => Task.FromResult<MailItem?>(Build(embedded, $"{id}/{embeddedIndex}")),
                 a.Properties.GetBoolean(AttachmentContactPhoto) == true));
         }

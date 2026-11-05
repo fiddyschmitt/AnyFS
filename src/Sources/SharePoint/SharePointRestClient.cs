@@ -49,7 +49,8 @@ internal sealed partial class SharePointRestClient : IDisposable
 
     /// <param name="siteUrl">The site (web) the calls are about, without a trailing slash.</param>
     /// <param name="credentials">Windows credentials, or null for the process's own logon (Windows only, in practice).</param>
-    public SharePointRestClient(Uri siteUrl, ICredentials? credentials, bool trustAnyCertificate, ILogger logger, Action<string>? onTrouble = null, Action? onSuccess = null, HttpMessageHandler? handler = null)
+    /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>); a <paramref name="handler"/> that retries keeps its own below it instead.</param>
+    public SharePointRestClient(Uri siteUrl, ICredentials? credentials, bool trustAnyCertificate, ILogger logger, Action<string>? onTrouble = null, Action? onSuccess = null, HttpMessageHandler? handler = null, IUpstreamWatcher? watcher = null)
     {
         SiteUrl = new Uri(siteUrl.AbsoluteUri.TrimEnd('/') + "/");
         _logger = logger;
@@ -75,7 +76,7 @@ internal sealed partial class SharePointRestClient : IDisposable
             handler = sockets;
         }
 
-        _http = new HttpClient(handler, disposeHandler: true) { Timeout = RequestTimeout };
+        _http = new HttpClient(UpstreamRequestsHandler.Around(handler, watcher), disposeHandler: true) { Timeout = RequestTimeout };
         _http.DefaultRequestHeaders.Accept.Add(JsonNoMetadata);
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(SharePointRestClient).Assembly.GetName().Version?.ToString(3) ?? "0"}");
     }

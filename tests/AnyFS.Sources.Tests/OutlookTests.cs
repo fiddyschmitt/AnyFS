@@ -163,6 +163,32 @@ public class OutlookSourceTests
     }
 
     [TestMethod]
+    public async Task WhatTheMailFileIsAskedIsARowByItsPlaceInTheFile()
+    {
+        var (source, context) = await OutlookFixtures.StartAsync("unicode.pst");
+        await using (source)
+        using (context)
+        {
+            var file = OutlookFixtures.Pst("unicode.pst");
+            var asked = context.UpstreamRequests;
+            Assert.AreEqual("Get metadata " + file, asked.Requests[0].ToString(), "its start asks whether the file is there");
+            Assert.AreEqual("Open mail file " + file, asked.Requests[1].ToString(), "then opens it and reads its folders");
+
+            var folder = await OutlookFixtures.ItemFolderAsync(source, "Inbox/2026/10", "Quarterly figures");
+            var inbox = asked.Requests.Single(r => r.What == "List folder" && r.Target == $"{file}: Inbox");
+            Assert.IsTrue(inbox.Entries > 0, "a folder's items");
+
+            var seen = asked.Requests.Count;
+            CollectionAssert.AreEqual(OutlookFixtures.FiguresCsv, await OutlookFixtures.ReadAsync(source, $"{folder}/attachments/figures.csv"));
+            var since = asked.Requests.Skip(seen).ToList();
+            Assert.IsTrue(since.Any(r => r.What == "Read item" && r.Target.StartsWith($"{file}: item ", StringComparison.Ordinal)), string.Join("; ", since));
+            Assert.IsTrue(since.Any(r => r.What == "Read attachment" && r.Target.EndsWith(": figures.csv", StringComparison.Ordinal)), string.Join("; ", since));
+
+            await UpstreamRequestRows.AllEndAsync(context);
+        }
+    }
+
+    [TestMethod]
     [DataRow("ansi.pst")]
     [DataRow("unicode.pst")]
     public async Task AMessageIsAFolderWithMarkdownEmlAndAttachments(string fixture)

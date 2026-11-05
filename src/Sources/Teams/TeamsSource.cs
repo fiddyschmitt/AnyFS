@@ -102,7 +102,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     private async Task<ITeamsApi> SignInAsync(CancellationToken ct)
     {
         // the cloud before the browser opens: its sign-in page is on the cloud's own Teams host
-        var (cloud, how) = await TeamsCloud.ResolveAsync(_settings, Context.StateDirectory, handler: null, ct).ConfigureAwait(false);
+        var (cloud, how) = await TeamsCloud.ResolveAsync(_settings, Context.StateDirectory, handler: null, ct, Context.UpstreamWatcher).ConfigureAwait(false);
         _cloud = cloud;
         Logger.LogInformation("teams: {Account} signs in to {Cloud} ({How})", _settings.AccountHint, cloud.Display, how);
         Context.ReportProgress($"Signing in to Teams in {cloud.Display}");
@@ -139,7 +139,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
 
         return new TeamsRest(new Uri(cloud.ApiHost), (service, refused, c) => Renew(session, service, refused, c), _settings.Concurrency, Logger, sharePointHost: () => session.SharePointHost,
-            inHand: session.InHand, seek: c => session.SeekAsync(sought, c, _teamSite), graphHost: cloud.GraphHost)
+            inHand: session.InHand, seek: c => session.SeekAsync(sought, c, _teamSite), graphHost: cloud.GraphHost, watcher: Context.UpstreamWatcher)
         {
             Account = session.Account ?? _settings.AccountHint,
             Mri = session.Mri,

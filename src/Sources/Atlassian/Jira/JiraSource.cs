@@ -82,7 +82,7 @@ public sealed class JiraSource : SourceBase, ICountable
 
     protected override async Task OnInitialiseAsync(CancellationToken ct)
     {
-        _session = new AtlassianSession(AtlassianProduct.Jira, _settings, Logger, _standIn, Context.Secrets);
+        _session = new AtlassianSession(AtlassianProduct.Jira, _settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
         await _session.SignInAsync(interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
         _api = new AtlassianApi(_session, _settings.Concurrency, Logger);
         _cache = new RequestCache(_stopping.Token);

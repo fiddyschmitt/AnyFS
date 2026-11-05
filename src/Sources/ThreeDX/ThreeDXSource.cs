@@ -81,7 +81,7 @@ public sealed class ThreeDXSource : SourceBase, ICountable
             throw new SourceFailedException("Signing in as yourself works on Windows only: choose Windows account and give a user name and password, or Web session.", permanent: true);
         }
 
-        _session = new ThreeDXSession(_settings, Logger, Context.Secrets, _options);
+        _session = new ThreeDXSession(_settings, Logger, Context.Secrets, _options, Context.UpstreamWatcher);
         try
         {
             await _session.SignInAsync(interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);

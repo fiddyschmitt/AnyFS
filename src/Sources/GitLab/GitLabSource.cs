@@ -73,7 +73,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
     protected override async Task OnInitialiseAsync(CancellationToken ct)
     {
-        _session = new GitLabSession(_settings, Logger, _standIn, Context.Secrets);
+        _session = new GitLabSession(_settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
         await _session.SignInAsync(interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
         _api = new GitLabApi(_session, _settings.Concurrency, Logger);
         _listings = new RequestCache(_stopping.Token);

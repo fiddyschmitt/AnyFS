@@ -65,6 +65,29 @@ public class GitLabLiveTests
 
     [TestMethod]
     [Timeout(600_000)]
+    public async Task EveryRequestOfTheServerIsARowThatEnds()
+    {
+        var (url, token) = Server();
+        using var context = new TestSourceContext();
+        await using (var source = await StartAsync(url + "/anyfs/tools/app", token, context))
+        {
+            await source.CountFilesAsync(CancellationToken.None);
+            Assert.IsTrue((await ReadAsync(source, "files/e2e/fixture.sha256")).Length > 0);
+        }
+
+        await UpstreamRequestRows.AllEndAsync(context);
+        var asked = context.UpstreamRequests.Requests;
+        Assert.IsTrue(asked.All(r => r.Target.StartsWith(url, StringComparison.Ordinal)), string.Join("; ", asked.Take(20)));
+        Assert.IsTrue(asked.All(r => r.Answer is not null || r.Error is not null), "each says how it went");
+        Assert.IsFalse(asked.Any(r => r.Target.Contains(token, StringComparison.Ordinal)), "the token is in no row");
+        var trees = asked.Where(r => r.Target.Contains("/repository/tree", StringComparison.Ordinal)).ToList();
+        Assert.IsTrue(trees.Count > 0 && trees.All(r => r.What == "GET" && r.Answer == "200 OK" && r.Bytes > 0), string.Join("; ", trees.Select(r => $"{r} {r.Answer} {r.Bytes}")));
+        Assert.IsTrue(asked.Any(r => r.What == "POST" && r.Target.EndsWith("/api/graphql", StringComparison.Ordinal) && r.Answer == "200 OK" && r.Bytes > 0), "the sizes, from GraphQL");
+        Assert.IsTrue(asked.Any(r => r.Target.Contains("/raw", StringComparison.Ordinal) && r.Bytes > 0), "a file's bytes went by on a row of their own");
+    }
+
+    [TestMethod]
+    [Timeout(600_000)]
     public async Task TheFixtureTreeIsServedWholeFromTheLabsRepository()
     {
         var (url, token) = Server();

@@ -25,6 +25,22 @@ public class OutlookGraphTests
     private static int Count(FakeExchange fake, Func<string, bool> path) => fake.Actions.Count(a => a.StartsWith("graph ", StringComparison.Ordinal) && path(a["graph ".Length..]));
 
     [TestMethod]
+    public async Task EveryRequestOfTheServerIsARowThatEnds()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            await OutlookFixtures.ListAsync(source, "");
+            await UpstreamRequestRows.AllEndAsync(context);
+            var asked = context.UpstreamRequests.Requests;
+            Assert.IsTrue(asked.Count > 0);
+            Assert.IsTrue(asked.All(r => r.Target.Contains("/v1.0/", StringComparison.Ordinal) && r.Answer is not null), string.Join("; ", asked));
+        }
+    }
+
+    [TestMethod]
     public void AnAppSignInIsAMailboxsAndCheckedAsSharePointsIs()
     {
         var plugin = new OutlookPlugin();

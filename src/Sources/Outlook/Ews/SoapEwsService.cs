@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Xml.Linq;
+using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.Outlook.Ews;
@@ -42,7 +43,8 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
     /// <param name="trustAnyCertificate">Accept the server's certificate whatever it is (a lab's self-signed one).</param>
     /// <param name="handler">The handler requests go through: a test's fake; null for the network.</param>
     /// <param name="paceKey">Whose pace the calls share: the account and the server.</param>
-    public SoapEwsService(Uri url, ICredentials credentials, bool trustAnyCertificate, HttpMessageHandler? handler, string paceKey, ILogger logger)
+    /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
+    public SoapEwsService(Uri url, ICredentials credentials, bool trustAnyCertificate, HttpMessageHandler? handler, string paceKey, ILogger logger, IUpstreamWatcher? watcher = null)
     {
         _url = url;
         _pace = MailboxPace.For(paceKey);
@@ -58,7 +60,7 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
             handler = windows;
         }
 
-        _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
+        _http = new HttpClient(UpstreamRequestsHandler.Around(handler, watcher)) { Timeout = TimeSpan.FromSeconds(120) };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("AnyFS");
     }
 

@@ -634,6 +634,28 @@ public class ThreeDXSourceTests
     }
 
     [TestMethod]
+    public async Task EveryRequestOfTheServerIsARowThatEnds()
+    {
+        using var fake = new Fake3DX();
+        var spec = Bytes(5000, 1);
+        fake.Add("DOC-001", "A", "Design spec", "Document", ("spec.pdf", spec));
+        using var context = new TestSourceContext("3dx");
+        await using (var source = await StartAsync(ThreeDXSignInTests.Settings(fake), context))
+        {
+            await ListAsync(source, "");
+            CollectionAssert.AreEqual(spec, await ReadAllAsync(source, "DOC-001 Rev A (Design spec)/spec.pdf"));
+        }
+
+        await UpstreamRequestRows.AllEndAsync(context);
+        var asked = context.UpstreamRequests.Requests;
+        Assert.IsTrue(asked.Count > 0);
+        Assert.AreEqual(fake.Requests.Count, asked.Count, "every one the server saw, and no more: " + string.Join("; ", asked));
+        CollectionAssert.AreEquivalent(fake.Requests.Select(r => r.Method).ToList(), asked.Select(r => r.What).ToList());
+        Assert.IsTrue(asked.Any(r => r.Bytes >= spec.Length), "the file went by on one");
+        Assert.IsFalse(asked.Any(r => r.Target.Contains("ticket=", StringComparison.OrdinalIgnoreCase) && !r.Target.Contains("ticket=…", StringComparison.OrdinalIgnoreCase)), "a download's ticket is no one's to read: " + string.Join("; ", asked));
+    }
+
+    [TestMethod]
     public async Task EveryDocumentIsAFolderOfItsFilesAsMount3DXShowsThem()
     {
         using var fake = new Fake3DX();

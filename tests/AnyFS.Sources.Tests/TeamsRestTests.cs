@@ -29,6 +29,26 @@ public class TeamsRestTests
     }
 
     [TestMethod]
+    public async Task EveryRequestOfTheServerIsARowThatEnds()
+    {
+        var service = new Service(r => r.Headers.Authorization?.Parameter == "aggregator-2" ? HttpStatusCode.OK : HttpStatusCode.Unauthorized);
+        var watcher = new AnyFS.Sdk.Testing.RecordingUpstreamWatcher();
+        var tokens = 0;
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (s, refused, _) => Task.FromResult(s == TeamsService.Aggregator ? $"aggregator-{++tokens}" : "other"), 4, NullLogger.Instance, service, watcher: watcher);
+        var structure = await rest.StructureAsync(CancellationToken.None);
+        Assert.AreEqual("Lab", structure.Teams.Single().DisplayName);
+
+        var asked = watcher.Requests;
+        Assert.AreEqual(0, watcher.Running.Count, string.Join("; ", watcher.Running));
+        Assert.AreEqual(3, asked.Count, "the service's address, the refusal and the answer: " + string.Join("; ", asked));
+        Assert.IsTrue(asked[1].Refused);
+        StringAssert.StartsWith(asked[1].Answer, "401");
+        Assert.IsFalse(asked[2].Refused);
+        Assert.AreEqual(asked[1].Target, asked[2].Target, "the same request, a row for each go");
+        Assert.IsTrue(asked[2].Bytes > 0);
+    }
+
+    [TestMethod]
     public async Task ARefusedTokenIsHandedBackAndTheCallTriedOnceWithAFreshOne()
     {
         var refusals = new List<(TeamsService Service, string Token)>();

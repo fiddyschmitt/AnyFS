@@ -603,6 +603,29 @@ public abstract class SharePointRestLiveTests
     internal abstract SharePointTarget Target { get; }
 
     [TestMethod]
+    public async Task EveryRequestOfTheServerIsARowThatEnds()
+    {
+        Target.Require();
+        using var context = Target.Context();
+        await using (var source = await Target.StartAsync(Target.Settings(), context))
+        {
+            await foreach (var _ in source.ListAsync("", None))
+            {
+            }
+
+            await foreach (var _ in source.ListAsync(Target.Library, None))
+            {
+            }
+        }
+
+        await UpstreamRequestRows.AllEndAsync(context);
+        var asked = context.UpstreamRequests.Requests;
+        Assert.IsTrue(asked.Count > 0);
+        Assert.IsTrue(asked.All(r => r.Answer is not null), string.Join("; ", asked.Select(r => $"{r} {r.Answer}")));
+        Assert.IsTrue(asked.Any(r => r.Target.Contains("/_api/", StringComparison.Ordinal) && r.Bytes > 0), string.Join("; ", asked.Select(r => $"{r} {r.Answer}")));
+    }
+
+    [TestMethod]
     public async Task LibrariesAreTheTopLevelFoldersAndFormsIsHidden()
     {
         Target.Require();

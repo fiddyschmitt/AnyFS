@@ -48,7 +48,8 @@ internal sealed record TeamsCloud(string Name, string TeamsHost, string ApiHost,
     /// folder; the one remembered when that cannot be read now; else the global cloud.
     /// </summary>
     /// <param name="handler">The lookup's handler: a test's; null for the network.</param>
-    internal static async Task<(TeamsCloud Cloud, string How)> ResolveAsync(TeamsSettings settings, string stateDirectory, HttpMessageHandler? handler, CancellationToken ct)
+    /// <param name="watcher">Who hears of the lookup's requests (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
+    internal static async Task<(TeamsCloud Cloud, string How)> ResolveAsync(TeamsSettings settings, string stateDirectory, HttpMessageHandler? handler, CancellationToken ct, IUpstreamWatcher? watcher = null)
     {
         if (settings.ChosenCloud is { } chosen)
         {
@@ -58,7 +59,7 @@ internal sealed record TeamsCloud(string Name, string TeamsHost, string ApiHost,
         var account = settings.AccountHint;
         var domain = MicrosoftRealm.DomainOf(account) ?? account;
         var file = Path.Combine(stateDirectory, "cloud.json");
-        if (await MicrosoftRealm.LookupAsync(account, handler, ct).ConfigureAwait(false) is { } realm)
+        if (await MicrosoftRealm.LookupAsync(account, handler, ct, watcher).ConfigureAwait(false) is { } realm)
         {
             var found = Of(realm);
             try

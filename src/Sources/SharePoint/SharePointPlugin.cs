@@ -959,7 +959,7 @@ public sealed class SharePointSiteSource : SharePointSource
         RefuseWithoutOwnRegistration(cloud, SharePointPlugin.SitePermissions);
         var signIn = await SignInAppAsync(SharePointPlugin.SiteScopes, cloud, ct).ConfigureAwait(false);
 
-        var graph = new GraphClient(signIn.Token, Logger, SharePointPlugin.Service, MarkDegraded, MarkHealthy, _standIn?.Handler(), cloud, MicrosoftPace.ForHost(site.Host));
+        var graph = new GraphClient(signIn.Token, Logger, SharePointPlugin.Service, MarkDegraded, MarkHealthy, _standIn?.Handler(), cloud, MicrosoftPace.ForHost(site.Host), Context.UpstreamWatcher);
         if (_settings.IsMultiSite)
         {
             // the source opens the sites itself, and leaves out those that do not open
@@ -1007,7 +1007,7 @@ public sealed class SharePointSiteSource : SharePointSource
         var signIn = await SignInAppAsync(SharePointPlugin.ContainerScopes, cloud, ct).ConfigureAwait(false);
 
         // containers have no site host to go by: their pace is the account's
-        var graph = new GraphClient(signIn.Token, Logger, SharePointPlugin.Service, MarkDegraded, MarkHealthy, _standIn?.Handler(), cloud, MicrosoftPace.For(signIn.Username ?? containerType.ToString()));
+        var graph = new GraphClient(signIn.Token, Logger, SharePointPlugin.Service, MarkDegraded, MarkHealthy, _standIn?.Handler(), cloud, MicrosoftPace.For(signIn.Username ?? containerType.ToString()), Context.UpstreamWatcher);
         Progress($"Listing the containers of type {containerType}");
         try
         {
@@ -1040,7 +1040,7 @@ public sealed class SharePointSiteSource : SharePointSource
             throw new SourceFailedException("Give a user name and password: signing in as the current account works on Windows only.", permanent: true);
         }
 
-        var rest = new SharePointRestClient(new Uri(site.Url), _settings.Credentials(), _settings.TrustAnyCertificate, Logger, MarkDegraded, MarkHealthy);
+        var rest = new SharePointRestClient(new Uri(site.Url), _settings.Credentials(), _settings.TrustAnyCertificate, Logger, MarkDegraded, MarkHealthy, watcher: Context.UpstreamWatcher);
         if (_settings.IsMultiSite)
         {
             _account = _settings.WindowsAccount;
@@ -1096,7 +1096,7 @@ public sealed class SharePointSiteSource : SharePointSource
             throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
         }
 
-        var handler = new BrowserSessionHandler(cookies, siteUri, c => signIn(false, c), Logger, _standIn?.Handler());
+        var handler = new BrowserSessionHandler(cookies, siteUri, c => signIn(false, c), Logger, _standIn?.Handler(), watcher: Context.UpstreamWatcher);
         var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, Logger, MarkDegraded, MarkHealthy, handler);
         if (_settings.IsMultiSite)
         {

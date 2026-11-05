@@ -61,10 +61,13 @@ internal sealed class ThreeDXSession : IDisposable
     private readonly TimeSpan _minRenewalInterval;
     private readonly string? _profile;
     private readonly bool _useKept;
+    private readonly IUpstreamWatcher? _watcher;
 
     /// <param name="options">What a test changes; null for the real thing.</param>
-    public ThreeDXSession(ThreeDXSettings settings, ILogger logger, ISecretStore? secrets, SessionOptions? options = null)
+    /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
+    public ThreeDXSession(ThreeDXSettings settings, ILogger logger, ISecretStore? secrets, SessionOptions? options = null, IUpstreamWatcher? watcher = null)
     {
+        _watcher = watcher;
         options ??= new SessionOptions();
         var handler = options.Handler;
         _allowBrowser = options.Browser;
@@ -95,7 +98,7 @@ internal sealed class ThreeDXSession : IDisposable
             _handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
         }
 
-        HttpMessageHandler send = handler ?? _handler;
+        var send = UpstreamRequestsHandler.Around(handler ?? _handler, watcher);
         Http = new HttpClient(send, disposeHandler: false) { Timeout = RequestTimeout };
         Http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(ThreeDXSession).Assembly.GetName().Version?.ToString(3) ?? "0"}");
         _flowHttp = new HttpClient(send, disposeHandler: false) { Timeout = FlowTimeout };
@@ -124,7 +127,7 @@ internal sealed class ThreeDXSession : IDisposable
             handler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
         }
 
-        var client = new HttpClient(handler, disposeHandler: true) { Timeout = FlowTimeout };
+        var client = new HttpClient(UpstreamRequestsHandler.Around(handler, _watcher), disposeHandler: true) { Timeout = FlowTimeout };
         client.DefaultRequestHeaders.AcceptEncoding.ParseAdd("gzip");
         client.DefaultRequestHeaders.AcceptEncoding.ParseAdd("deflate");
         client.DefaultRequestHeaders.AcceptEncoding.ParseAdd("br");

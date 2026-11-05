@@ -33,7 +33,8 @@ public sealed class GraphClient : IDisposable
     /// <param name="onSuccess">Called after a request succeeded, so the source can turn healthy again.</param>
     /// <param name="cloud">Whose Graph to call (the token must be for the same cloud); null: the global cloud.</param>
     /// <param name="pace">The tenant's pace the requests go at (<see cref="RequestPace"/>); null for none.</param>
-    public GraphClient(Func<CancellationToken, bool, Task<string>> token, ILogger logger, Microsoft365Service service, Action<string>? onTrouble = null, Action? onSuccess = null, HttpMessageHandler? handler = null, MicrosoftCloud? cloud = null, RequestPace? pace = null)
+    /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
+    public GraphClient(Func<CancellationToken, bool, Task<string>> token, ILogger logger, Microsoft365Service service, Action<string>? onTrouble = null, Action? onSuccess = null, HttpMessageHandler? handler = null, MicrosoftCloud? cloud = null, RequestPace? pace = null, IUpstreamWatcher? watcher = null)
     {
         _token = token;
         _logger = logger;
@@ -48,7 +49,7 @@ public sealed class GraphClient : IDisposable
             AutomaticDecompression = DecompressionMethods.All,
             MaxConnectionsPerServer = 32,
         };
-        _http = new HttpClient(handler, disposeHandler: true) { Timeout = RequestTimeout };
+        _http = new HttpClient(UpstreamRequestsHandler.Around(handler, watcher), disposeHandler: true) { Timeout = RequestTimeout };
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(GraphClient).Assembly.GetName().Version?.ToString(3) ?? "0"}");
     }
 

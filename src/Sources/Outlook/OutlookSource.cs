@@ -117,7 +117,7 @@ public sealed class OutlookSource : SourceBase, ICountable
         switch (_settings.Kind)
         {
             case OutlookKind.DataFile:
-                if (!File.Exists(file))
+                if (!FileIsThere(file))
                 {
                     throw new SourceFailedException($"No file at {file}.", permanent: false);
                 }
@@ -125,7 +125,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                 Context.ReportProgress($"Reading {Path.GetFileName(file)}");
                 try
                 {
-                    _store = await Task.Run(() => new PstMailStore(file, _settings.ShowHidden, Logger, _settings.CalendarMonthsAhead), ct).ConfigureAwait(false);
+                    _store = await Task.Run(() => new PstMailStore(file, _settings.ShowHidden, Logger, _settings.CalendarMonthsAhead, Context.UpstreamWatcher), ct).ConfigureAwait(false);
                     _seen = Stamp(file);
                 }
                 catch (PstException ex)
@@ -151,7 +151,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                         () => secrets.Get("msal-cache") is { } saved ? Convert.FromBase64String(saved) : null,
                         bytes => secrets.Set("msal-cache", Convert.ToBase64String(bytes)),
                         (title, message) => Context.PromptAsync(new PromptRequest(PromptKind.YesNo, title, message), ct));
-                    var (service, directory, account, how) = await ConnectAsync(_settings, _standIn, Logger, interactive: true, message => Context.ReportProgress(message), hooks, ct).ConfigureAwait(false);
+                    var (service, directory, account, how) = await ConnectAsync(_settings, _standIn, Logger, interactive: true, message => Context.ReportProgress(message), hooks, ct, Context.UpstreamWatcher).ConfigureAwait(false);
                     _store = new EwsMailStore(service, _settings.Kind == OutlookKind.Server ? $"{account} on {_settings.ServerUrl!.Host}" : account, _settings.ShowHidden, _settings.CalendarMonthsBack, _settings.CalendarMonthsAhead, Logger);
                     if (directory is not null)
                     {
@@ -329,7 +329,8 @@ public sealed class OutlookSource : SourceBase, ICountable
     /// browser (a window when <paramref name="interactive"/> and the saved sign-in has lapsed), an app sign-in and
     /// Microsoft Graph, or a Windows account to a server. Also who the account is and how it signed in, for messages.
     /// </summary>
-    internal static async Task<(IEwsService Service, IAddressBookService? Directory, string Account, string How)> ConnectAsync(OutlookSettings s, OutlookStandIn? standIn, ILogger logger, bool interactive, Action<string> progress, SignInHooks? hooks, CancellationToken ct)
+    /// <param name="watcher">Who hears of each request the service makes (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
+    internal static async Task<(IEwsService Service, IAddressBookService? Directory, string Account, string How)> ConnectAsync(OutlookSettings s, OutlookStandIn? standIn, ILogger logger, bool interactive, Action<string> progress, SignInHooks? hooks, CancellationToken ct, IUpstreamWatcher? watcher = null)
     {
         if (s.Kind == OutlookKind.Server)
         {
@@ -337,10 +338,10 @@ public sealed class OutlookSource : SourceBase, ICountable
             var url = s.EwsUrl!;
             var who = WindowsAccount.Name(s.IsWindowsCurrent, s.EffectiveSignIn == OutlookSignIn.Windows ? s.Username : null);
             var endpoint = standIn is null ? url : new Uri(standIn.Origin, url.PathAndQuery);
-            var soap = new SoapEwsService(endpoint, WindowsAccount.Credentials(s.IsWindowsCurrent, s.Username, s.Password), s.TrustAnyCertificate, standIn?.Handler(), $"{url.Host}|{who}", logger);
+            var soap = new SoapEwsService(endpoint, WindowsAccount.Credentials(s.IsWindowsCurrent, s.Username, s.Password), s.TrustAnyCertificate, standIn?.Handler(), $"{url.Host}|{who}", logger, watcher);
             progress($"Signing in to {url.Host} as {who}");
             // the organisation's address books over NSPI, where the real server is reached (a test's stand-in does not speak it)
-            var directory = standIn is null ? await ServerAddressBookAsync(s, soap, url.Host, who, logger, ct).ConfigureAwait(false) : null;
+            var directory = standIn is null ? await ServerAddressBookAsync(s, soap, url.Host, who, logger, ct, watcher).ConfigureAwait(false) : null;
             return (soap, directory, standIn?.Account ?? who, $"with a Windows account ({url.Host})");
         }
 
@@ -359,12 +360,12 @@ public sealed class OutlookSource : SourceBase, ICountable
                 throw new SourceFailedException($"An app sign-in needs the mailbox's address in place of {s.WebHost}; with Outlook on the web's address, sign in with the web session.", permanent: true);
             }
 
-            return await ConnectGraphAsync(s, address, standIn, logger, progress, hooks, ct).ConfigureAwait(false);
+            return await ConnectGraphAsync(s, address, standIn, logger, progress, hooks, ct, watcher).ConfigureAwait(false);
         }
 
         if (standIn is not null)
         {
-            var service = new OwaJsonService(standIn.Origin, address ?? standIn.Account, standIn.Token, standIn.Handler(), logger);
+            var service = new OwaJsonService(standIn.Origin, address ?? standIn.Account, standIn.Token, standIn.Handler(), logger, watcher);
             return (service, service, standIn.Account, "through the web session (a stand-in)");
         }
 
@@ -377,7 +378,7 @@ public sealed class OutlookSource : SourceBase, ICountable
         else
         {
             progress($"Finding {address}'s cloud");
-            cloud = MicrosoftCloud.FromName(s.Cloud) ?? await MicrosoftCloud.FindAsync(address!, null, ct).ConfigureAwait(false);
+            cloud = MicrosoftCloud.FromName(s.Cloud) ?? await MicrosoftCloud.FindAsync(address!, null, ct, watcher).ConfigureAwait(false);
         }
 
         // a browser profile of its own per mailbox address; for Outlook on the web's address, one per cloud
@@ -400,7 +401,7 @@ public sealed class OutlookSource : SourceBase, ICountable
 
             // a renewal shows no window: the source turns the lapse into Degraded and waits for a Retry
             return await session.TokenAsync(interactive: false, _ => { }, token).ConfigureAwait(false);
-        }, null, logger);
+        }, null, logger, watcher);
         _ = first;
         return (live, live, account, $"through the web session ({session.BrowserName}, {origin.Host})");
     }
@@ -410,13 +411,13 @@ public sealed class OutlookSource : SourceBase, ICountable
     /// the organisation's own signed in to there (silently from the saved sign-in when it can, else the browser or a
     /// device code), then Microsoft Graph at the mailbox's pace.
     /// </summary>
-    private static async Task<(IEwsService Service, IAddressBookService? Directory, string Account, string How)> ConnectGraphAsync(OutlookSettings s, string address, OutlookStandIn? standIn, ILogger logger, Action<string> progress, SignInHooks? hooks, CancellationToken ct)
+    private static async Task<(IEwsService Service, IAddressBookService? Directory, string Account, string How)> ConnectGraphAsync(OutlookSettings s, string address, OutlookStandIn? standIn, ILogger logger, Action<string> progress, SignInHooks? hooks, CancellationToken ct, IUpstreamWatcher? watcher)
     {
         var cloud = s.KnownCloud;
         if (cloud is null)
         {
             progress($"Finding {address}'s cloud");
-            cloud = standIn is null ? await MicrosoftCloud.FindAsync(address, null, ct).ConfigureAwait(false) : MicrosoftCloud.Global;
+            cloud = standIn is null ? await MicrosoftCloud.FindAsync(address, null, ct, watcher).ConfigureAwait(false) : MicrosoftCloud.Global;
         }
         if (!Guid.TryParse(s.EffectiveClientId, out _))
         {
@@ -459,7 +460,7 @@ public sealed class OutlookSource : SourceBase, ICountable
             logger.LogWarning("outlook: the app sign-in for {Address} is {Account}, whose mailbox is the one read", address, account);
         }
 
-        var graph = new GraphClient(signIn.Token, logger, OutlookPlugin.Service, handler: standIn?.Handler(), cloud: cloud, pace: MicrosoftPace.For(GraphEwsService.PaceKey(cloud, address)));
+        var graph = new GraphClient(signIn.Token, logger, OutlookPlugin.Service, handler: standIn?.Handler(), cloud: cloud, pace: MicrosoftPace.For(GraphEwsService.PaceKey(cloud, address)), watcher: watcher);
         return (new GraphEwsService(graph, address, s.ShowHidden, logger), null, account, cloud.IsGlobal ? "with an app sign-in (Microsoft Graph)" : $"with an app sign-in (Microsoft Graph, {cloud.Name})");
     }
 
@@ -468,7 +469,7 @@ public sealed class OutlookSource : SourceBase, ICountable
     /// endpoint for the signed-in mailbox, reached with the same Windows sign-in as EWS. Null when Autodiscover offers no
     /// such endpoint (an older server, or MAPI over HTTP turned off) or anything goes wrong; the mailbox is served regardless.
     /// </summary>
-    private static async Task<IAddressBookService?> ServerAddressBookAsync(OutlookSettings s, SoapEwsService soap, string host, string who, ILogger logger, CancellationToken ct)
+    private static async Task<IAddressBookService?> ServerAddressBookAsync(OutlookSettings s, SoapEwsService soap, string host, string who, ILogger logger, CancellationToken ct, IUpstreamWatcher? watcher)
     {
         var handler = new HttpClientHandler
         {
@@ -482,7 +483,7 @@ public sealed class OutlookSource : SourceBase, ICountable
             handler.ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
         }
 
-        var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(120) };
+        var http = new HttpClient(UpstreamRequestsHandler.Around(handler, watcher)) { Timeout = TimeSpan.FromSeconds(120) };
         http.DefaultRequestHeaders.UserAgent.ParseAdd("AnyFS");
         try
         {
@@ -538,11 +539,13 @@ public sealed class OutlookSource : SourceBase, ICountable
 
     // --- refresh ----------------------------------------------------------------------------------------------------------
 
-    private static (long, DateTime) Stamp(string file)
+    private (long, DateTime) Stamp(string file) => Context.UpstreamWatcher.Ask("Get metadata", file, () =>
     {
         var info = new FileInfo(file);
         return (info.Length, info.LastWriteTimeUtc);
-    }
+    });
+
+    private bool FileIsThere(string file) => Context.UpstreamWatcher.Ask("Get metadata", file, () => File.Exists(file));
 
     /// <summary>Asks the store what changed and serves the new tree; a file is read again only when it changed on disk.</summary>
     internal async Task RefreshAsync(CancellationToken ct)
@@ -553,7 +556,7 @@ public sealed class OutlookSource : SourceBase, ICountable
             if (_settings.Kind == OutlookKind.DataFile)
             {
                 var file = _settings.File!;
-                if (!File.Exists(file))
+                if (!FileIsThere(file))
                 {
                     MarkDegraded($"{file} is gone; the last listing is still served");
                     return;

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using AnyFS.Sdk;
 
 namespace AnyFS.Sources.Common;
 
@@ -40,14 +41,17 @@ public sealed record MicrosoftRealm(string Domain, string? CloudInstance, string
     /// knows no organisation by that domain (one not verified in any) or neither sign-in host could be read.
     /// </summary>
     /// <param name="handler">The handler the lookup goes through: a test's (left open); null for the network.</param>
-    public static async Task<MicrosoftRealm?> LookupAsync(string address, HttpMessageHandler? handler, CancellationToken ct)
+    /// <param name="watcher">Who hears of its requests (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
+    public static async Task<MicrosoftRealm?> LookupAsync(string address, HttpMessageHandler? handler, CancellationToken ct, IUpstreamWatcher? watcher = null)
     {
         if (DomainOf(address) is not { } domain)
         {
             return null;
         }
 
-        using var http = handler is null ? new HttpClient() : new HttpClient(handler, disposeHandler: false);
+        using var http = handler is null
+            ? new HttpClient(UpstreamRequestsHandler.Around(new HttpClientHandler(), watcher), disposeHandler: true)
+            : new HttpClient(UpstreamRequestsHandler.Around(handler, watcher), disposeHandler: false);
         http.Timeout = TimeSpan.FromSeconds(8);
         foreach (var host in LoginHosts)
         {

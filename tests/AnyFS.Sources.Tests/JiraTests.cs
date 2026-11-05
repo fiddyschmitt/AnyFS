@@ -179,6 +179,19 @@ public class JiraTests
     }
 
     [TestMethod]
+    public async Task EveryRequestOfTheServerIsARowThatEnds()
+    {
+        var fake = JiraSeed.Lab();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, JiraSeed.Settings(fake), context);
+        await source.CountFilesAsync(CancellationToken.None);
+        await UpstreamRequestRows.AllEndAsync(context);
+        Assert.IsTrue(fake.Requests.Count > 0);
+        Assert.AreEqual(fake.Requests.Count, context.UpstreamRequests.Requests.Count, "every one the server saw, and no more");
+        Assert.IsTrue(context.UpstreamRequests.Requests.All(r => r.Answer is not null));
+    }
+
+    [TestMethod]
     public async Task AnInstallationAtAContextPathIsFoundBelowTheHost()
     {
         var fake = JiraSeed.Lab();

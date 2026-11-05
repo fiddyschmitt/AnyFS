@@ -25,14 +25,15 @@ namespace AnyFS.Sources.Teams;
 /// <param name="inHand">The token for a service the page mints only as it gets round to it (SharePoint's, Graph's) if one is in hand, else null: never a wait.</param>
 /// <param name="seek">Asks the page for those tokens in the background; true when one came.</param>
 /// <param name="graphHost">Microsoft Graph's address in the cloud, where a Graph token's audience does not name it.</param>
+/// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
 internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, CancellationToken, Task<string>> tokenFor, int concurrency, ILogger logger, HttpMessageHandler? handler = null, Func<string?>? sharePointHost = null,
-    Func<TeamsService, string?>? inHand = null, Func<CancellationToken, Task<bool>>? seek = null, string graphHost = "https://graph.microsoft.com") : ITeamsApi
+    Func<TeamsService, string?>? inHand = null, Func<CancellationToken, Task<bool>>? seek = null, string graphHost = "https://graph.microsoft.com", IUpstreamWatcher? watcher = null) : ITeamsApi
 {
     // the client version Teams' media service takes its "platform id" from (49: Teams for work), as purple-teams sends it
     private const string ClientVersion = "49/25113001312";
     private const int MaxImageBytes = 50 << 20;
 
-    private readonly HttpClient _http = new(handler ?? new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, PooledConnectionLifetime = TimeSpan.FromMinutes(2) })
+    private readonly HttpClient _http = new(UpstreamRequestsHandler.Around(handler ?? new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, PooledConnectionLifetime = TimeSpan.FromMinutes(2) }, watcher))
     {
         Timeout = TimeSpan.FromSeconds(100),
     };

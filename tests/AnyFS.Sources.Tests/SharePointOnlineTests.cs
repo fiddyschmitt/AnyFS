@@ -423,6 +423,28 @@ public class SharePointOnlineLiveTests
     private static SharePointTarget Target => SpoTestServer.Target;
 
     [TestMethod]
+    public async Task EveryRequestOfTheServerIsARowThatEnds()
+    {
+        Target.Require();
+        using var context = Target.Context();
+        await using (var source = await Target.StartAsync(Target.Settings(), context))
+        {
+            await foreach (var _ in source.ListAsync("", None))
+            {
+            }
+
+            await foreach (var _ in source.ListAsync(Target.Library, None))
+            {
+            }
+        }
+
+        await UpstreamRequestRows.AllEndAsync(context);
+        var asked = context.UpstreamRequests.Requests;
+        Assert.IsTrue(asked.Count > 0);
+        Assert.IsTrue(asked.All(r => r.Answer is not null && r.Target.Contains("/v1.0/", StringComparison.Ordinal)), string.Join("; ", asked.Select(r => $"{r} {r.Answer}")));
+    }
+
+    [TestMethod]
     public async Task LibrariesAreTheTopLevelFolders()
     {
         Target.Require();

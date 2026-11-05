@@ -24,6 +24,22 @@ public class OutlookWebSessionTests
     }
 
     [TestMethod]
+    public async Task EveryRequestOfTheServerIsARowThatEnds()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            await OutlookFixtures.ListAsync(source, "");
+            await UpstreamRequestRows.AllEndAsync(context);
+            var asked = context.UpstreamRequests.Requests;
+            Assert.IsTrue(asked.Count > 0);
+            Assert.IsTrue(asked.All(r => r.Target.Contains("/owa/", StringComparison.Ordinal) && r.Answer is not null), string.Join("; ", asked));
+        }
+    }
+
+    [TestMethod]
     public void AnAddressIsAMailboxAndAnAddressOfAServerIsAServer()
     {
         var plugin = new OutlookPlugin();

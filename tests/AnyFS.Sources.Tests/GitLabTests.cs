@@ -763,6 +763,59 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
+    public async Task EveryRequestOfTheServerIsARowThatEnds()
+    {
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"), context);
+        await using var _s = source;
+        await source.CountFilesAsync(CancellationToken.None);
+        const string readme = "tools/app/files/README.md";
+        byte[] bytes;
+        await using (var file = await source.OpenAsync(readme, VfsOpenMode.Read, CancellationToken.None))
+        {
+            bytes = new byte[file.Length];
+            Assert.AreEqual(bytes.Length, await file.ReadFullyAsync(0, bytes, CancellationToken.None));
+        }
+
+        await UpstreamRequestRows.AllEndAsync(context);
+        Assert.AreEqual(fake.Requests.Count, context.UpstreamRequests.Requests.Count, "every one the server saw, and no more");
+        CollectionAssert.AreEquivalent(
+            fake.Requests.Select(r => r.Split(' ')[0]).ToList(),
+            context.UpstreamRequests.Requests.Select(r => r.What).ToList(),
+            "with what it was asked");
+        Assert.AreEqual(fake.Count("repository/tree"), UpstreamRequestRows.To(context, "repository/tree").Count);
+        Assert.IsTrue(context.UpstreamRequests.Requests.All(r => r.Target.StartsWith(fake.Origin, StringComparison.Ordinal)), "each with its whole address");
+        Assert.IsTrue(context.UpstreamRequests.Requests.All(r => r.Answer is not null), "and what the server answered");
+        Assert.IsTrue(context.UpstreamRequests.Requests.Any(r => r.What == "POST" && r.Target.EndsWith("/api/graphql", StringComparison.Ordinal) && r.Bytes > 0), "GraphQL's too");
+
+        var raw = UpstreamRequestRows.To(context, "/raw").Single();
+        Assert.AreEqual("200 OK", raw.Answer);
+        Assert.IsTrue(raw.Bytes >= bytes.Length, $"the file went by on it: {raw.Bytes:N0} of {bytes.Length:N0}");
+    }
+
+    [TestMethod]
+    public async Task ARefusalAndARetryAreRowsOfTheirOwn()
+    {
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(App(fake)), context);
+        await using var _s = source;
+        var before = context.UpstreamRequests.Requests.Count;
+        fake.ThrottleNext = 1;
+        await foreach (var _ in source.ListAsync("files", CancellationToken.None))
+        {
+        }
+
+        await UpstreamRequestRows.AllEndAsync(context);
+        var asked = context.UpstreamRequests.Requests.Skip(before).ToList();
+        var throttled = asked.Single(r => r.Refused);
+        StringAssert.StartsWith(throttled.Answer, "429");
+        Assert.IsTrue(asked.Count(r => r.Target == throttled.Target) >= 2, "the same request again, each go a row: " + string.Join("; ", asked));
+        Assert.IsFalse(asked.Last(r => r.Target == throttled.Target).Refused);
+    }
+
+    [TestMethod]
     public async Task TheCountShowsEachFolderItGoesThrough()
     {
         var fake = GitLabSeed.Lab();

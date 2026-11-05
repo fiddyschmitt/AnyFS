@@ -112,6 +112,22 @@ public class OutlookExchangeServerTests
     }
 
     [TestMethod]
+    public async Task EveryRequestOfTheServerIsARowThatEnds()
+    {
+        var fake = FakeExchange.Mailbox();
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            await OutlookFixtures.ListAsync(source, "");
+            await UpstreamRequestRows.AllEndAsync(context);
+            var asked = context.UpstreamRequests.Requests;
+            Assert.IsTrue(asked.Count > 0);
+            Assert.IsTrue(asked.All(r => r.What == "POST" && r.Target.EndsWith("/EWS/Exchange.asmx", StringComparison.Ordinal) && r.Answer is not null && r.Bytes > 0), string.Join("; ", asked));
+        }
+    }
+
+    [TestMethod]
     public async Task TheMailboxIsServedOverSoapAsOverTheWebSession()
     {
         var fake = FakeExchange.Mailbox();

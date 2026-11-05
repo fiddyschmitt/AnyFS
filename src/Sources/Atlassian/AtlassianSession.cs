@@ -49,7 +49,8 @@ internal sealed class AtlassianSession : IDisposable
     private string? _refused;
     private int _generation;
 
-    public AtlassianSession(AtlassianProduct product, IAtlassianSettings settings, ILogger logger, AtlassianStandIn? standIn = null, ISecretStore? secrets = null)
+    /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
+    public AtlassianSession(AtlassianProduct product, IAtlassianSettings settings, ILogger logger, AtlassianStandIn? standIn = null, ISecretStore? secrets = null, IUpstreamWatcher? watcher = null)
     {
         Product = product;
         Settings = settings;
@@ -82,7 +83,7 @@ internal sealed class AtlassianSession : IDisposable
             inner = sockets;
         }
 
-        _handler = new CookieHandler(Cookies, inner);
+        _handler = new CookieHandler(Cookies, UpstreamRequestsHandler.Around(inner, watcher));
         Http = new HttpClient(_handler, disposeHandler: false) { Timeout = RequestTimeout };
         Http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(AtlassianSession).Assembly.GetName().Version?.ToString(3) ?? "0"}");
         Address = AtlassianAddress.Candidates(Url).First();

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.SharePoint;
@@ -44,7 +45,8 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
     /// What sends the requests: a handler that keeps the cookies, unless a test stands in for SharePoint, when the cookies
     /// are carried through the one given as the default handler carries them (<see cref="CookieCarrier"/>).
     /// </param>
-    public BrowserSessionHandler(IReadOnlyList<SessionCookie> initial, Uri site, Func<CancellationToken, Task<IReadOnlyList<SessionCookie>>> renew, ILogger logger, HttpMessageHandler? inner = null, TimeSpan? minRenewalInterval = null)
+    /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>): one sent again after a renewal is a request again.</param>
+    public BrowserSessionHandler(IReadOnlyList<SessionCookie> initial, Uri site, Func<CancellationToken, Task<IReadOnlyList<SessionCookie>>> renew, ILogger logger, HttpMessageHandler? inner = null, TimeSpan? minRenewalInterval = null, IUpstreamWatcher? watcher = null)
     {
         _site = site;
         _renew = renew;
@@ -52,7 +54,7 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
         _minRenewalInterval = minRenewalInterval ?? DefaultMinRenewalInterval;
         _cookies = new CookieContainer();
         Apply(initial);
-        InnerHandler = inner is not null ? new CookieCarrier(_cookies) { InnerHandler = inner } : new SocketsHttpHandler
+        InnerHandler = inner is not null ? new CookieCarrier(_cookies) { InnerHandler = UpstreamRequestsHandler.Around(inner, watcher) } : UpstreamRequestsHandler.Around(new SocketsHttpHandler
         {
             CookieContainer = _cookies,
             UseCookies = true,
@@ -60,7 +62,7 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
             AutomaticDecompression = DecompressionMethods.All,
             MaxConnectionsPerServer = 32,
             AllowAutoRedirect = false,
-        };
+        }, watcher);
     }
 
     /// <summary>The cookies the requests carry.</summary>

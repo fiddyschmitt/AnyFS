@@ -46,7 +46,8 @@ internal sealed class GitLabSession : IDisposable
     private string? _refused;
     private int _generation;
 
-    public GitLabSession(GitLabSettings settings, ILogger logger, GitLabStandIn? standIn = null, ISecretStore? secrets = null)
+    /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
+    public GitLabSession(GitLabSettings settings, ILogger logger, GitLabStandIn? standIn = null, ISecretStore? secrets = null, IUpstreamWatcher? watcher = null)
     {
         Settings = settings;
         _logger = logger;
@@ -84,7 +85,7 @@ internal sealed class GitLabSession : IDisposable
             inner = sockets;
         }
 
-        _handler = new CookieHandler(Cookies, inner);
+        _handler = new CookieHandler(Cookies, UpstreamRequestsHandler.Around(inner, watcher));
         Http = new HttpClient(_handler, disposeHandler: false) { Timeout = RequestTimeout };
         Http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(GitLabSession).Assembly.GetName().Version?.ToString(3) ?? "0"}");
         Address = new GitLabAddress(new Uri($"{Url.Scheme}://{Url.Authority}"), "");
