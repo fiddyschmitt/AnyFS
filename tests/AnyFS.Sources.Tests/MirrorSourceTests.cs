@@ -277,6 +277,149 @@ public class MirrorSourceTests
     }
 
     [TestMethod]
+    public async Task WhatTheFileSystemIsAskedIsARowByItsRealPath()
+    {
+        var a = Path.Combine(_root, "A");
+        Directory.CreateDirectory(Path.Combine(a, "sub"));
+        var x = Path.Combine(a, "x.txt");
+        File.WriteAllText(x, "hello");
+        using var context = new TestSourceContext("mirror");
+        var source = await StartAsync(a, context);
+        await using var _s = source;
+        var chain = Chain(a);
+        var asked = context.UpstreamRequests;
+        var seen = asked.Requests.Count;
+        Assert.AreEqual("Check path " + a, asked.Requests.Single().ToString(), "its start asks whether the path is there");
+
+        // what has been asked since the last look
+        List<string> Since()
+        {
+            var since = asked.Requests.Skip(seen).Select(r => r.ToString()).ToList();
+            seen = asked.Requests.Count;
+            return since;
+        }
+
+        var check = "Check path " + a;
+
+        Assert.AreEqual(5, (await source.StatAsync(VfsPath.Join(chain, "x.txt"), CancellationToken.None))?.Length);
+        CollectionAssert.AreEqual(new[] { check, "Get metadata " + x }, Since(), "a file's metadata");
+
+        Assert.IsNull(await source.StatAsync(VfsPath.Join(chain, "nothing"), CancellationToken.None));
+        CollectionAssert.AreEqual(new[] { check, "Get metadata " + Path.Combine(a, "nothing") }, Since(), "asking is asking, whatever the answer");
+        Assert.AreEqual("not found", asked.Requests[^1].Answer, "and it says what the answer was");
+        Assert.IsFalse(asked.Requests[^1].Refused, "which is no failure");
+
+        CollectionAssert.AreEqual(new[] { "sub/", "x.txt" }, await NamesAsync(source, chain));
+        CollectionAssert.AreEqual(new[] { check, "Get metadata " + a, "List folder " + a }, Since(), "a folder listing");
+        Assert.AreEqual(2, asked.Requests[^1].Entries);
+        Assert.IsTrue(asked.Requests[^1].IsDone);
+
+        // a level of the chain above the mirrored path is AnyFS's own: nothing is asked for it
+        if (chain.Contains('/', StringComparison.Ordinal))
+        {
+            Assert.IsNotNull(await source.StatAsync(VfsPath.Parent(chain), CancellationToken.None));
+            await NamesAsync(source, VfsPath.Parent(chain));
+            CollectionAssert.AreEqual(Array.Empty<string>(), Since());
+        }
+
+        await using (var file = await source.OpenAsync(VfsPath.Join(chain, "x.txt"), VfsOpenMode.Read, CancellationToken.None))
+        {
+            CollectionAssert.AreEqual(new[] { check, "Get metadata " + x, "Read file " + x }, Since());
+            var read = asked.Requests[^1];
+            Assert.IsFalse(read.IsDone, "an open file is one request until it is closed");
+            var buffer = new byte[5];
+            Assert.AreEqual(5, await file.ReadAsync(0, buffer, CancellationToken.None));
+            Assert.AreEqual(5, read.Bytes, "its bytes go by on it");
+        }
+
+        Assert.IsTrue(asked.Requests[^1].IsDone);
+
+        var written = Path.Combine(a, "new.txt");
+        await using (var file = await source.OpenAsync(VfsPath.Join(chain, "new.txt"), VfsOpenMode.CreateNew, CancellationToken.None))
+        {
+            await file.WriteAsync(0, "abc"u8.ToArray(), CancellationToken.None);
+            Assert.AreEqual(3, asked.Requests[^1].Bytes);
+        }
+
+        CollectionAssert.AreEqual(new[] { check, "Get metadata " + written, "Write file " + written }, Since());
+
+        var moved = Path.Combine(a, "moved.txt");
+        await source.RenameAsync(VfsPath.Join(chain, "new.txt"), VfsPath.Join(chain, "moved.txt"), replace: false, CancellationToken.None);
+        var since = Since();
+        StringAssert.Contains(since[^1], $"Rename {written} to {moved}");
+        Assert.IsTrue(since.Take(since.Count - 1).All(s => s == check || s.StartsWith("Get metadata ", StringComparison.Ordinal)), string.Join("; ", since));
+
+        await source.SetTimesAsync(VfsPath.Join(chain, "moved.txt"), null, DateTimeOffset.UnixEpoch, CancellationToken.None);
+        Assert.AreEqual("Set times " + moved, Since()[^1]);
+
+        await source.DeleteAsync(VfsPath.Join(chain, "moved.txt"), CancellationToken.None);
+        Assert.AreEqual("Delete " + moved, Since()[^1]);
+
+        var made = Path.Combine(a, "made");
+        await source.CreateDirectoryAsync(VfsPath.Join(chain, "made"), CancellationToken.None);
+        Assert.AreEqual("Create folder " + made, Since()[^1]);
+
+        await source.DeleteAsync(VfsPath.Join(chain, "made"), CancellationToken.None);
+        CollectionAssert.AreEqual(new[] { check, "Get metadata " + made, "List folder " + made, "Delete " + made }, Since(), "whether a folder is empty is asked of it");
+
+        Assert.IsNotNull(await source.GetSpaceAsync(chain, CancellationToken.None));
+        Assert.AreEqual("Get space " + a, Since()[^1]);
+
+        Assert.AreEqual(0, asked.Running.Count, string.Join("; ", asked.Running));
+    }
+
+    [TestMethod]
+    public async Task WhatTheFileSystemRefusesIsAFailedRow()
+    {
+        var a = Path.Combine(_root, "A");
+        Directory.CreateDirectory(a);
+        using var context = new TestSourceContext("mirror");
+        var source = await StartAsync(a, context);
+        await using var _s = source;
+        var chain = Chain(a);
+        await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync(VfsPath.Join(chain, "nothing.txt"), VfsOpenMode.Read, CancellationToken.None));
+        var open = context.UpstreamRequests.Requests.Single(r => r.What == "Read file");
+        Assert.AreEqual(Path.Combine(a, "nothing.txt"), open.Target);
+        Assert.IsInstanceOfType<IOException>(open.Error);
+        Assert.IsTrue(open.IsDone);
+    }
+
+    [TestMethod]
+    public async Task ThePathsAreCheckedAsTheyAlwaysWereAndEachCheckIsARow()
+    {
+        var a = Path.Combine(_root, "A");
+        var missing = Path.Combine(_root, "missing");
+        Directory.CreateDirectory(a);
+        using var context = new TestSourceContext("mirror");
+        var source = await StartAsync(a + "\n" + missing, context);
+        await using var _s = source;
+        CollectionAssert.AreEquivalent(new[] { "Check path " + a, "Check path " + missing }, context.UpstreamRequests.Requests.Select(r => r.ToString()).ToList());
+        var before = context.UpstreamRequests.Requests.Count;
+        source.CheckRoots();
+        Assert.AreEqual(before + 2, context.UpstreamRequests.Requests.Count, "of its own accord, as well as for a client");
+    }
+
+    [TestMethod]
+    public async Task ACountAsksTheFileSystemForEachFolder()
+    {
+        var a = Path.Combine(_root, "A");
+        Directory.CreateDirectory(Path.Combine(a, "sub"));
+        File.WriteAllText(Path.Combine(a, "x.txt"), "x");
+        File.WriteAllText(Path.Combine(a, "sub", "y.txt"), "y");
+        File.WriteAllText(Path.Combine(a, "sub", "z.txt"), "z");
+        using var context = new TestSourceContext("mirror");
+        var source = await StartAsync(a, context, threads: 2, pathsInParallel: 1);
+        await using var _s = source;
+        var before = context.UpstreamRequests.Requests.Count;
+        await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+        var asked = context.UpstreamRequests.Requests.Skip(before).Where(r => r.What == "List folder").ToDictionary(r => r.Target);
+        Assert.AreEqual(2, asked.Count);
+        Assert.AreEqual(2, asked[a].Entries);
+        Assert.AreEqual(2, asked[Path.Combine(a, "sub")].Entries);
+        Assert.AreEqual(0, context.UpstreamRequests.Running.Count);
+    }
+
+    [TestMethod]
     public async Task CountFilesShowsEachFolderItGoesThrough()
     {
         var a = Path.Combine(_root, "A");

@@ -9,7 +9,9 @@ namespace AnyFS.Sources.Mirror;
 /// <summary>
 /// System.IO throughout: FileStream-free ranged reads through <see cref="RandomAccess"/> on handles opened
 /// with FileShare.ReadWrite | Delete. Status: Ready when every root is reachable, Degraded naming the ones
-/// that aren't, Failed only when none is. Writes go through when the collection and mount allow them.
+/// that aren't, Failed only when none is. Writes go through when the collection and mount allow them. Each
+/// question put to the file system is told to <see cref="ISourceContext.UpstreamWatcher"/>, by the real path: a
+/// listing, a path's metadata, an open file from its open to its close, the check that a mirrored path is there.
 /// </summary>
 public sealed class MirrorSource : SourceBase, ICountable
 {
@@ -21,6 +23,10 @@ public sealed class MirrorSource : SourceBase, ICountable
     /// <summary>How many entries a counting thread sees between updates of <see cref="SourceBase.Counters"/>.</summary>
     private const int CountBatch = 1024;
 
+    // what the file system is asked, in the words the Operations tab uses for a source's calls
+    private const string ListFolder = "List folder";
+    private const string GetMetadata = "Get metadata";
+
     private readonly MirrorSettings _settings;
     private readonly Node _root = new("");
     private readonly List<MirrorRoot> _roots = [];
@@ -28,6 +34,7 @@ public sealed class MirrorSource : SourceBase, ICountable
     private readonly object _gate = new();
     private readonly CancellationTokenSource _stop = new();
     private Task? _checker;
+    private IUpstreamWatcher? _watcher;
 
     public MirrorSource(MirrorSettings settings)
     {
@@ -95,7 +102,7 @@ public sealed class MirrorSource : SourceBase, ICountable
     /// </summary>
     private async Task WalkForCountAsync(MirrorRoot root, HashSet<string> chains, int threads, CancellationToken ct)
     {
-        if (!Directory.Exists(root.FullPath))
+        if (!IsThere(root))
         {
             Logger.LogDebug("mirror: count skipped {Path}: not reachable", root.Original);
             return;
@@ -114,6 +121,7 @@ public sealed class MirrorSource : SourceBase, ICountable
                 foreach (var (real, chain) in folders.GetConsumingEnumerable(ct))
                 {
                     using var at = Counters.EnterFolder(chain);
+                    var asked = _watcher?.Asked(ListFolder, real);
                     long entries = 0;
                     try
                     {
@@ -157,15 +165,20 @@ public sealed class MirrorSource : SourceBase, ICountable
                     catch (OperationCanceledException ex)
                     {
                         at.Failed(ex, ct);
+                        asked?.Failed(ex, ct);
                         throw;
                     }
                     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                     {
                         at.Failed(ex, ct);
+                        asked?.Failed(ex, ct);
                         Logger.LogDebug("mirror: count skipped {Path}: {Error}", real, ex.Message);
                     }
                     finally
                     {
+                        asked?.AddEntries(entries);
+                        asked?.Done();
+
                         // the last folder listed: the other threads' waits for more end
                         if (Interlocked.Decrement(ref outstanding) == 0)
                         {
@@ -188,6 +201,7 @@ public sealed class MirrorSource : SourceBase, ICountable
 
     protected override Task OnInitialiseAsync(CancellationToken ct)
     {
+        _watcher = Context.UpstreamWatcher;
         var errors = new List<string>();
         foreach (var line in MirrorRoot.Lines(_settings.Paths))
         {
@@ -302,7 +316,7 @@ public sealed class MirrorSource : SourceBase, ICountable
                 }
                 else
                 {
-                    entries = dir.EnumerateFileSystemInfos("*", Enumeration).Select(i => ToEntry(i, i.Name)).ToList();
+                    entries = Listing(dir);
                 }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -341,15 +355,16 @@ public sealed class MirrorSource : SourceBase, ICountable
             throw resolved.Node is null ? VfsException.NotFound(path) : VfsException.IsADirectory(path);
         }
 
-        if (resolved.Node is { } && Directory.Exists(resolved.Real))
+        if (resolved.Node is { } && IsFolder(resolved.Real))
         {
             throw VfsException.IsADirectory(path);
         }
 
         EnsureReachable(resolved.Root!);
+        IWatchedRequest? asked = null;
         try
         {
-            if (Directory.Exists(resolved.Real))
+            if (IsFolder(resolved.Real))
             {
                 throw VfsException.IsADirectory(path);
             }
@@ -362,11 +377,16 @@ public sealed class MirrorSource : SourceBase, ICountable
                 VfsOpenMode.Create => (FileMode.Create, FileAccess.ReadWrite),
                 _ => (FileMode.OpenOrCreate, FileAccess.ReadWrite),
             };
+
+            // the request stays open with the file, its bytes going by on it
+            asked = _watcher?.Asked(access == FileAccess.Read ? "Read file" : "Write file", resolved.Real);
             var handle = File.OpenHandle(resolved.Real, fileMode, access, FileShare.ReadWrite | FileShare.Delete, FileOptions.Asynchronous);
-            return Task.FromResult<IVfsFile>(new MirrorFile(handle, access != FileAccess.Read));
+            return Task.FromResult<IVfsFile>(new MirrorFile(handle, access != FileAccess.Read, asked));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            asked?.Failed(ex, ct);
+            asked?.Done();
             throw Translate(ex, path, resolved.Root);
         }
     }
@@ -377,18 +397,18 @@ public sealed class MirrorSource : SourceBase, ICountable
         var resolved = ResolveForWrite(path);
         try
         {
-            if (Directory.Exists(resolved.Real) || File.Exists(resolved.Real))
+            if (IsFolder(resolved.Real) || IsFile(resolved.Real))
             {
                 throw VfsException.AlreadyExists(path);
             }
 
             var parent = Path.GetDirectoryName(resolved.Real);
-            if (parent is not null && !Directory.Exists(parent))
+            if (parent is not null && !IsFolder(parent))
             {
                 throw VfsException.NotFound(VfsPath.Parent(path));
             }
 
-            Directory.CreateDirectory(resolved.Real);
+            _watcher.Ask("Create folder", resolved.Real, () => Directory.CreateDirectory(resolved.Real));
             return Task.CompletedTask;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -403,18 +423,18 @@ public sealed class MirrorSource : SourceBase, ICountable
         var resolved = ResolveForWrite(path);
         try
         {
-            if (Directory.Exists(resolved.Real))
+            if (IsFolder(resolved.Real))
             {
-                if (Directory.EnumerateFileSystemEntries(resolved.Real).Any())
+                if (_watcher.Ask(ListFolder, resolved.Real, () => Directory.EnumerateFileSystemEntries(resolved.Real).Any()))
                 {
                     throw VfsException.DirectoryNotEmpty(path);
                 }
 
-                Directory.Delete(resolved.Real);
+                _watcher.Ask("Delete", resolved.Real, () => Directory.Delete(resolved.Real));
             }
-            else if (File.Exists(resolved.Real))
+            else if (IsFile(resolved.Real))
             {
-                File.Delete(resolved.Real);
+                _watcher.Ask("Delete", resolved.Real, () => File.Delete(resolved.Real));
             }
             else
             {
@@ -437,14 +457,14 @@ public sealed class MirrorSource : SourceBase, ICountable
         var to = ResolveForWrite(toPath);
         try
         {
-            var fromIsDir = Directory.Exists(from.Real);
-            if (!fromIsDir && !File.Exists(from.Real))
+            var fromIsDir = IsFolder(from.Real);
+            if (!fromIsDir && !IsFile(from.Real))
             {
                 throw VfsException.NotFound(fromPath);
             }
 
-            var toExists = Directory.Exists(to.Real) || File.Exists(to.Real);
-            if (toExists && (!replace || fromIsDir || Directory.Exists(to.Real)))
+            var toExists = IsFolder(to.Real) || IsFile(to.Real);
+            if (toExists && (!replace || fromIsDir || IsFolder(to.Real)))
             {
                 if (!string.Equals(from.Real, to.Real, StringComparison.OrdinalIgnoreCase))
                 {
@@ -452,15 +472,17 @@ public sealed class MirrorSource : SourceBase, ICountable
                 }
             }
 
-            if (fromIsDir)
+            _watcher.Ask("Rename", $"{from.Real} to {to.Real}", () =>
             {
-                Directory.Move(from.Real, to.Real);
-            }
-            else
-            {
-                File.Move(from.Real, to.Real, overwrite: replace);
-            }
-
+                if (fromIsDir)
+                {
+                    Directory.Move(from.Real, to.Real);
+                }
+                else
+                {
+                    File.Move(from.Real, to.Real, overwrite: replace);
+                }
+            });
             return Task.CompletedTask;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -475,29 +497,35 @@ public sealed class MirrorSource : SourceBase, ICountable
         var resolved = ResolveForWrite(path);
         try
         {
-            if (Directory.Exists(resolved.Real))
+            if (IsFolder(resolved.Real))
             {
-                if (created is not null)
+                _watcher.Ask("Set times", resolved.Real, () =>
                 {
-                    Directory.SetCreationTimeUtc(resolved.Real, created.Value.UtcDateTime);
-                }
+                    if (created is not null)
+                    {
+                        Directory.SetCreationTimeUtc(resolved.Real, created.Value.UtcDateTime);
+                    }
 
-                if (modified is not null)
-                {
-                    Directory.SetLastWriteTimeUtc(resolved.Real, modified.Value.UtcDateTime);
-                }
+                    if (modified is not null)
+                    {
+                        Directory.SetLastWriteTimeUtc(resolved.Real, modified.Value.UtcDateTime);
+                    }
+                });
             }
-            else if (File.Exists(resolved.Real))
+            else if (IsFile(resolved.Real))
             {
-                if (created is not null)
+                _watcher.Ask("Set times", resolved.Real, () =>
                 {
-                    File.SetCreationTimeUtc(resolved.Real, created.Value.UtcDateTime);
-                }
+                    if (created is not null)
+                    {
+                        File.SetCreationTimeUtc(resolved.Real, created.Value.UtcDateTime);
+                    }
 
-                if (modified is not null)
-                {
-                    File.SetLastWriteTimeUtc(resolved.Real, modified.Value.UtcDateTime);
-                }
+                    if (modified is not null)
+                    {
+                        File.SetLastWriteTimeUtc(resolved.Real, modified.Value.UtcDateTime);
+                    }
+                });
             }
             else
             {
@@ -519,7 +547,7 @@ public sealed class MirrorSource : SourceBase, ICountable
     public override Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct)
     {
         var resolved = Resolve(VfsPath.Normalize(path));
-        var real = resolved.Real ?? (resolved.Node is { } node ? RootsUnder(node).FirstOrDefault(r => Directory.Exists(r.FullPath))?.FullPath : null);
+        var real = resolved.Real ?? (resolved.Node is { } node ? RootsUnder(node).FirstOrDefault(IsThere)?.FullPath : null);
         if (real is null)
         {
             return Task.FromResult<VfsSpace?>(null);
@@ -527,8 +555,11 @@ public sealed class MirrorSource : SourceBase, ICountable
 
         try
         {
-            var drive = new DriveInfo(real);
-            return Task.FromResult<VfsSpace?>(new VfsSpace(drive.TotalSize, drive.AvailableFreeSpace));
+            return Task.FromResult<VfsSpace?>(_watcher.Ask("Get space", real, () =>
+            {
+                var drive = new DriveInfo(real);
+                return new VfsSpace(drive.TotalSize, drive.AvailableFreeSpace);
+            }));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -626,29 +657,76 @@ public sealed class MirrorSource : SourceBase, ICountable
             unreachable = _unreachable.Contains(root);
         }
 
-        if (unreachable && Directory.Exists(root.FullPath))
+        if (unreachable && IsThere(root))
         {
             CheckRootsCore(report: true);
             return;
         }
 
-        if (unreachable || !Directory.Exists(root.FullPath))
+        if (unreachable || !IsThere(root))
         {
             MarkUnreachable(root);
             throw VfsException.Unavailable($"{root.Original} is not reachable");
         }
     }
 
-    private static FileSystemInfo? GetInfo(string real)
-    {
-        var dir = new DirectoryInfo(real);
-        if (dir.Exists)
-        {
-            return dir;
-        }
+    /// <summary>The check that a mirrored path is there, made for every call under it and every <see cref="MirrorSettings.CheckIntervalSeconds"/>.</summary>
+    private bool IsThere(MirrorRoot root) => _watcher.Ask("Check path", root.FullPath, () => Directory.Exists(root.FullPath));
 
-        var file = new FileInfo(real);
-        return file.Exists ? file : null;
+    private bool IsFolder(string real) => _watcher.Ask(GetMetadata, real, () => Directory.Exists(real));
+
+    private bool IsFile(string real) => _watcher.Ask(GetMetadata, real, () => File.Exists(real));
+
+    private FileSystemInfo? GetInfo(string real)
+    {
+        var asked = _watcher?.Asked(GetMetadata, real);
+        try
+        {
+            var dir = new DirectoryInfo(real);
+            if (dir.Exists)
+            {
+                return dir;
+            }
+
+            var file = new FileInfo(real);
+            if (file.Exists)
+            {
+                return file;
+            }
+
+            asked?.Answered("not found", refused: false);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            asked?.Failed(ex, CancellationToken.None);
+            throw;
+        }
+        finally
+        {
+            asked?.Done();
+        }
+    }
+
+    /// <summary>A folder's entries from the file system.</summary>
+    private List<VfsEntry> Listing(DirectoryInfo folder)
+    {
+        var asked = _watcher?.Asked(ListFolder, folder.FullName);
+        try
+        {
+            var entries = folder.EnumerateFileSystemInfos("*", Enumeration).Select(i => ToEntry(i, i.Name)).ToList();
+            asked?.AddEntries(entries.Count);
+            return entries;
+        }
+        catch (Exception ex)
+        {
+            asked?.Failed(ex, CancellationToken.None);
+            throw;
+        }
+        finally
+        {
+            asked?.Done();
+        }
     }
 
     private static VfsEntry ToEntry(FileSystemInfo info, string name)
@@ -683,7 +761,7 @@ public sealed class MirrorSource : SourceBase, ICountable
 
     private VfsException Translate(Exception ex, string path, MirrorRoot? root)
     {
-        if (root is not null && ex is IOException && !Directory.Exists(root.FullPath))
+        if (root is not null && ex is IOException && !IsThere(root))
         {
             MarkUnreachable(root);
             return VfsException.Unavailable($"{root.Original} is not reachable");
@@ -715,7 +793,7 @@ public sealed class MirrorSource : SourceBase, ICountable
 
     private void CheckRootsCore(bool report)
     {
-        var unreachable = _roots.Where(r => !Directory.Exists(r.FullPath)).ToList();
+        var unreachable = _roots.Where(r => !IsThere(r)).ToList();
         lock (_gate)
         {
             var changed = !_unreachable.SetEquals(unreachable);
@@ -792,7 +870,8 @@ public sealed class MirrorSource : SourceBase, ICountable
         }
     }
 
-    private sealed class MirrorFile(SafeFileHandle handle, bool writable) : IVfsFile
+    /// <param name="asked">The request this open file is, its bytes going by on it until it is closed.</param>
+    private sealed class MirrorFile(SafeFileHandle handle, bool writable, IWatchedRequest? asked) : IVfsFile
     {
         public long Length => RandomAccess.GetLength(handle);
 
@@ -803,7 +882,22 @@ public sealed class MirrorSource : SourceBase, ICountable
                 throw new ArgumentOutOfRangeException(nameof(offset));
             }
 
-            return RandomAccess.ReadAsync(handle, buffer, offset, ct);
+            return asked is null ? RandomAccess.ReadAsync(handle, buffer, offset, ct) : WatchedReadAsync(offset, buffer, asked, ct);
+        }
+
+        private async ValueTask<int> WatchedReadAsync(long offset, Memory<byte> buffer, IWatchedRequest request, CancellationToken ct)
+        {
+            try
+            {
+                var read = await RandomAccess.ReadAsync(handle, buffer, offset, ct).ConfigureAwait(false);
+                request.AddBytes(read);
+                return read;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                request.Failed(ex, ct);
+                throw;
+            }
         }
 
         public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct)
@@ -813,7 +907,21 @@ public sealed class MirrorSource : SourceBase, ICountable
                 throw VfsException.NotSupported("writing to a file opened for reading");
             }
 
-            return RandomAccess.WriteAsync(handle, data, offset, ct);
+            return asked is null ? RandomAccess.WriteAsync(handle, data, offset, ct) : WatchedWriteAsync(offset, data, asked, ct);
+        }
+
+        private async ValueTask WatchedWriteAsync(long offset, ReadOnlyMemory<byte> data, IWatchedRequest request, CancellationToken ct)
+        {
+            try
+            {
+                await RandomAccess.WriteAsync(handle, data, offset, ct).ConfigureAwait(false);
+                request.AddBytes(data.Length);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                request.Failed(ex, ct);
+                throw;
+            }
         }
 
         public ValueTask SetLengthAsync(long length, CancellationToken ct)
@@ -840,6 +948,7 @@ public sealed class MirrorSource : SourceBase, ICountable
         public ValueTask DisposeAsync()
         {
             handle.Dispose();
+            asked?.Done();
             return ValueTask.CompletedTask;
         }
     }
