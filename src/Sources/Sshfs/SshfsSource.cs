@@ -13,7 +13,8 @@ namespace AnyFS.Sources.Sshfs;
 /// <see cref="ListingCache"/> and stats are answered from it; a symbolic link shows as what it points at (a
 /// dangling one as an empty file); names starting with a dot are hidden; an entry nobody may write is read-only.
 /// A dropped connection is retried once on a fresh one, and the source turns Degraded until something succeeds.
-/// "Count files on start" lists many folders at once over the pool instead of the host's one-at-a-time walk.
+/// "Count files on start" lists many folders at once over the pool instead of the host's one-at-a-time walk. Each call to
+/// the server is told to <see cref="ISourceContext.UpstreamWatcher"/>, an open file as one from its open to its close.
 /// </summary>
 public sealed class SshfsSource : SourceBase, ICountable
 {
@@ -59,7 +60,7 @@ public sealed class SshfsSource : SourceBase, ICountable
         Context.ReportProgress("Checking the remote root");
         try
         {
-            var attributes = await client.GetAttributesAsync(_root, ct).ConfigureAwait(false);
+            var attributes = await AttributesAsync(client, _root, ct).ConfigureAwait(false);
             if (!attributes.IsDirectory)
             {
                 throw new SourceFailedException($"{_root} on {_settings.Host} is not a folder", permanent: true);
@@ -128,15 +129,25 @@ public sealed class SshfsSource : SourceBase, ICountable
             throw VfsException.NotFound(path);
         }
 
+        // the request stays open with the file, its bytes going by on it; each try at the open is one
+        IWatchedRequest? asked = null;
         var stream = await RunAsync(path, async client =>
         {
+            asked = Context.UpstreamWatcher?.Asked("SFTP open", remote);
             try
             {
                 return await client.OpenAsync(remote, fileMode, access, ct).ConfigureAwait(false);
             }
-            catch (SftpException ex) when (ex.StatusCode == StatusCode.Failure && fileMode == FileMode.CreateNew)
+            catch (Exception ex)
             {
-                throw VfsException.AlreadyExists(path);
+                asked?.Failed(ex, ct);
+                asked?.Done();
+                if (ex is SftpException { StatusCode: StatusCode.Failure } && fileMode == FileMode.CreateNew)
+                {
+                    throw VfsException.AlreadyExists(path);
+                }
+
+                throw;
             }
         }, ct).ConfigureAwait(false);
 
@@ -155,7 +166,7 @@ public sealed class SshfsSource : SourceBase, ICountable
             length = known?.Length ?? 0;
         }
 
-        return new SshfsFile(stream, length, access != FileAccess.Read, () => Listings.InvalidateParentOf(path));
+        return new SshfsFile(stream, length, access != FileAccess.Read, () => Listings.InvalidateParentOf(path), asked);
     }
 
     public override async Task CreateDirectoryAsync(string path, CancellationToken ct)
@@ -164,14 +175,14 @@ public sealed class SshfsSource : SourceBase, ICountable
         var remote = Remote(path);
         await RunAsync(path, async client =>
         {
-            if (await client.ExistsAsync(remote, ct).ConfigureAwait(false))
+            if (await Context.UpstreamWatcher.AskAsync("SFTP stat", remote, () => client.ExistsAsync(remote, ct), ct).ConfigureAwait(false))
             {
                 throw VfsException.AlreadyExists(path);
             }
 
             try
             {
-                await client.CreateDirectoryAsync(remote, ct).ConfigureAwait(false);
+                await Context.UpstreamWatcher.AskAsync("SFTP mkdir", remote, () => client.CreateDirectoryAsync(remote, ct), ct).ConfigureAwait(false);
             }
             catch (SftpPathNotFoundException)
             {
@@ -194,10 +205,10 @@ public sealed class SshfsSource : SourceBase, ICountable
         var remote = Remote(path);
         var wasDirectory = await RunAsync(path, async client =>
         {
-            var attributes = await client.GetAttributesAsync(remote, ct).ConfigureAwait(false);
+            var attributes = await AttributesAsync(client, remote, ct).ConfigureAwait(false);
             if (attributes.IsDirectory)
             {
-                await foreach (var child in client.ListDirectoryAsync(remote, ct).ConfigureAwait(false))
+                await foreach (var child in ListingAsync(client, remote, ct).ConfigureAwait(false))
                 {
                     if (child.Name is not ("." or ".."))
                     {
@@ -205,11 +216,11 @@ public sealed class SshfsSource : SourceBase, ICountable
                     }
                 }
 
-                await client.DeleteDirectoryAsync(remote, ct).ConfigureAwait(false);
+                await Context.UpstreamWatcher.AskAsync("SFTP rmdir", remote, () => client.DeleteDirectoryAsync(remote, ct), ct).ConfigureAwait(false);
                 return true;
             }
 
-            await client.DeleteFileAsync(remote, ct).ConfigureAwait(false);
+            await Context.UpstreamWatcher.AskAsync("SFTP delete", remote, () => client.DeleteFileAsync(remote, ct), ct).ConfigureAwait(false);
             return false;
         }, ct).ConfigureAwait(false);
 
@@ -233,11 +244,11 @@ public sealed class SshfsSource : SourceBase, ICountable
         var toRemote = Remote(toPath);
         var movedDirectory = await RunAsync(fromPath, async client =>
         {
-            var from = await client.GetAttributesAsync(fromRemote, ct).ConfigureAwait(false);
+            var from = await AttributesAsync(client, fromRemote, ct).ConfigureAwait(false);
             SftpFileAttributes? to = null;
             try
             {
-                to = await client.GetAttributesAsync(toRemote, ct).ConfigureAwait(false);
+                to = await AttributesAsync(client, toRemote, ct).ConfigureAwait(false);
             }
             catch (SftpPathNotFoundException)
             {
@@ -251,11 +262,11 @@ public sealed class SshfsSource : SourceBase, ICountable
             if (to is not null && fromRemote != toRemote)
             {
                 // posix-rename@openssh.com replaces the target in one step; the plain SFTP rename refuses an existing name
-                await Task.Run(() => client.RenameFile(fromRemote, toRemote, isPosix: true), ct).ConfigureAwait(false);
+                await Context.UpstreamWatcher.AskAsync("SFTP rename", fromRemote, () => Task.Run(() => client.RenameFile(fromRemote, toRemote, isPosix: true), ct), ct).ConfigureAwait(false);
             }
             else
             {
-                await client.RenameFileAsync(fromRemote, toRemote, ct).ConfigureAwait(false);
+                await Context.UpstreamWatcher.AskAsync("SFTP rename", fromRemote, () => client.RenameFileAsync(fromRemote, toRemote, ct), ct).ConfigureAwait(false);
             }
 
             return from.IsDirectory;
@@ -282,7 +293,7 @@ public sealed class SshfsSource : SourceBase, ICountable
         var remote = Remote(path);
         await RunAsync(path, async client =>
         {
-            await Task.Run(() => client.SetLastWriteTimeUtc(remote, modified.Value.UtcDateTime), ct).ConfigureAwait(false);
+            await Context.UpstreamWatcher.AskAsync("SFTP set time", remote, () => Task.Run(() => client.SetLastWriteTimeUtc(remote, modified.Value.UtcDateTime), ct), ct).ConfigureAwait(false);
             return true;
         }, ct).ConfigureAwait(false);
         Listings.InvalidateParentOf(path);
@@ -301,7 +312,7 @@ public sealed class SshfsSource : SourceBase, ICountable
             {
                 long files = 0;
                 var folders = new List<string>();
-                await foreach (var item in client.ListDirectoryAsync(Remote(dir), token).ConfigureAwait(false))
+                await foreach (var item in ListingAsync(client, Remote(dir), token).ConfigureAwait(false))
                 {
                     if (item.Name is "." or "..")
                     {
@@ -332,7 +343,8 @@ public sealed class SshfsSource : SourceBase, ICountable
         {
             return await RunAsync(path, async client =>
             {
-                var status = await client.GetStatusAsync(Remote(VfsPath.Normalize(path)), ct).ConfigureAwait(false);
+                var remote = Remote(VfsPath.Normalize(path));
+                var status = await Context.UpstreamWatcher.AskAsync("SFTP statvfs", remote, () => client.GetStatusAsync(remote, ct), ct).ConfigureAwait(false);
                 var block = status.FileSystemBlockSize != 0 ? status.FileSystemBlockSize : status.BlockSize;
                 return block == 0 ? null : new VfsSpace((long)Math.Min(status.TotalBlocks * block, long.MaxValue), (long)Math.Min(status.AvailableBlocks * block, long.MaxValue));
             }, ct).ConfigureAwait(false);
@@ -386,7 +398,7 @@ public sealed class SshfsSource : SourceBase, ICountable
             try
             {
                 items = [];
-                await foreach (var item in client.ListDirectoryAsync(remote, ct).ConfigureAwait(false))
+                await foreach (var item in ListingAsync(client, remote, ct).ConfigureAwait(false))
                 {
                     if (item.Name is not ("." or ".."))
                     {
@@ -400,7 +412,7 @@ public sealed class SshfsSource : SourceBase, ICountable
                 SftpFileAttributes? attributes = null;
                 try
                 {
-                    attributes = await client.GetAttributesAsync(remote, ct).ConfigureAwait(false);
+                    attributes = await AttributesAsync(client, remote, ct).ConfigureAwait(false);
                 }
                 catch (SftpPathNotFoundException)
                 {
@@ -439,13 +451,57 @@ public sealed class SshfsSource : SourceBase, ICountable
         }
     }
 
-    private static async Task<VfsEntry> ToEntryAsync(SftpClient client, ISftpFile item, CancellationToken ct)
+    /// <summary>A path's attributes from the server.</summary>
+    private Task<SftpFileAttributes> AttributesAsync(SftpClient client, string remote, CancellationToken ct)
+        => Context.UpstreamWatcher.AskAsync("SFTP stat", remote, () => client.GetAttributesAsync(remote, ct), ct);
+
+    /// <summary>A folder's entries from the server as they come, "." and ".." among them, however far the caller reads: one request to its watcher.</summary>
+    private async IAsyncEnumerable<ISftpFile> ListingAsync(SftpClient client, string remote, [EnumeratorCancellation] CancellationToken ct)
+    {
+        var asked = Context.UpstreamWatcher?.Asked("SFTP list", remote);
+        var items = client.ListDirectoryAsync(remote, ct).GetAsyncEnumerator(ct);
+        try
+        {
+            while (true)
+            {
+                bool more;
+                try
+                {
+                    more = await items.MoveNextAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    asked?.Failed(ex, ct);
+                    throw;
+                }
+
+                if (!more)
+                {
+                    break;
+                }
+
+                if (items.Current.Name is not ("." or ".."))
+                {
+                    asked?.AddEntries(1);
+                }
+
+                yield return items.Current;
+            }
+        }
+        finally
+        {
+            asked?.Done();
+            await items.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async Task<VfsEntry> ToEntryAsync(SftpClient client, ISftpFile item, CancellationToken ct)
     {
         if (item.IsSymbolicLink)
         {
             try
             {
-                var target = await client.GetAttributesAsync(item.FullName, ct).ConfigureAwait(false);
+                var target = await AttributesAsync(client, item.FullName, ct).ConfigureAwait(false);
                 return ToEntry(item.Name, target.IsDirectory, target.Size, target.LastWriteTimeUtc, target.OwnerCanWrite || target.GroupCanWrite || target.OthersCanWrite);
             }
             catch (SshException)
@@ -563,7 +619,7 @@ public sealed class SshfsSource : SourceBase, ICountable
 /// positionless to callers, SFTP reads carry offsets anyway). The length is what the listing said at open, kept
 /// up to date by this handle's own writes.
 /// </summary>
-internal sealed class SshfsFile(SftpFileStream stream, long length, bool writable, Action onClose) : IVfsFile
+internal sealed class SshfsFile(SftpFileStream stream, long length, bool writable, Action onClose, IWatchedRequest? asked = null) : IVfsFile
 {
     private readonly SemaphoreSlim _lock = new(1, 1);
     private long _length = length;
@@ -588,10 +644,13 @@ internal sealed class SshfsFile(SftpFileStream stream, long length, bool writabl
                 stream.Seek(offset, SeekOrigin.Begin);
             }
 
-            return await stream.ReadAsync(buffer, ct).ConfigureAwait(false);
+            var read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false);
+            asked?.AddBytes(read);
+            return read;
         }
         catch (Exception ex) when (ex is SshException or SocketException or IOException)
         {
+            asked?.Failed(ex, ct);
             throw Translate(ex);
         }
         finally
@@ -618,6 +677,7 @@ internal sealed class SshfsFile(SftpFileStream stream, long length, bool writabl
             }
 
             await stream.WriteAsync(data, ct).ConfigureAwait(false);
+            asked?.AddBytes(data.Length);
             if (offset + data.Length > _length)
             {
                 Volatile.Write(ref _length, offset + data.Length);
@@ -625,6 +685,7 @@ internal sealed class SshfsFile(SftpFileStream stream, long length, bool writabl
         }
         catch (Exception ex) when (ex is SshException or SocketException or IOException)
         {
+            asked?.Failed(ex, ct);
             throw Translate(ex);
         }
         finally
@@ -697,10 +758,12 @@ internal sealed class SshfsFile(SftpFileStream stream, long length, bool writabl
             }
             catch (Exception ex) when (ex is SshException or SocketException or IOException or ObjectDisposedException)
             {
+                asked?.Failed(ex, CancellationToken.None);
             }
         }
         finally
         {
+            asked?.Done();
             _lock.Release();
             _lock.Dispose();
         }

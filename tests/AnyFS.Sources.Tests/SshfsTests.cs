@@ -70,6 +70,58 @@ public class SshfsLiveTests
     }
 
     [TestMethod]
+    public async Task WhatTheServerIsAskedIsARowForEachCall()
+    {
+        SshTestServer.Require();
+        using var context = new TestSourceContext("sshfs");
+        await using (var source = await StartAsync(SshTestServer.Settings(), context))
+        {
+            var asked = context.UpstreamRequests;
+            Assert.AreEqual(("SSH connect", $"{SshTestServer.Host}:{SshTestServer.Port}"), (asked.Requests[0].What, asked.Requests[0].Target));
+            Assert.AreEqual("SFTP stat", asked.Requests[1].What, "the root checked as it starts");
+
+            var names = new List<string>();
+            await foreach (var entry in source.ListAsync("", None))
+            {
+                names.Add(entry.Name);
+            }
+
+            var list = asked.Requests.First(r => r.What == "SFTP list");
+            Assert.AreEqual(names.Count, list.Entries, "the dot entries are no entries");
+            Assert.IsTrue(list.IsDone);
+            Assert.IsTrue(asked.Requests.Any(r => r.What == "SFTP stat" && r.Target.EndsWith("/link-to-docs", StringComparison.Ordinal)), "a link is resolved by a call of its own");
+
+            await using (var file = await source.OpenAsync("medium.bin", VfsOpenMode.Read, None))
+            {
+                var open = asked.Requests[^1];
+                Assert.AreEqual("SFTP open", open.What);
+                StringAssert.EndsWith(open.Target, "/medium.bin");
+                Assert.IsFalse(open.IsDone, "an open file is one request until it is closed");
+                var buffer = new byte[4096];
+                Assert.AreEqual(4096, await file.ReadFullyAsync(0, buffer, None));
+                Assert.AreEqual(4096, open.Bytes, "its bytes go by on it");
+            }
+
+            var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () =>
+            {
+                await foreach (var _ in source.ListAsync("no-such-folder", None))
+                {
+                }
+            });
+            Assert.AreEqual(VfsError.NotFound, ex.Error);
+            var refused = asked.Requests.Last(r => r.What == "SFTP list");
+            StringAssert.EndsWith(refused.Target, "/no-such-folder");
+            Assert.IsNotNull(refused.Error, "what the server refused says so");
+            Assert.IsTrue(refused.IsDone);
+
+            Assert.IsNotNull(await source.GetSpaceAsync("", None));
+            Assert.IsTrue(asked.Requests.Any(r => r.What == "SFTP statvfs"));
+        }
+
+        await UpstreamRequestRows.AllEndAsync(context);
+    }
+
+    [TestMethod]
     public async Task LinksHiddenNamesAndReadOnlyFilesShowAsTheyShould()
     {
         SshTestServer.Require();

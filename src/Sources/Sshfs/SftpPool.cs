@@ -99,7 +99,7 @@ internal sealed class SftpPool : IAsyncDisposable
             }
 
             var login = new SshLogin(_settings, _context, _hostKeys);
-            var client = await login.ConnectAsync(ct).ConfigureAwait(false);
+            var client = await _context.UpstreamWatcher.AskAsync("SSH connect", $"{_settings.Host.Trim()}:{_settings.Port}", () => login.ConnectAsync(ct), ct).ConfigureAwait(false);
             if (ReferenceEquals(slot, _slots[0]) || Home == "/")
             {
                 Home = string.IsNullOrEmpty(client.WorkingDirectory) ? "/" : client.WorkingDirectory;
