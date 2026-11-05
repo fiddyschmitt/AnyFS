@@ -453,6 +453,67 @@ public class OperationsTabTests
     }
 
     [TestMethod]
+    public void TheRowsStayWhereTheyAreAndShowWhatStandsThereAsOperationsComeAndGo()
+    {
+        var changes = new List<System.Collections.Specialized.NotifyCollectionChangedAction>();
+        ((System.Collections.Specialized.INotifyCollectionChanged)_tab.Rows).CollectionChanged += (_, e) => changes.Add(e.Action);
+        var first = Begin(Alpha, OperationKind.Stat, "first");
+        _tab.Refresh();
+        var top = _tab.Rows.Single();
+        Assert.AreEqual(first.Id, top.Id);
+        CollectionAssert.AreEqual(new[] { System.Collections.Specialized.NotifyCollectionChangedAction.Add }, changes, "one row: one change to the list");
+
+        changes.Clear();
+        var second = Begin(Alpha, OperationKind.Stat, "second");
+        _tab.Refresh();
+        CollectionAssert.AreEqual(new[] { "second", "first" }, Paths());
+        Assert.AreSame(top, _tab.Rows[0], "the top row is the same row, now showing the newest operation");
+        Assert.AreEqual(second.Id, top.Id);
+        CollectionAssert.AreEqual(new[] { System.Collections.Specialized.NotifyCollectionChangedAction.Add }, changes, "the list grew by one row");
+
+        changes.Clear();
+        var storm = Enumerable.Range(0, 300).Select(i => Begin(Alpha, OperationKind.CountFolder, $"storm{i:000}")).ToList();
+        _tab.Refresh();
+        Assert.AreEqual(302, _tab.Rows.Count);
+        Assert.AreEqual("storm299", top.Path);
+        Assert.AreEqual("first", _tab.Rows[301].Path);
+        CollectionAssert.AreEqual(new[] { System.Collections.Specialized.NotifyCollectionChangedAction.Add }, changes, "a storm of rows is one change to the list, not one per row");
+
+        changes.Clear();
+        storm.ForEach(op => op.Complete());
+        var more = Enumerable.Range(0, 300).Select(i => Begin(Alpha, OperationKind.CountFolder, $"more{i:000}")).ToList();
+        _tab.Refresh();
+        Assert.AreEqual(500, _tab.Rows.Count, "capped");
+        Assert.AreEqual("more299", top.Path);
+        CollectionAssert.AreEqual(new[] { System.Collections.Specialized.NotifyCollectionChangedAction.Add }, changes, "grown to the cap in one change");
+
+        changes.Clear();
+        more.ForEach(op => op.Complete());
+        var again = Enumerable.Range(0, 300).Select(i => Begin(Alpha, OperationKind.CountFolder, $"again{i:000}")).ToList();
+        _tab.Refresh();
+        Assert.AreEqual(500, _tab.Rows.Count);
+        Assert.AreEqual("again299", top.Path);
+        Assert.AreEqual(0, changes.Count, "the list turned over without a change to it: the rows show other operations");
+
+        changes.Clear();
+        second.Complete();
+        again.ForEach(op => op.Complete());
+        _time.Advance(TimeSpan.FromSeconds(6));
+        _tab.Refresh();
+        CollectionAssert.AreEqual(new[] { "first" }, Paths(), "the storm has gone");
+        Assert.AreSame(top, _tab.Rows.Single());
+        Assert.AreEqual(first.Id, top.Id);
+        CollectionAssert.AreEqual(new[] { System.Collections.Specialized.NotifyCollectionChangedAction.Remove }, changes, "the list shrank in one change");
+
+        changes.Clear();
+        first.Complete();
+        _time.Advance(TimeSpan.FromSeconds(6));
+        _tab.Refresh();
+        Assert.AreEqual(0, _tab.Rows.Count);
+        CollectionAssert.AreEqual(new[] { System.Collections.Specialized.NotifyCollectionChangedAction.Remove }, changes);
+    }
+
+    [TestMethod]
     public void ACountSaysWhereItIsUpToOnItsOneRow()
     {
         var counters = new SourceCounters();

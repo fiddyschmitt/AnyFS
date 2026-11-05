@@ -55,21 +55,10 @@ public sealed class OperationTracker
         return op;
     }
 
-    /// <summary>Everything running, and everything that finished within <see cref="KeepFinishedFor"/>, in no particular order.</summary>
+    /// <summary>Everything running, and everything that finished within <see cref="KeepFinishedFor"/>, as it stood, in no particular order.</summary>
     public IReadOnlyList<OperationRecord> Recent()
     {
-        List<Operation> ops;
-        lock (_gate)
-        {
-            Prune();
-            ops = new List<Operation>(_running.Count + _finished.Sum(f => f.Count));
-            ops.AddRange(_running.Values);
-            foreach (var finished in _finished)
-            {
-                ops.AddRange(finished);
-            }
-        }
-
+        var ops = Live();
         var records = new List<OperationRecord>(ops.Count);
         foreach (var op in ops)
         {
@@ -78,6 +67,33 @@ public sealed class OperationTracker
 
         return records;
     }
+
+    /// <summary>
+    /// Everything running, and everything that finished within <see cref="KeepFinishedFor"/>, as the operations themselves,
+    /// in no particular order: for a view that picks the few it shows before it reads them. The window's Operations tab,
+    /// refreshed four times a second, had <see cref="Recent"/> copy every one of the thousands a start-up's counts have in
+    /// flight each time, and the window's thread with them (5-Nov-2026).
+    /// </summary>
+    public IReadOnlyList<Operation> Live()
+    {
+        lock (_gate)
+        {
+            Prune();
+            var ops = new List<Operation>(_running.Count + _finished.Sum(f => f.Count));
+            ops.AddRange(_running.Values);
+            foreach (var finished in _finished)
+            {
+                ops.AddRange(finished);
+            }
+
+            return ops;
+        }
+    }
+
+    /// <summary>The operation as it stands now.</summary>
+    public OperationRecord Snapshot(Operation op) => op.Snapshot(_time);
+
+    internal TimeProvider Time => _time;
 
     /// <summary>The session's counters, per source (by name) and per kind, kinds that were never asked left out.</summary>
     public OperationStatsSnapshot Stats()

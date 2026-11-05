@@ -2,6 +2,60 @@ using AnyFS.Sdk;
 
 namespace AnyFS.Core.Operations;
 
+/// <summary>
+/// What an operation shows of itself: the same of one in flight (<see cref="Operation"/>, read as it runs) and of one as it
+/// stood when a snapshot was taken (<see cref="OperationRecord"/>). The window's Operations tab reads the operations in
+/// flight through this, and makes no snapshot of the thousands it does not show.
+/// </summary>
+public interface IOperationView
+{
+    /// <summary>Ascending in the order the operations began.</summary>
+    long Id { get; }
+
+    Guid SourceId { get; }
+
+    /// <summary>The source's name when the operation began.</summary>
+    string Source { get; }
+
+    OperationKind Kind { get; }
+
+    /// <summary>The path asked for, relative to the source's root ("" for the root, and for a kind without a path).</summary>
+    string Path { get; }
+
+    /// <summary>What else the caller said or found: a rename's target, "not found" for a stat.</summary>
+    string? Detail { get; }
+
+    DateTimeOffset Started { get; }
+
+    /// <summary>So far, while it runs.</summary>
+    TimeSpan Duration { get; }
+
+    OperationOutcome Outcome { get; }
+
+    /// <summary>Why it failed, or why it was cancelled when that is known.</summary>
+    string? Error { get; }
+
+    /// <summary>Read or written through the file handle so far.</summary>
+    long Bytes { get; }
+
+    /// <summary>Entries a listing has given so far, files a count has found so far.</summary>
+    long Items { get; }
+
+    /// <summary>While a count runs, the folder it is up to ("" for the root; <see cref="SourceCounters.CurrentFolder"/>); null when it is in none, and for anything else.</summary>
+    string? At { get; }
+
+    /// <summary>What a server was asked, in a word or two (GET, SFTP list); null for what is named by its kind alone.</summary>
+    string? What { get; }
+
+    /// <summary>What the server answered, where it went well ("200 OK"); null for anything else.</summary>
+    string? Answer { get; }
+
+    /// <summary>The words the window's Operations tab uses for it.</summary>
+    string Name => What ?? Kind.Describe();
+
+    OperationAskedOf AskedOf => Kind.AskedOf();
+}
+
 /// <summary>One operation as it stood when the snapshot was taken: what the Operations tab's rows are made from.</summary>
 /// <param name="Id">Ascending in the order the operations began.</param>
 /// <param name="Source">The source's name when the operation began.</param>
@@ -29,7 +83,7 @@ public sealed record OperationRecord(
     long Items,
     string? At = null,
     string? What = null,
-    string? Answer = null)
+    string? Answer = null) : IOperationView
 {
     /// <summary>The words the window's Operations tab uses for it.</summary>
     public string Name => What ?? Kind.Describe();
@@ -43,7 +97,7 @@ public sealed record OperationRecord(
 /// <see cref="Cancel"/>; a second end is ignored. A failure inside an operation that goes on regardless (one read of an
 /// open file) is <see cref="Note"/>d, and the operation ends Failed with it when it is completed.
 /// </summary>
-public sealed class Operation
+public sealed class Operation : IOperationView
 {
     private readonly OperationTracker _tracker;
     private readonly object _gate = new();
@@ -114,6 +168,17 @@ public sealed class Operation
 
     public long Items => Volatile.Read(ref _following)?.FilesKnown ?? Interlocked.Read(ref _items);
 
+    /// <summary>So far, while it runs; as it ended, after.</summary>
+    public TimeSpan Duration => Elapsed(_tracker.Time);
+
+    /// <summary>While a count runs, the folder it is up to; null when it is in none, and for anything else.</summary>
+    public string? At => Outcome == OperationOutcome.Running ? Volatile.Read(ref _following)?.CurrentFolder : null;
+
+    /// <summary>The words the window's Operations tab uses for it.</summary>
+    public string Name => What ?? Kind.Describe();
+
+    public OperationAskedOf AskedOf => Kind.AskedOf();
+
     public void AddBytes(long count)
     {
         if (count > 0)
@@ -173,10 +238,10 @@ public sealed class Operation
         // before the outcome: a row read as running says where it was, and one that has ended says nowhere
         var at = Volatile.Read(ref _following)?.CurrentFolder;
         var outcome = Outcome;
-        return new(Id, SourceId, Source, Kind, Path, Detail, Started, Duration(time), outcome, Error, Bytes, Items, outcome == OperationOutcome.Running ? at : null, What, Answer);
+        return new(Id, SourceId, Source, Kind, Path, Detail, Started, Elapsed(time), outcome, Error, Bytes, Items, outcome == OperationOutcome.Running ? at : null, What, Answer);
     }
 
-    internal TimeSpan Duration(TimeProvider time)
+    internal TimeSpan Elapsed(TimeProvider time)
         => IsFinished ? time.GetElapsedTime(StartedAt, FinishedAt) : time.GetElapsedTime(StartedAt);
 
     /// <summary>

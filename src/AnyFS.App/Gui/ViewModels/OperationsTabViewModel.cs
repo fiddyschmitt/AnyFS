@@ -4,6 +4,7 @@ using System.Text;
 using AnyFS.App.Gui.Services;
 using AnyFS.Core.Operations;
 using AnyFS.Core.Runtime;
+using Avalonia.Collections;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -30,12 +31,18 @@ public enum OperationAskedOfFilter
     Source,
 }
 
-/// <summary>One row: an operation as it stands, its texts made once per refresh so the list only redraws what changed.</summary>
-public sealed partial class OperationRowViewModel(long id) : ObservableObject
+/// <summary>
+/// One row of the list: a place in it, showing the operation that stands there now, its texts made once per refresh so the
+/// list only redraws what changed. The rows stay where they are as the operations shown come and go: a storm of requests,
+/// newest first, turns the whole list over four times a second, and a list whose rows came and went with the operations
+/// made the view build every row it shows anew each time (5-Nov-2026).
+/// </summary>
+public sealed partial class OperationRowViewModel : ObservableObject
 {
     private bool _ended;
 
-    public long Id { get; } = id;
+    /// <summary>The operation shown here now (<see cref="IOperationView.Id"/>); 0 before the first.</summary>
+    public long Id { get; private set; }
 
     [ObservableProperty]
     public partial string Started { get; set; } = "";
@@ -76,34 +83,43 @@ public sealed partial class OperationRowViewModel(long id) : ObservableObject
     [ObservableProperty]
     public partial OperationOutcome Outcome { get; set; }
 
-    public void Update(OperationRecord record)
+    /// <summary>The row as the operation stands now (read as it runs, or a snapshot of it): the one shown here already, or another.</summary>
+    public void Show(IOperationView record)
     {
-        // an operation that has ended never changes again: its texts are not made anew four times a second for five seconds
-        if (_ended)
+        if (record.Id != Id)
         {
+            // what never changes while one operation is shown is made once: with hundreds of rows in a refresh, four times a second, each text counts
+            Id = record.Id;
+            _ended = false;
+            var started = record.Started.ToLocalTime();
+            Started = started.ToString("HH:mm:ss.f", CultureInfo.CurrentCulture);
+            StartedFull = started.ToString("d MMM yyyy HH:mm:ss.fff", CultureInfo.CurrentCulture);
+            AskedOf = AskedOfText(record);
+            Source = record.Source;
+            Operation = record.Name;
+        }
+        else if (_ended)
+        {
+            // an operation that has ended never changes again: its texts are not made anew four times a second for five seconds
             return;
         }
 
-        _ended = record.Outcome != OperationOutcome.Running;
-        var started = record.Started.ToLocalTime();
-        Started = started.ToString("HH:mm:ss.f", CultureInfo.CurrentCulture);
-        StartedFull = started.ToString("d MMM yyyy HH:mm:ss.fff", CultureInfo.CurrentCulture);
-        AskedOf = AskedOfText(record);
-        Source = record.Source;
-        Operation = record.Name;
+        // the outcome first: a row read as it ends says it ended, with the duration and the texts of its end
+        var outcome = record.Outcome;
+        _ended = outcome != OperationOutcome.Running;
         Path = PathText(record);
         PathShown = PathShownText(record);
         IsAddress = PathShown.Length != Path.Length;
         Duration = DurationText(record);
         Detail = DetailText(record);
         Result = ResultText(record);
-        Outcome = record.Outcome;
+        Outcome = outcome;
     }
 
-    public static string AskedOfText(OperationRecord record) => record.AskedOf == OperationAskedOf.Source ? "Source" : "AnyFS";
+    public static string AskedOfText(IOperationView record) => record.AskedOf == OperationAskedOf.Source ? "Source" : "AnyFS";
 
     /// <summary>The path asked for; a count, asked for none, says which folder it is up to while it runs.</summary>
-    public static string PathText(OperationRecord record)
+    public static string PathText(IOperationView record)
     {
         var path = record.At ?? (record.Kind.HasPath() ? record.Path : null);
         return path is null ? "" : path.Length == 0 ? "(root)" : path;
@@ -113,7 +129,7 @@ public sealed partial class OperationRowViewModel(long id) : ObservableObject
     /// What the Path column shows: <see cref="PathText"/>, and of a server's address what comes after the server, since it is
     /// what was asked that tells one row from the next. The whole address is in the tooltip and in what is copied.
     /// </summary>
-    public static string PathShownText(OperationRecord record)
+    public static string PathShownText(IOperationView record)
     {
         var path = PathText(record);
         if (record.Kind != OperationKind.Upstream)
@@ -126,10 +142,10 @@ public sealed partial class OperationRowViewModel(long id) : ObservableObject
         return slash < 0 ? path : path[slash..];
     }
 
-    public static string DurationText(OperationRecord record) => record.Duration.TotalSeconds.ToString("0.00", CultureInfo.CurrentCulture);
+    public static string DurationText(IOperationView record) => record.Duration.TotalSeconds.ToString("0.00", CultureInfo.CurrentCulture);
 
     /// <summary>What went by: bytes through a file handle or to and from a server, entries of a listing, files counted, else what the operation said.</summary>
-    public static string DetailText(OperationRecord record) => record.Kind switch
+    public static string DetailText(IOperationView record) => record.Kind switch
     {
         OperationKind.ReadFile or OperationKind.WriteFile => record.Bytes > 0 ? Format.Bytes(record.Bytes) : record.Detail ?? "",
         OperationKind.Upstream => record.Items > 0 ? $"{record.Items:N0} {(record.Items == 1 ? "entry" : "entries")}" : record.Bytes > 0 ? Format.Bytes(record.Bytes) : "",
@@ -139,7 +155,7 @@ public sealed partial class OperationRowViewModel(long id) : ObservableObject
         _ => record.Detail ?? "",
     };
 
-    public static string ResultText(OperationRecord record) => record.Outcome switch
+    public static string ResultText(IOperationView record) => record.Outcome switch
     {
         OperationOutcome.Running => "Running",
         OperationOutcome.Succeeded => record.Answer ?? "OK",
@@ -172,7 +188,8 @@ public sealed partial class SourceFilterViewModel(Guid id, Action<SourceFilterVi
 /// The Operations tab (spec 11.5): every operation asked of a source, and everything it asked of its server, as it runs and
 /// for five seconds after it ends, newest first, each column sortable; filtered by who was asked, by source, by how long
 /// they have taken, and to failures. The window refreshes it four times a second while it is the tab shown, so the durations
-/// tick.
+/// tick. A refresh picks what it shows from the operations themselves, and reads only those: a start-up's counts have
+/// thousands in flight, and copying every one of them four times a second held up the window (5-Nov-2026).
 /// </summary>
 public sealed partial class OperationsTabViewModel : ObservableObject
 {
@@ -186,7 +203,7 @@ public sealed partial class OperationsTabViewModel : ObservableObject
     private readonly Func<IEnumerable<(Guid Id, string Name)>> _sources;
     private readonly ITextClipboard _clipboard;
     private readonly HashSet<Guid> _hidden = [];
-    private IReadOnlyList<OperationRecord> _shown = [];
+    private IReadOnlyList<IOperationView> _shown = [];
     private int _matching;
     private double? _longerThan;
     private bool _syncing;
@@ -205,7 +222,8 @@ public sealed partial class OperationsTabViewModel : ObservableObject
         UpdateHeaders();
     }
 
-    public ObservableCollection<OperationRowViewModel> Rows { get; } = [];
+    /// <summary>The rows, as many as there are operations shown, each showing the one that stands there now (a list that grows and shrinks by many rows in one change).</summary>
+    public AvaloniaList<OperationRowViewModel> Rows { get; } = new();
 
     public ObservableCollection<SourceFilterViewModel> Sources { get; } = [];
 
@@ -296,13 +314,13 @@ public sealed partial class OperationsTabViewModel : ObservableObject
         SyncSources();
         if (IsActive && !IsPaused)
         {
-            var records = _operations.Recent();
-            var shown = new List<OperationRecord>(records.Count);
-            foreach (var record in records)
+            var live = _operations.Live();
+            var shown = new List<IOperationView>(live.Count);
+            foreach (var op in live)
             {
-                if (Passes(record))
+                if (Passes(op))
                 {
-                    shown.Add(record);
+                    shown.Add(op);
                 }
             }
 
@@ -314,12 +332,43 @@ public sealed partial class OperationsTabViewModel : ObservableObject
             }
 
             _shown = shown;
-            ListSync.Sync(Rows, shown, r => r.Id, vm => vm.Id, r => new OperationRowViewModel(r.Id), (vm, r) => vm.Update(r));
+            SyncRows(shown);
             OnPropertyChanged(nameof(HasRows));
-            EmptyText = records.Count > 0 ? NothingMatches : NothingRunning;
+            EmptyText = live.Count > 0 ? NothingMatches : NothingRunning;
         }
 
         Summary = Summarise(_operations.Stats());
+    }
+
+    /// <summary>
+    /// The rows show what is shown, in its order: each row the operation at its place, the list grown or shrunk to the
+    /// number of them in one change. The rows themselves stay, so the view keeps what it has built for them and changes
+    /// their texts, whatever comes and goes.
+    /// </summary>
+    private void SyncRows(List<IOperationView> shown)
+    {
+        var i = 0;
+        for (; i < shown.Count && i < Rows.Count; i++)
+        {
+            Rows[i].Show(shown[i]);
+        }
+
+        if (i < shown.Count)
+        {
+            var more = new List<OperationRowViewModel>(shown.Count - i);
+            for (; i < shown.Count; i++)
+            {
+                var row = new OperationRowViewModel();
+                row.Show(shown[i]);
+                more.Add(row);
+            }
+
+            Rows.AddRange(more);
+        }
+        else if (Rows.Count > shown.Count)
+        {
+            Rows.RemoveRange(shown.Count, Rows.Count - shown.Count);
+        }
     }
 
     /// <summary>Click a header: that column, ascending; the same header again turns it round (Started and Duration begin with the latest and the longest).</summary>
@@ -405,7 +454,7 @@ public sealed partial class OperationsTabViewModel : ObservableObject
         _ => true,
     };
 
-    private bool Passes(OperationRecord record)
+    private bool Passes(IOperationView record)
     {
         if (!IsShown(record.AskedOf) || _hidden.Contains(record.SourceId))
         {
@@ -426,9 +475,9 @@ public sealed partial class OperationsTabViewModel : ObservableObject
     /// count stays above the rest whatever the sort, and so within the cap on rows: the folders it goes through come and go
     /// by the hundred, and would push it out of sight.
     /// </summary>
-    private static Comparison<OperationRecord> Comparison(OperationColumn column, bool descending)
+    private static Comparison<IOperationView> Comparison(OperationColumn column, bool descending)
     {
-        Comparison<OperationRecord> key = column switch
+        Comparison<IOperationView> key = column switch
         {
             OperationColumn.Started => (a, b) => a.Id.CompareTo(b.Id),
             OperationColumn.AskedOf => (a, b) => a.AskedOf.CompareTo(b.AskedOf),

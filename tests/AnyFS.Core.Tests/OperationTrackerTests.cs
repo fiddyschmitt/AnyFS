@@ -50,6 +50,44 @@ public class OperationTrackerTests
     }
 
     [TestMethod]
+    public void TheOperationsThemselvesCanBeReadAsTheyRunWithoutASnapshotOfThemAll()
+    {
+        var time = new FakeTime();
+        var tracker = new OperationTracker(time);
+        var counters = new SourceCounters();
+        var count = tracker.Begin(Alpha, "alpha", OperationKind.Count, "");
+        count.Follow(counters);
+        var request = tracker.Begin(Beta, "beta", OperationKind.Upstream, "https://server.test/tree", what: "GET");
+        time.Advance(TimeSpan.FromMilliseconds(300));
+
+        var live = tracker.Live();
+        CollectionAssert.AreEquivalent(new[] { count, request }, live.ToList(), "the operations as they are, not copies of them");
+        IOperationView view = request;
+        Assert.AreEqual(TimeSpan.FromMilliseconds(300), view.Duration, "read as it runs");
+        Assert.AreEqual(("GET", OperationAskedOf.Source, OperationOutcome.Running), (view.Name, view.AskedOf, view.Outcome));
+        Assert.IsNull(view.At);
+        using (counters.EnterFolder("group/app"))
+        {
+            Assert.AreEqual("group/app", ((IOperationView)count).At, "a count says where it is, as its snapshot does");
+            Assert.AreEqual("group/app", tracker.Snapshot(count).At);
+        }
+
+        time.Advance(TimeSpan.FromMilliseconds(200));
+        request.Answer = "200 OK";
+        request.Complete();
+        Assert.AreEqual(TimeSpan.FromMilliseconds(500), view.Duration, "stopped where it ended");
+        time.Advance(TimeSpan.FromSeconds(1));
+        Assert.AreEqual(TimeSpan.FromMilliseconds(500), view.Duration);
+        Assert.AreEqual(("200 OK", OperationOutcome.Succeeded), (view.Answer, view.Outcome));
+        Assert.AreEqual(tracker.Snapshot(request), tracker.Recent().Single(r => r.Id == request.Id), "a snapshot of one is the same as among the rest");
+
+        time.Advance(TimeSpan.FromSeconds(4.5));
+        CollectionAssert.AreEqual(new[] { count }, tracker.Live().ToList(), "gone from the live list five seconds after it ended, as from the snapshots");
+        count.Complete();
+        Assert.IsNull(((IOperationView)count).At, "a count that is over is in no folder");
+    }
+
+    [TestMethod]
     public void ACountShowsItsRunningTotalAndItsFolderUntilItEnds()
     {
         var tracker = new OperationTracker(new FakeTime());
