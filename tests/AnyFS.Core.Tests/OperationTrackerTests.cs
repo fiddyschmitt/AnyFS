@@ -196,6 +196,41 @@ public class OperationTrackerTests
     }
 
     [TestMethod]
+    public void AStormOfQuickCallsLeavesWhatTheServerWasAskedInSight()
+    {
+        var tracker = new OperationTracker(new FakeTime(), keepFinishedAtMost: 3);
+        tracker.Begin(Alpha, "alpha", OperationKind.Upstream, "https://server.test/one", what: "GET").Complete();
+        for (var i = 0; i < 50; i++)
+        {
+            tracker.Begin(Alpha, "alpha", OperationKind.Stat, i.ToString()).Complete();
+        }
+
+        CollectionAssert.AreEquivalent(new[] { "https://server.test/one", "47", "48", "49" }, tracker.Recent().Select(r => r.Path).ToList());
+
+        for (var i = 0; i < 5; i++)
+        {
+            tracker.Begin(Alpha, "alpha", OperationKind.Upstream, $"https://server.test/{i}", what: "GET").Complete();
+        }
+
+        CollectionAssert.AreEquivalent(new[] { "https://server.test/2", "https://server.test/3", "https://server.test/4", "47", "48", "49" }, tracker.Recent().Select(r => r.Path).ToList(), "a storm of requests has a cap of its own too");
+    }
+
+    [TestMethod]
+    public void WhatAServerWasAskedGoesAfterFiveSecondsAndWithItsSource()
+    {
+        var time = new FakeTime();
+        var tracker = new OperationTracker(time);
+        tracker.Begin(Alpha, "alpha", OperationKind.Upstream, "https://server.test/a", what: "GET").Complete();
+        tracker.Begin(Beta, "beta", OperationKind.Upstream, "https://server.test/b", what: "GET").Complete();
+        Assert.AreEqual(2, tracker.Recent().Count);
+        tracker.Forget(Beta);
+        Assert.AreEqual("alpha", tracker.Recent().Single().Source);
+        time.Advance(TimeSpan.FromSeconds(5));
+        Assert.AreEqual(0, tracker.Recent().Count);
+        Assert.AreEqual(1, tracker.Stats().Finished, "the session's count stays");
+    }
+
+    [TestMethod]
     public void ANotedFailureEndsTheOperationFailedWhenItCompletes()
     {
         var tracker = new OperationTracker(new FakeTime());
@@ -230,6 +265,17 @@ public class OperationTrackerTests
         Assert.IsFalse(OperationKind.Start.HasPath());
         Assert.IsFalse(OperationKind.Count.HasPath());
         Assert.IsFalse(OperationKind.Stop.HasPath());
+        Assert.AreEqual("Asked of source", OperationKind.Upstream.Describe());
+        Assert.IsTrue(OperationKind.Upstream.HasPath());
+    }
+
+    [TestMethod]
+    public void OnlyARequestOfAServerIsAskedOfTheServer()
+    {
+        foreach (var kind in Enum.GetValues<OperationKind>())
+        {
+            Assert.AreEqual(kind == OperationKind.Upstream ? OperationAskedOf.Source : OperationAskedOf.AnyFS, kind.AskedOf(), kind.ToString());
+        }
     }
 }
 
@@ -244,6 +290,62 @@ public class TrackedSourceTests
         var source = new TrackedSource(inner, handle, tracker);
         await source.InitialiseAsync(new TestSourceContext(name), CancellationToken.None);
         return (source, tracker, time);
+    }
+
+    [TestMethod]
+    public async Task WhatASourceAsksItsServerIsARowOfItsOwn()
+    {
+        var (source, tracker, time) = await TrackedAsync(new MemorySource(), "lab");
+        var server = source.UpstreamRows();
+
+        var asked = server.Asked("GET", "https://server.test/api/a?page=2");
+        asked.AddBytes(1000);
+        time.Advance(TimeSpan.FromSeconds(2));
+        var row = tracker.Recent().Single(r => r.Kind == OperationKind.Upstream);
+        Assert.AreEqual(OperationOutcome.Running, row.Outcome);
+        Assert.AreEqual(OperationAskedOf.Source, row.AskedOf);
+        Assert.AreEqual("lab", row.Source, "under the name its source has now");
+        Assert.AreEqual("GET", row.Name);
+        Assert.AreEqual("https://server.test/api/a?page=2", row.Path);
+        Assert.AreEqual(1000, row.Bytes);
+
+        asked.Answered("200 OK", refused: false);
+        asked.AddBytes(24);
+        asked.Done();
+        asked.Done();
+        row = tracker.Recent().Single(r => r.Kind == OperationKind.Upstream);
+        Assert.AreEqual(OperationOutcome.Succeeded, row.Outcome);
+        Assert.AreEqual("200 OK", row.Answer);
+        Assert.IsNull(row.Error);
+        Assert.AreEqual(1024, row.Bytes);
+        Assert.AreEqual(TimeSpan.FromSeconds(2), row.Duration);
+
+        var refused = server.Asked("GET", "https://server.test/gone");
+        refused.Answered("404 Not Found", refused: true);
+        Assert.AreEqual(OperationOutcome.Running, tracker.Recent().Single(r => r.Path.EndsWith("gone", StringComparison.Ordinal)).Outcome, "its body may yet come");
+        refused.Done();
+        row = tracker.Recent().Single(r => r.Path.EndsWith("gone", StringComparison.Ordinal));
+        Assert.AreEqual((OperationOutcome.Failed, "404 Not Found"), (row.Outcome, row.Error));
+
+        var broke = server.Asked("GET", "https://server.test/broke");
+        broke.Answered("200 OK", refused: false);
+        broke.Failed(new IOException("the connection dropped"), CancellationToken.None);
+        broke.Done();
+        row = tracker.Recent().Single(r => r.Path.EndsWith("broke", StringComparison.Ordinal));
+        Assert.AreEqual((OperationOutcome.Failed, "the connection dropped"), (row.Outcome, row.Error));
+
+        using var stopped = new CancellationTokenSource();
+        await stopped.CancelAsync();
+        var gaveUp = server.Asked("SFTP list", "/home/x");
+        gaveUp.AddEntries(3);
+        gaveUp.Failed(new OperationCanceledException(stopped.Token), stopped.Token);
+        gaveUp.Done();
+        row = tracker.Recent().Single(r => r.Path == "/home/x");
+        Assert.AreEqual((OperationOutcome.Cancelled, "SFTP list", 3L), (row.Outcome, row.Name, row.Items));
+
+        var stats = tracker.Stats().Sources.Single().Operations.Single(o => o.Kind == OperationKind.Upstream);
+        Assert.AreEqual((4L, 2L, 1L, 0L), (stats.Finished, stats.Failed, stats.Cancelled, stats.Running));
+        Assert.AreEqual(1024, stats.Bytes);
     }
 
     [TestMethod]

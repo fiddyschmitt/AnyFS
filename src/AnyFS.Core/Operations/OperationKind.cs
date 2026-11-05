@@ -24,6 +24,15 @@ public enum OperationKind
     CountFolder,
     /// <summary><see cref="IAsyncDisposable.DisposeAsync"/> of the source.</summary>
     Stop,
+    /// <summary>Not a call to the source but one it made: what it asked of whatever is behind it, its server or its folders (<see cref="Sdk.ISourceContext.UpstreamWatcher"/>), whoever or whatever it was for.</summary>
+    Upstream,
+}
+
+/// <summary>Who an operation asks: AnyFS, by a client through a mount or by AnyFS's own work, or the source, what is behind it: its server, its folders.</summary>
+public enum OperationAskedOf
+{
+    AnyFS,
+    Source,
 }
 
 public enum OperationOutcome
@@ -53,9 +62,12 @@ public static class OperationKindExtensions
         OperationKind.Count => "Count files",
         OperationKind.CountFolder => "Count folder",
         OperationKind.Stop => "Stop",
+        OperationKind.Upstream => "Asked of source",
         _ => kind.ToString(),
     };
 
-    /// <summary>Whether the operation is about a path in the source (its start, count and stop are not).</summary>
+    /// <summary>Whether the operation is about a path in the source (its start, count and stop are not); a server request's is its address on the server.</summary>
     public static bool HasPath(this OperationKind kind) => kind is not (OperationKind.Start or OperationKind.Count or OperationKind.Stop);
+
+    public static OperationAskedOf AskedOf(this OperationKind kind) => kind == OperationKind.Upstream ? OperationAskedOf.Source : OperationAskedOf.AnyFS;
 }

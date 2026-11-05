@@ -46,7 +46,7 @@ internal static class Commands
 
         var operationsOption = new Option<bool>("--operations")
         {
-            Description = "Also print what each source was asked this session, per kind of operation: how many finished, failed and are running, the average and the longest.",
+            Description = "Also print what each source was asked, and asked of its server, this session, per kind of operation: how many finished, failed and are running, the average and the longest.",
         };
         var status = new Command("status", "Print collections, sources, mounts, their states and access paths. Exit code 0 when everything is green, 1 when not, 2 when anyfs is not running.") { operationsOption };
         status.SetAction(parseResult => Status(parseResult.GetValue(settingsDir), parseResult.GetValue(operationsOption)));
@@ -197,13 +197,13 @@ internal static class Commands
             return;
         }
 
-        out_.WriteLine($"  {"Source",-24} {"Operation",-14} {"Finished",9} {"Failed",7} {"Running",8} {"Average",9} {"Longest",9}  Data");
+        out_.WriteLine($"  {"Source",-24} {"Operation",-15} {"Finished",9} {"Failed",7} {"Running",8} {"Average",9} {"Longest",9}  Data");
         foreach (var source in operations.Sources)
         {
             var name = source.Name.Length > 24 ? source.Name[..21] + "..." : source.Name;
             foreach (var o in source.Operations)
             {
-                out_.WriteLine($"  {name,-24} {o.Kind.Describe(),-14} {o.Finished,9:N0} {o.Failed,7:N0} {o.Running,8:N0} {o.AverageSeconds,7:0.00} s {o.MaxSeconds,7:0.00} s  {Data(o)}");
+                out_.WriteLine($"  {name,-24} {o.Kind.Describe(),-15} {o.Finished,9:N0} {o.Failed,7:N0} {o.Running,8:N0} {o.AverageSeconds,7:0.00} s {o.MaxSeconds,7:0.00} s  {Data(o)}");
             }
         }
     }
@@ -211,6 +211,7 @@ internal static class Commands
     private static string Data(OperationKindStats o) => o.Kind switch
     {
         OperationKind.ReadFile or OperationKind.WriteFile => o.Bytes > 0 ? Format.Bytes(o.Bytes) : "",
+        OperationKind.Upstream => string.Join(", ", new[] { o.Bytes > 0 ? Format.Bytes(o.Bytes) : "", o.Items > 0 ? $"{o.Items:N0} entries" : "" }.Where(s => s.Length > 0)),
         OperationKind.List or OperationKind.CountFolder => o.Items > 0 ? $"{o.Items:N0} entries" : "",
         OperationKind.Count => o.Items > 0 ? $"{o.Items:N0} files" : "",
         _ => "",

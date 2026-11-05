@@ -45,6 +45,62 @@ public class SourceRunnerTests
     }
 
     [TestMethod]
+    public async Task WithATrackerWhatTheSourceAsksItsServerIsRecordedFromItsStartOn()
+    {
+        var tracker = new OperationTracker();
+        var plugin = new AskingServerPlugin();
+        await using var runner = Runner(new MemoryPluginSettings(), plugin: plugin, operations: tracker);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready");
+        var rows = tracker.Recent().OrderBy(r => r.Id).ToList();
+        Assert.AreEqual(OperationKind.Start, rows[0].Kind);
+        var asked = rows.Single(r => r.Kind == OperationKind.Upstream);
+        Assert.AreEqual(("src", "GET", "https://server.test/sign-in", OperationOutcome.Succeeded), (asked.Source, asked.Name, asked.Path, asked.Outcome));
+
+        // after its start too, for its whole life: nothing has to be running for it to ask
+        await plugin.Context!.UpstreamWatcher.AskAsync("GET", "https://server.test/later", () => Task.FromResult(1), CancellationToken.None);
+        Assert.IsTrue(tracker.Recent().Any(r => r.Path == "https://server.test/later"));
+    }
+
+    [TestMethod]
+    public async Task WithNoTrackerNobodyHearsWhatTheSourceAsks()
+    {
+        var plugin = new AskingServerPlugin();
+        await using var runner = Runner(new MemoryPluginSettings(), plugin: plugin);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready");
+        Assert.IsNull(plugin.Context!.UpstreamWatcher);
+    }
+
+    private sealed class AskingServerPlugin : ISourcePlugin
+    {
+        public ISourceContext? Context { get; private set; }
+
+        public string TypeId => "memory";
+
+        public string DisplayName => "Asks";
+
+        public string Description => "Asks its server something as it starts";
+
+        public string TypeFolder => "asks";
+
+        public Stream? OpenIcon() => null;
+
+        public Type SettingsType => typeof(MemoryPluginSettings);
+
+        public object CreateDefaultSettings() => new MemoryPluginSettings();
+
+        public ISource CreateSource(object settings) => new MemorySource
+        {
+            OnInitialise = async (ctx, ct) =>
+            {
+                Context = ctx;
+                await ctx.UpstreamWatcher.AskAsync("GET", "https://server.test/sign-in", () => Task.FromResult(1), ct);
+            },
+        };
+    }
+
+    [TestMethod]
     public async Task WithATrackerEveryCallToTheSourceIsRecorded()
     {
         var tracker = new OperationTracker();

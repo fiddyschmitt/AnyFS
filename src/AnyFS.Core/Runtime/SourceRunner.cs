@@ -224,7 +224,9 @@ public sealed class SourceRunner : IAsyncDisposable
             {
                 var context = new SourceContextImpl(this, Definition, _paths, _secrets, _prompts, _logger);
                 var created = _plugin!.CreateSource(_settings ?? _plugin.CreateDefaultSettings());
-                source = _operations is null ? created : new TrackedSource(created, Handle, _operations);
+                var tracked = _operations is null ? null : new TrackedSource(created, Handle, _operations);
+                context.UpstreamWatcher = tracked?.UpstreamRows();
+                source = (ISource?)tracked ?? created;
                 await source.InitialiseAsync(context, ct).ConfigureAwait(false);
                 ct.ThrowIfCancellationRequested();
                 Handle.Current = source;
@@ -403,6 +405,8 @@ public sealed class SourceRunner : IAsyncDisposable
         public void ReportHealth(ComponentHealth health, string? detail = null) => _runner.OnHealth(health, detail);
 
         public Task<PromptResult> PromptAsync(PromptRequest request, CancellationToken ct) => _prompts.PromptAsync(_definition.Name, request, ct);
+
+        public IUpstreamWatcher? UpstreamWatcher { get; set; }
 
         private sealed class VolatileSecrets : ISecretStore
         {

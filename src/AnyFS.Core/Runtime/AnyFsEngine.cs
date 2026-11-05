@@ -1242,11 +1242,11 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
         if (op.Outcome == OperationOutcome.Failed)
         {
-            _logger.LogDebug("source {Source}: {Operation} '{Path}' failed after {Seconds:F2} s: {Error}", op.Source, op.Kind.Describe().ToLowerInvariant(), op.Path, op.Duration.TotalSeconds, op.Error);
+            _logger.LogDebug("source {Source}: {Operation} '{Path}' failed after {Seconds:F2} s: {Error}", op.Source, op.What ?? op.Kind.Describe().ToLowerInvariant(), op.Path, op.Duration.TotalSeconds, op.Error);
         }
         else if (op.Duration >= SlowOperation)
         {
-            _logger.LogDebug("source {Source}: {Operation} '{Path}' took {Seconds:F1} s ({Outcome})", op.Source, op.Kind.Describe().ToLowerInvariant(), op.Path, op.Duration.TotalSeconds, op.Outcome.ToString().ToLowerInvariant());
+            _logger.LogDebug("source {Source}: {Operation} '{Path}' took {Seconds:F1} s ({Outcome})", op.Source, op.What ?? op.Kind.Describe().ToLowerInvariant(), op.Path, op.Duration.TotalSeconds, op.Outcome.ToString().ToLowerInvariant());
         }
     }
 

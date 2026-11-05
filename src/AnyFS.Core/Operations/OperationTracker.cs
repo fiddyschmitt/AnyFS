@@ -3,10 +3,11 @@ using System.Collections.Concurrent;
 namespace AnyFS.Core.Operations;
 
 /// <summary>
-/// Every operation asked of every source, as it runs and for a while after it ends (the Operations tab), and counters per
-/// source and kind for the session (<c>anyfs status --operations</c>, status.json, <see cref="Stats"/>). Sources are
-/// recorded by the <see cref="TrackedSource"/> the runner wraps them in, so nothing a source does is missed and no source
-/// has to know. Cheap enough to be always on: a begin and an end take a short lock each, and the counters are atomic.
+/// Every operation asked of every source, and everything each source asked of its server, as it runs and for a while after
+/// it ends (the Operations tab), and counters per source and kind for the session (<c>anyfs status --operations</c>,
+/// status.json, <see cref="Stats"/>). Sources are recorded by the <see cref="TrackedSource"/> the runner wraps them in, so
+/// nothing a source does is missed and no source has to know. Cheap enough to be always on: a begin and an end take a short
+/// lock each, and the counters are atomic.
 /// </summary>
 public sealed class OperationTracker
 {
@@ -15,12 +16,14 @@ public sealed class OperationTracker
     private readonly TimeProvider _time;
     private readonly object _gate = new();
     private readonly Dictionary<long, Operation> _running = [];
-    private readonly Queue<Operation> _finished = new();
+
+    // by who was asked, each with the cap to itself: a storm of quick calls to AnyFS answered from what is kept asks no server, and leaves what the servers were asked in sight
+    private readonly Queue<Operation>[] _finished = [new(), new()];
     private readonly ConcurrentDictionary<Guid, SourceCounters> _counters = new();
     private long _nextId;
 
     /// <param name="keepFinishedFor">How long a finished operation stays in <see cref="Recent"/>: five seconds by default.</param>
-    /// <param name="keepFinishedAtMost">A cap on finished operations kept, for a storm of quick calls; the oldest go first.</param>
+    /// <param name="keepFinishedAtMost">A cap on finished operations kept, of those asked of AnyFS and of those asked of a server each, for a storm of quick calls; the oldest go first.</param>
     public OperationTracker(TimeProvider? time = null, TimeSpan? keepFinishedFor = null, int keepFinishedAtMost = 5000)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(keepFinishedAtMost, 1);
@@ -37,9 +40,10 @@ public sealed class OperationTracker
     public event Action<OperationRecord>? Finished;
 
     /// <summary>Records an operation that has just begun; end it on the <see cref="Operation"/> returned.</summary>
-    public Operation Begin(Guid sourceId, string source, OperationKind kind, string path, string? detail = null)
+    /// <param name="what">What a server is being asked, in a word or two (GET, SFTP list); null for what is named by its kind alone.</param>
+    public Operation Begin(Guid sourceId, string source, OperationKind kind, string path, string? detail = null, string? what = null)
     {
-        var op = new Operation(this, Interlocked.Increment(ref _nextId), sourceId, source, kind, path, detail, _time.GetUtcNow(), _time.GetTimestamp());
+        var op = new Operation(this, Interlocked.Increment(ref _nextId), sourceId, source, kind, path, detail, what, _time.GetUtcNow(), _time.GetTimestamp());
         var counters = _counters.GetOrAdd(sourceId, _ => new SourceCounters());
         counters.Name = source;
         counters.For(kind).Begun();
@@ -58,9 +62,12 @@ public sealed class OperationTracker
         lock (_gate)
         {
             Prune();
-            ops = new List<Operation>(_running.Count + _finished.Count);
+            ops = new List<Operation>(_running.Count + _finished.Sum(f => f.Count));
             ops.AddRange(_running.Values);
-            ops.AddRange(_finished);
+            foreach (var finished in _finished)
+            {
+                ops.AddRange(finished);
+            }
         }
 
         var records = new List<OperationRecord>(ops.Count);
@@ -103,13 +110,16 @@ public sealed class OperationTracker
         _counters.TryRemove(sourceId, out _);
         lock (_gate)
         {
-            if (_finished.Any(op => op.SourceId == sourceId))
+            foreach (var finished in _finished)
             {
-                var kept = _finished.Where(op => op.SourceId != sourceId).ToList();
-                _finished.Clear();
-                foreach (var op in kept)
+                if (finished.Any(op => op.SourceId == sourceId))
                 {
-                    _finished.Enqueue(op);
+                    var kept = finished.Where(op => op.SourceId != sourceId).ToList();
+                    finished.Clear();
+                    foreach (var op in kept)
+                    {
+                        finished.Enqueue(op);
+                    }
                 }
             }
         }
@@ -122,7 +132,7 @@ public sealed class OperationTracker
         lock (_gate)
         {
             _running.Remove(op.Id);
-            _finished.Enqueue(op);
+            _finished[(int)op.Kind.AskedOf()].Enqueue(op);
             Prune();
         }
 
@@ -134,12 +144,15 @@ public sealed class OperationTracker
         Finished?.Invoke(op.Snapshot(_time));
     }
 
-    // under _gate: the finished queue is in the order the operations ended, so the expired ones are at its head
+    // under _gate: each finished queue is in the order the operations ended, so the expired ones are at its head
     private void Prune()
     {
-        while (_finished.Count > 0 && (_finished.Count > KeepFinishedAtMost || _time.GetElapsedTime(_finished.Peek().FinishedAt) >= KeepFinishedFor))
+        foreach (var finished in _finished)
         {
-            _finished.Dequeue();
+            while (finished.Count > 0 && (finished.Count > KeepFinishedAtMost || _time.GetElapsedTime(finished.Peek().FinishedAt) >= KeepFinishedFor))
+            {
+                finished.Dequeue();
+            }
         }
     }
 

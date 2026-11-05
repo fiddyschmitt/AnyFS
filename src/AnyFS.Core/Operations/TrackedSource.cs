@@ -57,6 +57,37 @@ public sealed class TrackedSource : ISource
         public void Done() => op.Complete();
     }
 
+    /// <summary>A row for each thing the source asks of what is behind it, its server or its folders, for its whole life, whoever or whatever it is for (<see cref="ISourceContext.UpstreamWatcher"/>).</summary>
+    public IUpstreamWatcher UpstreamRows() => new RequestRows(this);
+
+    private sealed class RequestRows(TrackedSource source) : IUpstreamWatcher
+    {
+        public IWatchedRequest Asked(string what, string target) => new RequestRow(source._tracker.Begin(source._handle.Id, source._handle.Name, OperationKind.Upstream, target, what: what));
+    }
+
+    private sealed class RequestRow(Operation op) : IWatchedRequest
+    {
+        public void AddBytes(long count) => op.AddBytes(count);
+
+        public void AddEntries(long count) => op.AddItems(count);
+
+        public void Answered(string answer, bool refused)
+        {
+            if (refused)
+            {
+                op.Note(answer);
+            }
+            else
+            {
+                op.Answer = answer;
+            }
+        }
+
+        public void Failed(Exception error, CancellationToken ct) => op.Fail(error, ct);
+
+        public void Done() => op.Complete();
+    }
+
     public Task InitialiseAsync(ISourceContext context, CancellationToken ct)
         => TrackAsync(Begin(OperationKind.Start), () => Inner.InitialiseAsync(context, ct), ct);
 

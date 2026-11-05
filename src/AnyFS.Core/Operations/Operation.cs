@@ -12,6 +12,8 @@ namespace AnyFS.Core.Operations;
 /// <param name="Bytes">Read or written through the file handle so far.</param>
 /// <param name="Items">Entries a listing has given so far, files a count has found so far.</param>
 /// <param name="At">While a count runs, the folder it is up to ("" for the root; <see cref="SourceCounters.CurrentFolder"/>); null when it is in none, and for anything else.</param>
+/// <param name="What">What a server was asked, in a word or two (GET, SFTP list); null for what is named by its kind alone.</param>
+/// <param name="Answer">What the server answered, where it went well ("200 OK"); null for anything else.</param>
 public sealed record OperationRecord(
     long Id,
     Guid SourceId,
@@ -25,7 +27,15 @@ public sealed record OperationRecord(
     string? Error,
     long Bytes,
     long Items,
-    string? At = null);
+    string? At = null,
+    string? What = null,
+    string? Answer = null)
+{
+    /// <summary>The words the window's Operations tab uses for it.</summary>
+    public string Name => What ?? Kind.Describe();
+
+    public OperationAskedOf AskedOf => Kind.AskedOf();
+}
 
 /// <summary>
 /// An operation in flight, handed out by <see cref="OperationTracker.Begin"/>. The caller adds what goes by
@@ -42,10 +52,11 @@ public sealed class Operation
     private int _outcome = (int)OperationOutcome.Running;
     private string? _error;
     private string? _detail;
+    private string? _answer;
     private (OperationOutcome Outcome, string? Error)? _noted;
     private SourceCounters? _following;
 
-    internal Operation(OperationTracker tracker, long id, Guid sourceId, string source, OperationKind kind, string path, string? detail, DateTimeOffset started, long startedAt)
+    internal Operation(OperationTracker tracker, long id, Guid sourceId, string source, OperationKind kind, string path, string? detail, string? what, DateTimeOffset started, long startedAt)
     {
         _tracker = tracker;
         Id = id;
@@ -54,6 +65,7 @@ public sealed class Operation
         Kind = kind;
         Path = path;
         _detail = detail;
+        What = what;
         Started = started;
         StartedAt = startedAt;
     }
@@ -67,6 +79,9 @@ public sealed class Operation
     public OperationKind Kind { get; }
 
     public string Path { get; }
+
+    /// <summary>What a server was asked, in a word or two (GET, SFTP list); null for what is named by its kind alone.</summary>
+    public string? What { get; }
 
     public DateTimeOffset Started { get; }
 
@@ -87,6 +102,13 @@ public sealed class Operation
     public bool IsFinished => Outcome != OperationOutcome.Running;
 
     public string? Error => Volatile.Read(ref _error);
+
+    /// <summary>What the server answered, where it went well ("200 OK"): the row's result in place of "OK".</summary>
+    public string? Answer
+    {
+        get => Volatile.Read(ref _answer);
+        set => Volatile.Write(ref _answer, value);
+    }
 
     public long Bytes => Interlocked.Read(ref _bytes);
 
@@ -137,12 +159,21 @@ public sealed class Operation
         }
     }
 
+    /// <summary>A refusal, said now with the request still to finish (a server's 404, its body to come): remembered for <see cref="Complete"/>, as with a failure <see cref="Note(Exception, CancellationToken)"/>d.</summary>
+    public void Note(string refusal)
+    {
+        lock (_gate)
+        {
+            _noted ??= (OperationOutcome.Failed, refusal);
+        }
+    }
+
     internal OperationRecord Snapshot(TimeProvider time)
     {
         // before the outcome: a row read as running says where it was, and one that has ended says nowhere
         var at = Volatile.Read(ref _following)?.CurrentFolder;
         var outcome = Outcome;
-        return new(Id, SourceId, Source, Kind, Path, Detail, Started, Duration(time), outcome, Error, Bytes, Items, outcome == OperationOutcome.Running ? at : null);
+        return new(Id, SourceId, Source, Kind, Path, Detail, Started, Duration(time), outcome, Error, Bytes, Items, outcome == OperationOutcome.Running ? at : null, What, Answer);
     }
 
     internal TimeSpan Duration(TimeProvider time)

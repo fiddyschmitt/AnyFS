@@ -43,10 +43,18 @@ public class StatusOperationsTests
         var count = tracker.Begin(Guid.NewGuid(), longName, OperationKind.Count, "");
         count.AddItems(7);
         count.Complete();
+        var request = tracker.Begin(alpha, "alpha", OperationKind.Upstream, "https://server.test/tree", what: "GET");
+        request.AddBytes(3 * 1024);
+        request.Note("404 Not Found");
+        request.Complete();
 
         var lines = Print(tracker.Stats()).Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => l.TrimEnd('\r')).ToList();
-        Assert.AreEqual(6, lines.Count, string.Join(" | ", lines));
+        Assert.AreEqual(7, lines.Count, string.Join(" | ", lines));
         StringAssert.StartsWith(lines[1].Trim(), "Source");
+
+        var requests = lines.Single(l => l.Contains("Asked of source", StringComparison.Ordinal));
+        CollectionAssert.AreEqual(new[] { "alpha", "Asked", "of", "source", "1", "1", "0" }, requests.Split(' ', StringSplitOptions.RemoveEmptyEntries).Take(7).ToArray(), "what was asked of what is behind them, however many verbs that took");
+        StringAssert.EndsWith(requests, "3 KB");
 
         var reads = lines.Single(l => l.Contains("Read file", StringComparison.Ordinal));
         StringAssert.EndsWith(reads, "2 KB");
