@@ -91,7 +91,13 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   the user for a PIN or code with `Context.PromptAsync(...)` (headless without a terminal, the
   source fails with "Needs input" until it's retried from the UI); report later trouble with
   `Context.ReportHealth(ComponentHealth.Degraded, "root X unreachable")` and recovery with
-  `ComponentHealth.Ready`.
+  `ComponentHealth.Ready`. `SourceBase` keeps the book for you: `MarkDegraded(detail)` reports once,
+  until `MarkHealthy()` reports Ready again, and `Guard(() => call)` runs a call to the upstream,
+  marking the source Degraded while a call fails with `Unavailable` and Ready again when one succeeds.
+- Names: what the upstream calls a thing may be no file name. `SafeNames.Safe` makes one Windows takes
+  (refused characters as underscores, a refused ending or device name mended, cut to a length),
+  `SafeNames.Unique` tells a folder's twins in case apart with a number (`notes (2).pdf`), and
+  `SafeNames.Title` puts a title on one line and cuts it with an ellipsis.
 - Everything may be called concurrently from many threads.
 - What you ask of whatever is behind your source, a server, a folder, a file: `Context.UpstreamWatcher`
   hears of it, and the Operations tab shows each as a row, under "Asked of: Source". Over HTTP, put
