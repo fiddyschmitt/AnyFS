@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.IO.Compression;
 using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
@@ -51,15 +50,21 @@ public sealed class KeptListings : IAsyncDisposable
     // when the last walk that listed every folder whatever its stamp ended, or the first walk (saved with the listings); null before it
     private DateTimeOffset? _fullWalkAt;
 
-    // what the listings were last saved as (the cache's version), and whether what is saved beside them (_fullWalkAt, _leftOut)
-    // has moved since: a walk over a tree that has not changed keeps every listing by its stamp, and has nothing to save
-    private long _savedVersion = -1;
-    private volatile bool _changed;
-
     // what a walk last left out of each folder it left some out of (KeptListingsOptions.LeftOut), saved with the listings: keeping a
     // folder by its stamp, it knows without asking that one below it with no listing was left out on purpose. Asking cost a big
     // GitLab the listing of everything above each of those at every start.
     private readonly ConcurrentDictionary<string, IReadOnlySet<string>> _leftOut = new(StringComparer.Ordinal);
+
+    // where the listings are written as they change (KeptListingsOptions.SaveTo), and what changed beside them since the last
+    // write: the folders whose left-out names changed, and whether the time of the last whole walk did
+    private readonly ListingsFile? _file;
+    private readonly Lock _saveGate = new();
+    private readonly ConcurrentDictionary<string, byte> _leftOutChanged = new(StringComparer.Ordinal);
+    private volatile bool _fullWalkChanged;
+    private Task _saveLoop = Task.CompletedTask;
+
+    // the walk of what is held going on now, which the count, when it is asked for, cancels (under _gate)
+    private CancellationTokenSource? _heldWalk;
 
     /// <param name="lister">Lists one folder from the upstream ("" for the root), as for a <see cref="ListingCache"/>.</param>
     /// <param name="counters">The source's own counters: the first walk counts into them as it goes, and each walk sets its total there when done.</param>
@@ -81,111 +86,109 @@ public sealed class KeptListings : IAsyncDisposable
             : new ListingCache(_options.UnkeptFor, lister, time: _time) { OnListing = Listing, StampOf = _options.StampOf };
         if (_options.Keep && _options.SaveTo is { } saved)
         {
-            Load(saved);
+            _file = new ListingsFile(saved, _options.SaveKey ?? "", _logger, _options.Name);
+            Load();
+
+            // what is held from here on is written down as it changes, what the last run left not among it
+            Cache.FollowChanges();
+            if (_options.SaveEvery > TimeSpan.Zero)
+            {
+                var stopping = _stopping.Token;
+                _saveLoop = Task.Run(() => SaveLoopAsync(stopping), CancellationToken.None);
+            }
         }
     }
 
-    private const int SavedVersion = 2;
-
     /// <summary>
-    /// The listings an earlier run saved for the same <see cref="KeptListingsOptions.SaveKey"/>, until the first walk lists
-    /// them afresh, with their stamps (a folder whose stamp holds is not), and when the last walk that listed every folder was.
+    /// The listings an earlier run left for the same <see cref="KeptListingsOptions.SaveKey"/>, however far its walk had got,
+    /// with their stamps (a walk keeps a folder whose stamp holds, and everything held below it), what walks leave out, and
+    /// when the last walk that listed every folder was.
     /// </summary>
-    private void Load(string path)
+    private void Load()
+    {
+        var saved = _file!.Load();
+        foreach (var (folder, (listing, stamp)) in saved.Listings)
+        {
+            Cache.Restore(folder, listing, stamp);
+        }
+
+        foreach (var (folder, names) in saved.LeftOut)
+        {
+            _leftOut[folder] = names;
+        }
+
+        _restored = saved.Listings.Count > 0;
+        _fullWalkAt = saved.FullWalkAt;
+        if (_restored)
+        {
+            _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run answer at once, {Stamped:N0} of them stamped", _options.Name, saved.Listings.Count, saved.Listings.Values.Count(v => v.Stamp is not null));
+        }
+    }
+
+    /// <summary>Every <see cref="KeptListingsOptions.SaveEvery"/>, what changed is written down, so a run that ends without stopping (killed, cut off) loses only what changed since.</summary>
+    private async Task SaveLoopAsync(CancellationToken ct)
     {
         try
         {
-            using var file = File.OpenRead(path);
-            using var zip = new GZipStream(file, CompressionMode.Decompress);
-            if (JsonSerializer.Deserialize(zip, SavedListingsJson.Default.SavedListings) is not { Version: SavedVersion } saved || saved.Key != (_options.SaveKey ?? ""))
+            while (true)
             {
-                return;
+                await Task.Delay(_options.SaveEvery, _time, ct).ConfigureAwait(false);
+                Save();
             }
-
-            foreach (var (folder, listing) in saved.Listings)
-            {
-                Cache.Restore(folder, listing, saved.Stamps?.GetValueOrDefault(folder));
-            }
-
-            foreach (var (folder, names) in saved.LeftOut ?? [])
-            {
-                _leftOut[folder] = names.ToHashSet(StringComparer.Ordinal);
-            }
-
-            _restored = saved.Listings.Count > 0;
-            _fullWalkAt = saved.FullWalkAt;
-            _savedVersion = Cache.Version;
-            _changed = false;
-            _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run answer at once, {Stamped:N0} of them stamped", _options.Name, saved.Listings.Count, saved.Stamps?.Count ?? 0);
         }
-        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        catch (OperationCanceledException)
         {
-            // the first run
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or InvalidDataException or NotSupportedException)
-        {
-            _logger.LogInformation("{Name}: the listings saved by the last run could not be read ({Error}); listing afresh", _options.Name, ex.Message);
         }
     }
 
     /// <summary>
-    /// Saves the listings held now (<see cref="KeptListingsOptions.SaveTo"/>), where anything has changed since they were last
-    /// saved: written whole beside the file and moved into place, so a crash leaves the last good one.
+    /// Writes down what changed since the last write (<see cref="KeptListingsOptions.SaveTo"/>), appended to the file: a
+    /// walk adds what it listed since; a walk over a tree that has not changed, nothing. The whole is written afresh where the
+    /// file is another's, of another format or unknown after a failed write, or holds many more records than listings.
     /// </summary>
     private void Save()
     {
-        if (!_options.Keep || _options.SaveTo is not { } path)
+        if (_file is null)
         {
             return;
         }
 
-        // read before the snapshot: a change that lands meanwhile moves the version past this one, and the next save has it
-        var version = Cache.Version;
-        if (version == _savedVersion && !_changed)
+        lock (_saveGate)
         {
-            return;
-        }
-
-        try
-        {
-            var saved = new SavedListings(SavedVersion, _options.SaveKey ?? "", Cache.Snapshot().ToDictionary(p => p.Key, p => p.Value.ToList(), StringComparer.Ordinal))
+            try
             {
-                Stamps = Cache.Stamps().ToDictionary(StringComparer.Ordinal),
-                FullWalkAt = _fullWalkAt,
-                LeftOut = _leftOut.ToArray().ToDictionary(p => p.Key, p => p.Value.ToList(), StringComparer.Ordinal),
-            };
-            if (Path.GetDirectoryName(path) is { Length: > 0 } folder)
-            {
-                Directory.CreateDirectory(folder);
-            }
-
-            var temp = path + ".tmp";
-            using (var file = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
-            using (var zip = new GZipStream(file, CompressionLevel.Fastest))
-            {
-                JsonSerializer.Serialize(zip, saved, SavedListingsJson.Default.SavedListings);
-            }
-
-            // an antivirus holding the old file refuses the replace for a moment
-            for (var attempt = 1; ; attempt++)
-            {
-                try
+                if (_file.MustRewrite || _file.Records > 2L * Cache.Count + 10_000)
                 {
-                    File.Move(temp, path, overwrite: true);
-                    break;
+                    // the whole says everything that changed so far
+                    Cache.TakeChanges();
+                    _leftOutChanged.Clear();
+                    _fullWalkChanged = false;
+                    _file.Rewrite(Cache.AllHeld(), _fullWalkAt, _leftOut.ToArray().Select(p => (p.Key, p.Value)));
+                    return;
                 }
-                catch (Exception ex) when ((ex is UnauthorizedAccessException or IOException) && attempt < 6)
+
+                var (cleared, changes) = Cache.TakeChanges();
+                var leftOut = new List<(string Folder, IReadOnlySet<string>? Names)>();
+                foreach (var folder in _leftOutChanged.Keys)
                 {
-                    Thread.Sleep(10 << (attempt - 1));
+                    if (_leftOutChanged.TryRemove(folder, out _))
+                    {
+                        leftOut.Add((folder, _leftOut.TryGetValue(folder, out var names) ? names : null));
+                    }
+                }
+
+                var fullWalk = _fullWalkChanged;
+                _fullWalkChanged = false;
+                if (cleared || changes.Count > 0 || leftOut.Count > 0 || fullWalk)
+                {
+                    _file.Append(cleared, changes, _fullWalkAt, fullWalk, leftOut);
                 }
             }
-
-            _savedVersion = version;
-            _changed = false;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
-        {
-            _logger.LogInformation("{Name}: the listings could not be saved for the next run ({Error})", _options.Name, ex.Message);
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+            {
+                // the next write is the whole: what the file says after this is not known
+                _logger.LogInformation("{Name}: the listings could not be saved for the next run ({Error})", _options.Name, ex.Message);
+            }
         }
     }
 
@@ -201,10 +204,22 @@ public sealed class KeptListings : IAsyncDisposable
     /// </summary>
     public void StartWalks()
     {
+        CancellationTokenSource? heldWalk;
         lock (_gate)
         {
             _everyFolder.TrySetResult();
+            heldWalk = _heldWalk;
             StartLoop();
+        }
+
+        // a walk of what is held gives way: the first of every folder begins at once
+        try
+        {
+            heldWalk?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // it ended meanwhile
         }
     }
 
@@ -382,8 +397,11 @@ public sealed class KeptListings : IAsyncDisposable
 
         await _stopping.CancelAsync().ConfigureAwait(false);
         await walking.ConfigureAwait(false);
+        await _saveLoop.ConfigureAwait(false);
         _firstWalk.TrySetResult();
         _stopping.Dispose();
+
+        // what changed since the last write: a stop part way through a walk keeps all it listed, and costs only that
         Save();
     }
 
@@ -422,14 +440,52 @@ public sealed class KeptListings : IAsyncDisposable
             var counting = everyFolder && !counted;
             var counters = counting ? _counters : new SourceCounters();
             var started = _time.GetTimestamp();
+
+            // a walk of what is held gives way to the count when it is asked for (StartWalks), which goes through all of it and
+            // more: run to its end, it went through every folder a restart had brought back before the count could begin, and
+            // the count then went through them all again
+            var givesWay = everyFolder ? null : CancellationTokenSource.CreateLinkedTokenSource(ct);
+            if (givesWay is not null)
+            {
+                lock (_gate)
+                {
+                    _heldWalk = givesWay;
+                    if (_everyFolder.Task.IsCompleted)
+                    {
+                        givesWay.Cancel();
+                    }
+                }
+            }
+
             try
             {
                 var full = FullWalkDue;
-                var whole = await WalkAsync(counters, full, !everyFolder, ct).ConfigureAwait(false);
+                bool whole;
+                try
+                {
+                    whole = await WalkAsync(counters, full, !everyFolder, givesWay?.Token ?? ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (givesWay is not null && !ct.IsCancellationRequested)
+                {
+                    _logger.LogInformation("{Name}: the walk of the folders asked for gave way to the count", _options.Name);
+                    continue;
+                }
+                finally
+                {
+                    if (givesWay is not null)
+                    {
+                        lock (_gate)
+                        {
+                            _heldWalk = null;
+                        }
+
+                        givesWay.Dispose();
+                    }
+                }
                 if (full || _fullWalkAt is null)
                 {
                     _fullWalkAt = _time.GetUtcNow();
-                    _changed = true;
+                    _fullWalkChanged = true;
                 }
 
                 // what this walk could not list stays as it is until the next one, which begins a WalkEvery from now
@@ -611,12 +667,15 @@ public sealed class KeptListings : IAsyncDisposable
                     var leftOut = hasFolders && !heldAlone && _options.LeftOut is { } left ? await left(folder, ct).ConfigureAwait(false) : null;
                     if (leftOut is { Count: > 0 })
                     {
-                        _leftOut[folder] = leftOut;
-                        _changed = true;
+                        if (!_leftOut.TryGetValue(folder, out var had) || !had.SetEquals(leftOut))
+                        {
+                            _leftOut[folder] = leftOut;
+                            _leftOutChanged[folder] = 0;
+                        }
                     }
                     else if (!heldAlone && _leftOut.TryRemove(folder, out _))
                     {
-                        _changed = true;
+                        _leftOutChanged[folder] = 0;
                     }
 
                     long files = 0;
@@ -955,6 +1014,14 @@ public sealed record KeptListingsOptions
     public string? SaveKey { get; init; }
 
     /// <summary>
+    /// With <see cref="SaveTo"/>, how often what changed is written down (thirty seconds): appended to the file as a walk goes,
+    /// so a source stopped part way through its first walk starts the next run from what it had, and one that ends without
+    /// stopping (its process killed, the machine turned off) loses only what changed since. Zero writes only after each walk
+    /// and when the source stops.
+    /// </summary>
+    public TimeSpan SaveEvery { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// A folder's stamp (<see cref="ListingCache.StampOf"/>): what its listing and every listing below it depend on, as the
     /// upstream tells it cheaply. A walk keeps a stamped folder whose stamp holds, and everything held below it, as they
     /// are. Null (the default) stamps nothing: every walk lists every folder.
@@ -969,7 +1036,7 @@ public sealed record KeptListingsOptions
     public TimeSpan FullWalkEvery { get; init; } = TimeSpan.FromDays(1);
 }
 
-/// <summary>The listings a run saved (<see cref="KeptListingsOptions.SaveTo"/>): what they are for, each folder's, the stamps held with them, and when every folder was last listed.</summary>
+/// <summary>The listings a run saved before the file became a log (<see cref="ListingsFile"/>): read once, and written in the new format at the first save.</summary>
 internal sealed record SavedListings(int Version, string Key, Dictionary<string, List<VfsEntry>> Listings)
 {
     public Dictionary<string, string>? Stamps { get; init; }

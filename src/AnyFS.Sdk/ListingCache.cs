@@ -42,7 +42,16 @@ public sealed class ListingCache
     }
 
     /// <summary>How many listings are held.</summary>
-    public int Count => _entries.Count;
+    public int Count
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _keys.Count;
+            }
+        }
+    }
 
     /// <summary>
     /// Moves with every change to what is held (a listing kept, replaced or let go, a stamp taken off): a source that saves
@@ -202,6 +211,7 @@ public sealed class ListingCache
 
         _entries[path] = entry;
         _keys.Add(path);
+        _changes?.Add(path);
         Interlocked.Increment(ref _version);
     }
 
@@ -214,8 +224,57 @@ public sealed class ListingCache
         }
 
         _keys.Remove(path);
+        _changes?.Add(path);
         Interlocked.Increment(ref _version);
         return true;
+    }
+
+    // with changes followed (KeptListings writing them down as they come), the paths whose listing or stamp changed since
+    // they were last taken, and whether everything was let go meanwhile
+    private HashSet<string>? _changes;
+    private bool _clearedSinceTaken;
+
+    /// <summary>From now on, every change to what is held is remembered until <see cref="TakeChanges"/> takes it.</summary>
+    internal void FollowChanges()
+    {
+        lock (_gate)
+        {
+            _changes ??= new HashSet<string>(StringComparer.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// What changed since the last time (with <see cref="FollowChanges"/>): whether everything was let go first, then each
+    /// changed folder as it is held now, its listing and stamp, or no listing where it is held no more. Taken, so the next
+    /// time says only what changes after this.
+    /// </summary>
+    internal (bool Cleared, List<(string Path, IReadOnlyList<VfsEntry>? Listing, string? Stamp)> Changes) TakeChanges()
+    {
+        lock (_gate)
+        {
+            var changes = new List<(string, IReadOnlyList<VfsEntry>?, string?)>(_changes?.Count ?? 0);
+            foreach (var path in _changes ?? [])
+            {
+                changes.Add(_entries.TryGetValue(path, out var held) ? (path, held.List, held.Stamp) : (path, null, null));
+            }
+
+            _changes?.Clear();
+            var cleared = _clearedSinceTaken;
+            _clearedSinceTaken = false;
+            return (cleared, changes);
+        }
+    }
+
+    /// <summary>Every listing held now with its stamp, nothing copied: for writing them all down (a moment's view; changes meanwhile are followed as usual).</summary>
+    internal IEnumerable<(string Path, IReadOnlyList<VfsEntry> Listing, string? Stamp)> AllHeld()
+    {
+        foreach (var (path, entry) in _entries)
+        {
+            if (!IsExpired(entry))
+            {
+                yield return (path, entry.List, entry.Stamp);
+            }
+        }
     }
 
     /// <summary>
@@ -386,6 +445,12 @@ public sealed class ListingCache
             _entries.Clear();
             _keys.Clear();
             Interlocked.Increment(ref _version);
+            if (_changes is not null)
+            {
+                _changes.Clear();
+                _clearedSinceTaken = true;
+            }
+
             _failures.Clear();
             foreach (var fetch in _fetches.Values)
             {
@@ -514,7 +579,9 @@ public sealed class ListingCache
 
     private void TrimIfNeededLocked()
     {
-        if (_entries.Count <= _maxDirectories)
+        // the paths' index counts what is held at no cost: the dictionary's own Count takes every one of its locks, at every
+        // listing stored, which made bringing back a big run's listings take half a minute
+        if (_keys.Count <= _maxDirectories)
         {
             return;
         }
@@ -527,13 +594,13 @@ public sealed class ListingCache
             }
         }
 
-        if (_entries.Count <= _maxDirectories)
+        if (_keys.Count <= _maxDirectories)
         {
             return;
         }
 
         // still over: drop the oldest quarter
-        var oldest = _entries.OrderBy(p => p.Value.Fetched).Take(Math.Max(1, _entries.Count / 4)).ToList();
+        var oldest = _entries.OrderBy(p => p.Value.Fetched).Take(Math.Max(1, _keys.Count / 4)).ToList();
         foreach (var pair in oldest)
         {
             RemoveLocked(pair.Key);

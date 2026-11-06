@@ -241,8 +241,10 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   the rest; `ListTree` hands it a whole subtree at once where you have a quicker way than folder by
   folder (GitLab lists a repository a hundred entries a request), and where it fails the rest of that
   walk goes folder by folder. A folder that could not be listed makes the count a lower bound too.
-  `SaveTo` saves the listings to a file in your state folder when a walk ends and when the source
-  stops, and reads them back at the next start, so every folder opens at once from the first moment;
+  `SaveTo` writes the listings to a file in your state folder as they change (every `SaveEvery`,
+  thirty seconds, after each walk and when the source stops; appended to, so a stop costs only what
+  changed since), and reads them back at the next start, so every folder opens at once from the first
+  moment, and a source stopped part way through its first walk goes on from where it was;
   `SaveKey` says what they were saved for (the account, the server, the settings that shape the tree
   and a version of your own that moves when what you list or how you measure files changes), and
   another's are not read. `StampOf` gives a folder's stamp: what its listing and every listing below
