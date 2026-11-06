@@ -355,10 +355,11 @@ internal sealed class GitLabApi : IDisposable
             return status.ToString(CultureInfo.InvariantCulture);
         }
 
+        // a hold is asked for by a throttled answer, or by what any answer (a 404's too) says is left of the limit: nothing
         var observed = Header(response, "RateLimit-Observed");
         var allowed = Header(response, "RateLimit-Limit");
         var counts = observed is not null && allowed is not null ? $": {observed} of {allowed} requests used" : "";
-        return response.IsSuccessStatusCode ? $"the quota of {limit} is used up{counts}" : $"{status}, {limit}{counts}";
+        return response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable ? $"{status}, {limit}{counts}" : $"the quota of {limit} is used up{counts}";
     }
 
     private async Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
