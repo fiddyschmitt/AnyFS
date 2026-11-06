@@ -224,6 +224,25 @@ public class OutlookItemListingTests
     }
 
     [TestMethod]
+    public async Task AfterTheCountAPassOverEverythingAsksTheServerNothing()
+    {
+        var fake = WithMay(out _);
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+            await UpstreamRequestRows.AllEndAsync(context);
+            var requests = context.UpstreamRequests.Requests.Select(r => r.ToString()).ToList();
+            var before = requests.Count;
+            var folders = await ListEverything.OfAsync(source);
+            Assert.IsTrue(folders > 20, folders.ToString());
+            var after = context.UpstreamRequests.Requests.Select(r => r.ToString()).ToList();
+            Assert.AreEqual(before, after.Count, "asked for after the walk: " + ListEverything.Since(after, before));
+        }
+    }
+
+    [TestMethod]
     public async Task ACountsReportsKeepTheOrderOfItsCountWhileSeveralBatchesEndTogether()
     {
         // batches that end together report together, and a busy host takes reports made at once in no set order: each one

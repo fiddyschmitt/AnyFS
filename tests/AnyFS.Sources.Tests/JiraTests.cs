@@ -712,6 +712,20 @@ public class JiraTests
     // --- the walk ------------------------------------------------------------------------------------------------------
 
     [TestMethod]
+    public async Task AfterTheCountAPassOverEverythingAsksTheServerNothing()
+    {
+        var fake = JiraSeed.Lab();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, JiraSeed.Settings(fake), context);
+        await source.CountFilesAsync(CancellationToken.None);
+        await UpstreamRequestRows.AllEndAsync(context);
+        var before = fake.Requests.Count;
+        var folders = await ListEverything.OfAsync(source);
+        Assert.IsTrue(folders > 20, folders.ToString());
+        Assert.AreEqual(before, fake.Requests.Count, "asked for after the walk: " + ListEverything.Since(fake.Requests, before));
+    }
+
+    [TestMethod]
     public async Task TheCountWalksEveryProjectWholeAndKeepsWhatItListed()
     {
         var fake = JiraSeed.Lab();

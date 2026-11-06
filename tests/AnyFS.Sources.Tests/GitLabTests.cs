@@ -1220,6 +1220,31 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
+    public async Task AfterTheCountAPassOverEverythingAsksTheServerNothing()
+    {
+        // a search over every file (FileLocator Pro's), once the first walk is done: answered from what the walk kept, the
+        // branches' and tags' folders among it (until 6-Nov-2026 left out of the walk, so the pass asked the server for each)
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server), context);
+        await using var _s = source;
+        Assert.IsTrue((await ListAsync(source, "anyfs")).Count > 0);
+        var clients = context.UpstreamRequests.Requests.Count;
+        Assert.IsTrue(clients > 0);
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(EnumerationState.Complete, source.Counters.State, "nothing left out: the count is whole");
+        await UpstreamRequestRows.AllEndAsync(context);
+        var rows = context.UpstreamRequests.Requests;
+        Assert.IsTrue(rows.Take(clients).All(r => !r.What.EndsWith("(walk)", StringComparison.Ordinal)), "a client's requests are its own: " + string.Join("; ", rows.Take(clients)));
+        Assert.IsTrue(rows.Skip(clients).Count(r => r.What.EndsWith("(walk)", StringComparison.Ordinal)) > 20, "the walk's say so: " + string.Join("; ", rows.Skip(clients).Take(10)));
+
+        var before = fake.Requests.Count;
+        var folders = await ListEverything.OfAsync(source);
+        Assert.IsTrue(folders > 30, folders.ToString());
+        Assert.AreEqual(before, fake.Requests.Count, "asked for after the walk: " + ListEverything.Since(fake.Requests, before));
+    }
+
+    [TestMethod]
     public async Task AClientsRequestTakesTheNextSlotAheadOfTheWalks()
     {
         // one request at a time over a server that takes 40 ms to answer, the walk's requests queued for the slot: a client's
@@ -1407,17 +1432,19 @@ public class GitLabSourceTests
         await using var _s = source;
         await source.CountFilesAsync(CancellationToken.None);
 
-        // each project's default branch whole, a hundred entries a request: the app's 264 in three, the docs' one in one;
-        // the sizes a hundred at a time: the app's 258 files in three, the docs' README in one
-        Assert.AreEqual(3 + 1, fake.Count("repository/tree"), "the default branches' trees, whole, and no branch's or tag's");
+        // each repository whole, a hundred entries a request: the app's default branch (264 in three) and each of its branches
+        // and tags at a commit of its own (feature/x 265 in three, Feature one in one; main and v1.0 share a commit, as do
+        // feature/x and release/2.0, and a commit kept is not asked for again), the docs' one in one; the sizes a hundred at a
+        // time, the same (until 6-Nov-2026 the branches and tags were left out, and listed folder by folder when opened)
+        Assert.AreEqual(3 + 3 + 1 + 1, fake.Count("repository/tree"), "every repository at every commit, whole, once: " + string.Join("; ", fake.Requests.Where(r => r.Contains("repository/tree", StringComparison.Ordinal))));
         Assert.AreEqual(0, fake.Count("path=many"), "no repository folder listed alone");
-        Assert.AreEqual(3 + 1, fake.Count("POST /api/graphql"));
+        Assert.AreEqual(3 + 3 + 1 + 1, fake.Count("POST /api/graphql"));
         Assert.IsTrue(fake.Count("/notes") > 0, "the issues' and merge requests' notes: their folders are walked");
         Assert.IsTrue(fake.Count("/jobs") > 0, "the pipelines' jobs too");
 
-        // docs: README.md and the wiki's five pages; app: 258 files (and its release's)
-        Assert.IsTrue(source.Counters.FilesKnown >= 1 + 5 + 258, $"{source.Counters.FilesKnown:N0} files");
-        Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "the branches' and tags' repositories left out make it a lower bound");
+        // docs: README.md and the wiki's five pages; app: 258 files on main (and its release's), as many again on each branch and tag
+        Assert.IsTrue(source.Counters.FilesKnown >= 1 + 5 + 258 * 4, $"{source.Counters.FilesKnown:N0} files");
+        Assert.AreEqual(EnumerationState.Complete, source.Counters.State, "nothing left out: the count is whole");
 
         // every folder the walk went into answers from what it kept
         var asked = fake.Requests.Count;
@@ -1429,10 +1456,10 @@ public class GitLabSourceTests
         CollectionAssert.Contains((await ListAsync(source, "docs/issues/#1 Install fails on Debian")).Select(e => e.Name).ToList(), "comments.md");
         Assert.AreEqual(asked, fake.Requests.Count, "nothing asked");
 
-        // a folder the walk left out (a tag's repository, at a commit that is no branch's head) is listed when opened
-        var trees = fake.Count("repository/tree");
+        // a tag's repository too, walked with the rest (until 6-Nov-2026 left out, and listed when opened)
         Assert.IsTrue((await ListAsync(source, "tools/app/tags/release/2.0")).Count > 0);
-        Assert.IsTrue(fake.Count("repository/tree") > trees, "the tag's repository, listed now");
+        Assert.IsTrue((await ListAsync(source, "tools/app/branches/Feature")).Count > 0);
+        Assert.AreEqual(asked, fake.Requests.Count, "nothing asked for a branch's or a tag's folder either");
     }
 
     [TestMethod]

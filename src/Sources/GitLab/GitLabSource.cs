@@ -744,27 +744,35 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     }
 
     /// <summary>
-    /// For a walk: a project's <c>files</c>, its default branch, whole, every folder's listing at the head commit by path,
-    /// from the repository kept whole first (<see cref="FillTreeAsync"/>); null for any other folder, which the walk lists
-    /// alone.
+    /// For a walk: a repository whole, every folder's listing at a commit by path, from the repository kept whole first
+    /// (<see cref="FillTreeAsync"/>): a project's <c>files</c> (its default branch at its head) or a branch's or tag's folder (at
+    /// its commit); null for any other folder, which the walk lists alone.
     /// </summary>
     private async Task<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?> ListTreeAsync(string path, CancellationToken ct)
     {
-        if (await ResolveAsync(path, ct).ConfigureAwait(false) is not FilesFolder files)
-        {
-            return null;
-        }
-
         var listings = new Dictionary<string, IReadOnlyList<VfsEntry>>(StringComparer.Ordinal);
-        if (await Guard(() => HeadAsync(files.Project, ct)).ConfigureAwait(false) is not { } head)
+        TreeFolder root;
+        switch (await ResolveAsync(path, ct).ConfigureAwait(false))
         {
-            listings[path] = [];
-            return listings;
+            case FilesFolder files:
+                if (await Guard(() => HeadAsync(files.Project, ct)).ConfigureAwait(false) is not { } head)
+                {
+                    listings[path] = [];
+                    return listings;
+                }
+
+                root = files.At(head);
+                break;
+            case TreeFolder { RepoPath.Length: 0 } tree:
+                root = tree;
+                break;
+            default:
+                return null;
         }
 
-        await Guard(() => FillTreeAsync(files.Project, head.Commit, ct)).ConfigureAwait(false);
+        await Guard(() => FillTreeAsync(root.Project, root.Commit, ct)).ConfigureAwait(false);
         var pending = new Queue<(GlFolder Folder, string Path)>();
-        pending.Enqueue((files.At(head), path));
+        pending.Enqueue((root, path));
         while (pending.TryDequeue(out var next))
         {
             // from what is kept now: no request
@@ -792,6 +800,25 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             return 0;
         }
 
+        // once, however many ask at once: a branch and a tag at the same commit, walked together, read it one time
+        var filling = _filling.GetOrAdd($"{project.Id}@{commit}", _ => Task.Run(() => FillTreeNowAsync(project, commit, _stopping.Token)));
+        try
+        {
+            return await filling.WaitAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (filling.IsCompleted)
+            {
+                _filling.TryRemove(new KeyValuePair<string, Task<int>>($"{project.Id}@{commit}", filling));
+            }
+        }
+    }
+
+    private readonly ConcurrentDictionary<string, Task<int>> _filling = new(StringComparer.Ordinal);
+
+    private async Task<int> FillTreeNowAsync(GlProject project, string commit, CancellationToken ct)
+    {
         var folders = new Dictionary<string, List<GlTreeEntry>>(StringComparer.Ordinal) { [""] = [] };
         List<GlTreeEntry> In(string folder) => folders.TryGetValue(folder, out var entries) ? entries : folders[folder] = [];
         var query = $"projects/{project.Id}/repository/tree?ref={Uri.EscapeDataString(commit)}&recursive=true&per_page=100&pagination=keyset";

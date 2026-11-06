@@ -527,6 +527,24 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task AfterTheCountAPassOverEverythingAsksTheServerNothing()
+    {
+        var fake = Seed();
+        fake.AddLibraryFile(Site, "General/report.docx", Encoding.UTF8.GetBytes("a report"), When);
+        using var context = new TestSourceContext();
+        await using var source = new TeamsSource(new TeamsSettings { Account = fake.Account }, fake.StandIn(2_000, 200));
+        await source.InitialiseAsync(context, CancellationToken.None);
+        await source.CountFilesAsync(CancellationToken.None);
+        await UpstreamRequestRows.AllEndAsync(context);
+        var requests = context.UpstreamRequests.Requests.Select(r => r.ToString()).ToList();
+        var before = requests.Count;
+        var folders = await ListEverything.OfAsync(source);
+        Assert.IsTrue(folders > 5, folders.ToString());
+        var after = context.UpstreamRequests.Requests.Select(r => r.ToString()).ToList();
+        Assert.AreEqual(before, after.Count, "asked for after the walk: " + ListEverything.Since(after, before));
+    }
+
+    [TestMethod]
     public async Task CountFilesWalksTheConversationsTooWithTheRequestsAtATime()
     {
         var fake = Seed();

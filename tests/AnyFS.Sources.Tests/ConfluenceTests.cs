@@ -493,6 +493,20 @@ public class ConfluenceTests
     }
 
     [TestMethod]
+    public async Task AfterTheCountAPassOverEverythingAsksTheServerNothing()
+    {
+        var fake = ConfluenceSeed.Lab();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake), context);
+        await source.CountFilesAsync(CancellationToken.None);
+        await UpstreamRequestRows.AllEndAsync(context);
+        var before = fake.Requests.Count;
+        var folders = await ListEverything.OfAsync(source);
+        Assert.IsTrue(folders > 10, folders.ToString());
+        Assert.AreEqual(before, fake.Requests.Count, "asked for after the walk: " + ListEverything.Since(fake.Requests, before));
+    }
+
+    [TestMethod]
     public async Task WhatAKeptListingNamesIsFoundFromItAfterARestart()
     {
         var fake = ConfluenceSeed.Lab();

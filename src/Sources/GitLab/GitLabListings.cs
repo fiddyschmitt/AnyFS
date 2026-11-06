@@ -25,12 +25,14 @@ internal sealed partial class SavedTreesJson : JsonSerializerContext;
 /// <summary>
 /// The repository's folders at the commits the source has listed (spec 7.8). A commit's tree never changes, so a folder
 /// listed once is kept for good, between starts too (<c>state\trees.json.gz</c>): a project opened again lists at once,
-/// and only a branch that moved costs requests. Bounded: past <see cref="MaxFolders"/> the oldest-listed go.
+/// and only a branch that moved costs requests. Bounded: past <see cref="MaxFolders"/> the oldest-listed go (a million,
+/// as the SDK keeps listings; until 6-Nov-2026 fifty thousand, which a server of thousands of projects with their branches
+/// and tags walked would have gone past, and listed the oldest again).
 /// </summary>
 internal sealed class TreeStore
 {
     public const string FileName = "trees.json.gz";
-    private const int MaxFolders = 50_000;
+    private const int MaxFolders = 1_000_000;
 
     private readonly ConcurrentDictionary<string, (List<TreeItem> Items, long Order)> _folders = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Task<List<TreeItem>>> _listing = new(StringComparer.Ordinal);

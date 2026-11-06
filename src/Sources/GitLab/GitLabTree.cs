@@ -328,9 +328,11 @@ internal sealed class RefsFolder(GlProject project, RefKind kind, string prefix,
 
         var raw = level.Keys.ToList();
         var names = GitLabNames.Unique(raw);
-        // a ref's folder is a whole repository: not walked, but listed when opened
+        // a ref's folder is the whole repository at its commit: walked whole as files is (ListTree), nothing asked where the
+        // commit is kept already (a branch at the default branch's head costs nothing); until 6-Nov-2026 left out of the walk
+        // and listed folder by folder when opened, so a search's first pass over the tree asked the server for every one
         return raw.Select((segment, i) => level[segment] is { } r
-            ? (GlNode)new TreeFolder(project, r.Commit, "", names[i], r.Committed, walked: false)
+            ? (GlNode)new TreeFolder(project, r.Commit, "", names[i], r.Committed)
             : new RefsFolder(project, kind, prefix + segment + "/", names[i], Modified)).ToList();
     }
 }
@@ -340,9 +342,14 @@ internal sealed class RefsFolder(GlProject project, RefKind kind, string prefix,
 /// then the rest, each in the order of their names, however GitLab sent them (a folder listed alone, or the whole tree at
 /// once), so twins in case are numbered the same either way.
 /// </summary>
-internal sealed class TreeFolder(GlProject project, string commit, string path, string name, DateTimeOffset? time, bool walked = true) : GlFolder(name, time, time)
+internal sealed class TreeFolder(GlProject project, string commit, string path, string name, DateTimeOffset? time) : GlFolder(name, time, time)
 {
-    public override bool Walked => walked;
+    public GlProject Project => project;
+
+    public string Commit => commit;
+
+    /// <summary>The folder's path in the repository; empty for its root (<c>files</c>, or a branch's or tag's folder).</summary>
+    public string RepoPath => path;
 
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {

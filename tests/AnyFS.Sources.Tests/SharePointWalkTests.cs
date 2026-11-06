@@ -56,6 +56,18 @@ public class SharePointWalkTests
     }
 
     [TestMethod]
+    public async Task AfterTheCountAPassOverEverythingAsksTheServerNothing()
+    {
+        var store = BusyTenant();
+        await using var source = await MemorySharePointSource.StartAsync(store, otherSites: true, walkEvery: TimeSpan.FromHours(1));
+        await source.CountFilesAsync(None);
+        var before = store.FolderListings;
+        var folders = await ListEverything.OfAsync(source);
+        Assert.IsTrue(folders > 10, folders.ToString());
+        Assert.AreEqual(before, store.FolderListings, "folders listed from the store after the walk");
+    }
+
+    [TestMethod]
     public async Task KeptListingsAreWhatTheSourceLastSawUntilTheNextWalk()
     {
         var store = MemoryDocumentStore.Sample();
