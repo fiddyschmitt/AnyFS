@@ -579,58 +579,69 @@ public class KeptListingsTests
             tree[$"{part}/y"] = [VfsEntry.File("h.txt", 1)];
         }
 
-        // which parts have a listing in flight, and the most at once
-        var inFlight = new Dictionary<string, int>(StringComparer.Ordinal);
-        var started = new List<string>();
-        var most = 0;
-        async IAsyncEnumerable<VfsEntry> SlowAsync(string path, [EnumeratorCancellation] CancellationToken ct)
+        // a walk with so many parts at once: the most that had a listing in flight together, and the order they began in
+        async Task<(int Most, List<string> Started)> WalkAsync(int partsAtOnce)
         {
-            var part = path.Split('/')[0];
-            if (part.Length > 0)
+            var inFlight = new Dictionary<string, int>(StringComparer.Ordinal);
+            var started = new List<string>();
+            var most = 0;
+            async IAsyncEnumerable<VfsEntry> SlowAsync(string path, [EnumeratorCancellation] CancellationToken ct)
             {
-                lock (inFlight)
-                {
-                    if (!started.Contains(part))
-                    {
-                        started.Add(part);
-                    }
-
-                    inFlight[part] = inFlight.GetValueOrDefault(part) + 1;
-                    most = Math.Max(most, inFlight.Count);
-                }
-            }
-
-            try
-            {
-                await Task.Delay(15, ct);
-                foreach (var e in tree[path])
-                {
-                    yield return e;
-                }
-            }
-            finally
-            {
+                var part = path.Split('/')[0];
                 if (part.Length > 0)
                 {
                     lock (inFlight)
                     {
-                        if (--inFlight[part] == 0)
+                        if (!started.Contains(part))
                         {
-                            inFlight.Remove(part);
+                            started.Add(part);
+                        }
+
+                        inFlight[part] = inFlight.GetValueOrDefault(part) + 1;
+                        most = Math.Max(most, inFlight.Count);
+                    }
+                }
+
+                try
+                {
+                    await Task.Delay(15, ct);
+                    foreach (var e in tree[path])
+                    {
+                        yield return e;
+                    }
+                }
+                finally
+                {
+                    if (part.Length > 0)
+                    {
+                        lock (inFlight)
+                        {
+                            if (--inFlight[part] == 0)
+                            {
+                                inFlight.Remove(part);
+                            }
                         }
                     }
                 }
             }
+
+            var counters = new SourceCounters();
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, Parallelism = 2, PartsBelow = (folder, _) => ValueTask.FromResult(folder.Length == 0), PartsAtOnce = partsAtOnce };
+            await using var kept = new KeptListings(SlowAsync, counters, NullLogger.Instance, options);
+            await kept.CountAsync(CancellationToken.None);
+            Assert.AreEqual(12, counters.FilesKnown, "every part walked");
+            return (most, started);
         }
 
-        var counters = new SourceCounters();
-        var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, Parallelism = 2, PartsBelow = (folder, _) => ValueTask.FromResult(folder.Length == 0), PartsAtOnce = 2 };
-        await using var kept = new KeptListings(SlowAsync, counters, NullLogger.Instance, options);
-        await kept.CountAsync(CancellationToken.None);
-        Assert.AreEqual(12, counters.FilesKnown, "every part walked");
+        var (most, started) = await WalkAsync(2);
         Assert.AreEqual(2, most, "two parts at a time, no more");
         CollectionAssert.AreEquivalent(new[] { "a", "b" }, started.Take(2).ToList(), "the first two found go first");
-        Assert.IsTrue(started.IndexOf("c") < started.IndexOf("d"), $"then each in the order it was found: {string.Join(", ", started)}");
+
+        // two turns that come free together (a and b ending at once) are taken together, and which of their parts begins first
+        // is anyone's guess (CI, 6-Nov-2026: d before c): one at a time, each turn comes free alone, and the order found shows
+        (most, started) = await WalkAsync(1);
+        Assert.AreEqual(1, most, "one part at a time");
+        CollectionAssert.AreEqual(new[] { "a", "b", "c", "d" }, started, $"each in the order it was found: {string.Join(", ", started)}");
     }
 
     [TestMethod]
