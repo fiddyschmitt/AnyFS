@@ -77,17 +77,25 @@ public static class VfsPath
         return true;
     }
 
-    private static bool HasDotSegment(string path)
+    /// <summary>Whether any segment is "." or "..": a scan, since every call of every mount passes here.</summary>
+    private static bool HasDotSegment(ReadOnlySpan<char> path)
     {
-        foreach (var seg in path.Split('/'))
+        while (true)
         {
-            if (seg is "." or "..")
+            var slash = path.IndexOf('/');
+            var segment = slash < 0 ? path : path[..slash];
+            if (segment.Length is 1 or 2 && segment[0] == '.' && (segment.Length == 1 || segment[1] == '.'))
             {
                 return true;
             }
-        }
 
-        return false;
+            if (slash < 0)
+            {
+                return false;
+            }
+
+            path = path[(slash + 1)..];
+        }
     }
 
     /// <summary>Splits a normalised path into segments; the root gives an empty array.</summary>

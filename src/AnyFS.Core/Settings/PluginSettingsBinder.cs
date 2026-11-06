@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Text.Json;
@@ -34,6 +35,9 @@ public static class PluginSettingsBinder
 
     private static readonly JsonSerializerOptions Options = CreateOptions();
 
+    // each settings type described once: the form, the files and the secret store all ask, the form at every keystroke
+    private static readonly ConcurrentDictionary<Type, IReadOnlyList<SettingProperty>> Described = new();
+
     [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = Justification)]
     [UnconditionalSuppressMessage("AOT", "IL3050", Justification = Justification)]
     private static JsonSerializerOptions CreateOptions() => new()
@@ -47,6 +51,17 @@ public static class PluginSettingsBinder
     };
 
     public static IReadOnlyList<SettingProperty> Describe([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)] Type settingsType)
+    {
+        if (Described.TryGetValue(settingsType, out var known))
+        {
+            return known;
+        }
+
+        var described = DescribeNow(settingsType);
+        return Described.GetOrAdd(settingsType, described);
+    }
+
+    private static List<SettingProperty> DescribeNow([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)] Type settingsType)
     {
         var list = new List<SettingProperty>();
         foreach (var property in settingsType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
