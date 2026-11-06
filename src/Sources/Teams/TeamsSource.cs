@@ -239,9 +239,18 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
         if (node is MarkdownFile markdown)
         {
-            // built now (the last run's listing named it): served as built, and the listing put right where its length differs
+            // built now (the last run's listing named it): served as built, and the listing put right where its length differs.
+            // One of the root's files built while this open found it is found again: the root listed after the build measures
+            // the newer bytes, and serving these would put back what this open came upon, "being read" on a slow start
+            // (6-Nov-2026), and the listing's length with it, until the next walk
+            var told = (await AwaitedAsync(parent, Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase)).ConfigureAwait(false))?.Length;
+            if (BuiltSince(normalized, markdown.Content))
+            {
+                return await OpenAsync(path, mode, ct).ConfigureAwait(false);
+            }
+
             Serve(normalized, markdown.Content);
-            if ((await AwaitedAsync(parent, Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase)).ConfigureAwait(false))?.Length is { } told && told != markdown.Content.Length)
+            if (told is { } length && length != markdown.Content.Length)
             {
                 Kept.Cache.Update(normalized, markdown.Entry, StringComparison.OrdinalIgnoreCase);
             }
@@ -1052,6 +1061,15 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             }
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="path"/> is one of the root's files built behind the listings, built since <paramref name="found"/>
+    /// were its bytes: what a listing gives it now differs from what was found.
+    /// </summary>
+    private bool BuiltSince(string path, byte[] found)
+        => VfsPath.Parent(path).Length == 0
+            && new[] { _myGroups, _allGroups, _calls, _activity }.FirstOrDefault(f => f.Name.Equals(path, StringComparison.OrdinalIgnoreCase)) is { Last.Bytes: { } now }
+            && !now.AsSpan().SequenceEqual(found);
 
     /// <summary>Whether a root listing has a built file as it is now: served with its bytes, or not shown where it has none.</summary>
     private bool Measured(IReadOnlyList<VfsEntry> root, BuiltFile file)
