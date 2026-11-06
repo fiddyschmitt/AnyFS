@@ -159,7 +159,10 @@ public sealed class AnyFsEngine : IAsyncDisposable
     {
         _stopped = true;
         await _shutdown.CancelAsync().ConfigureAwait(false);
-        foreach (var collection in Collections)
+
+        // the mounts first, so nothing is asked of a source while it stops; then every source at once: one after another, a
+        // window closing gave its 15 s to the first, and the others were cut off before they had written what they kept
+        await Task.WhenAll(Collections.Select(async collection =>
         {
             try
             {
@@ -169,9 +172,9 @@ public sealed class AnyFsEngine : IAsyncDisposable
             {
                 _logger.LogWarning(ex, "collection {Collection}: stop failed", collection.Name);
             }
-        }
+        })).ConfigureAwait(false);
 
-        foreach (var source in Sources)
+        await Task.WhenAll(Sources.Select(async source =>
         {
             try
             {
@@ -181,7 +184,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
             {
                 _logger.LogWarning(ex, "source {Source}: stop failed", source.Definition.Name);
             }
-        }
+        })).ConfigureAwait(false);
 
         FlushStats();
         try
