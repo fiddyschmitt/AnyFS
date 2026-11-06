@@ -178,15 +178,16 @@ internal abstract class FakeAtlassian
             return Login(body?["username"]?.GetValue<string>(), body?["password"]?.GetValue<string>(), json: true);
         }
 
-        if (request.Method == "POST" && path is "login.jsp" or "dologin.action")
+        if (request.Method == "POST" && path is "login.jsp" or "dologin.action" or "j_atl_security_check" or "userlogin!doDefault.action")
         {
             if (!LoginForm)
             {
                 return Response.Redirect("https://idp.fake.test/saml");
             }
 
+            // Seraph's form names (Jira, Confluence, Bamboo), or Bitbucket's
             var form = request.Form;
-            return Login(form.GetValueOrDefault("os_username"), form.GetValueOrDefault("os_password"), json: false);
+            return Login(form.GetValueOrDefault("os_username") ?? form.GetValueOrDefault("j_username"), form.GetValueOrDefault("os_password") ?? form.GetValueOrDefault("j_password"), json: false);
         }
 
         var (user, refusal) = Authenticate(request);
@@ -317,6 +318,12 @@ internal abstract class FakeAtlassian
             if (answer.ContentType is not null)
             {
                 response.Content.Headers.TryAddWithoutValidation("Content-Type", answer.ContentType);
+            }
+
+            if (message.Method == HttpMethod.Head)
+            {
+                // as a server answers HEAD: the size of what GET would give, no body
+                response.Content.Headers.ContentLength = answer.Body.Length;
             }
 
             foreach (var (name, value) in answer.Headers ?? [])

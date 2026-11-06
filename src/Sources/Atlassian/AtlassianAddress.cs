@@ -1,10 +1,46 @@
 namespace AnyFS.Sources.Atlassian;
 
-/// <summary>The two products the assembly's sources read.</summary>
+/// <summary>The products the assembly's sources read (Data Center; spec 7.10, 7.11, 7.12).</summary>
 internal enum AtlassianProduct
 {
     Jira,
     Confluence,
+    Bitbucket,
+    Bamboo,
+}
+
+internal static class AtlassianProducts
+{
+    /// <summary>The product's name, as messages say it.</summary>
+    public static string Name(this AtlassianProduct product) => product switch
+    {
+        AtlassianProduct.Jira => "Jira",
+        AtlassianProduct.Confluence => "Confluence",
+        AtlassianProduct.Bitbucket => "Bitbucket",
+        _ => "Bamboo",
+    };
+
+    /// <summary>The source type's name, as log lines start and settings folders are named: <c>jira</c>, <c>confluence</c>, <c>bitbucket</c>, <c>bamboo</c>.</summary>
+    public static string TypeId(this AtlassianProduct product) => product switch
+    {
+        AtlassianProduct.Jira => "jira",
+        AtlassianProduct.Confluence => "confluence",
+        AtlassianProduct.Bitbucket => "bitbucket",
+        _ => "bamboo",
+    };
+
+    /// <summary>The product an application links manifest names (<c>typeId</c>): Bitbucket Server still calls itself <c>stash</c> there.</summary>
+    public static AtlassianProduct? OfManifest(string? typeId) => (typeId ?? "").ToLowerInvariant() switch
+    {
+        "jira" => AtlassianProduct.Jira,
+        "confluence" => AtlassianProduct.Confluence,
+        "stash" or "bitbucket" => AtlassianProduct.Bitbucket,
+        "bamboo" => AtlassianProduct.Bamboo,
+        _ => null,
+    };
+
+    /// <summary>The name of the environment variable that moves the web session's browser profiles (tests), <c>ANYFS_JIRA_PROFILES</c>, and the stem of the others.</summary>
+    public static string Variable(this AtlassianProduct product, string suffix) => "ANYFS_" + product.TypeId().ToUpperInvariant() + "_" + suffix;
 }
 
 /// <summary>
@@ -23,8 +59,14 @@ internal sealed record AtlassianAddress(Uri Base, IReadOnlyList<string> Rest, IR
     /// <summary>A page of the installation (<c>login.jsp</c>), relative to its address.</summary>
     public Uri Page(string relative) => new(Base, relative.TrimStart('/'));
 
-    /// <summary>The product's REST API: Jira's <c>rest/api/2/</c>, Confluence's <c>rest/api/</c>, with a slash at the end.</summary>
-    public Uri Api(AtlassianProduct product) => new(Base, product == AtlassianProduct.Jira ? "rest/api/2/" : "rest/api/");
+    /// <summary>The product's REST API: Jira's <c>rest/api/2/</c>, Confluence's <c>rest/api/</c>, Bitbucket's <c>rest/api/1.0/</c>, Bamboo's <c>rest/api/latest/</c>, with a slash at the end.</summary>
+    public Uri Api(AtlassianProduct product) => new(Base, product switch
+    {
+        AtlassianProduct.Jira => "rest/api/2/",
+        AtlassianProduct.Confluence => "rest/api/",
+        AtlassianProduct.Bitbucket => "rest/api/1.0/",
+        _ => "rest/api/latest/",
+    });
 
     /// <summary>
     /// The address the person typed, tidied: trimmed, its fragment dropped, its query kept (a filter's id, a page's id).

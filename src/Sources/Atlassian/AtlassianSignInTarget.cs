@@ -22,7 +22,7 @@ internal sealed class AtlassianSignInTarget(AtlassianProduct product, Uri instal
 
     public override string LogPrefix => Name(product);
 
-    public override string WebDriverVariable => product == AtlassianProduct.Jira ? "ANYFS_JIRA_WEBDRIVER" : "ANYFS_CONFLUENCE_WEBDRIVER";
+    public override string WebDriverVariable => product.Variable("WEBDRIVER");
 
     public override string OtherWayIn => ", or choose Personal access token under Sign in with";
 
@@ -30,16 +30,13 @@ internal sealed class AtlassianSignInTarget(AtlassianProduct product, Uri instal
     public override IReadOnlyList<string> NegotiateHosts => [Page.Host];
 
     /// <summary>The source type's name, as log lines start.</summary>
-    public static string Name(AtlassianProduct product) => product == AtlassianProduct.Jira ? "jira" : "confluence";
+    public static string Name(AtlassianProduct product) => product.TypeId();
 
     /// <summary>
-    /// The browser profile that keeps the web session's sign-in to a Jira or Confluence installation;
-    /// <c>ANYFS_JIRA_PROFILES</c> / <c>ANYFS_CONFLUENCE_PROFILES</c> move the root (tests).
+    /// The browser profile that keeps the web session's sign-in to an installation; <c>ANYFS_JIRA_PROFILES</c>,
+    /// <c>ANYFS_CONFLUENCE_PROFILES</c>, <c>ANYFS_BITBUCKET_PROFILES</c>, <c>ANYFS_BAMBOO_PROFILES</c> move the root (tests).
     /// </summary>
-    public static string DefaultProfile(AtlassianProduct product, string host)
-        => product == AtlassianProduct.Jira
-            ? ProfileFor("jira-browser", host, "ANYFS_JIRA_PROFILES")
-            : ProfileFor("confluence-browser", host, "ANYFS_CONFLUENCE_PROFILES");
+    public static string DefaultProfile(AtlassianProduct product, string host) => ProfileFor(product.TypeId() + "-browser", host, product.Variable("PROFILES"));
 
     /// <summary>The profile is AnyFS's own, for this installation only: every cookie in it belongs to the sign-in (an identity provider's too).</summary>
     public override bool Keeps(SessionCookie cookie) => true;
@@ -84,6 +81,12 @@ internal sealed class AtlassianSignInTarget(AtlassianProduct product, Uri instal
             if (!response.IsSuccessStatusCode || response.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) != true)
             {
                 return false;
+            }
+
+            // Bitbucket's who-am-I call names the account in a header, not its data
+            if (AtlassianSession.NamedUser(product, response) is { } named)
+            {
+                return named.Length > 0;
             }
 
             using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false), cancellationToken: ct).ConfigureAwait(false);

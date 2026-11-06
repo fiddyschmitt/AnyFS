@@ -39,6 +39,12 @@ internal static class Json
     /// <summary>A time as Jira (<c>2026-10-30T14:02:11.000+1000</c>) or Confluence (<c>2026-10-30T14:02:11.000+10:00</c>) writes it.</summary>
     public static DateTimeOffset? Date(this JsonElement e, string name) => ParseDate(e.Str(name));
 
+    /// <summary>A time as Bitbucket writes it: milliseconds since the epoch (<c>1761832931000</c>); null for none.</summary>
+    public static DateTimeOffset? Epoch(this JsonElement e, string name)
+        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var ms) && ms > 0
+            ? DateTimeOffset.FromUnixTimeMilliseconds(ms)
+            : null;
+
     public static DateTimeOffset? ParseDate(string? text)
     {
         if (string.IsNullOrWhiteSpace(text))

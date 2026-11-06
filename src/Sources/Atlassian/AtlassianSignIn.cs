@@ -43,7 +43,7 @@ internal static class AtlassianSignInChoices
     public const string WebSession = "Web session, in a browser";
     public const string Password = "User name and password";
 
-    public const string Hint = "Personal access token: one you make in your profile (Profile, Personal Access Tokens), sent with every request; the server's own way for programs. Web session: AnyFS opens the server's own sign-in page in a browser of its own for you to sign in, single sign-on and all, and keeps that session; it renews it without a window while the server lets it, and shows the window again only when it does not. User name and password: the server's own login form with your account's name and password (an Active Directory account where the server signs people in through the directory).";
+    public const string Hint = "Personal access token: one you make in your profile (Profile, Personal Access Tokens; in Bitbucket, Manage account, HTTP access tokens), sent with every request; the server's own way for programs. Web session: AnyFS opens the server's own sign-in page in a browser of its own for you to sign in, single sign-on and all, and keeps that session; it renews it without a window while the server lets it, and shows the window again only when it does not. User name and password: the server's own login form with your account's name and password (an Active Directory account where the server signs people in through the directory).";
 
     public static AtlassianSignIn? From(string? choice) => (choice ?? "").Trim() switch
     {

@@ -83,6 +83,27 @@ internal static class AtlassianNames
         return dot > 0 && name.Length - dot <= 10 ? $"{name[..dot]} ({n}){name[dot..]}" : $"{name} ({n})";
     }
 
+    /// <summary>The key a folder's name ends with in parentheses (<c>Alpha (ABC)</c>, <c>Build (PROJ-PLAN)</c>), or null.</summary>
+    public static string? KeyInParentheses(string name)
+    {
+        if (!name.EndsWith(')'))
+        {
+            return null;
+        }
+
+        var open = name.LastIndexOf('(');
+        var key = open < 0 ? "" : name[(open + 1)..^1].Trim();
+        return key.Length == 0 || key.Contains(' ') ? null : key;
+    }
+
+    /// <summary>The number a folder's name starts with after a hash (<c>#12 Title</c>), or null.</summary>
+    public static long? NumberAfterHash(string name)
+    {
+        var space = name.IndexOf(' ');
+        var head = space < 0 ? name : name[..space];
+        return head.Length > 1 && head[0] == '#' && long.TryParse(head[1..], NumberStyles.None, CultureInfo.InvariantCulture, out var n) ? n : null;
+    }
+
     /// <summary>A title for a name: one line, its spaces collapsed, cut on a character boundary with an ellipsis.</summary>
     public static string Title(string? title)
     {

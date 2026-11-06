@@ -86,6 +86,10 @@ internal sealed class AtlassianApi : IDisposable
     public Task<HttpResponseMessage> OpenAsync(Uri url, string what, CancellationToken ct)
         => SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), what, ct, HttpCompletionOption.ResponseHeadersRead, json: false);
 
+    /// <summary>A download's headers alone (its size, its kind), by HEAD; the caller disposes the response.</summary>
+    public Task<HttpResponseMessage> HeadAsync(Uri url, string what, CancellationToken ct)
+        => SendAsync(() => new HttpRequestMessage(HttpMethod.Head, url), what, ct, HttpCompletionOption.ResponseHeadersRead, json: false);
+
     /// <summary>
     /// Sends a request (made afresh for each attempt) at the server's pace and returns a successful response; refusals and
     /// failures become <see cref="VfsException"/>s, after the retries the class describes. A call for data
@@ -213,8 +217,8 @@ internal sealed class AtlassianApi : IDisposable
     }
 
     /// <summary>
-    /// The product's own words for an error: Jira's <c>errorMessages</c> and <c>errors</c>, Confluence's <c>message</c>,
-    /// else a short start of the body.
+    /// The product's own words for an error: Jira's <c>errorMessages</c> and <c>errors</c>, Confluence's and Bamboo's
+    /// <c>message</c>, Bitbucket's <c>errors</c> list with a <c>message</c> each, else a short start of the body.
     /// </summary>
     internal static string? Message(string body)
     {
@@ -235,6 +239,7 @@ internal sealed class AtlassianApi : IDisposable
                     parts.AddRange(errors.EnumerateObject().Where(p => p.Value.ValueKind == JsonValueKind.String).Select(p => $"{p.Name}: {p.Value.GetString()}"));
                 }
 
+                parts.AddRange(root.Arr("errors").Select(e => e.ValueKind == JsonValueKind.Object ? e.Str("message") : e.ValueKind == JsonValueKind.String ? e.GetString() : null).Where(m => !string.IsNullOrWhiteSpace(m)).Select(m => m!));
                 if (parts.Count > 0)
                 {
                     return string.Join("; ", parts);

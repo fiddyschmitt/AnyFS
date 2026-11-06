@@ -16,16 +16,16 @@ namespace AnyFS.Sources.Atlassian;
 internal sealed record AtlassianStandIn(Func<HttpMessageHandler> Handler, Func<bool, CancellationToken, Task<IReadOnlyList<SessionCookie>>>? Browser = null, bool UseKept = true);
 
 /// <summary>
-/// A Jira or Confluence source's sign-in and the client its requests go through (spec 7.10). First it finds the
-/// installation behind the address (the host, or a context path below it); then it signs in the way the settings say. A
-/// personal access token goes on every request as a bearer token; a refused token is final. The web session takes the
-/// cookies of a browser of AnyFS's own signed in on the installation's own page (<see cref="AtlassianSignInTarget"/>);
-/// a user name and password go through the product's own login form (Seraph's), which gives the same session cookie, or,
-/// where the form is not there, as Basic authentication on every request where the server allows it. Both products' REST
-/// APIs take the session cookie as they take a token. A refused request signs in again (the browser headless, the form
-/// again), once for every request refused with it. A session's cookies are kept in the source's secret store for the next
-/// start, and handed from the settings dialog's Test to the source it starts. The client follows no redirects itself, so
-/// a login page in place of data is seen for what it is.
+/// An Atlassian source's sign-in (Jira, Confluence, Bitbucket, Bamboo) and the client its requests go through (spec 7.10).
+/// First it finds the installation behind the address (the host, or a context path below it); then it signs in the way the
+/// settings say. A personal access token goes on every request as a bearer token; a refused token is final. The web session
+/// takes the cookies of a browser of AnyFS's own signed in on the installation's own page (<see cref="AtlassianSignInTarget"/>);
+/// a user name and password go through the product's own login form (Seraph's, or Bitbucket's), which gives the same session
+/// cookie, or, where the form is not there, as Basic authentication on every request where the server allows it. The
+/// products' REST APIs take the session cookie as they take a token. A refused request signs in again (the browser headless,
+/// the form again), once for every request refused with it. A session's cookies are kept in the source's secret store for
+/// the next start, and handed from the settings dialog's Test to the source it starts. The client follows no redirects itself,
+/// so a login page in place of data is seen for what it is.
 /// </summary>
 internal sealed class AtlassianSession : IDisposable
 {
@@ -124,7 +124,7 @@ internal sealed class AtlassianSession : IDisposable
     public bool CanRenew => Method != AtlassianSignIn.Token;
 
     /// <summary>The product's name, as messages say it.</summary>
-    public string ProductName => Product == AtlassianProduct.Jira ? "Jira" : "Confluence";
+    public string ProductName => Product.Name();
 
     private string LogName => AtlassianSignInTarget.Name(Product);
 
@@ -138,8 +138,33 @@ internal sealed class AtlassianSession : IDisposable
         _ => "the personal access token",
     };
 
-    /// <summary>The who-am-I call, relative to the installation: Jira's <c>rest/api/2/myself</c>, Confluence's <c>rest/api/user/current</c>.</summary>
-    public static string WhoPath(AtlassianProduct product) => product == AtlassianProduct.Jira ? "rest/api/2/myself" : "rest/api/user/current";
+    /// <summary>
+    /// The who-am-I call, relative to the installation: Jira's <c>rest/api/2/myself</c>, Confluence's <c>rest/api/user/current</c>,
+    /// Bamboo's <c>rest/api/latest/currentUser</c>; Bitbucket has none, so its application properties (data to anyone) are asked
+    /// for, and the account read from the <c>X-AUSERNAME</c> header every answer of Seraph's carries (<see cref="NamedUser"/>).
+    /// </summary>
+    public static string WhoPath(AtlassianProduct product) => product switch
+    {
+        AtlassianProduct.Jira => "rest/api/2/myself",
+        AtlassianProduct.Confluence => "rest/api/user/current",
+        AtlassianProduct.Bitbucket => "rest/api/1.0/application-properties",
+        _ => "rest/api/latest/currentUser",
+    };
+
+    /// <summary>
+    /// For a product whose who-am-I answer names the account in its <c>X-AUSERNAME</c> header rather than its data (Bitbucket):
+    /// the name, empty for nobody (<c>anonymous</c>, or no header); null for a product whose answer's data says.
+    /// </summary>
+    public static string? NamedUser(AtlassianProduct product, HttpResponseMessage response)
+    {
+        if (product != AtlassianProduct.Bitbucket)
+        {
+            return null;
+        }
+
+        var name = response.Headers.TryGetValues("X-AUSERNAME", out var names) ? names.FirstOrDefault()?.Trim() ?? "" : "";
+        return name.Equals("anonymous", StringComparison.OrdinalIgnoreCase) ? "" : name;
+    }
 
     /// <summary>
     /// Finds the installation behind the address: the first of its candidates (the host, then each longer path) whose
@@ -161,7 +186,7 @@ internal sealed class AtlassianSession : IDisposable
                     using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
                     if (response.IsSuccessStatusCode && await ManifestAsync(response, ct).ConfigureAwait(false) is { } manifest)
                     {
-                        if (manifest.TypeId.Equals(LogName, StringComparison.OrdinalIgnoreCase))
+                        if (AtlassianProducts.OfManifest(manifest.TypeId) == Product)
                         {
                             Address = candidate;
                             Version = manifest.Version;
@@ -199,7 +224,7 @@ internal sealed class AtlassianSession : IDisposable
 
         if (other is not null)
         {
-            var named = other.Equals("jira", StringComparison.OrdinalIgnoreCase) ? "Jira" : other.Equals("confluence", StringComparison.OrdinalIgnoreCase) ? "Confluence" : other;
+            var named = AtlassianProducts.OfManifest(other)?.Name() ?? other;
             throw new SourceFailedException($"{Url.Host} is {named}, not {ProductName}: add it as a {named} source.", permanent: true);
         }
 
@@ -362,7 +387,7 @@ internal sealed class AtlassianSession : IDisposable
 
     private BrowserSession Browser()
         => _browser ??= new BrowserSession(
-            BrowserLocator.Find(Settings.Browser, Product == AtlassianProduct.Jira ? "ANYFS_JIRA_BROWSER" : "ANYFS_CONFLUENCE_BROWSER"),
+            BrowserLocator.Find(Settings.Browser, Product.Variable("BROWSER")),
             new AtlassianSignInTarget(Product, Address.Base, Settings.TrustAnyCertificate),
             _logger);
 
@@ -503,19 +528,21 @@ internal sealed class AtlassianSession : IDisposable
         return response.IsSuccessStatusCode ? "gave no session the REST API takes" : $"answered {(int)response.StatusCode}";
     }
 
-    /// <summary>Seraph's login form (Jira's <c>login.jsp</c>, Confluence's <c>dologin.action</c>): null when signed in, else why not.</summary>
+    /// <summary>
+    /// The product's login form (Jira's <c>login.jsp</c>, Confluence's <c>dologin.action</c>, Bamboo's
+    /// <c>userlogin!doDefault.action</c>, all Seraph's; Bitbucket's <c>j_atl_security_check</c>, Spring Security's with
+    /// Seraph's headers): null when signed in, else why not.
+    /// </summary>
     private async Task<string?> SeraphFormAsync(string user, string password, CancellationToken ct)
     {
-        var jira = Product == AtlassianProduct.Jira;
-        var fields = new List<KeyValuePair<string, string>>
+        var (page, fields) = Product switch
         {
-            new("os_username", user),
-            new("os_password", password),
-            new("os_cookie", "true"),
-            new("os_destination", ""),
-            new("login", jira ? "Log In" : "Log in"),
+            AtlassianProduct.Jira => ("login.jsp", new List<KeyValuePair<string, string>> { new("os_username", user), new("os_password", password), new("os_cookie", "true"), new("os_destination", ""), new("login", "Log In") }),
+            AtlassianProduct.Confluence => ("dologin.action", new List<KeyValuePair<string, string>> { new("os_username", user), new("os_password", password), new("os_cookie", "true"), new("os_destination", ""), new("login", "Log in") }),
+            AtlassianProduct.Bitbucket => ("j_atl_security_check", new List<KeyValuePair<string, string>> { new("j_username", user), new("j_password", password), new("_atl_remember_me", "on"), new("submit", "Log in") }),
+            _ => ("userlogin!doDefault.action", new List<KeyValuePair<string, string>> { new("os_username", user), new("os_password", password), new("os_cookie", "true"), new("checkBoxFields", "os_cookie"), new("os_destination", ""), new("save", "Log in") }),
         };
-        using var request = new HttpRequestMessage(HttpMethod.Post, Address.Page(jira ? "login.jsp" : "dologin.action")) { Content = new FormUrlEncodedContent(fields) };
+        using var request = new HttpRequestMessage(HttpMethod.Post, Address.Page(page)) { Content = new FormUrlEncodedContent(fields) };
         request.Headers.TryAddWithoutValidation("X-Atlassian-Token", "no-check");
         using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
         var reason = response.Headers.TryGetValues("X-Seraph-LoginReason", out var reasons) ? string.Join(",", reasons) : null;
@@ -566,8 +593,7 @@ internal sealed class AtlassianSession : IDisposable
         var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (response.IsSuccessStatusCode && response.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true)
         {
-            using var doc = JsonDocument.Parse(body);
-            if (AtlassianUser.Parse(Product, doc.RootElement) is { } user)
+            if (await UserOfAsync(response, body, ct).ConfigureAwait(false) is { } user)
             {
                 return (user, null);
             }
@@ -611,8 +637,46 @@ internal sealed class AtlassianSession : IDisposable
             return null;
         }
 
-        using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false), cancellationToken: ct).ConfigureAwait(false);
-        return AtlassianUser.Parse(Product, doc.RootElement);
+        return await UserOfAsync(response, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false), ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The account a who-am-I answer names: in its data, or (Bitbucket) in its <c>X-AUSERNAME</c> header, the display name then
+    /// asked of the users call, the name alone where that cannot be had.
+    /// </summary>
+    private async Task<AtlassianUser?> UserOfAsync(HttpResponseMessage response, string body, CancellationToken ct)
+    {
+        if (NamedUser(Product, response) is { } named)
+        {
+            if (named.Length == 0)
+            {
+                return null;
+            }
+
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, Address.Page("rest/api/1.0/users/" + Uri.EscapeDataString(named)));
+                await AuthorizeAsync(request, ct).ConfigureAwait(false);
+                using var who = await Http.SendAsync(request, ct).ConfigureAwait(false);
+                if (who.IsSuccessStatusCode && who.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    using var doc = JsonDocument.Parse(await who.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+                    if (AtlassianUser.Parse(Product, doc.RootElement) is { } user)
+                    {
+                        return user with { Name = named };
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException || ex is TaskCanceledException && !ct.IsCancellationRequested)
+            {
+                _logger.LogDebug("{Product}: the account {Name} could not be read ({Error}); its name serves", LogName, named, ex.Message);
+            }
+
+            return new AtlassianUser(named, named);
+        }
+
+        using var data = JsonDocument.Parse(body);
+        return AtlassianUser.Parse(Product, data.RootElement);
     }
 
     /// <summary>Adds what the sign-in needs to a request: the token's or Basic's header (a session's cookies go by themselves).</summary>

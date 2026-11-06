@@ -3,9 +3,9 @@
     <AssemblyName>AnyFS.Sources.Atlassian</AssemblyName>
     <RootNamespace>AnyFS.Sources.Atlassian</RootNamespace>
   </PropertyGroup>
-  <!-- The Jira and Confluence sources (spec 7.10): two types over what they share here, the address and server discovery,
-       the three sign-ins, the REST client, names and the HTML-to-Markdown step. Jira's REST API (/rest/api/2) and
-       Confluence's (/rest/api) over HttpClient and System.Text.Json directly, no SDK. Data Center first. -->
+  <!-- The Jira, Confluence, Bitbucket and Bamboo sources (spec 7.10 to 7.12): four types over what they share here, the
+       address and server discovery, the three sign-ins, the REST client, names and the HTML-to-Markdown step. Each
+       product's REST API over HttpClient and System.Text.Json directly, no SDK. Data Center first. -->
   <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
     <!-- the request pace, the web session (with its Selenium WebDriver fallback), the cookie jar, ResponseStream, MemoryFile, StateFile -->
@@ -21,9 +21,11 @@
     <Using Include="AnyFS.Sources.Common" />
   </ItemGroup>
   <ItemGroup>
-    <!-- the types' icons (OpenIcon): own marks in each product's blue, drawn for AnyFS (Atlassian's logos are trademarks) -->
+    <!-- the types' icons (OpenIcon): the products' marks, given by the user on 6-Nov-2026 (until then own marks in each product's blue) -->
     <EmbeddedResource Include="Assets\jira.png" LogicalName="jira.png" />
     <EmbeddedResource Include="Assets\confluence.png" LogicalName="confluence.png" />
+    <EmbeddedResource Include="Assets\bitbucket.png" LogicalName="bitbucket.png" />
+    <EmbeddedResource Include="Assets\bamboo.png" LogicalName="bamboo.png" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
