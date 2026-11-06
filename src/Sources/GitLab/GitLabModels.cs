@@ -1,42 +1,8 @@
 using System.Globalization;
 using System.Text.Json;
+using AnyFS.Sources.Common;
 
 namespace AnyFS.Sources.GitLab;
-
-/// <summary>Reading GitLab's JSON by hand (no reflection, so the trimmed build keeps it working): a missing or null field is the default.</summary>
-internal static class Json
-{
-    public static string? Str(this JsonElement e, string name)
-        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-
-    public static long Long(this JsonElement e, string name)
-    {
-        if (e.ValueKind != JsonValueKind.Object || !e.TryGetProperty(name, out var v))
-        {
-            return 0;
-        }
-
-        // GraphQL's BigInt comes as a string
-        return v.ValueKind switch
-        {
-            JsonValueKind.Number when v.TryGetInt64(out var n) => n,
-            JsonValueKind.String when long.TryParse(v.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var s) => s,
-            _ => 0,
-        };
-    }
-
-    public static bool Bool(this JsonElement e, string name)
-        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
-
-    public static DateTimeOffset? Date(this JsonElement e, string name)
-        => e.Str(name) is { } text && DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var d) ? d : null;
-
-    public static JsonElement Obj(this JsonElement e, string name)
-        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Object ? v : default;
-
-    public static IEnumerable<JsonElement> Arr(this JsonElement e, string name)
-        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Array ? v.EnumerateArray() : [];
-}
 
 /// <summary>The signed-in account (<c>GET /user</c>).</summary>
 internal sealed record GlUser(long Id, string Username, string Name)
