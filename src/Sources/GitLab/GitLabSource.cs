@@ -16,7 +16,6 @@ namespace AnyFS.Sources.GitLab;
 /// </summary>
 public sealed partial class GitLabSource : SourceBase, ICountable
 {
-    private static readonly TimeSpan SaveEvery = TimeSpan.FromMinutes(5);
 
     // how many folders' last listings are remembered at most (ResolveAsync); past that they start again
     private const int MostFoldersRemembered = 200_000;
@@ -40,7 +39,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     private SpoolCache? _spool;
     private GlFolder? _root;
     private ProjectsCounted? _counted;
-    private Task _saving = Task.CompletedTask;
     private volatile bool _graphQlRefused;
 
     public GitLabSource(GitLabSettings settings)
@@ -83,7 +81,11 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         _api = new GitLabApi(_session, Requests, Logger);
         _api.Held += (wait, why) => Volatile.Read(ref _counted)?.Waiting(wait, why);
         _listings = new RequestCache(_stopping.Token);
-        _trees = new TreeStore(Path.Combine(Context.StateDirectory, TreeStore.FileName), Logger);
+        _trees = new TreeStore();
+
+        // the repository folders were kept in a file of their own until 6-Nov-2026: the kept listings hold them now
+        DeleteQuietly(Path.Combine(Context.StateDirectory, "trees.json.gz"));
+        DeleteQuietly(Path.Combine(Context.StateDirectory, "trees.json.gz.tmp"));
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
         var path = _session.Address.Path;
@@ -147,9 +149,8 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         });
 
         _kept.StartWalksOfHeld();
-        Logger.LogInformation("gitlab: serving {Scope} {Path} on {Server} as {User} ({Trees:N0} repository folders kept)",
-            Scope.ToString().ToLowerInvariant(), path, _session.Address.Server, _session.User?.Username, _trees.Count);
-        _saving = SaveAsync(_stopping.Token);
+        Logger.LogInformation("gitlab: serving {Scope} {Path} on {Server} as {User}",
+            Scope.ToString().ToLowerInvariant(), path, _session.Address.Server, _session.User?.Username);
     }
 
     // --- the VFS -------------------------------------------------------------------------------------------------------
@@ -692,10 +693,11 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     /// <summary>
     /// A folder's stamp for the walks (<see cref="KeptListingsOptions.StampOf"/>): a project's folder has its last activity
     /// as GitLab tells it (moved by a push, an issue, a comment, a pipeline, with an hour's grain) and its default branch's
-    /// head, so a project nothing happened in is kept whole; an issue's or merge request's folder its last update, a
-    /// pipeline's its last update, so a changed project costs only what changed in it; any other folder none, being a
-    /// request or two to list. The project's parent listing and its head are the calls the stamps share, each kept a
-    /// refresh interval.
+    /// head, so a project nothing happened in is kept whole; the repository's own folders (<c>files</c>, and each branch's or
+    /// tag's) their commit, so a project with an issue's comment and no push keeps its trees; an issue's or merge request's
+    /// folder its last update, a pipeline's its last update, so a changed project costs only what changed in it; any other
+    /// folder none, being a request or two to list. The project's parent listing and its head are the calls the stamps share,
+    /// each kept a refresh interval.
     /// </summary>
     internal async ValueTask<string?> StampAsync(string path, string? held, CancellationToken ct)
     {
@@ -705,6 +707,10 @@ public sealed partial class GitLabSource : SourceBase, ICountable
                 Volatile.Read(ref _counted)?.Reached(project.Project);
                 var head = project.Project.Repository ? await HeadAsync(project.Project, ct).ConfigureAwait(false) : null;
                 return $"{project.Project.LastActivity?.UtcTicks ?? 0}|{head?.Commit}";
+            case FilesFolder files:
+                return files.Project.Repository && await HeadAsync(files.Project, ct).ConfigureAwait(false) is { } at ? at.Commit : "none";
+            case TreeFolder { RepoPath.Length: 0 } tree:
+                return tree.Commit;
             case TicketFolder ticket:
                 return (ticket.Ticket.Updated?.UtcTicks ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture);
             case PipelineFolder pipeline:
@@ -846,35 +852,29 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         return true;
     }
 
-    // --- health and keeping --------------------------------------------------------------------------------------------
+    // --- stopping ------------------------------------------------------------------------------------------------------
 
-    private async Task SaveAsync(CancellationToken ct)
+    private static void DeleteQuietly(string path)
     {
         try
         {
-            while (!ct.IsCancellationRequested)
-            {
-                await Task.Delay(SaveEvery, ct).ConfigureAwait(false);
-                _trees?.Save();
-            }
+            File.Delete(path);
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
         }
     }
 
     public override async ValueTask DisposeAsync()
     {
-        await _stopping.CancelAsync().ConfigureAwait(false);
-        await _saving.ConfigureAwait(false);
-
-        // the walks stop before what they ask through goes, and what they kept is saved
+        // the walks stop first, and what they kept is written down; then what they asked through goes. The other way round,
+        // each repository a walk was reading failed as if it could not be read at once, and said so in the log at every stop
         if (_kept is not null)
         {
             await _kept.DisposeAsync().ConfigureAwait(false);
         }
 
-        _trees?.Save();
+        await _stopping.CancelAsync().ConfigureAwait(false);
         if (_spool is not null)
         {
             await _spool.DisposeAsync().ConfigureAwait(false);
@@ -886,6 +886,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             _session.Save();
             _session.Dispose();
         }
+
         _stopping.Dispose();
         await base.DisposeAsync().ConfigureAwait(false);
     }

@@ -1,7 +1,5 @@
 using System.Collections.Concurrent;
 using System.Diagnostics.CodeAnalysis;
-using System.Text.Json.Serialization;
-using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.GitLab;
 
@@ -13,48 +11,22 @@ namespace AnyFS.Sources.GitLab;
 /// <param name="F">Whether the file is in Git LFS.</param>
 internal sealed record TreeItem(string N, char K, string S, long L, bool F);
 
-/// <summary>Repository folders at a commit, by <c>project@commit:path</c>, as kept between starts.</summary>
-internal sealed class SavedTrees
-{
-    public Dictionary<string, List<TreeItem>> Folders { get; set; } = [];
-}
-
-[JsonSerializable(typeof(SavedTrees))]
-internal sealed partial class SavedTreesJson : JsonSerializerContext;
-
 /// <summary>
-/// The repository's folders at the commits the source has listed (spec 7.8). A commit's tree never changes, so a folder
-/// listed once is kept for good, between starts too (<c>state\trees.json.gz</c>): a project opened again lists at once,
-/// and only a branch that moved costs requests. Bounded: past <see cref="MaxFolders"/> the oldest-listed go (a million,
-/// as the SDK keeps listings; until 6-Nov-2026 fifty thousand, which a server of thousands of projects with their branches
-/// and tags walked would have gone past, and listed the oldest again).
+/// The repository's folders at the commits the source has listed this run (spec 7.8), by <c>project@commit:path</c>. A
+/// commit's tree never changes, so a folder listed once is kept, and a branch and a tag at one commit share it. Kept for the
+/// run alone since 6-Nov-2026: between runs the kept listings hold what the walks saw (the SDK's file, written as a walk
+/// goes), and a repository's folder is stamped by its commit, so one whose commit has not moved is kept whole without this.
+/// Written whole every five minutes and at every stop, the file this was had grown past a hundred megabytes on a big
+/// server, and its write was what kept a stop from ending in time. Bounded: past <see cref="MaxFolders"/> the
+/// oldest-listed go (a million, as the SDK keeps listings).
 /// </summary>
 internal sealed class TreeStore
 {
-    public const string FileName = "trees.json.gz";
     private const int MaxFolders = 1_000_000;
 
     private readonly ConcurrentDictionary<string, (List<TreeItem> Items, long Order)> _folders = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Task<List<TreeItem>>> _listing = new(StringComparer.Ordinal);
-    private readonly string? _path;
-    private readonly ILogger _logger;
     private long _order;
-    private int _dirty;
-
-    public TreeStore(string? path, ILogger logger)
-    {
-        _path = path;
-        _logger = logger;
-        if (path is not null && StateFile.Load(path, SavedTreesJson.Default.SavedTrees) is { } saved)
-        {
-            foreach (var (key, items) in saved.Folders)
-            {
-                _folders[key] = (items, Interlocked.Increment(ref _order));
-            }
-
-            logger.LogInformation("gitlab: {Count:N0} repository folders kept from before", saved.Folders.Count);
-        }
-    }
 
     public int Count => _folders.Count;
 
@@ -85,7 +57,6 @@ internal sealed class TreeStore
             _folders[key] = (items, Interlocked.Increment(ref _order));
         }
 
-        Interlocked.Exchange(ref _dirty, 1);
         Trim();
     }
 
@@ -96,7 +67,6 @@ internal sealed class TreeStore
             await Task.Yield();
             var items = await list(CancellationToken.None).ConfigureAwait(false);
             _folders[key] = (items, Interlocked.Increment(ref _order));
-            Interlocked.Exchange(ref _dirty, 1);
             Trim();
             return items;
         }
@@ -114,26 +84,6 @@ internal sealed class TreeStore
             {
                 _folders.TryRemove(old);
             }
-        }
-    }
-
-    /// <summary>Writes the folders to the state file when something was listed since the last time.</summary>
-    public void Save()
-    {
-        if (_path is null || Interlocked.Exchange(ref _dirty, 0) == 0)
-        {
-            return;
-        }
-
-        try
-        {
-            var saved = new SavedTrees { Folders = _folders.ToDictionary(f => f.Key, f => f.Value.Items, StringComparer.Ordinal) };
-            StateFile.Save(_path, saved, SavedTreesJson.Default.SavedTrees);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            Interlocked.Exchange(ref _dirty, 1);
-            _logger.LogWarning("gitlab: the repository folders could not be kept for the next start: {Error}", ex.Message);
         }
     }
 }

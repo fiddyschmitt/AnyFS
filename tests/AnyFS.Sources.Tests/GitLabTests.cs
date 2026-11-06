@@ -812,13 +812,36 @@ public class GitLabSourceTests
         var (first, _) = await StartAsync(fake, GitLabSeed.Settings(App(fake)), context);
         Assert.AreEqual(250, (await ListAsync(first, "files/many")).Count);
         await first.DisposeAsync();
-        Assert.IsTrue(File.Exists(Path.Combine(context.StateDirectory, TreeStore.FileName)));
 
         var trees = fake.Count("repository/tree");
         var (second, _) = await StartAsync(fake, GitLabSeed.Settings(App(fake)), context);
         await using var _s = second;
         Assert.AreEqual(250, (await ListAsync(second, "files/many")).Count);
-        Assert.AreEqual(trees, fake.Count("repository/tree"), "the commit's folders came from the state folder");
+        Assert.AreEqual(trees, fake.Count("repository/tree"), "the commit's folders came from the listings kept in the state folder");
+    }
+
+    [TestMethod]
+    public async Task AProjectWithActivityButNoNewCommitKeepsItsTreesAcrossARestart()
+    {
+        // an issue's comment moves the project's activity, and its folder is listed again at the next start; its repository's
+        // folders, its branches' and its tags', stamped by their commits, are kept as they were (the repository store's file
+        // did this until 6-Nov-2026)
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        var (first, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"), context);
+        await first.CountFilesAsync(CancellationToken.None);
+        await first.DisposeAsync();
+
+        var app = fake.ProjectAt("anyfs/tools/app");
+        app.LastActivity = app.LastActivity.AddDays(1);
+        fake.Requests.Clear();
+        var (second, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs"), context);
+        await using var _s = second;
+        await second.CountFilesAsync(CancellationToken.None);
+        Assert.IsTrue(fake.Count($"/projects/{app.Id}/repository/branches") > 0, "its folder listed again: " + string.Join("; ", fake.Requests.Take(10)));
+        Assert.AreEqual(0, fake.Count("/repository/tree"), "no tree read again: " + string.Join("; ", fake.Requests.Where(r => r.Contains("/repository/tree", StringComparison.Ordinal)).Take(3)));
+        Assert.AreEqual(250, (await ListAsync(second, "tools/app/files/many")).Count);
+        Assert.IsTrue((await ListAsync(second, "tools/app/tags/release/2.0")).Count > 0);
     }
 
     [TestMethod]
