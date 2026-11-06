@@ -90,7 +90,7 @@ public sealed class GitLabSettings
     public int WalkMinutes { get; set; } = 30;
 
     [Setting("Projects at a time", Advanced = true, Order = 17,
-        Hint = "How many projects a walk goes through at once, each one's folders listed together. A server with thousands of projects and the capacity to answer counts faster with more; a server that asks AnyFS to wait (429) is waited for however many are set.")]
+        Hint = "How many projects a walk goes through at once, each one's folders listed together. A server with thousands of projects and the capacity to answer counts faster with more. However many are set, a server's own limits are kept to: GitLab names them on every answer, and AnyFS asks no more than each allows until it resets, and waits where it is asked to (429). A search while the walk runs goes first.")]
     public int ProjectsAtATime { get; set; } = 8;
 
     [Setting("Requests at a time per project", Advanced = true, Order = 18,

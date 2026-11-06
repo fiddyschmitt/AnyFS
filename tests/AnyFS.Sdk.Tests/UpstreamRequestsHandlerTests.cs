@@ -48,6 +48,24 @@ public class UpstreamRequestsHandlerTests
     }
 
     [TestMethod]
+    public async Task AWalksRequestSaysItIsOne()
+    {
+        // what the walks start carries the mark; a client's request, made outside them, does not (the Operations tab's Operation column)
+        var (client, watcher) = Client(_ => Ok("hello"));
+        using var _c = client;
+        Assert.AreEqual("hello", await client.GetStringAsync("https://server.test/api/mine"));
+        await Task.Run(async () =>
+        {
+            Walks.Current = true;
+            Assert.AreEqual("hello", await client.GetStringAsync("https://server.test/api/walked"));
+        });
+
+        Assert.IsFalse(Walks.Current, "the walk's mark stays with the walk");
+        Assert.AreEqual("hello", await client.GetStringAsync("https://server.test/api/mine-again"));
+        CollectionAssert.AreEqual(new[] { "GET", "GET (walk)", "GET" }, watcher.Requests.Select(r => r.What).ToList());
+    }
+
+    [TestMethod]
     public async Task ARequestRunsUntilItsBodyHasBeenRead()
     {
         var (client, watcher) = Client(_ => Ok("hello world"));

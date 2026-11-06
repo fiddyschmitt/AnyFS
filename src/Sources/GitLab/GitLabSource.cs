@@ -81,6 +81,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         _session = new GitLabSession(_settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
         await _session.SignInAsync(interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
         _api = new GitLabApi(_session, Requests, Logger);
+        _api.Held += (wait, why) => Volatile.Read(ref _counted)?.Waiting(wait, why);
         _listings = new RequestCache(_stopping.Token);
         _trees = new TreeStore(Path.Combine(Context.StateDirectory, TreeStore.FileName), Logger);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
@@ -586,7 +587,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         }
         finally
         {
-            Volatile.Write(ref _counted, null);
+            Interlocked.Exchange(ref _counted, null)?.Over();
         }
     }
 
@@ -619,10 +620,16 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     /// How far a count has got through the projects: each said once as the walk comes to it (or someone opens it first), and
     /// how much of the list is behind it. Projects come to at once ("Projects at a time") are said one at a time, so that
     /// what is said keeps the order of the count: counted and said apart, a smaller number could be said after a larger one.
+    /// While the server has asked AnyFS to wait (<see cref="GitLabApi.Held"/>), the count says so too, with the server's reason,
+    /// so a tile that stands still says why.
     /// </summary>
     private sealed class ProjectsCounted(ISourceContext context, long? total)
     {
         private readonly HashSet<long> _reached = [];
+        private string? _said;
+        private double? _fraction;
+        private DateTime _heldUntil;
+        private string _why = "";
 
         public long? Total => total;
 
@@ -639,13 +646,59 @@ public sealed partial class GitLabSource : SourceBase, ICountable
                 if (total is > 0 and var known)
                 {
                     // the one it has come to is not behind it yet: the bar is full only as the count ends
-                    context.ReportProgress($"Counting files: {Math.Min(count, known):N0} of {known:N0} projects", (double)Math.Min(count - 1, known - 1) / known);
+                    _said = $"Counting files: {Math.Min(count, known):N0} of {known:N0} projects";
+                    _fraction = (double)Math.Min(count - 1, known - 1) / known;
                 }
                 else
                 {
-                    context.ReportProgress($"Counting files: {count:N0} projects so far");
+                    _said = $"Counting files: {count:N0} projects so far";
+                    _fraction = null;
+                }
+
+                Say();
+            }
+        }
+
+        /// <summary>The server asked AnyFS to wait: said with how far the count has got, until the wait is over, when the count is said plainly again.</summary>
+        public void Waiting(TimeSpan wait, string why)
+        {
+            lock (_reached)
+            {
+                _heldUntil = DateTime.UtcNow + wait;
+                _why = why;
+                if (_said is not null)
+                {
+                    Say();
                 }
             }
+
+            _ = Task.Delay(wait + TimeSpan.FromMilliseconds(50)).ContinueWith(_ =>
+            {
+                lock (_reached)
+                {
+                    if (!_over && _said is not null && DateTime.UtcNow >= _heldUntil)
+                    {
+                        Say();
+                    }
+                }
+            }, TaskScheduler.Default);
+        }
+
+        /// <summary>The count is over: nothing more is said of it.</summary>
+        public void Over()
+        {
+            lock (_reached)
+            {
+                _over = true;
+            }
+        }
+
+        private bool _over;
+
+        private void Say()
+        {
+            var waiting = DateTime.UtcNow < _heldUntil ? $", waiting {Math.Ceiling((_heldUntil - DateTime.UtcNow).TotalSeconds):N0} s as GitLab asks ({_why})" : "";
+            context.ReportProgress(_said + waiting, _fraction);
         }
     }
 

@@ -477,14 +477,19 @@ internal sealed class GitLabSession : IDisposable
     /// <summary>Adds what the sign-in needs to a request: the token's header (a session's cookies go by themselves).</summary>
     public ValueTask AuthorizeAsync(HttpRequestMessage request, CancellationToken ct)
     {
-        if (Method == GitLabSignIn.AccessToken && Settings.Token is { } token)
+        // the token goes to the server alone, never where it sends a request on (an upload's signed address in object storage)
+        request.Headers.Remove("PRIVATE-TOKEN");
+        if (Method == GitLabSignIn.AccessToken && Settings.Token is { } token && request.RequestUri is { } url && OnServer(url))
         {
-            request.Headers.Remove("PRIVATE-TOKEN");
             request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
         }
 
         return ValueTask.CompletedTask;
     }
+
+    /// <summary>Whether an address is the server's own (its scheme and host, with the port), not another's it sent a request on to.</summary>
+    public bool OnServer(Uri url)
+        => url.Scheme.Equals(Address.Server.Scheme, StringComparison.OrdinalIgnoreCase) && url.Authority.Equals(Address.Server.Authority, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// After a request seen at <paramref name="seen"/> (its <see cref="Generation"/>) was refused: signs in again once for

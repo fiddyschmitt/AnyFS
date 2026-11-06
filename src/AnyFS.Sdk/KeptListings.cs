@@ -264,6 +264,9 @@ public sealed class KeptListings : IAsyncDisposable
     private async Task<bool> WalkAsync(SourceCounters counters, bool full, bool heldAlone, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(counters);
+
+        // everything the walk starts from here is the walk's: a client's listing that joins one of its requests waits for it, but its own go first
+        Walks.Current = true;
         using var inFlight = new SemaphoreSlim(_options.MaxInFlight, _options.MaxInFlight);
         using var partSlots = _options.PartsAtOnce > 0 ? new SemaphoreSlim(_options.PartsAtOnce, _options.PartsAtOnce) : null;
         var walk = new Walk(counters, inFlight, full) { HeldBelow = heldAlone && _options.ListTree is not null ? CountHeldBelow() : null, PartSlots = partSlots };

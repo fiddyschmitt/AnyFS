@@ -16,7 +16,7 @@ namespace AnyFS.Sources.Tests;
 [TestClass]
 public class RequestPaceTests
 {
-    private static HttpResponseMessage Throttled(HttpStatusCode status, int? seconds)
+    private static HttpResponseMessage Throttled(HttpStatusCode status, int? seconds, string? limit = null)
     {
         var response = new HttpResponseMessage(status);
         if (seconds is { } s)
@@ -24,7 +24,99 @@ public class RequestPaceTests
             response.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(s));
         }
 
+        if (limit is not null)
+        {
+            response.Headers.TryAddWithoutValidation("RateLimit-Name", limit);
+        }
+
         return response;
+    }
+
+    /// <summary>An answer as GitLab gives every one under a limit: the limit's name and what is left of it, reset at a time.</summary>
+    private static HttpResponseMessage Counted(string limit, int remaining, DateTimeOffset reset)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK);
+        response.Headers.TryAddWithoutValidation("RateLimit-Name", limit);
+        response.Headers.TryAddWithoutValidation("RateLimit-Limit", "100");
+        response.Headers.TryAddWithoutValidation("RateLimit-Observed", (100 - remaining).ToString());
+        response.Headers.TryAddWithoutValidation("RateLimit-Remaining", remaining.ToString());
+        response.Headers.TryAddWithoutValidation("RateLimit-Reset", reset.ToUnixTimeSeconds().ToString());
+        return response;
+    }
+
+    [TestMethod]
+    public async Task AHoldOnOneKindOfRequestLeavesTheOthersFree()
+    {
+        var pace = new RequestPace(burst: 100, perSecond: 100);
+        Assert.AreEqual(TimeSpan.FromSeconds(1), pace.Hold(Throttled(HttpStatusCode.TooManyRequests, 1), "GET projects/*/repository/tree"));
+        Assert.AreEqual(TimeSpan.Zero, pace.HeldFor("GET projects/*/issues"), "another kind of request goes on");
+        Assert.IsTrue(pace.HeldFor("GET projects/*/repository/tree") > TimeSpan.FromMilliseconds(500));
+
+        var clock = Stopwatch.StartNew();
+        await pace.WaitAsync("GET projects/*/issues", CancellationToken.None);
+        Assert.IsTrue(clock.Elapsed < TimeSpan.FromMilliseconds(300), $"not held: {clock.ElapsedMilliseconds} ms");
+        await pace.WaitAsync("GET projects/*/repository/tree", CancellationToken.None);
+        Assert.IsTrue(clock.Elapsed >= TimeSpan.FromMilliseconds(900), $"the throttled kind waited out the second: {clock.ElapsedMilliseconds} ms");
+    }
+
+    [TestMethod]
+    public async Task ALimitTheServerNamesHoldsEveryKindOfRequestItHasNamedItFor()
+    {
+        // GitLab names the limit each answer came under; a 429 under it holds every kind of request known to be under it
+        var pace = new RequestPace(burst: 100, perSecond: 100);
+        var reset = DateTimeOffset.UtcNow.AddMinutes(5);
+        Assert.IsNull(pace.Hold(Counted("throttle_authenticated_api", 50, reset), "GET projects/*/issues"), "plenty left: no hold");
+        Assert.IsNull(pace.Hold(Counted("throttle_authenticated_files_api", 50, reset), "GET projects/*/repository/files/*"));
+        Assert.AreEqual(TimeSpan.FromSeconds(1), pace.Hold(Throttled(HttpStatusCode.TooManyRequests, 1, "throttle_authenticated_api"), "GET projects/*/repository/tree"));
+        Assert.IsTrue(pace.HeldFor("GET projects/*/issues") > TimeSpan.FromMilliseconds(500), "under the same limit, as its answers said");
+        Assert.IsTrue(pace.HeldFor("GET projects/*/repository/tree") > TimeSpan.FromMilliseconds(500));
+        Assert.AreEqual(TimeSpan.Zero, pace.HeldFor("GET projects/*/repository/files/*"), "under another limit");
+        Assert.AreEqual(TimeSpan.Zero, pace.HeldFor("GET groups"), "not known to be under any yet");
+        Assert.AreEqual(TimeSpan.Zero, pace.HeldFor(null), "the holds on every request are another matter");
+
+        var clock = Stopwatch.StartNew();
+        await pace.WaitAsync("GET projects/*/issues", CancellationToken.None);
+        Assert.IsTrue(clock.Elapsed >= TimeSpan.FromMilliseconds(900), $"held with the rest of its limit: {clock.ElapsedMilliseconds} ms");
+    }
+
+    [TestMethod]
+    public async Task AQuotaUsedUpHoldsItsLimitUntilTheResetBeforeTheServerNeedSay429()
+    {
+        var pace = new RequestPace(burst: 100, perSecond: 100);
+        var reset = DateTimeOffset.UtcNow.AddSeconds(2);   // a whole second, as the header gives it: one to two seconds on
+        var wait = pace.Hold(Counted("throttle_authenticated_api", 0, reset), "GET projects/*/repository/tree");
+        Assert.IsNotNull(wait);
+        Assert.IsTrue(wait.Value > TimeSpan.FromMilliseconds(900) && wait.Value <= TimeSpan.FromSeconds(2), wait.ToString());
+        Assert.IsNull(pace.Hold(Counted("throttle_authenticated_api", 0, reset), "GET projects/*/repository/tree"), "the same again is not news");
+
+        var clock = Stopwatch.StartNew();
+        await pace.WaitAsync("GET projects/*/repository/tree", CancellationToken.None);
+        Assert.IsTrue(clock.Elapsed >= TimeSpan.FromMilliseconds(900), $"waited for the reset: {clock.ElapsedMilliseconds} ms");
+        Assert.AreEqual(TimeSpan.Zero, pace.HeldFor("GET projects/*/repository/tree"), "and then went on");
+        Assert.IsNull(pace.Hold(Counted("throttle_authenticated_api", 0, DateTimeOffset.UtcNow.AddSeconds(-5)), "GET projects/*/repository/tree"), "a reset already past holds nothing");
+    }
+
+    [TestMethod]
+    public async Task WhatIsInFlightCountsAgainstWhatIsLeftSoABurstNeverGoesOverIt()
+    {
+        // two left of the limit: two turns go, the third waits for the reset, and a kind not answered yet counts under the same limit
+        var pace = new RequestPace(burst: 100, perSecond: 100);
+        var reset = DateTimeOffset.UtcNow.AddSeconds(2);
+        Assert.IsNull(pace.Hold(Counted("throttle_authenticated_api", 2, reset), "GET projects/*/issues"));
+        using var first = await pace.TakeAsync("GET projects/*/issues", CancellationToken.None);
+        using var second = await pace.TakeAsync("GET projects/*/wikis", CancellationToken.None);
+        var third = pace.TakeAsync("GET projects/*/issues", CancellationToken.None).AsTask();
+        await Task.Delay(100);
+        Assert.IsFalse(third.IsCompleted, "nothing left for a third while two are in flight");
+
+        // one answered with one left: the third goes
+        first.Answered();
+        Assert.IsNull(pace.Hold(Counted("throttle_authenticated_api", 1, reset), "GET projects/*/issues"));
+        await Task.Delay(100);
+        Assert.IsFalse(third.IsCompleted, "one left and one in flight: still none to spare");
+        second.Answered();
+        Assert.IsNull(pace.Hold(Counted("throttle_authenticated_api", 1, reset), "GET projects/*/wikis"));
+        using var went = await third.WaitAsync(TimeSpan.FromSeconds(1));
     }
 
     [TestMethod]

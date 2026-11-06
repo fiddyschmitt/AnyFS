@@ -91,9 +91,14 @@ internal sealed partial class FakeGitLab
                     }))
                     : Response.NotFound("404 Not Found");
             case ["uploads", var secret, var file]:
-                return project.Uploads.TryGetValue($"{secret}/{file}", out var bytes)
-                    ? new Response(200, bytes, "application/octet-stream", new() { ["Content-Length"] = bytes.Length.ToString(CultureInfo.InvariantCulture) })
-                    : Response.NotFound("404 Not found");
+                if (!project.Uploads.TryGetValue($"{secret}/{file}", out var bytes))
+                {
+                    return Response.NotFound("404 Not found");
+                }
+
+                return UploadsInObjectStore
+                    ? SentToStore(r, $"/uploads/{project.Id}/{secret}/{Uri.EscapeDataString(file)}")
+                    : new Response(200, bytes, "application/octet-stream", new() { ["Content-Length"] = bytes.Length.ToString(CultureInfo.InvariantCulture) });
             default:
                 return null;
         }

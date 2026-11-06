@@ -58,6 +58,42 @@ internal sealed partial class FakeGitLab
     /// <summary>How many requests to answer 429 with Retry-After: 1 before answering again.</summary>
     public int ThrottleNext { get; set; }
 
+    /// <summary>
+    /// A limit as GitLab's Rack::Attack keeps one: so many requests a window (the windows aligned to the epoch), the ones over
+    /// it answered 429 with Retry-After to the window's end, and every request it covers answered with the RateLimit-* headers
+    /// that name it and count it, as GitLab answers every request. Null for no limit.
+    /// </summary>
+    public Quota? Limit { get; set; }
+
+    /// <summary>How many requests the limit refused (429).</summary>
+    public int Throttled => Volatile.Read(ref _throttled);
+
+    /// <summary>
+    /// Whether uploads (an issue's attachments, a wiki's) live in object storage GitLab does not proxy: a request for one is
+    /// sent on to a signed address there (<see cref="ObjectStore"/>), 302 to a GET and 303 to a HEAD as Grape answers them.
+    /// </summary>
+    public bool UploadsInObjectStore { get; set; }
+
+    /// <summary>The object store's address, answered by the same handler: a signed address alone opens it.</summary>
+    public const string ObjectStore = "https://objects.fake.test";
+
+    /// <summary>How long every answer takes, for a server that is not instant.</summary>
+    public TimeSpan AnswerDelay { get; set; }
+
+    /// <summary>Every request the object store answered, oldest first: "GET /uploads/...".</summary>
+    public ConcurrentQueue<string> ObjectStoreRequests { get; } = new();
+
+    private long _quotaWindow = -1;
+    private int _quotaCount;
+    private int _throttled;
+
+    /// <param name="Name">What GitLab calls it (<c>throttle_authenticated_api</c>).</param>
+    /// <param name="Requests">How many a window.</param>
+    /// <param name="Window">The window.</param>
+    /// <param name="Covers">Which API paths it covers; null for every one.</param>
+    /// <param name="Silent">Whether it says nothing of itself but the 429's Retry-After: a limit of the kind GitLab's application limits are, with no headers on the answers under it.</param>
+    public sealed record Quota(string Name, int Requests, TimeSpan Window, Func<string, bool>? Covers = null, bool Silent = false);
+
     /// <summary>Past how many records a listing no longer says how many there are: GitLab's X-Total stops at 10,000.</summary>
     public int TotalsUpTo { get; set; } = 10_000;
 
@@ -363,6 +399,115 @@ internal sealed partial class FakeGitLab
                 return Response.Json(new JsonObject { ["message"] = "Retry later" }, 429, new() { ["Retry-After"] = "1" });
             }
 
+            // the limit, where one covers the request: counted first, as Rack::Attack counts, and named on every answer
+            Dictionary<string, string>? limits = null;
+            if (Limit is { } quota && r.Url.AbsolutePath.Contains("/api/", StringComparison.Ordinal) && (quota.Covers?.Invoke(r.Url.AbsolutePath) ?? true))
+            {
+                var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                var seconds = (long)quota.Window.TotalSeconds;
+                var window = now / seconds;
+                if (window != _quotaWindow)
+                {
+                    _quotaWindow = window;
+                    _quotaCount = 0;
+                }
+
+                _quotaCount++;
+                var reset = (window + 1) * seconds;
+                limits = new()
+                {
+                    ["RateLimit-Name"] = quota.Name,
+                    ["RateLimit-Limit"] = quota.Requests.ToString(CultureInfo.InvariantCulture),
+                    ["RateLimit-Observed"] = _quotaCount.ToString(CultureInfo.InvariantCulture),
+                    ["RateLimit-Remaining"] = Math.Max(0, quota.Requests - _quotaCount).ToString(CultureInfo.InvariantCulture),
+                    ["RateLimit-Reset"] = reset.ToString(CultureInfo.InvariantCulture),
+                };
+                if (_quotaCount > quota.Requests)
+                {
+                    Interlocked.Increment(ref _throttled);
+                    limits["Retry-After"] = Math.Max(1, reset - now).ToString(CultureInfo.InvariantCulture);
+                    limits["RateLimit-ResetTime"] = DateTimeOffset.FromUnixTimeSeconds(reset).ToString("R", CultureInfo.InvariantCulture);
+                    return quota.Silent
+                        ? Response.Json(new JsonObject { ["message"] = "This endpoint has been requested too many times. Try again later." }, 429, new() { ["Retry-After"] = limits["Retry-After"] })
+                        : new Response(429, Encoding.UTF8.GetBytes("Retry later\n"), "text/plain", limits);
+                }
+
+                if (quota.Silent)
+                {
+                    limits = null;
+                }
+            }
+
+            var answer = Route(r);
+            if (limits is not null)
+            {
+                var headers = new Dictionary<string, string>(answer.Headers ?? [], StringComparer.OrdinalIgnoreCase);
+                foreach (var (name, value) in limits)
+                {
+                    headers[name] = value;
+                }
+
+                answer = answer with { Headers = headers };
+            }
+
+            return answer;
+        }
+    }
+
+    /// <summary>A request sent on to its upload's signed address in the object store, as GitLab sends one it does not proxy.</summary>
+    private static Response SentToStore(Request r, string path)
+        => new(r.Method == "HEAD" ? 303 : 302, Encoding.UTF8.GetBytes("This resource has been moved temporarily.\n"), "text/plain",
+            new() { ["Location"] = $"{ObjectStore}{path}?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=600&X-Amz-Signature=0f4a1e" });
+
+    /// <summary>
+    /// The object store's answer to a request sent on to it: the signed address alone opens an upload (a sign-in header with
+    /// it is refused, as S3 refuses a second means of authentication); a HEAD gives the headers.
+    /// </summary>
+    private HttpResponseMessage StoreAnswer(HttpRequestMessage message, Dictionary<string, string> headers)
+    {
+        var url = message.RequestUri!;
+        ObjectStoreRequests.Enqueue($"{message.Method.Method} {url.AbsolutePath}");
+        HttpResponseMessage Refused(int status, string code, string why)
+            => new((HttpStatusCode)status) { RequestMessage = message, Content = new StringContent($"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error><Code>{code}</Code><Message>{why}</Message></Error>", Encoding.UTF8, "application/xml") };
+        if (headers.ContainsKey("PRIVATE-TOKEN") || headers.ContainsKey("Authorization") || headers.ContainsKey("Cookie"))
+        {
+            return Refused(400, "InvalidArgument", "Only one auth mechanism allowed; only the X-Amz-Algorithm query parameter, Signature query string parameter or the Authorization header should be specified");
+        }
+
+        if (!url.Query.Contains("X-Amz-Signature=", StringComparison.Ordinal))
+        {
+            return Refused(403, "AccessDenied", "Access Denied");
+        }
+
+        var segments = url.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.UnescapeDataString).ToArray();
+        byte[]? bytes;
+        lock (_gate)
+        {
+            bytes = segments switch
+            {
+                ["uploads", var id, var secret, var file] => _projects.FirstOrDefault(p => p.Id.ToString(CultureInfo.InvariantCulture) == id)?.Uploads.GetValueOrDefault($"{secret}/{file}"),
+                ["wiki", var owner, var hash, var file] => (owner.StartsWith("groups/", StringComparison.Ordinal)
+                    ? _groups.FirstOrDefault(g => g.FullPath == owner["groups/".Length..])?.WikiUploads
+                    : _projects.FirstOrDefault(p => p.FullPath == owner)?.WikiUploads)?.GetValueOrDefault($"{hash}/{file}"),
+                _ => null,
+            };
+        }
+
+        if (bytes is null)
+        {
+            return Refused(404, "NoSuchKey", "The specified key does not exist.");
+        }
+
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { RequestMessage = message, Content = new ByteArrayContent(message.Method == HttpMethod.Head ? [] : bytes) };
+        response.Content.Headers.TryAddWithoutValidation("Content-Type", "application/octet-stream");
+        response.Content.Headers.TryAddWithoutValidation("Content-Length", bytes.Length.ToString(CultureInfo.InvariantCulture));
+        return response;
+    }
+
+    /// <summary>The answer itself: the pages, then the API, for the account the request signs in as.</summary>
+    private Response Route(Request r)
+    {
+        {
             var path = r.Url.AbsolutePath;
             if (Root.Length > 0)
             {
@@ -717,9 +862,14 @@ internal sealed partial class FakeGitLab
         var uploads = owner.StartsWith("groups/", StringComparison.Ordinal)
             ? _groups.FirstOrDefault(g => g.FullPath == owner["groups/".Length..] && Sees(user, g))?.WikiUploads
             : _projects.FirstOrDefault(p => p.FullPath == owner && Sees(user, p))?.WikiUploads;
-        return uploads is not null && uploads.TryGetValue(file, out var bytes)
-            ? new Response(200, bytes, "application/octet-stream", new() { ["Content-Length"] = bytes.Length.ToString(CultureInfo.InvariantCulture) })
-            : new Response(404, Encoding.UTF8.GetBytes("<html>not found</html>"), "text/html");
+        if (uploads is null || !uploads.TryGetValue(file, out var bytes))
+        {
+            return new Response(404, Encoding.UTF8.GetBytes("<html>not found</html>"), "text/html");
+        }
+
+        return UploadsInObjectStore
+            ? SentToStore(r, $"/wiki/{Uri.EscapeDataString(owner)}/{file.Split('/').Select(Uri.EscapeDataString).Aggregate((a, b) => a + "/" + b)}")
+            : new Response(200, bytes, "application/octet-stream", new() { ["Content-Length"] = bytes.Length.ToString(CultureInfo.InvariantCulture) });
     }
 
     private readonly Dictionary<string, User> _sessions = new(StringComparer.Ordinal);
@@ -884,15 +1034,20 @@ internal sealed partial class FakeGitLab
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage message, CancellationToken ct)
         {
             var url = message.RequestUri!;
-            if (!url.GetLeftPart(UriPartial.Authority).Equals(fake.Origin, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new HttpRequestException($"No such host is known. ({url.Host})");
-            }
-
             var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (var header in message.Headers)
             {
                 headers[header.Key] = string.Join(header.Key.Equals("Cookie", StringComparison.OrdinalIgnoreCase) ? "; " : ", ", header.Value);
+            }
+
+            if (url.GetLeftPart(UriPartial.Authority).Equals(ObjectStore, StringComparison.OrdinalIgnoreCase))
+            {
+                return fake.StoreAnswer(message, headers);
+            }
+
+            if (!url.GetLeftPart(UriPartial.Authority).Equals(fake.Origin, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new HttpRequestException($"No such host is known. ({url.Host})");
             }
 
             byte[] body = [];
@@ -910,6 +1065,11 @@ internal sealed partial class FakeGitLab
             var segments = raw.Split('/', StringSplitOptions.RemoveEmptyEntries).Select(Uri.UnescapeDataString).ToArray();
             var query = (url.Query.Length > 1 ? url.Query[1..] : "").Split('&', StringSplitOptions.RemoveEmptyEntries)
                 .Select(p => p.Split('=', 2)).ToDictionary(p => Uri.UnescapeDataString(p[0]), p => p.Length > 1 ? Uri.UnescapeDataString(p[1].Replace('+', ' ')) : "", StringComparer.Ordinal);
+            if (fake.AnswerDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(fake.AnswerDelay, ct).ConfigureAwait(false);
+            }
+
             var answer = fake.Answer(new Request(message.Method.Method, url, segments, query, headers, body));
             var response = new HttpResponseMessage((HttpStatusCode)answer.Status) { RequestMessage = message, Content = new ByteArrayContent(message.Method == HttpMethod.Head ? [] : answer.Body) };
             if (answer.ContentType is not null)

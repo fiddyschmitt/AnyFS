@@ -218,9 +218,16 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
             || value.StartsWith("eyJ", StringComparison.Ordinal)
             || SecretNames.Any(secret => name.Contains(secret, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>What a request is called to the watcher: its method, and that it is a walk's where it is (the Operations tab's Operation column: "GET (walk)").</summary>
+    public static string What(HttpRequestMessage request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return Walks.Current ? $"{request.Method.Method} (walk)" : request.Method.Method;
+    }
+
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        var asked = _watcher.Asked(request.Method.Method, Shown(request.RequestUri));
+        var asked = _watcher.Asked(What(request), Shown(request.RequestUri));
         HttpResponseMessage response;
         try
         {
@@ -240,7 +247,7 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
 
     protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        var asked = _watcher.Asked(request.Method.Method, Shown(request.RequestUri));
+        var asked = _watcher.Asked(What(request), Shown(request.RequestUri));
         HttpResponseMessage response;
         try
         {

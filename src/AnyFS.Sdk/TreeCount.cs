@@ -28,6 +28,8 @@ public static class TreeCount
         ArgumentNullException.ThrowIfNull(counters);
         ArgumentOutOfRangeException.ThrowIfLessThan(parallelism, 1);
 
+        // the count's listings are a walk's: a client's go before them where the source gates its requests
+        Walks.Current = true;
         var pending = Channel.CreateUnbounded<string>(new UnboundedChannelOptions { SingleReader = false, SingleWriter = false });
         var outstanding = 1;
         pending.Writer.TryWrite("");

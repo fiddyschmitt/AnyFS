@@ -1113,12 +1113,12 @@ public class GitLabSourceTests
         Assert.AreEqual(fake.Requests.Count, context.UpstreamRequests.Requests.Count, "every one the server saw, and no more");
         CollectionAssert.AreEquivalent(
             fake.Requests.Select(r => r.Split(' ')[0]).ToList(),
-            context.UpstreamRequests.Requests.Select(r => r.What).ToList(),
-            "with what it was asked");
+            context.UpstreamRequests.Requests.Select(r => r.What.Split(' ')[0]).ToList(),
+            "with what it was asked (the walk's marked so)");
         Assert.AreEqual(fake.Count("repository/tree"), UpstreamRequestRows.To(context, "repository/tree").Count);
         Assert.IsTrue(context.UpstreamRequests.Requests.All(r => r.Target.StartsWith(fake.Origin, StringComparison.Ordinal)), "each with its whole address");
         Assert.IsTrue(context.UpstreamRequests.Requests.All(r => r.Answer is not null), "and what the server answered");
-        Assert.IsTrue(context.UpstreamRequests.Requests.Any(r => r.What == "POST" && r.Target.EndsWith("/api/graphql", StringComparison.Ordinal) && r.Bytes > 0), "GraphQL's too");
+        Assert.IsTrue(context.UpstreamRequests.Requests.Any(r => r.What.StartsWith("POST", StringComparison.Ordinal) && r.Target.EndsWith("/api/graphql", StringComparison.Ordinal) && r.Bytes > 0), "GraphQL's too");
 
         var raw = UpstreamRequestRows.To(context, "/raw").Single();
         Assert.AreEqual("200 OK", raw.Answer);
@@ -1146,6 +1146,70 @@ public class GitLabSourceTests
         Assert.IsFalse(asked.Last(r => r.Target == throttled.Target).Refused);
     }
 
+    [TestMethod]
+    public async Task AServersQuotaIsKeptToOnItsOwnWordBeforeItNeedSay429()
+    {
+        // GitLab names the limit on every answer and says what is left of it: at none left, AnyFS waits for the reset itself,
+        // and the server is never asked what it would refuse
+        var fake = GitLabSeed.Lab();
+        fake.Limit = new FakeGitLab.Quota("throttle_authenticated_api", 3, TimeSpan.FromSeconds(2));
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs/docs"));
+        await using var _s = source;
+
+        // a client's pass over the whole project, one folder at a time: many windows' worth of requests
+        var folders = await ListEverything.OfAsync(source);
+        Assert.IsTrue(folders > 5, folders.ToString());
+        Assert.IsTrue(fake.Requests.Count > 9, "more than three windows' worth asked: " + fake.Requests.Count);
+        Assert.AreEqual(0, fake.Throttled, "no 429: the holds come first");
+    }
+
+    [TestMethod]
+    public async Task AHoldOnOneLimitLeavesRequestsUnderTheOthersFree()
+    {
+        // a limit on the repository alone: its requests wait for the reset, the rest of the tree goes on meanwhile
+        var fake = GitLabSeed.Lab();
+        fake.Limit = new FakeGitLab.Quota("throttle_authenticated_files_api", 1, TimeSpan.FromSeconds(3), path => path.Contains("/repository/", StringComparison.Ordinal));
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/anyfs/docs"));
+        await using var _s = source;
+        Assert.IsTrue((await ListAsync(source, "files")).Count > 0);
+        Assert.IsTrue(fake.Requests.Count(r => r.Contains("/repository/", StringComparison.Ordinal)) >= 1);
+
+        // the repository's quota is used up now: the issues and the wiki answer at once all the same
+        var clock = Stopwatch.StartNew();
+        Assert.IsTrue((await ListAsync(source, "issues")).Count > 0);
+        Assert.IsTrue((await ListAsync(source, "wiki")).Count > 0);
+        Assert.IsTrue(clock.Elapsed < TimeSpan.FromSeconds(1), $"not held with the repository's requests: {clock.ElapsedMilliseconds} ms");
+    }
+
+    [TestMethod]
+    public async Task AServersCountSaysItIsWaitingWhileGitLabAsksItTo()
+    {
+        var fake = GitLabSeed.Lab();
+        fake.Limit = new FakeGitLab.Quota("throttle_authenticated_api", 12, TimeSpan.FromSeconds(2));
+        var (source, context) = await StartAsync(fake, GitLabSeed.Settings(fake.Server));
+        await using var _s = source;
+        await source.CountFilesAsync(CancellationToken.None);
+        var said = ProjectProgress(context);
+        var waiting = said.Where(s => s.Message.Contains("waiting", StringComparison.Ordinal)).ToList();
+        Assert.IsTrue(waiting.Count > 0, "the tile says why it stands still: " + string.Join("; ", said.Select(s => s.Message)));
+        StringAssert.Matches(waiting[0].Message, new System.Text.RegularExpressions.Regex(@"^Counting files: \d+ of \d+ projects, waiting \d+ s as GitLab asks \((429, throttle_authenticated_api|the quota of throttle_authenticated_api is used up): \d+ of 12 requests used\)$"), waiting[0].Message);
+        // a wait that ends while the count goes on is said plainly again; one the count ends in is left to the count's end
+        var total = (await source.ServerListingAsync(CancellationToken.None)).Projects.Count;
+        StringAssert.StartsWith(said[^1].Message, $"Counting files: {total:N0} of {total:N0} projects", said[^1].Message);
+        var plain = said.Select((s, i) => (s.Message, i)).Where(s => s.i > 0 && !s.Message.Contains("waiting", StringComparison.Ordinal) && said[s.i - 1].Message.Contains("waiting", StringComparison.Ordinal)).ToList();
+        Assert.IsTrue(plain.Count > 0 || said[^1].Message.Contains("waiting", StringComparison.Ordinal), "said plainly again after a wait: " + string.Join("; ", said.Select(s => s.Message)));
+    }
+
+    [TestMethod]
+    [DataRow("https://gitlab.example.com/api/v4/projects/123/repository/tree?ref=main&path=src", "GET projects/*/repository/tree")]
+    [DataRow("https://gitlab.example.com/api/v4/projects/123/repository/files/src%2Fmain.py/raw?ref=main", "GET projects/*/repository/files/*/raw")]
+    [DataRow("https://gitlab.example.com/api/v4/projects/123/uploads/12d86697a1756f24b87861d45eee5cf6/notes.txt", "GET projects/*/uploads/*/notes.txt")]
+    [DataRow("https://gitlab.example.com/api/v4/projects?simple=true&per_page=100", "GET projects")]
+    [DataRow("https://gitlab.example.com/api/graphql", "GET graphql")]
+    [DataRow("https://gitlab.example.com/anyfs/docs/-/wikis/uploads/0123456789abcdef0123456789abcdef/diagram.png", "GET anyfs/docs/-/wikis/uploads/*/diagram.png")]
+    public void ARequestsKindIsItsMethodAndTheShapeOfItsPath(string url, string kind)
+        => Assert.AreEqual(kind, GitLabApi.Kind(new HttpRequestMessage(HttpMethod.Get, new Uri(url))));
+
     /// <summary>What a count said of the projects, in the order it said it: the number it had come to and the fraction behind it.</summary>
     private static List<(string Message, double? Fraction)> ProjectProgress(TestSourceContext context)
     {
@@ -1153,6 +1217,30 @@ public class GitLabSourceTests
         {
             return context.Progress.Where(p => p.Message.StartsWith("Counting files", StringComparison.Ordinal)).ToList();
         }
+    }
+
+    [TestMethod]
+    public async Task AClientsRequestTakesTheNextSlotAheadOfTheWalks()
+    {
+        // one request at a time over a server that takes 40 ms to answer, the walk's requests queued for the slot: a client's
+        // listing takes each next slot as it frees, so its few requests go one after another, not one between each of the walk's
+        var fake = GitLabSeed.Lab();
+        fake.AnswerDelay = TimeSpan.FromMilliseconds(40);
+        var settings = GitLabSeed.Settings(fake.Server);
+        settings.ProjectsAtATime = 1;
+        settings.RequestsPerProject = 1;
+        var (source, _) = await StartAsync(fake, settings);
+        await using var _s = source;
+        var count = source.CountFilesAsync(CancellationToken.None);
+        await Task.Delay(300);
+
+        var from = fake.Requests.Count;
+        var clock = Stopwatch.StartNew();
+        Assert.IsTrue((await ListAsync(source, "anyfs/docs/issues")).Count > 0);
+        var took = clock.Elapsed;
+        await count;
+        var made = fake.Requests.Skip(from).Take(12).ToList();
+        Assert.IsTrue(took < TimeSpan.FromMilliseconds(400), $"{took.TotalMilliseconds:F0} ms, after: {string.Join("; ", made)}");
     }
 
     [TestMethod]
@@ -1623,6 +1711,31 @@ public class GitLabTicketTests
     }
 
     [TestMethod]
+    public async Task AnAttachmentInObjectStorageIsHadFromThereAndTheTokenStaysWithTheServer()
+    {
+        // GitLab that does not proxy its object storage sends a request for an upload on to a signed address there: 303 to the
+        // HEAD that measures it (as Grape answers a HEAD), 302 to the GET that reads it; the token goes to GitLab alone, and the
+        // store, which refuses any sign-in header, answers the signed address. Until 6-Nov-2026 the 303 was an error ("the
+        // attachment could not be had: GitLab answered 303 to an attachment", the user's log) and the attachment was left out.
+        var fake = GitLabSeed.Lab();
+        fake.UploadsInObjectStore = true;
+        var log = new LineLogger();
+        using var context = new TestSourceContext("gitlab", log);
+        var source = new GitLabSource(GitLabSeed.Settings(fake.Server + "/anyfs/docs"), fake.StandIn());
+        await source.InitialiseAsync(context, CancellationToken.None);
+        await using var _s = source;
+        var attachments = await ListAsync(source, First + "/attachments");
+        CollectionAssert.AreEqual(new[] { "steps.txt", "diagram.png", "data.bin" }, attachments.Select(e => e.Name).ToArray());
+        Assert.AreEqual(GitLabSeed.Data.Length, attachments.Single(e => e.Name == "data.bin").Length, "measured where the store keeps it");
+        CollectionAssert.AreEqual(GitLabSeed.Data, await ReadAsync(source, First + "/attachments/data.bin"));
+
+        var store = fake.ObjectStoreRequests.ToList();
+        Assert.IsTrue(store.Count >= 4, "the three measured and the one read: " + string.Join("; ", store));
+        Assert.IsTrue(store.All(r => r.StartsWith("GET ", StringComparison.Ordinal)), "a HEAD sent on by a 303 goes as a GET, as the status says: " + string.Join("; ", store));
+        Assert.IsFalse(log.Lines.Any(l => l.Contains("could not be had", StringComparison.Ordinal) || l.Contains("303", StringComparison.Ordinal)), log.ToString());
+    }
+
+    [TestMethod]
     public async Task AClosedIssueSaysSoAndAnIssueWithoutCommentsSaysThat()
     {
         var fake = GitLabSeed.Lab();
@@ -1958,6 +2071,20 @@ public class GitLabWebSessionTests
         Assert.AreEqual("a screenshot", Encoding.UTF8.GetString(await ReadAsync(source, $"wiki/attachments/{GitLabSeed.ShotHash}/shot 1.png")));
         StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, "wiki/home.md")), $"(attachments/{GitLabSeed.DiagramHash}/diagram.png)");
         StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, "wiki/guides/install/linux.md")), $"(../../attachments/{GitLabSeed.ShotHash}/shot%201.png)");
+    }
+
+    [TestMethod]
+    public async Task WithASessionAWikisEmbeddedFilesInObjectStorageAreHadFromThere()
+    {
+        // the wiki's page route sends the browser session on to the store too; the session's cookies stay with GitLab
+        var fake = Lab();
+        fake.UploadsInObjectStore = true;
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, new Browser(fake), context);
+        CollectionAssert.AreEqual(new[] { GitLabSeed.DiagramHash, GitLabSeed.ShotHash }, await NamesAsync(source, "wiki/attachments"));
+        CollectionAssert.AreEqual(GitLabSeed.Diagram, await ReadAsync(source, $"wiki/attachments/{GitLabSeed.DiagramHash}/diagram.png"));
+        Assert.AreEqual("a screenshot", Encoding.UTF8.GetString(await ReadAsync(source, $"wiki/attachments/{GitLabSeed.ShotHash}/shot 1.png")));
+        Assert.IsTrue(fake.ObjectStoreRequests.Count >= 2, string.Join("; ", fake.ObjectStoreRequests));
     }
 
     [TestMethod]
