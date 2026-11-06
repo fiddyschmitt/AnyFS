@@ -51,6 +51,11 @@ public sealed class KeptListings : IAsyncDisposable
     // when the last walk that listed every folder whatever its stamp ended, or the first walk (saved with the listings); null before it
     private DateTimeOffset? _fullWalkAt;
 
+    // what the listings were last saved as (the cache's version), and whether what is saved beside them (_fullWalkAt, _leftOut)
+    // has moved since: a walk over a tree that has not changed keeps every listing by its stamp, and has nothing to save
+    private long _savedVersion = -1;
+    private volatile bool _changed;
+
     // what a walk last left out of each folder it left some out of (KeptListingsOptions.LeftOut), saved with the listings: keeping a
     // folder by its stamp, it knows without asking that one below it with no listing was left out on purpose. Asking cost a big
     // GitLab the listing of everything above each of those at every start.
@@ -109,6 +114,8 @@ public sealed class KeptListings : IAsyncDisposable
 
             _restored = saved.Listings.Count > 0;
             _fullWalkAt = saved.FullWalkAt;
+            _savedVersion = Cache.Version;
+            _changed = false;
             _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run answer at once, {Stamped:N0} of them stamped", _options.Name, saved.Listings.Count, saved.Stamps?.Count ?? 0);
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
@@ -121,10 +128,20 @@ public sealed class KeptListings : IAsyncDisposable
         }
     }
 
-    /// <summary>Saves the listings held now (<see cref="KeptListingsOptions.SaveTo"/>): written whole beside the file and moved into place, so a crash leaves the last good one.</summary>
+    /// <summary>
+    /// Saves the listings held now (<see cref="KeptListingsOptions.SaveTo"/>), where anything has changed since they were last
+    /// saved: written whole beside the file and moved into place, so a crash leaves the last good one.
+    /// </summary>
     private void Save()
     {
         if (!_options.Keep || _options.SaveTo is not { } path)
+        {
+            return;
+        }
+
+        // read before the snapshot: a change that lands meanwhile moves the version past this one, and the next save has it
+        var version = Cache.Version;
+        if (version == _savedVersion && !_changed)
         {
             return;
         }
@@ -162,6 +179,9 @@ public sealed class KeptListings : IAsyncDisposable
                     Thread.Sleep(10 << (attempt - 1));
                 }
             }
+
+            _savedVersion = version;
+            _changed = false;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
         {
@@ -409,6 +429,7 @@ public sealed class KeptListings : IAsyncDisposable
                 if (full || _fullWalkAt is null)
                 {
                     _fullWalkAt = _time.GetUtcNow();
+                    _changed = true;
                 }
 
                 // what this walk could not list stays as it is until the next one, which begins a WalkEvery from now
@@ -591,10 +612,11 @@ public sealed class KeptListings : IAsyncDisposable
                     if (leftOut is { Count: > 0 })
                     {
                         _leftOut[folder] = leftOut;
+                        _changed = true;
                     }
-                    else if (!heldAlone)
+                    else if (!heldAlone && _leftOut.TryRemove(folder, out _))
                     {
-                        _leftOut.TryRemove(folder, out _);
+                        _changed = true;
                     }
 
                     long files = 0;

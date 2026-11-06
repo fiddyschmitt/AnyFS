@@ -752,6 +752,44 @@ public class KeptListingsTests
     }
 
     [TestMethod]
+    public async Task AWalkThatFindsNothingChangedSavesNothingAgain()
+    {
+        var file = TempFile();
+        try
+        {
+            _stamps["docs"] = "v1";
+            _stamps["photos"] = "v1";
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, SaveKey = "jane@contoso.com", StampOf = StampOf };
+            var then = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            await using (var kept = Kept(new SourceCounters(), options))
+            {
+                await kept.CountAsync(CancellationToken.None);
+                Assert.IsTrue(File.Exists(file), "saved after the first walk");
+                File.SetLastWriteTimeUtc(file, then);
+
+                // the root is listed again (it has no stamp) and found as it was; the stamped folders are kept: nothing to save
+                await kept.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+            }
+
+            Assert.AreEqual(then, File.GetLastWriteTimeUtc(file), "not written again when the source stopped");
+
+            // a change: the next run's walk finds it, and saves
+            _tree["docs"].Add(VfsEntry.File("new.txt", 4));
+            _stamps["docs"] = "v2";
+            await using (var next = Kept(new SourceCounters(), options))
+            {
+                await next.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+            }
+
+            Assert.AreNotEqual(then, File.GetLastWriteTimeUtc(file), "saved with the change");
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [TestMethod]
     public async Task AFolderWhoseStampHoldsIsKeptWithEverythingBelowItFromTheLastRun()
     {
         var file = TempFile();

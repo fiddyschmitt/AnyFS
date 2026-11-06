@@ -316,6 +316,33 @@ public class ListingCacheTests
     }
 
     [TestMethod]
+    public void TheFoldersUnderOneAreItsOwnAndNotItsNamesakes()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
+        foreach (var path in new[] { "docs", "docs/sub", "docs/sub/deep", "docs0", "docs-old", "docsx/y", "" })
+        {
+            cache.Keep(path, [VfsEntry.File("f", 1)]);
+        }
+
+        CollectionAssert.AreEquivalent(new[] { "docs", "docs/sub", "docs/sub/deep" }, cache.Under("docs").Keys.ToArray());
+        CollectionAssert.AreEquivalent(new[] { "docs/sub", "docs/sub/deep" }, cache.Under("docs/sub").Keys.ToArray());
+        Assert.AreEqual(7, cache.Under("").Count, "everything for the root");
+        Assert.AreEqual(0, cache.Under("nope").Count);
+
+        var version = cache.Version;
+        cache.InvalidateTree("docs");
+        CollectionAssert.AreEquivalent(new[] { "", "docs0", "docs-old", "docsx/y" }, cache.Snapshot().Keys.ToArray(), "the namesakes stay");
+        Assert.IsTrue(cache.Version > version, "the version moved with the change");
+
+        // the same listing again is no change; another is
+        version = cache.Version;
+        cache.Keep("docs0", [VfsEntry.File("f", 1)]);
+        Assert.AreEqual(version, cache.Version, "the same again");
+        cache.Keep("docs0", [VfsEntry.File("f", 2)]);
+        Assert.AreNotEqual(version, cache.Version);
+    }
+
+    [TestMethod]
     public async Task AKeptListingStaysUntilListedAfresh()
     {
         var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
@@ -341,15 +368,6 @@ public class ListingCacheTests
         _time.Advance(TimeSpan.FromSeconds(1));
         await cache.GetAsync("docs", CancellationToken.None);
         Assert.AreEqual(1, _calls);
-
-        // what a plugin built against SDK 0.2 calls: the refresh window it gives is ignored
-#pragma warning disable CS0618
-        var old = new ListingCache(ListingCache.Kept, ListAsync, 10_000, _time, TimeSpan.FromSeconds(5));
-        await old.ListAsync("docs", CancellationToken.None);
-        _time.Advance(TimeSpan.FromSeconds(1));
-        await old.ListAsync("docs", CancellationToken.None);
-#pragma warning restore CS0618
-        Assert.AreEqual(2, _calls, "one listing for the second cache too");
     }
 
     [TestMethod]
