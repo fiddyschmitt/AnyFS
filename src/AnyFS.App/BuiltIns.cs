@@ -5,6 +5,7 @@ using AnyFS.Mounts.Http;
 using AnyFS.Mounts.Smb;
 using AnyFS.Mounts.WebDav;
 using AnyFS.Mounts.WinFsp;
+using AnyFS.Sources.Atlassian.Bitbucket;
 using AnyFS.Sources.Atlassian.Confluence;
 using AnyFS.Sources.Atlassian.Jira;
 using AnyFS.Sources.GitLab;
@@ -32,6 +33,7 @@ public static class BuiltIns
         registry.AddBuiltIn(new TeamsPlugin());
         registry.AddBuiltIn(new JiraPlugin());
         registry.AddBuiltIn(new ConfluencePlugin());
+        registry.AddBuiltIn(new BitbucketPlugin());
         registry.AddBuiltIn(new WinFspMountProvider());
         registry.AddBuiltIn(new FuseMountProvider());
         registry.AddBuiltIn(new SmbMountProvider());
