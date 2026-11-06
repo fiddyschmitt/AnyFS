@@ -169,6 +169,16 @@ writes to `provisioning/atlassian/secrets/jira-tester.token`) are set, and the s
 sign-in. The sources' folders are made of documents and attachments, not the fixture tree the E2E compares, so there are
 no E2E rows for them.
 
+The Bitbucket and Bamboo sources' unit tests run the same way against `FakeBitbucket.cs` and `FakeBamboo.cs`, which share
+`FakeAtlassian.cs` too (its login form answers Bitbucket's `j_atl_security_check` and Bamboo's `userlogin!doDefault.action`
+as well, and a HEAD answers with the size GET would give). `FakeBitbucket` holds projects (visible to everyone or to some
+accounts, a person's `~NAME` among them), repositories whose commits are snapshots of files, branches and tags, submodules,
+and pull requests with their activities and a diff; its lists page with `isLastPage` and `nextPageStart` (`PageLimit` caps a
+page). `FakeBamboo` holds projects, plans with their jobs, plan branches, and builds with a result per job, its log and the
+artifacts it kept (a folder of files, shown as a page of links as Bamboo shows one, or a single file); its lists page with
+`start-index`, `max-result` and `size`. Neither product is in the lab and there are no live tests for them: the request
+shapes the sources send are the APIs as documented, unchecked against a real server.
+
 ## Publish
 
 ```
