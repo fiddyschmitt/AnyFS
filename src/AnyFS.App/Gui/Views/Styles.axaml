@@ -13,11 +13,19 @@
   <Style Selector="Border.tile:pointerover">
     <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseMediumLowBrush}" />
   </Style>
-  <Style Selector="ProgressBar.tile">
+  <!-- a tile's bars: the one that fills goes across the tile; the one that goes on and on is small, beside the file count -->
+  <Style Selector="ProgressBar.filling">
     <Setter Property="Height" Value="4" />
     <Setter Property="MinWidth" Value="0" />
     <Setter Property="HorizontalAlignment" Value="Stretch" />
     <Setter Property="Margin" Value="0,6,0,0" />
+  </Style>
+  <Style Selector="ProgressBar.endless">
+    <Setter Property="Width" Value="44" />
+    <Setter Property="MinWidth" Value="44" />
+    <Setter Property="Height" Value="4" />
+    <Setter Property="VerticalAlignment" Value="Center" />
+    <Setter Property="Margin" Value="0,0,8,0" />
   </Style>
   <Style Selector="ListBox.tiles">
     <Setter Property="Background" Value="Transparent" />
