@@ -1184,6 +1184,37 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
+    public async Task AServersCountSaysItsProjectsInOrderWhileSeveralAreComeToAtOnce()
+    {
+        // projects come to at once report together, and a busy host takes reports made at once in no set order: each one
+        // says one project more than the one before
+        var fake = GitLabSeed.Lab();
+        var tester = fake.UserNamed("tester");
+        var many = fake.AddGroup("many", "Many", null, tester);
+        for (var i = 0; i < 40; i++)
+        {
+            fake.AddProject(many, $"project{i:00}", $"Project {i}").Commit("main", new Dictionary<string, byte[]> { ["README.md"] = Encoding.UTF8.GetBytes($"project {i}\n") });
+        }
+
+        using var inner = new TestSourceContext();
+        var context = new SlowReportsContext(inner);
+        var settings = GitLabSeed.Settings(fake.Server);
+        settings.ProjectsAtATime = 8;
+        var source = new GitLabSource(settings, fake.StandIn());
+        await source.InitialiseAsync(context, CancellationToken.None);
+        await using var _s = source;
+        await source.CountFilesAsync(CancellationToken.None);
+
+        var said = context.Said("Counting files: ").Where(s => s.Fraction is not null).ToList();
+        var total = (await source.ServerListingAsync(CancellationToken.None)).Projects.Count;
+        Assert.AreEqual(total, said.Count, "each project said once: " + string.Join("; ", said.Select(s => s.Message)));
+        for (var i = 1; i < said.Count; i++)
+        {
+            Assert.AreEqual($"Counting files: {i + 1:N0} of {total:N0} projects", said[i].Message, "in the order of the count: " + string.Join("; ", said.Select(s => s.Message)));
+        }
+    }
+
+    [TestMethod]
     public async Task AServersCountOverWhatIsKeptStillGoesThroughItsProjects()
     {
         var fake = GitLabSeed.Lab();

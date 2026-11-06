@@ -248,7 +248,11 @@ public interface ISourceContext
 
     ISecretStore Secrets { get; }
 
-    /// <summary>Shown while the source is Starting ("Logging in...") or counting its files (<see cref="ICountable"/>), with an optional 0..1 fraction.</summary>
+    /// <summary>
+    /// Shown while the source is Starting ("Logging in...") or counting its files (<see cref="ICountable"/>), with an optional
+    /// 0..1 fraction. The last said is what shows: a source that says how far it has got from several tasks at once says it
+    /// one at a time, in the order of its count, or an earlier figure can come last.
+    /// </summary>
     void ReportProgress(string message, double? fraction = null);
 
     /// <summary>Changes the source's health after it has started (a root went away: Degraded; came back: Ready).</summary>

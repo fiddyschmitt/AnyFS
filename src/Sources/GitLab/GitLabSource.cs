@@ -615,17 +615,26 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         }
     }
 
-    /// <summary>How far a count has got through the projects: each said once as the walk comes to it (or someone opens it first), and how much of the list is behind it.</summary>
+    /// <summary>
+    /// How far a count has got through the projects: each said once as the walk comes to it (or someone opens it first), and
+    /// how much of the list is behind it. Projects come to at once ("Projects at a time") are said one at a time, so that
+    /// what is said keeps the order of the count: counted and said apart, a smaller number could be said after a larger one.
+    /// </summary>
     private sealed class ProjectsCounted(ISourceContext context, long? total)
     {
-        private readonly ConcurrentDictionary<long, bool> _reached = new();
+        private readonly HashSet<long> _reached = [];
 
         public long? Total => total;
 
         public void Reached(GlProject project)
         {
-            if (_reached.TryAdd(project.Id, true))
+            lock (_reached)
             {
+                if (!_reached.Add(project.Id))
+                {
+                    return;
+                }
+
                 long count = _reached.Count;
                 if (total is > 0 and var known)
                 {

@@ -224,6 +224,39 @@ public class OutlookItemListingTests
     }
 
     [TestMethod]
+    public async Task ACountsReportsKeepTheOrderOfItsCountWhileSeveralBatchesEndTogether()
+    {
+        // batches that end together report together, and a busy host takes reports made at once in no set order: each one
+        // says no less than the one before, and the last says the whole count (CI, 6-Nov-2026: "9 of 29 items" came last)
+        var fake = FakeExchange.Mailbox();
+        var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
+        for (var i = 0; i < 240; i++)
+        {
+            fake.AddMessage(inbox, $"Note {i:D3}", ("Adele Vance", "adelev@fake.test"), new DateTimeOffset(2026, 4, 1 + (i % 28), 9, 0, 0, TimeSpan.Zero), $"<p>Note {i}.</p>", []);
+        }
+
+        using var inner = new TestSourceContext("outlook");
+        var context = new SlowReportsContext(inner);
+        var settings = Settings();
+        settings.Concurrency = 8;
+        var source = new OutlookSource(settings, fake.StandIn());
+        await source.InitialiseAsync(context, CancellationToken.None);
+        await using (source)
+        {
+            await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+        }
+
+        var said = context.Said("Counting files: ");
+        Assert.IsTrue(said.Count >= 240 / OutlookSource.BatchItems, string.Join("; ", said.Select(s => s.Message)));
+        for (var i = 1; i < said.Count; i++)
+        {
+            Assert.IsTrue(said[i].Fraction >= said[i - 1].Fraction, $"report {i} went back: " + string.Join("; ", said.Select(s => s.Message)));
+        }
+
+        Assert.AreEqual(1.0, said[^1].Fraction, said[^1].Message);
+    }
+
+    [TestMethod]
     public async Task CountingOnStartListsEveryItemAndKeepsNewMailListed()
     {
         var fake = WithMay(out _);

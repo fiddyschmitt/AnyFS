@@ -767,12 +767,12 @@ public sealed class OutlookSource : SourceBase, ICountable
     }
 
     /// <summary>
-    /// Lists every item not listed yet: a folder's items a batch at a time (<see cref="BatchItems"/>), two batches at once
-    /// (of the four requests a mailbox takes at a time, two are left to whoever browses), their files not kept; the count
-    /// grows as it goes. An item that does not list is left to its folder's opening, which says why; when the store fails
-    /// as a whole (the network, the sign-in, a server too busy) the listing waits, a minute and then longer, and goes on.
-    /// Items found meanwhile (a refresh) are listed before it ends. With <paramref name="report"/> (the host's count), how
-    /// far it got shows on the tile. One at a time.
+    /// Lists every item not listed yet: a folder's items a batch at a time (<see cref="BatchItems"/>), "Requests at a time"
+    /// batches at once (<see cref="PassAsync"/>), their files not kept; the count grows as it goes. An item that does not
+    /// list is left to its folder's opening, which says why; when the store fails as a whole (the network, the sign-in, a
+    /// server too busy) the listing waits, a minute and then longer, and goes on. Items found meanwhile (a refresh) are listed
+    /// before it ends. With <paramref name="report"/> (the host's count), how far it got shows on the tile, in the order of
+    /// the count however the batches end. One at a time.
     /// </summary>
     private async Task ListAllAsync(bool report, CancellationToken ct)
     {
@@ -783,6 +783,7 @@ public sealed class OutlookSource : SourceBase, ICountable
             var pause = TimeSpan.FromMinutes(1);
             var started = Stopwatch.GetTimestamp();
             var done = 0;
+            var counting = new object();
             while (true)
             {
                 var todo = _tree.ById.Values.Where(n => !tried.Contains(n.Item!.Id) && _listings.For(n.Item!) is null).ToList();
@@ -799,10 +800,16 @@ public sealed class OutlookSource : SourceBase, ICountable
 
                 var failure = await PassAsync(todo, tried, listed =>
                 {
-                    var now = Interlocked.Add(ref done, listed);
-                    if (report)
+                    // batches that end together each add theirs and say the total so far, one at a time, so that what is said
+                    // keeps the order of the count: added and said apart, an earlier total could be said last ("9 of 29
+                    // items" once all 29 were done, 6-Nov-2026)
+                    lock (counting)
                     {
-                        Context.ReportProgress($"Counting files: {now:N0} of {total:N0} items", (double)now / total);
+                        done += listed;
+                        if (report)
+                        {
+                            Context.ReportProgress($"Counting files: {done:N0} of {total:N0} items", (double)done / total);
+                        }
                     }
                 }, ct).ConfigureAwait(false);
                 if (failure is null)
