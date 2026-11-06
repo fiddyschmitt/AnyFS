@@ -30,7 +30,6 @@ public sealed class BitbucketSource : SourceBase, ICountable
     private SpoolCache? _spool;
     private BbFolder? _root;
     private RepositoriesCounted? _counted;
-    private bool _degraded;
 
     public BitbucketSource(BitbucketSettings settings)
         : this(settings, standIn: null)
@@ -194,22 +193,6 @@ public sealed class BitbucketSource : SourceBase, ICountable
         }
 
         return node;
-    }
-
-    /// <summary>Runs a request to Bitbucket, marking the source Degraded while Bitbucket cannot be reached and Ready again once it answers.</summary>
-    private async Task<T> Guard<T>(Func<Task<T>> work)
-    {
-        try
-        {
-            var result = await work().ConfigureAwait(false);
-            MarkHealthy();
-            return result;
-        }
-        catch (VfsException ex) when (ex.Error == VfsError.Unavailable)
-        {
-            MarkDegraded(ex.Message);
-            throw;
-        }
     }
 
     // --- what the folders ask for --------------------------------------------------------------------------------------
@@ -578,24 +561,6 @@ public sealed class BitbucketSource : SourceBase, ICountable
     }
 
     // --- health and keeping --------------------------------------------------------------------------------------------
-
-    private void MarkDegraded(string detail)
-    {
-        if (!_degraded && IsInitialised)
-        {
-            _degraded = true;
-            Context.ReportHealth(ComponentHealth.Degraded, detail);
-        }
-    }
-
-    private void MarkHealthy()
-    {
-        if (_degraded && IsInitialised)
-        {
-            _degraded = false;
-            Context.ReportHealth(ComponentHealth.Ready);
-        }
-    }
 
     public override async ValueTask DisposeAsync()
     {

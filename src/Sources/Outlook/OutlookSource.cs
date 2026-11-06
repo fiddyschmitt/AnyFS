@@ -73,7 +73,6 @@ public sealed class OutlookSource : SourceBase, ICountable
     private IDisposable? _directoryOwned;
     private Task _refreshing = Task.CompletedTask;
     private (long Length, DateTime Written) _seen;
-    private bool _degraded;
 
     /// <summary>What encrypted S/MIME mail is opened with (the user's certificates; for tests, <see cref="SmimeCertificates"/> too).</summary>
     private SmimeKeys? _keys;
@@ -1529,24 +1528,6 @@ public sealed class OutlookSource : SourceBase, ICountable
         {
             MarkDegraded(ex.Message);
             throw VfsException.Unavailable($"the Outlook data file could not be read: {ex.Message}");
-        }
-    }
-
-    private void MarkDegraded(string detail)
-    {
-        if (!_degraded && IsInitialised)
-        {
-            _degraded = true;
-            Context.ReportHealth(ComponentHealth.Degraded, detail);
-        }
-    }
-
-    private void MarkHealthy()
-    {
-        if (_degraded && IsInitialised)
-        {
-            _degraded = false;
-            Context.ReportHealth(ComponentHealth.Ready);
         }
     }
 

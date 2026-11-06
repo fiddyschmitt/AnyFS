@@ -37,7 +37,6 @@ public sealed class ThreeDXSource : SourceBase, ICountable
     private SpoolCache? _spool;
     private Task _refreshing = Task.CompletedTask;
     private Task _keepingAlive = Task.CompletedTask;
-    private bool _degraded;
     private DateOrder? _dates;
 
     public ThreeDXSource(ThreeDXSettings settings)
@@ -457,24 +456,6 @@ public sealed class ThreeDXSource : SourceBase, ICountable
         {
             MarkDegraded(ex.Message);
             throw;
-        }
-    }
-
-    private void MarkDegraded(string detail)
-    {
-        if (!_degraded && IsInitialised)
-        {
-            _degraded = true;
-            Context.ReportHealth(ComponentHealth.Degraded, detail);
-        }
-    }
-
-    private void MarkHealthy()
-    {
-        if (_degraded && IsInitialised)
-        {
-            _degraded = false;
-            Context.ReportHealth(ComponentHealth.Ready);
         }
     }
 

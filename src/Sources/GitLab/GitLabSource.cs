@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using System.Text.Json.Nodes;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.GitLab;
@@ -41,7 +42,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     private ProjectsCounted? _counted;
     private Task _saving = Task.CompletedTask;
     private volatile bool _graphQlRefused;
-    private bool _degraded;
 
     public GitLabSource(GitLabSettings settings)
         : this(settings, standIn: null)
@@ -251,22 +251,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     private static GlNode? Child(IReadOnlyList<GlNode> children, string name)
         => children.FirstOrDefault(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
             ?? children.OfType<TicketFolder>().FirstOrDefault(t => TicketFolder.SameTicket(t.Name, name));
-
-    /// <summary>Runs a request to GitLab, marking the source Degraded while GitLab cannot be reached and Ready again once it answers.</summary>
-    private async Task<T> Guard<T>(Func<Task<T>> work)
-    {
-        try
-        {
-            var result = await work().ConfigureAwait(false);
-            MarkHealthy();
-            return result;
-        }
-        catch (VfsException ex) when (ex.Error == VfsError.Unavailable)
-        {
-            MarkDegraded(ex.Message);
-            throw;
-        }
-    }
 
     /// <summary>
     /// "Projects at a time" (1 to 64): how many projects a server's or a group's walk goes through at once, each a part of its own
@@ -863,24 +847,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     }
 
     // --- health and keeping --------------------------------------------------------------------------------------------
-
-    private void MarkDegraded(string detail)
-    {
-        if (!_degraded && IsInitialised)
-        {
-            _degraded = true;
-            Context.ReportHealth(ComponentHealth.Degraded, detail);
-        }
-    }
-
-    private void MarkHealthy()
-    {
-        if (_degraded && IsInitialised)
-        {
-            _degraded = false;
-            Context.ReportHealth(ComponentHealth.Ready);
-        }
-    }
 
     private async Task SaveAsync(CancellationToken ct)
     {

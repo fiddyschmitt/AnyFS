@@ -78,7 +78,6 @@ public abstract class SharePointSource : SourceBase, ICountable
     private KeptListings? _kept;
     private SpoolCache? _spool;
     private string _uploadDir = "";
-    private bool _degraded;
 
     public override SourceCapabilities Capabilities => new(CanWrite: true, CaseInsensitive: true);
 
@@ -1568,25 +1567,6 @@ public abstract class SharePointSource : SourceBase, ICountable
     {
         MarkDegraded(ex.Message);
         return VfsException.Unavailable(ex.Message);
-    }
-
-    /// <summary>For the flavour's connection code: the source's health follows the store's fortunes.</summary>
-    protected void MarkDegraded(string detail)
-    {
-        if (!_degraded && IsInitialised)
-        {
-            _degraded = true;
-            Context.ReportHealth(ComponentHealth.Degraded, detail);
-        }
-    }
-
-    protected void MarkHealthy()
-    {
-        if (_degraded && IsInitialised)
-        {
-            _degraded = false;
-            Context.ReportHealth(ComponentHealth.Ready);
-        }
     }
 
     /// <summary>A site the source shows as a folder: its own site at the root, a subsite or another site below it.</summary>

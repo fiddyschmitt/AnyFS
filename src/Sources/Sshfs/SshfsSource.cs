@@ -23,7 +23,6 @@ public sealed class SshfsSource : SourceBase, ICountable
     private ListingCache? _listings;
     private string _root = "/";
     private bool _driveRoot;
-    private bool _degraded;
 
     public SshfsSource(SshfsSettings settings)
     {
@@ -525,7 +524,7 @@ public sealed class SshfsSource : SourceBase, ICountable
             }
             catch (SourceFailedException ex)
             {
-                MarkDegraded(ex.Message);
+                MarkDegraded($"{_settings.Host}: {ex.Message}");
                 throw VfsException.Unavailable($"{_settings.Host}: {ex.Message}");
             }
             catch (ObjectDisposedException)
@@ -568,7 +567,7 @@ public sealed class SshfsSource : SourceBase, ICountable
                     continue;
                 }
 
-                MarkDegraded(ex.Message);
+                MarkDegraded($"{_settings.Host}: {ex.Message}");
                 throw VfsException.Unavailable($"{_settings.Host} is not reachable: {ex.Message}");
             }
             catch (SshException ex)
@@ -593,23 +592,6 @@ public sealed class SshfsSource : SourceBase, ICountable
         _ => new VfsException(VfsError.IoError, $"{path}: {ex.Message}", ex),
     };
 
-    private void MarkDegraded(string reason)
-    {
-        if (!_degraded && IsInitialised)
-        {
-            _degraded = true;
-            Context.ReportHealth(ComponentHealth.Degraded, $"{_settings.Host}: {reason}");
-        }
-    }
-
-    private void MarkHealthy()
-    {
-        if (_degraded && IsInitialised)
-        {
-            _degraded = false;
-            Context.ReportHealth(ComponentHealth.Ready);
-        }
-    }
 }
 
 /// <summary>

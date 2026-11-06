@@ -11,6 +11,7 @@ namespace AnyFS.Sdk;
 public abstract class SourceBase : ISource
 {
     private ISourceContext? _context;
+    private bool _degraded;
 
     public virtual SourceCapabilities Capabilities => SourceCapabilities.ReadOnly;
 
@@ -88,6 +89,51 @@ public abstract class SourceBase : ISource
         if (!Capabilities.CanWrite)
         {
             throw VfsException.NotSupported(operation);
+        }
+    }
+
+    /// <summary>
+    /// Reports the source <see cref="ComponentHealth.Degraded"/> with <paramref name="detail"/>, once, until
+    /// <see cref="MarkHealthy"/>: for an upstream that cannot be reached, or a part of it that fails. Nothing before the
+    /// source has started (a failure then is the start's to report).
+    /// </summary>
+    protected void MarkDegraded(string detail)
+    {
+        if (!_degraded && IsInitialised)
+        {
+            _degraded = true;
+            Context.ReportHealth(ComponentHealth.Degraded, detail);
+        }
+    }
+
+    /// <summary>Reports the source <see cref="ComponentHealth.Ready"/> again, once, after <see cref="MarkDegraded"/>.</summary>
+    protected void MarkHealthy()
+    {
+        if (_degraded && IsInitialised)
+        {
+            _degraded = false;
+            Context.ReportHealth(ComponentHealth.Ready);
+        }
+    }
+
+    /// <summary>
+    /// Runs a call to the upstream: the source is marked Degraded while the upstream cannot be reached
+    /// (<see cref="VfsError.Unavailable"/>) and Ready again once a call succeeds. Any other failure is the call's own, and
+    /// says nothing about the source's health.
+    /// </summary>
+    protected virtual async Task<T> Guard<T>(Func<Task<T>> work)
+    {
+        ArgumentNullException.ThrowIfNull(work);
+        try
+        {
+            var result = await work().ConfigureAwait(false);
+            MarkHealthy();
+            return result;
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.Unavailable)
+        {
+            MarkDegraded(ex.Message);
+            throw;
         }
     }
 }

@@ -44,7 +44,6 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     private KeptListings? _kept;
     private SpoolCache? _spool;
     private CoFolder? _root;
-    private bool _degraded;
 
     public ConfluenceSource(ConfluenceSettings settings)
         : this(settings, standIn: null)
@@ -314,21 +313,6 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         }
 
         return null;
-    }
-
-    private async Task<T> Guard<T>(Func<Task<T>> work)
-    {
-        try
-        {
-            var result = await work().ConfigureAwait(false);
-            MarkHealthy();
-            return result;
-        }
-        catch (VfsException ex) when (ex.Error == VfsError.Unavailable)
-        {
-            MarkDegraded(ex.Message);
-            throw;
-        }
     }
 
     // --- what the folders ask for --------------------------------------------------------------------------------------
@@ -906,24 +890,6 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     }
 
     // --- health and keeping --------------------------------------------------------------------------------------------
-
-    private void MarkDegraded(string detail)
-    {
-        if (!_degraded && IsInitialised)
-        {
-            _degraded = true;
-            Context.ReportHealth(ComponentHealth.Degraded, detail);
-        }
-    }
-
-    private void MarkHealthy()
-    {
-        if (_degraded && IsInitialised)
-        {
-            _degraded = false;
-            Context.ReportHealth(ComponentHealth.Ready);
-        }
-    }
 
     public override async ValueTask DisposeAsync()
     {

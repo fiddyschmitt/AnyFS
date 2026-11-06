@@ -32,7 +32,6 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     private RequestCache? _cache;
     private KeptListings? _kept;
     private RootFolder? _root;
-    private bool _degraded;
 
     // the cloud signed in to: the one chosen, else found from the account at the start (a stand-in's: the global cloud)
     private TeamsCloud _cloud = TeamsCloud.Global;
@@ -408,7 +407,8 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         return node;
     }
 
-    private async Task<T> Guard<T>(Func<Task<T>> work)
+    /// <summary>As the base, except that a token not handed out is no sign that the service is down.</summary>
+    protected override async Task<T> Guard<T>(Func<Task<T>> work)
     {
         try
         {
@@ -1487,24 +1487,6 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     }
 
     // --- health --------------------------------------------------------------------------------------------------------
-
-    private void MarkDegraded(string detail)
-    {
-        if (!_degraded && IsInitialised)
-        {
-            _degraded = true;
-            Context.ReportHealth(ComponentHealth.Degraded, detail);
-        }
-    }
-
-    private void MarkHealthy()
-    {
-        if (_degraded && IsInitialised)
-        {
-            _degraded = false;
-            Context.ReportHealth(ComponentHealth.Ready);
-        }
-    }
 
     public override async ValueTask DisposeAsync()
     {
