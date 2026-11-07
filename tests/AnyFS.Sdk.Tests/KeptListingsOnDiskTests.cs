@@ -155,6 +155,68 @@ public class KeptListingsOnDiskTests
     }
 
     [TestMethod]
+    public async Task ATreeKeptAtOnceStoresOnlyWhatDiffers()
+    {
+        var folder = TempFolder();
+        var moved = new HashSet<string>(StringComparer.Ordinal);
+        Task<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?> TreeOf(string path, CancellationToken ct)
+        {
+            if (path.Length != 3)
+            {
+                return Task.FromResult<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>(null);
+            }
+
+            var tree = new Dictionary<string, IReadOnlyList<VfsEntry>>(StringComparer.Ordinal);
+            foreach (var (p, entries) in _tree)
+            {
+                if (p == path || p.StartsWith(path + "/", StringComparison.Ordinal))
+                {
+                    tree[p] = entries.ToList();
+                }
+            }
+
+            return Task.FromResult<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>(tree);
+        }
+
+        var options = Options(folder) with
+        {
+            ListTree = TreeOf,
+            StampOf = (path, _, _) => ValueTask.FromResult<string?>(path.Length == 3 ? (moved.Contains(path) ? "v2" : "v1") : null),
+        };
+        await using (var kept = Kept(options))
+        {
+            await kept.CountAsync(CancellationToken.None);
+            var first = kept.DiskStatistics!;
+            Assert.AreEqual(41, first.Inserts.Count);
+            Assert.AreEqual(0, first.Updates.Count + first.Deletes.Count);
+            Assert.AreEqual(0, first.RangeRows, "nothing held below any of them yet");
+        }
+
+        // a file added below d05, d06's sub gone, a folder added to d07; nothing else
+        _tree["d05/sub"] = [VfsEntry.File("x.txt", 7), VfsEntry.File("y.txt", 8)];
+        _tree["d06"] = [.. Enumerable.Range(0, 5).Select(f => VfsEntry.File($"f{f}.txt", f + 1, etag: $"06{f:x2}aa"))];
+        _tree.TryRemove("d06/sub", out _);
+        _tree["d07"] = [VfsEntry.Directory("sub"), VfsEntry.Directory("more"), .. Enumerable.Range(0, 5).Select(f => VfsEntry.File($"f{f}.txt", f + 1, etag: $"07{f:x2}aa"))];
+        _tree["d07/more"] = [VfsEntry.File("z.txt", 9)];
+        moved.UnionWith(["d05", "d06", "d07"]);
+
+        await using var next = Kept(options);
+        Assert.AreEqual(41, next.Cache.Count);
+        await next.CountAsync(CancellationToken.None);
+        var again = next.DiskStatistics!;
+        Assert.AreEqual(4, again.Updates.Count, "d05 (its stamp moved), d05/sub, d06 and d07 differ");
+        Assert.AreEqual(1, again.Inserts.Count, "d07/more is new");
+        Assert.AreEqual(1, again.Deletes.Count, "d06/sub is gone");
+        Assert.IsTrue(again.RangeRows >= 3, $"what is held below each moved folder is read as a range: {again.RangeRows} rows");
+        Assert.AreEqual(41, next.Cache.Count);
+        Assert.IsNull(next.Cache.Held("d06/sub"));
+        Assert.AreEqual("z.txt", next.Cache.Held("d07/more")!.Single().Name);
+        Assert.AreEqual(2, next.Cache.Held("d05/sub")!.Count);
+        Assert.AreEqual("v2", next.Cache.StampHeld("d05"));
+        Assert.AreEqual("v1", next.Cache.StampHeld("d04"), "kept as it was");
+    }
+
+    [TestMethod]
     public async Task TheFileOfAnEarlierRunMovesIntoTheDatabaseOnce()
     {
         var folder = TempFolder();

@@ -484,6 +484,38 @@ public class ListingCacheTests
         Assert.AreEqual(0, _calls);
     }
 
+    [TestMethod]
+    public void ATreeKeptAtOnceReplacesWhatWasHeldBelowItsRoot()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
+        cache.Keep("docs", [VfsEntry.Directory("sub"), VfsEntry.Directory("old")]);
+        cache.Keep("docs/sub", [VfsEntry.File("c.txt", 3)]);
+        cache.Keep("docs/old", [VfsEntry.File("o.txt", 1)]);
+        cache.Keep("docs-beside", [VfsEntry.File("x.txt", 1)]);
+        var before = cache.Version;
+
+        var tree = new Dictionary<string, IReadOnlyList<VfsEntry>>(StringComparer.Ordinal)
+        {
+            ["docs"] = [VfsEntry.Directory("sub"), VfsEntry.File("a.txt", 1)],
+            ["docs/sub"] = [VfsEntry.File("c.txt", 3)],
+            ["docs/new"] = [VfsEntry.File("n.txt", 2)],
+        };
+        cache.KeepTree("docs", tree, "s1");
+        Assert.IsNull(cache.Held("docs/old"), "held below the root and not in the tree: gone");
+        Assert.AreEqual(2, cache.Held("docs")!.Count);
+        Assert.AreEqual("s1", cache.StampHeld("docs"));
+        Assert.AreEqual(1, cache.Held("docs/sub")!.Count);
+        Assert.AreEqual("n.txt", cache.Held("docs/new")!.Single().Name);
+        Assert.IsNotNull(cache.Held("docs-beside"), "not below the root (its path only begins the same): as it was");
+        Assert.AreEqual(4, cache.Count);
+        Assert.IsTrue(cache.Version > before);
+
+        var kept = cache.Version;
+        cache.KeepTree("docs", tree, "s1");
+        Assert.AreEqual(kept, cache.Version, "the same tree again moves nothing");
+        Assert.AreEqual(0, _calls, "nothing asked of the lister");
+    }
+
 
     [TestMethod]
     public async Task AFailedRefreshKeepsWhatWasHeld()

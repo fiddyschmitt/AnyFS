@@ -264,6 +264,48 @@ internal sealed class SqliteListingStore : IListingStore
         }
     }
 
+    public void Replace(string path, StoredListing listing)
+    {
+        var asked = Stopwatch.GetTimestamp();
+        using (_gate.EnterScope())
+        {
+            var started = _meter.Entered(asked);
+            var op = Meter.Update;
+            try
+            {
+                Begin();
+                var packed = listing.Packed ?? ListingCodec.Pack(listing.List!, out _);
+                _meter.Bytes(packed.Length);
+                Fill(_update, path, listing, packed);
+                if (_update.ExecuteNonQuery() == 0)
+                {
+                    // not there after all: stored as new
+                    op = Meter.Insert;
+                    Fill(_insert, path, listing, packed);
+                    if (_insert.ExecuteNonQuery() > 0)
+                    {
+                        Interlocked.Increment(ref _count);
+                    }
+                }
+
+                _meter.Note(op, started);
+                started = 0;
+                Wrote();
+            }
+            catch (SqliteException ex)
+            {
+                Failed("write", ex);
+            }
+            finally
+            {
+                if (started != 0)
+                {
+                    _meter.Note(op, started);
+                }
+            }
+        }
+    }
+
     public bool Remove(string path)
     {
         var asked = Stopwatch.GetTimestamp();

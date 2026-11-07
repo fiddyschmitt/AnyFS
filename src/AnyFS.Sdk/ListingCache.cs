@@ -292,10 +292,76 @@ public sealed class ListingCache
             }
         }
 
-        _store.Set(path, listing);
+        if (held is null)
+        {
+            _store.Set(path, listing);
+        }
+        else
+        {
+            _store.Replace(path, listing);
+        }
+
         _hot.TryRemove(path, out _);
         _changes?.Add(path);
         Interlocked.Increment(ref _version);
+    }
+
+    /// <summary>
+    /// Keeps the listings of <paramref name="root"/> and of every folder below it, as a walk that reads a whole subtree at once
+    /// has them (<see cref="KeptListingsOptions.ListTree"/>), with <paramref name="stamp"/> on the root's: each in place of what
+    /// is held, as <see cref="Keep"/> would, and whatever was held below the root that the tree does not name let go. What is
+    /// held below the root is read once, in order, not folder by folder, and only what differs is stored.
+    /// </summary>
+    public void KeepTree(string root, IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>> tree, string? stamp = null)
+    {
+        ArgumentNullException.ThrowIfNull(tree);
+
+        // made outside the gate: packing is the bulk of the work
+        var made = new List<(string Path, StoredListing Listing)>(tree.Count);
+        foreach (var (path, listing) in tree)
+        {
+            made.Add((path, Make(listing, path == root ? stamp : null)));
+        }
+
+        lock (_gate)
+        {
+            var held = new Dictionary<string, StoredListing>(StringComparer.Ordinal);
+            foreach (var (path, listing) in _store.Under(root))
+            {
+                held[path] = listing;
+            }
+
+            foreach (var (path, listing) in made)
+            {
+                _failures.TryRemove(path, out _);
+                if (held.Remove(path, out var was))
+                {
+                    if (was.SameAs(listing))
+                    {
+                        was.Fetched = listing.Fetched;
+                        continue;
+                    }
+
+                    _store.Replace(path, listing);
+                }
+                else
+                {
+                    _store.Set(path, listing);
+                }
+
+                _hot.TryRemove(path, out _);
+                _changes?.Add(path);
+                Interlocked.Increment(ref _version);
+            }
+
+            // held below the root, and not in the tree: gone, with nothing to reach it by
+            foreach (var path in held.Keys)
+            {
+                RemoveLocked(path);
+            }
+
+            TrimIfNeededLocked();
+        }
     }
 
     /// <summary>Lets go of what is held for <paramref name="path"/> (under the gate); false where nothing was.</summary>

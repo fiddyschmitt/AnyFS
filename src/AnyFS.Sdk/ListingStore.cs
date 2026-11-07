@@ -124,6 +124,9 @@ internal interface IListingStore : IDisposable
     /// <summary>Holds <paramref name="listing"/> for <paramref name="path"/>; whether nothing was held for it before.</summary>
     bool Set(string path, StoredListing listing);
 
+    /// <summary>Holds <paramref name="listing"/> for <paramref name="path"/> in place of the one held, which the caller has just read: as <see cref="Set"/>, with that known.</summary>
+    void Replace(string path, StoredListing listing);
+
     /// <summary>Lets go of what is held for <paramref name="path"/>; false where nothing was.</summary>
     bool Remove(string path);
 
@@ -163,6 +166,8 @@ internal sealed class MemoryListingStore : IListingStore
         Interlocked.Increment(ref _count);
         return true;
     }
+
+    public void Replace(string path, StoredListing listing) => Set(path, listing);
 
     public bool Remove(string path)
     {

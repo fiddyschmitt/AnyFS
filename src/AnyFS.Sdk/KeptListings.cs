@@ -718,9 +718,9 @@ public sealed class KeptListings : IAsyncDisposable
                         if (tree is not null)
                         {
                             // the folder and everything below it at once: all kept and counted, nothing left to go into
-                            foreach (var (path, listing) in tree)
+                            Cache.KeepTree(folder, tree, stamp);
+                            foreach (var listing in tree.Values)
                             {
-                                Cache.Keep(path, listing, path == folder ? stamp : null);
                                 walk.Counters.Add(listing.Count(e => !e.IsDirectory), listing.Count(e => e.IsDirectory));
                                 at.Listed(listing.Count);
                             }
