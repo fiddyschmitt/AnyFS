@@ -58,6 +58,10 @@ public sealed class KeptListings : IAsyncDisposable
     // where the listings are written as they change (KeptListingsOptions.SaveTo), and what changed beside them since the last
     // write: the folders whose left-out names changed, and whether the time of the last whole walk did
     private readonly ListingsFile? _file;
+
+    // the database that holds the listings, where they are kept on disk (KeptListingsOptions.OnDisk): the file then only
+    // ever holds what an earlier run left before, moved in once
+    private readonly SqliteListingStore? _disk;
     private readonly Lock _saveGate = new();
     private readonly ConcurrentDictionary<string, byte> _leftOutChanged = new(StringComparer.Ordinal);
     private volatile bool _fullWalkChanged;
@@ -84,17 +88,26 @@ public sealed class KeptListings : IAsyncDisposable
         if (_options.Keep && _options.SaveTo is { } saved)
         {
             _file = new ListingsFile(saved, _options.SaveKey ?? "", _logger, _options.Name);
+            var onDisk = _options.OnDisk ?? Environment.GetEnvironmentVariable("ANYFS_LISTINGS_ON_DISK") is "1" or "true";
+            if (onDisk)
+            {
+                _disk = new SqliteListingStore(Path.Combine(Path.GetDirectoryName(saved) ?? "", "listings.db"), _options.SaveKey ?? "", _logger, _options.Name);
+            }
         }
 
         Cache = _options.Keep
-            ? new ListingCache(ListingCache.Kept, lister, 10_000, _time, null) { OnListing = Listing, StampOf = _options.StampOf, FailureKeptFor = _options.KeepFailures ? _ => untilNextWalk : null }
+            ? new ListingCache(ListingCache.Kept, lister, 10_000, _time, _disk) { OnListing = Listing, StampOf = _options.StampOf, FailureKeptFor = _options.KeepFailures ? _ => untilNextWalk : null }
             : new ListingCache(_options.UnkeptFor, lister, time: _time) { OnListing = Listing, StampOf = _options.StampOf };
         if (_file is not null)
         {
             Load();
 
             // what is held from here on is written down as it changes, what the last run left not among it
-            Cache.FollowChanges();
+            if (_disk is null)
+            {
+                Cache.FollowChanges();
+            }
+
             if (_options.SaveEvery > TimeSpan.Zero)
             {
                 var stopping = _stopping.Token;
@@ -110,6 +123,35 @@ public sealed class KeptListings : IAsyncDisposable
     /// </summary>
     private void Load()
     {
+        if (_disk is not null)
+        {
+            // what an earlier run left in the file, before the listings were kept on disk, goes into the database once
+            if (_disk.Count == 0 && _file!.Exists)
+            {
+                var moved = _file.Load();
+                _disk.Import(moved);
+                _file.Delete();
+                if (moved.Listings.Count > 0)
+                {
+                    _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run moved into the database", _options.Name, moved.Listings.Count);
+                }
+            }
+
+            foreach (var (folder, names) in _disk.LeftOut())
+            {
+                _leftOut[folder] = names;
+            }
+
+            _restored = _disk.Count > 0;
+            _fullWalkAt = _disk.FullWalkAt;
+            if (_restored)
+            {
+                _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run answer at once", _options.Name, _disk.Count);
+            }
+
+            return;
+        }
+
         var saved = _file!.Load();
         foreach (var (folder, listing) in saved.Listings)
         {
@@ -161,7 +203,7 @@ public sealed class KeptListings : IAsyncDisposable
         {
             try
             {
-                if (_file.MustRewrite || _file.Records > 2L * Cache.Count + 10_000)
+                if (_disk is null && (_file.MustRewrite || _file.Records > 2L * Cache.Count + 10_000))
                 {
                     // the whole says everything that changed so far
                     Cache.TakeChanges();
@@ -182,6 +224,13 @@ public sealed class KeptListings : IAsyncDisposable
 
                 var fullWalk = _fullWalkChanged;
                 _fullWalkChanged = false;
+                if (_disk is not null)
+                {
+                    // the listings are in the database as they are stored: what is in flight is committed, with the rest
+                    _disk.Save(_fullWalkAt, fullWalk, leftOut);
+                    return;
+                }
+
                 var (cleared, changes) = Cache.TakeChanges();
                 if (cleared || changes.Count > 0 || leftOut.Count > 0 || fullWalk)
                 {
@@ -407,6 +456,7 @@ public sealed class KeptListings : IAsyncDisposable
 
         // what changed since the last write: a stop part way through a walk keeps all it listed, and costs only that
         Save();
+        _disk?.Dispose();
     }
 
     // how many folders held below a folder make a walk of what is held read it at once (ListTree) where it can: a client has been
@@ -973,6 +1023,12 @@ public sealed record KeptListingsOptions
     /// <summary>Listings in flight in a walk in all, whatever the number of parts.</summary>
     public int MaxInFlight { get; init; } = 64;
 
+    /// <summary>
+    /// With <see cref="SaveTo"/>, whether the listings are kept on disk, in a database beside the file, with the last
+    /// few thousand asked for in memory, rather than in memory with the file written as they change: for a source of
+    /// more than fits. Null (the default) keeps them in memory, unless the environment says <c>ANYFS_LISTINGS_ON_DISK=1</c>.
+    /// </summary>
+    public bool? OnDisk { get; init; }
 
     /// <summary>
     /// Whether the folders in a folder are each walked as a part of their own, <see cref="Parallelism"/> folders of each at a

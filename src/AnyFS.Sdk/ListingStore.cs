@@ -110,7 +110,7 @@ internal sealed class StoredListing
 
 /// <summary>
 /// Where a <see cref="ListingCache"/> holds its listings, by folder path: in memory (<see cref="MemoryListingStore"/>), or on
-/// disk for a source that keeps the listings of more than fits. Everything but
+/// disk for a source that keeps the listings of more than fits (<see cref="SqliteListingStore"/>). Everything but
 /// <see cref="Get"/> and <see cref="All"/> is called under the cache's gate.
 /// </summary>
 internal interface IListingStore : IDisposable
