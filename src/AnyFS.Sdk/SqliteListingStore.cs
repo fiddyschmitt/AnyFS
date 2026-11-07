@@ -609,7 +609,9 @@ internal sealed class SqliteListingStore : IListingStore
             try
             {
                 Begin();
-                foreach (var (path, listing) in saved.Listings)
+
+                // in key order: a row added at the end of the tree costs a tenth of one put in among the rest
+                foreach (var (path, listing) in saved.Listings.OrderBy(l => l.Key, StringComparer.Ordinal))
                 {
                     Fill(_insert, path, listing, listing.Packed!);
                     if (_insert.ExecuteNonQuery() > 0)
