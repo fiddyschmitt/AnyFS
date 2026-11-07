@@ -217,6 +217,34 @@ public class KeptListingsOnDiskTests
     }
 
     [TestMethod]
+    public async Task WhatIsStoredBeforeTheCommitIsReadBackAtOnce()
+    {
+        var folder = TempFolder();
+        await using (var kept = Kept(Options(folder)))
+        {
+            await kept.CountAsync(CancellationToken.None);
+            var committed = kept.DiskStatistics!.Commits.Count;
+
+            // kept, let go, and kept again, with no commit between: each answers as it is now, not as the last commit left it
+            kept.Cache.Keep("d05/extra", [VfsEntry.File("e.txt", 5)]);
+            Assert.AreEqual("e.txt", kept.Cache.Held("d05/extra")!.Single().Name);
+            Assert.AreEqual(42, kept.Cache.Count);
+            kept.Cache.Invalidate("d05/sub");
+            Assert.IsNull(kept.Cache.Held("d05/sub"));
+            kept.Cache.Keep("d05/sub", [VfsEntry.File("x.txt", 7), VfsEntry.File("w.txt", 1)]);
+            Assert.AreEqual(2, kept.Cache.Held("d05/sub")!.Count);
+            var reads = Enumerable.Range(0, 64).AsParallel().Select(i => kept.Cache.Held(i % 2 == 0 ? "d05/extra" : "d05/sub")!.Count).ToList();
+            Assert.IsTrue(reads.All(n => n is 1 or 2), "every reader sees what this run stored");
+            Assert.AreEqual(committed, kept.DiskStatistics!.Commits.Count, "none of it committed yet");
+        }
+
+        await using var next = Kept(Options(folder));
+        Assert.AreEqual(42, next.Cache.Count, "the stop committed it");
+        Assert.AreEqual(2, next.Cache.Held("d05/sub")!.Count);
+        Assert.AreEqual("e.txt", next.Cache.Held("d05/extra")!.Single().Name);
+    }
+
+    [TestMethod]
     public async Task TheFileOfAnEarlierRunMovesIntoTheDatabaseOnce()
     {
         var folder = TempFolder();

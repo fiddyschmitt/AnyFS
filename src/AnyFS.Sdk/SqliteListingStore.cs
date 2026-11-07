@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using Microsoft.Data.Sqlite;
@@ -9,11 +10,13 @@ namespace AnyFS.Sdk;
 /// The listings on disk, in a SQLite database (<see cref="KeptListingsOptions.OnDisk"/>): a row a folder, its path the
 /// key, its entries as the cache holds them (<see cref="ListingCodec"/>). For a source that keeps the listings of more
 /// than fits in memory: what is held is the database, with the last few thousand folders asked for made in memory by the
-/// cache, and the start reads nothing back. One connection, used by one caller at a time; writes go into a transaction
-/// committed when the source saves (<see cref="Save"/>), after a walk and at the stop, and when it has grown big, so a
-/// run that ends without stopping loses only what came after the last of those. Write-ahead logging, so a reader is
-/// never held up by the writer, and each commit is on the disk before it returns. The folders below one are a range of the key.
-/// What it does is counted (<see cref="Statistics"/>).
+/// cache, and the start reads nothing back. One connection writes, used by one caller at a time, and reads what is held
+/// below a folder; writes go into a transaction committed when the source saves (<see cref="Save"/>), after a walk and at
+/// the stop, and when it has grown big, so a run that ends without stopping loses only what came after the last of those.
+/// A few connections more read by path (<see cref="Get"/>), so a listing asked for waits for no write and no commit:
+/// write-ahead logging gives each the last commit's view, and what this run stored since is kept beside until the commit
+/// lands. Each commit is on the disk before it returns. The folders below one are a range of the key. What it does is
+/// counted (<see cref="Statistics"/>).
 /// </summary>
 internal sealed class SqliteListingStore : IListingStore
 {
@@ -25,13 +28,24 @@ internal sealed class SqliteListingStore : IListingStore
     // rows read at a time where a range is read (what is held below a folder), the connection free between them
     private const int PageRows = 1_000;
 
+    // connections of their own for what is asked for by path (Get: the cache's hot path, clients and the walk alike), so a
+    // listing asked for waits for no write and no commit: each sees the last commit, and what this run stored since is
+    // kept beside (_written) until the commit lands
+    private const int Readers = 4;
+
     private readonly string _path;
     private readonly ILogger _logger;
     private readonly string _name;
     private readonly Lock _gate = new();
     private readonly Meter _meter = new();
+    private readonly Reader?[] _readers = new Reader?[Readers];
+    private readonly ConcurrentStack<Reader> _free = new();
+    private readonly SemaphoreSlim _readerSlots = new(Readers, Readers);
+    private readonly Lock _writtenGate = new();
+    private readonly Dictionary<string, StoredListing?> _written = new(StringComparer.Ordinal);
+    private bool _clearedSinceCommit;
+    private long _commits;
     private SqliteConnection _db = null!;
-    private SqliteCommand _get = null!;
     private SqliteCommand _insert = null!;
     private SqliteCommand _update = null!;
     private SqliteCommand _delete = null!;
@@ -153,17 +167,34 @@ internal sealed class SqliteListingStore : IListingStore
             FullWalkAt = new DateTimeOffset(t, TimeSpan.FromMinutes(m));
         }
 
-        _get = Prepare("SELECT stamp, count, folders, entries FROM listing WHERE path = $path", "$path");
         _insert = Prepare("INSERT OR IGNORE INTO listing(path, stamp, count, folders, entries) VALUES($path, $stamp, $count, $folders, $entries)", "$path", "$stamp", "$count", "$folders", "$entries");
         _update = Prepare("UPDATE listing SET stamp = $stamp, count = $count, folders = $folders, entries = $entries WHERE path = $path", "$path", "$stamp", "$count", "$folders", "$entries");
         _delete = Prepare("DELETE FROM listing WHERE path = $path", "$path");
         _range = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path >= $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
         _rangeFrom = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path > $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
+
+        CloseReaders();
+        for (var i = 0; i < Readers; i++)
+        {
+            _readers[i] = new Reader(_path);
+            _free.Push(_readers[i]!);
+        }
+    }
+
+    private void CloseReaders()
+    {
+        _free.Clear();
+        for (var i = 0; i < Readers; i++)
+        {
+            _readers[i]?.Dispose();
+            _readers[i] = null;
+        }
     }
 
     /// <summary>Moves a database that could not be opened to <c>.damaged</c> beside it (the one before it overwritten), its log and shared memory deleted.</summary>
     private void PutAside()
     {
+        CloseReaders();
         _db?.Dispose();
         _db = null!;
         try
@@ -192,20 +223,49 @@ internal sealed class SqliteListingStore : IListingStore
     public StoredListing? Get(string path)
     {
         var asked = Stopwatch.GetTimestamp();
-        using (_gate.EnterScope())
+
+        // stored since the last commit: this run knows it, the readers' view does not yet
+        lock (_writtenGate)
         {
+            if (_written.TryGetValue(path, out var written))
+            {
+                if (written is not null)
+                {
+                    _meter.Found();
+                }
+
+                _meter.Note(Meter.Read, asked);
+                return written;
+            }
+
+            if (_clearedSinceCommit)
+            {
+                _meter.Note(Meter.Read, asked);
+                return null;
+            }
+        }
+
+        _readerSlots.Wait();
+        try
+        {
+            _free.TryPop(out var reader);
             var started = _meter.Entered(asked);
             try
             {
-                _get.Parameters[0].Value = path;
-                using var reader = _get.ExecuteReader();
-                if (!reader.Read())
+                var commits = Volatile.Read(ref _commits);
+                var found = reader!.Find(path);
+                if (found is null && Volatile.Read(ref _commits) != commits)
                 {
-                    return null;
+                    // a commit landed while this was read, and what it brought may be what was asked for: once more, from a view that has it
+                    found = reader.Find(path);
                 }
 
-                _meter.Found();
-                return Read(reader, 0);
+                if (found is not null)
+                {
+                    _meter.Found();
+                }
+
+                return found;
             }
             catch (SqliteException ex)
             {
@@ -215,7 +275,12 @@ internal sealed class SqliteListingStore : IListingStore
             finally
             {
                 _meter.Note(Meter.Read, started);
+                _free.Push(reader!);
             }
+        }
+        finally
+        {
+            _readerSlots.Release();
         }
     }
 
@@ -235,6 +300,7 @@ internal sealed class SqliteListingStore : IListingStore
                 if (_insert.ExecuteNonQuery() > 0)
                 {
                     Interlocked.Increment(ref _count);
+                    Written(path, listing);
                     _meter.Note(op, started);
                     started = 0;
                     Wrote();
@@ -244,6 +310,7 @@ internal sealed class SqliteListingStore : IListingStore
                 op = Meter.Update;
                 Fill(_update, path, listing, packed);
                 _update.ExecuteNonQuery();
+                Written(path, listing);
                 _meter.Note(op, started);
                 started = 0;
                 Wrote();
@@ -288,6 +355,7 @@ internal sealed class SqliteListingStore : IListingStore
                     }
                 }
 
+                Written(path, listing);
                 _meter.Note(op, started);
                 started = 0;
                 Wrote();
@@ -322,6 +390,7 @@ internal sealed class SqliteListingStore : IListingStore
                 }
 
                 Interlocked.Decrement(ref _count);
+                Written(path, null);
                 _meter.Note(Meter.Delete, started);
                 started = 0;
                 Wrote();
@@ -351,6 +420,12 @@ internal sealed class SqliteListingStore : IListingStore
                 Begin();
                 Run("DELETE FROM listing");
                 Volatile.Write(ref _count, 0);
+                lock (_writtenGate)
+                {
+                    _written.Clear();
+                    _clearedSinceCommit = true;
+                }
+
                 Wrote();
             }
             catch (SqliteException ex)
@@ -555,6 +630,9 @@ internal sealed class SqliteListingStore : IListingStore
     {
         lock (_gate)
         {
+            // the readers first: a view one holds would keep the log from being folded in whole
+            CloseReaders();
+            _readerSlots.Dispose();
             try
             {
                 Commit();
@@ -565,7 +643,7 @@ internal sealed class SqliteListingStore : IListingStore
                 _logger.LogInformation("{Name}: the listings database could not be closed cleanly ({Error})", _name, ex.Message);
             }
 
-            foreach (var command in new[] { _get, _insert, _update, _delete, _range, _rangeFrom })
+            foreach (var command in new[] { _insert, _update, _delete, _range, _rangeFrom })
             {
                 command.Dispose();
             }
@@ -610,6 +688,23 @@ internal sealed class SqliteListingStore : IListingStore
             {
                 _meter.Note(Meter.Commit, started);
             }
+
+            // the readers see it now: what was kept beside for them goes, and a read under way that saw neither asks again
+            lock (_writtenGate)
+            {
+                _written.Clear();
+                _clearedSinceCommit = false;
+                Interlocked.Increment(ref _commits);
+            }
+        }
+    }
+
+    /// <summary>Stored, or let go (null), in the transaction under way: answered from here until the commit lands.</summary>
+    private void Written(string path, StoredListing? listing)
+    {
+        lock (_writtenGate)
+        {
+            _written[path] = listing;
         }
     }
 
@@ -697,6 +792,42 @@ internal sealed class SqliteListingStore : IListingStore
         if (_failures++ % 1000 == 0)
         {
             _logger.LogWarning("{Name}: the listings database {Path} could not be {What} ({Error})", _name, _path, what == "read" ? "read" : "written", ex.Message);
+        }
+    }
+
+    /// <summary>A connection of its own for reading by path, with the one statement prepared: used by one caller at a time.</summary>
+    private sealed class Reader : IDisposable
+    {
+        private readonly SqliteConnection _db;
+        private readonly SqliteCommand _get;
+
+        public Reader(string path)
+        {
+            _db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString()) { DefaultTimeout = 2 };
+            _db.Open();
+            foreach (var pragma in new[] { "PRAGMA query_only=1", "PRAGMA cache_size=-8192", "PRAGMA mmap_size=67108864" })
+            {
+                using var command = _db.CreateCommand();
+                command.CommandText = pragma;
+                command.ExecuteNonQuery();
+            }
+
+            _get = _db.CreateCommand();
+            _get.CommandText = "SELECT stamp, count, folders, entries FROM listing WHERE path = $path";
+            _get.Parameters.Add(new SqliteParameter("$path", DBNull.Value));
+        }
+
+        public StoredListing? Find(string path)
+        {
+            _get.Parameters[0].Value = path;
+            using var reader = _get.ExecuteReader();
+            return reader.Read() ? Read(reader, 0) : null;
+        }
+
+        public void Dispose()
+        {
+            _get.Dispose();
+            _db.Dispose();
         }
     }
 
