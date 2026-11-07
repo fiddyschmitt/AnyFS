@@ -10,13 +10,13 @@ namespace AnyFS.Sdk;
 /// The listings on disk, in a SQLite database (<see cref="KeptListingsOptions.OnDisk"/>): a row a folder, its path the
 /// key, its entries as the cache holds them (<see cref="ListingCodec"/>). For a source that keeps the listings of more
 /// than fits in memory: what is held is the database, with the last few thousand folders asked for made in memory by the
-/// cache, and the start reads nothing back. One connection writes, used by one caller at a time, and reads what is held
-/// below a folder; writes go into a transaction committed when the source saves (<see cref="Save"/>), after a walk and at
-/// the stop, and when it has grown big, so a run that ends without stopping loses only what came after the last of those.
-/// A few connections more read by path (<see cref="Get"/>), so a listing asked for waits for no write and no commit:
-/// write-ahead logging gives each the last commit's view, and what this run stored since is kept beside until the commit
-/// lands. Each commit is on the disk before it returns, and a connection of its own folds the log into the database behind
-/// it. The folders below one are a range of the key. What it does is counted (<see cref="Statistics"/>).
+/// cache, and the start reads nothing back. One connection writes, used by one caller at a time; writes go into a
+/// transaction committed when the source saves (<see cref="Save"/>), after a walk and at the stop, and when it has grown
+/// big, so a run that ends without stopping loses only what came after the last of those. A few connections more read,
+/// by path (<see cref="Get"/>) and by range (the folders below one are a range of the key), so a listing asked for waits
+/// for no write and no commit: write-ahead logging gives each the last commit's view, and what this run stored since is
+/// kept beside, in order, until the commit lands. Each commit is on the disk before it returns, and a connection of its
+/// own folds the log into the database behind it. What it does is counted (<see cref="Statistics"/>).
 /// </summary>
 internal sealed class SqliteListingStore : IListingStore
 {
@@ -28,10 +28,11 @@ internal sealed class SqliteListingStore : IListingStore
     // rows read at a time where a range is read (what is held below a folder), the connection free between them
     private const int PageRows = 1_000;
 
-    // connections of their own for what is asked for by path (Get: the cache's hot path, clients and the walk alike), so a
+    // connections of their own for reading (Get and the ranges: the cache's hot path, clients and the walk alike), so a
     // listing asked for waits for no write and no commit: each sees the last commit, and what this run stored since is
-    // kept beside (_written) until the commit lands
-    private const int Readers = 4;
+    // kept beside (_written) until the commit lands; as many as there are processors, since clients ask from as many
+    // threads as there are, and four were waited for by thirty-two
+    private static readonly int Readers = Math.Clamp(Environment.ProcessorCount, 4, 16);
 
     private readonly string _path;
     private readonly ILogger _logger;
@@ -43,6 +44,7 @@ internal sealed class SqliteListingStore : IListingStore
     private readonly SemaphoreSlim _readerSlots = new(Readers, Readers);
     private readonly Lock _writtenGate = new();
     private readonly Dictionary<string, StoredListing?> _written = new(StringComparer.Ordinal);
+    private readonly SortedSet<string> _writtenOrder = new(StringComparer.Ordinal);
     private bool _clearedSinceCommit;
     private long _commits;
     private Checkpointer? _checkpointer;
@@ -50,8 +52,6 @@ internal sealed class SqliteListingStore : IListingStore
     private SqliteCommand _insert = null!;
     private SqliteCommand _update = null!;
     private SqliteCommand _delete = null!;
-    private SqliteCommand _range = null!;
-    private SqliteCommand _rangeFrom = null!;
     private int _count;
     private bool _inTransaction;
     private int _pending;
@@ -175,8 +175,6 @@ internal sealed class SqliteListingStore : IListingStore
         _insert = Prepare("INSERT OR IGNORE INTO listing(path, stamp, count, folders, entries) VALUES($path, $stamp, $count, $folders, $entries)", "$path", "$stamp", "$count", "$folders", "$entries");
         _update = Prepare("UPDATE listing SET stamp = $stamp, count = $count, folders = $folders, entries = $entries WHERE path = $path", "$path", "$stamp", "$count", "$folders", "$entries");
         _delete = Prepare("DELETE FROM listing WHERE path = $path", "$path");
-        _range = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path >= $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
-        _rangeFrom = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path > $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
 
         CloseReaders();
         for (var i = 0; i < Readers; i++)
@@ -433,6 +431,7 @@ internal sealed class SqliteListingStore : IListingStore
                 lock (_writtenGate)
                 {
                     _written.Clear();
+                    _writtenOrder.Clear();
                     _clearedSinceCommit = true;
                 }
 
@@ -485,55 +484,118 @@ internal sealed class SqliteListingStore : IListingStore
 
     public IEnumerable<(string Path, StoredListing Listing)> All() => Range("", "￿￿");
 
-    /// <summary>The rows from <paramref name="from"/> up to <paramref name="to"/> in path order, a page at a time, the connection free between pages.</summary>
+    /// <summary>
+    /// The rows from <paramref name="from"/> up to <paramref name="to"/> in path order, a page at a time from a reader, the
+    /// reader free between pages, with what this run stored since the last commit in its place among them (taken first:
+    /// a read of the database after that sees everything else, the commit landed or not).
+    /// </summary>
     private IEnumerable<(string Path, StoredListing Listing)> Range(string from, string to)
     {
-        var first = true;
-        var last = from;
-        while (true)
+        List<(string Path, StoredListing? Listing)> written = [];
+        bool cleared;
+        lock (_writtenGate)
         {
-            var page = new List<(string, StoredListing)>(PageRows);
-            var asked = Stopwatch.GetTimestamp();
-            using (_gate.EnterScope())
+            cleared = _clearedSinceCommit;
+            if (_writtenOrder.Count > 0)
             {
-                var started = _meter.Entered(asked);
-                try
+                foreach (var path in _writtenOrder.GetViewBetween(from, to))
                 {
-                    var command = first ? _range : _rangeFrom;
-                    command.Parameters[0].Value = last;
-                    command.Parameters[1].Value = to;
-                    command.Parameters[2].Value = PageRows;
-                    using var reader = command.ExecuteReader();
-                    while (reader.Read())
+                    if (string.CompareOrdinal(path, to) < 0)
                     {
-                        page.Add((reader.GetString(0), Read(reader, 1)));
+                        written.Add((path, _written[path]));
                     }
-
-                    _meter.Rows(page.Count);
                 }
-                catch (SqliteException ex)
+            }
+        }
+
+        var at = 0;
+        if (!cleared)
+        {
+            var first = true;
+            var last = from;
+            while (true)
+            {
+                var page = ReadPage(first ? from : last, to, after: !first);
+                if (page is null)
                 {
-                    Failed("read", ex);
                     yield break;
                 }
-                finally
+
+                foreach (var row in page)
                 {
-                    _meter.Note(Meter.Range, started);
+                    // what was stored before this row's path goes first; the row itself as stored since, where it was
+                    while (at < written.Count && string.CompareOrdinal(written[at].Path, row.Path) < 0)
+                    {
+                        if (written[at].Listing is { } before)
+                        {
+                            yield return (written[at].Path, before);
+                        }
+
+                        at++;
+                    }
+
+                    if (at < written.Count && written[at].Path == row.Path)
+                    {
+                        if (written[at].Listing is { } instead)
+                        {
+                            yield return (row.Path, instead);
+                        }
+
+                        at++;
+                        continue;
+                    }
+
+                    yield return row;
                 }
-            }
 
-            foreach (var row in page)
+                if (page.Count < PageRows)
+                {
+                    break;
+                }
+
+                first = false;
+                last = page[^1].Path;
+            }
+        }
+
+        for (; at < written.Count; at++)
+        {
+            if (written[at].Listing is { } after)
             {
-                yield return row;
+                yield return (written[at].Path, after);
             }
+        }
+    }
 
-            if (page.Count < PageRows)
+    /// <summary>One page of the rows from <paramref name="from"/> (after it, with <paramref name="after"/>) up to <paramref name="to"/>, from a reader; null where the database could not be read.</summary>
+    private List<(string Path, StoredListing Listing)>? ReadPage(string from, string to, bool after)
+    {
+        var asked = Stopwatch.GetTimestamp();
+        _readerSlots.Wait();
+        try
+        {
+            _free.TryPop(out var reader);
+            var started = _meter.Entered(asked);
+            try
             {
-                yield break;
+                var page = reader!.Page(from, to, after, PageRows);
+                _meter.Rows(page.Count);
+                return page;
             }
-
-            first = false;
-            last = page[^1].Item1;
+            catch (SqliteException ex)
+            {
+                Failed("read", ex);
+                return null;
+            }
+            finally
+            {
+                _meter.Note(Meter.Range, started);
+                _free.Push(reader!);
+            }
+        }
+        finally
+        {
+            _readerSlots.Release();
         }
     }
 
@@ -655,7 +717,7 @@ internal sealed class SqliteListingStore : IListingStore
                 _logger.LogInformation("{Name}: the listings database could not be closed cleanly ({Error})", _name, ex.Message);
             }
 
-            foreach (var command in new[] { _insert, _update, _delete, _range, _rangeFrom })
+            foreach (var command in new[] { _insert, _update, _delete })
             {
                 command.Dispose();
             }
@@ -705,6 +767,7 @@ internal sealed class SqliteListingStore : IListingStore
             lock (_writtenGate)
             {
                 _written.Clear();
+                _writtenOrder.Clear();
                 _clearedSinceCommit = false;
                 Interlocked.Increment(ref _commits);
             }
@@ -726,6 +789,7 @@ internal sealed class SqliteListingStore : IListingStore
         lock (_writtenGate)
         {
             _written[path] = listing;
+            _writtenOrder.Add(path);
         }
     }
 
@@ -816,26 +880,30 @@ internal sealed class SqliteListingStore : IListingStore
         }
     }
 
-    /// <summary>A connection of its own for reading by path, with the one statement prepared: used by one caller at a time.</summary>
+    /// <summary>A connection of its own for reading, by path and by range, with the statements prepared: used by one caller at a time.</summary>
     private sealed class Reader : IDisposable
     {
         private readonly SqliteConnection _db;
         private readonly SqliteCommand _get;
+        private readonly SqliteCommand _range;
+        private readonly SqliteCommand _rangeAfter;
 
         public Reader(string path)
         {
             _db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString()) { DefaultTimeout = 2 };
             _db.Open();
-            foreach (var pragma in new[] { "PRAGMA query_only=1", "PRAGMA cache_size=-8192", "PRAGMA mmap_size=67108864" })
+            // the database mapped into memory as far as SQLite allows (two gigabytes): a page read is then a look at the
+            // operating system's own cache of the file, shared by every reader, with no copy into a cache of the reader's own
+            foreach (var pragma in new[] { "PRAGMA query_only=1", "PRAGMA cache_size=-8192", "PRAGMA mmap_size=2147418112" })
             {
                 using var command = _db.CreateCommand();
                 command.CommandText = pragma;
                 command.ExecuteNonQuery();
             }
 
-            _get = _db.CreateCommand();
-            _get.CommandText = "SELECT stamp, count, folders, entries FROM listing WHERE path = $path";
-            _get.Parameters.Add(new SqliteParameter("$path", DBNull.Value));
+            _get = Prepare("SELECT stamp, count, folders, entries FROM listing WHERE path = $path", "$path");
+            _range = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path >= $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
+            _rangeAfter = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path > $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
         }
 
         public StoredListing? Find(string path)
@@ -845,9 +913,40 @@ internal sealed class SqliteListingStore : IListingStore
             return reader.Read() ? Read(reader, 0) : null;
         }
 
+        /// <summary>Up to <paramref name="limit"/> rows from <paramref name="from"/> (after it, with <paramref name="after"/>) up to <paramref name="to"/>, in path order.</summary>
+        public List<(string Path, StoredListing Listing)> Page(string from, string to, bool after, int limit)
+        {
+            var command = after ? _rangeAfter : _range;
+            command.Parameters[0].Value = from;
+            command.Parameters[1].Value = to;
+            command.Parameters[2].Value = limit;
+            var page = new List<(string, StoredListing)>(limit);
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                page.Add((reader.GetString(0), Read(reader, 1)));
+            }
+
+            return page;
+        }
+
+        private SqliteCommand Prepare(string sql, params string[] parameters)
+        {
+            var command = _db.CreateCommand();
+            command.CommandText = sql;
+            foreach (var name in parameters)
+            {
+                command.Parameters.Add(new SqliteParameter(name, DBNull.Value));
+            }
+
+            return command;
+        }
+
         public void Dispose()
         {
             _get.Dispose();
+            _range.Dispose();
+            _rangeAfter.Dispose();
             _db.Dispose();
         }
     }

@@ -235,13 +235,20 @@ public class KeptListingsOnDiskTests
             Assert.AreEqual(2, kept.Cache.Held("d05/sub")!.Count);
             var reads = Enumerable.Range(0, 64).AsParallel().Select(i => kept.Cache.Held(i % 2 == 0 ? "d05/extra" : "d05/sub")!.Count).ToList();
             Assert.IsTrue(reads.All(n => n is 1 or 2), "every reader sees what this run stored");
+
+            // what is held below a folder says the same: the folder let go is not among it, the ones stored since are, in place
+            var below = kept.Cache.Under("d05");
+            CollectionAssert.AreEqual(new[] { "d05", "d05/extra", "d05/sub" }, below.Keys.Order(StringComparer.Ordinal).ToArray());
+            Assert.AreEqual(2, below["d05/sub"].Count);
+            kept.Cache.Invalidate("d05/extra");
+            Assert.IsFalse(kept.Cache.Under("d05").ContainsKey("d05/extra"));
             Assert.AreEqual(committed, kept.DiskStatistics!.Commits.Count, "none of it committed yet");
         }
 
         await using var next = Kept(Options(folder));
-        Assert.AreEqual(42, next.Cache.Count, "the stop committed it");
+        Assert.AreEqual(41, next.Cache.Count, "the stop committed it: one kept, one let go");
         Assert.AreEqual(2, next.Cache.Held("d05/sub")!.Count);
-        Assert.AreEqual("e.txt", next.Cache.Held("d05/extra")!.Single().Name);
+        Assert.IsNull(next.Cache.Held("d05/extra"));
     }
 
     [TestMethod]
