@@ -11,7 +11,7 @@ namespace AnyFS.Sdk;
 /// cache, and the start reads nothing back. One connection, used by one caller at a time; writes go into a transaction
 /// committed when the source saves (<see cref="Save"/>), after a walk and at the stop, and when it has grown big, so a
 /// run that ends without stopping loses only what came after the last of those. Write-ahead logging, so a reader is
-/// never held up by the writer and a commit does not wait for the disk. The folders below one are a range of the key.
+/// never held up by the writer, and each commit is on the disk before it returns. The folders below one are a range of the key.
 /// </summary>
 internal sealed class SqliteListingStore : IListingStore
 {
@@ -77,8 +77,9 @@ internal sealed class SqliteListingStore : IListingStore
         _db?.Dispose();
         _db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _path, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false }.ToString());
         _db.Open();
+        // every commit reaches the disk before it returns (as the file's appends do): commits are a few a minute, so it costs nothing
         Run("PRAGMA journal_mode=WAL");
-        Run("PRAGMA synchronous=NORMAL");
+        Run("PRAGMA synchronous=FULL");
         Run("PRAGMA cache_size=-65536");
         Run("PRAGMA temp_store=MEMORY");
         Run("PRAGMA mmap_size=67108864");
