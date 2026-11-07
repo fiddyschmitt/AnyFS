@@ -91,7 +91,15 @@ public sealed class KeptListings : IAsyncDisposable
             var onDisk = _options.OnDisk ?? Environment.GetEnvironmentVariable("ANYFS_LISTINGS_ON_DISK") is "1" or "true";
             if (onDisk)
             {
-                _disk = new SqliteListingStore(Path.Combine(Path.GetDirectoryName(saved) ?? "", "listings.db"), _options.SaveKey ?? "", _logger, _options.Name);
+                try
+                {
+                    _disk = new SqliteListingStore(Path.Combine(Path.GetDirectoryName(saved) ?? "", "listings.db"), _options.SaveKey ?? "", _logger, _options.Name);
+                }
+                catch (IOException ex)
+                {
+                    // the folder refused, the disk full: this run keeps its listings in memory and the file, as without OnDisk
+                    _logger.LogWarning("{Name}: the listings database could not be opened ({Error}); the listings are kept in memory for this run", _options.Name, ex.Message);
+                }
             }
         }
 
@@ -135,6 +143,11 @@ public sealed class KeptListings : IAsyncDisposable
                 {
                     _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run moved into the database", _options.Name, moved.Listings.Count);
                 }
+            }
+            else if (_file!.Exists)
+            {
+                // a run that could not open the database kept its listings in the file: the database is the store
+                _file.Delete();
             }
 
             foreach (var (folder, names) in _disk.LeftOut())

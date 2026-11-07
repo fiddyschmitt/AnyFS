@@ -27,13 +27,13 @@ internal sealed class SqliteListingStore : IListingStore
     private readonly ILogger _logger;
     private readonly string _name;
     private readonly Lock _gate = new();
-    private readonly SqliteConnection _db;
-    private readonly SqliteCommand _get;
-    private readonly SqliteCommand _insert;
-    private readonly SqliteCommand _update;
-    private readonly SqliteCommand _delete;
-    private readonly SqliteCommand _range;
-    private readonly SqliteCommand _rangeFrom;
+    private SqliteConnection _db = null!;
+    private SqliteCommand _get = null!;
+    private SqliteCommand _insert = null!;
+    private SqliteCommand _update = null!;
+    private SqliteCommand _delete = null!;
+    private SqliteCommand _range = null!;
+    private SqliteCommand _rangeFrom = null!;
     private int _count;
     private bool _inTransaction;
     private int _pending;
@@ -49,56 +49,95 @@ internal sealed class SqliteListingStore : IListingStore
             Directory.CreateDirectory(folder);
         }
 
-        _db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false }.ToString());
         try
         {
-            _db.Open();
-            Run("PRAGMA journal_mode=WAL");
-            Run("PRAGMA synchronous=NORMAL");
-            Run("PRAGMA cache_size=-65536");
-            Run("PRAGMA temp_store=MEMORY");
-            Run("PRAGMA mmap_size=67108864");
-            Run("CREATE TABLE IF NOT EXISTS listing(path TEXT PRIMARY KEY NOT NULL, stamp TEXT, count INTEGER NOT NULL, folders INTEGER NOT NULL, entries BLOB NOT NULL) WITHOUT ROWID");
-            Run("CREATE TABLE IF NOT EXISTS meta(name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID");
-            Run("CREATE TABLE IF NOT EXISTS leftout(folder TEXT PRIMARY KEY NOT NULL, names TEXT NOT NULL) WITHOUT ROWID");
-            var ours = Meta("key") == key && Meta("format") == FormatVersion.ToString(CultureInfo.InvariantCulture);
-            if (!ours)
-            {
-                // another's listings, of another format, or none yet: none of it is this run's
-                if (Meta("key") is not null)
-                {
-                    _logger.LogInformation("{Name}: the listings saved by the last run are for something else; listing afresh", _name);
-                }
-
-                Run("DELETE FROM listing");
-                Run("DELETE FROM leftout");
-                Run("DELETE FROM meta");
-                SetMeta("key", key);
-                SetMeta("format", FormatVersion.ToString(CultureInfo.InvariantCulture));
-            }
-
-            using (var count = _db.CreateCommand())
-            {
-                count.CommandText = "SELECT count(*) FROM listing";
-                _count = Convert.ToInt32(count.ExecuteScalar(), CultureInfo.InvariantCulture);
-            }
-
-            if (Meta("fullwalk") is { } at && at.Split('|') is [var ticks, var minutes] && long.TryParse(ticks, CultureInfo.InvariantCulture, out var t) && int.TryParse(minutes, CultureInfo.InvariantCulture, out var m))
-            {
-                FullWalkAt = new DateTimeOffset(t, TimeSpan.FromMinutes(m));
-            }
-
-            _get = Prepare("SELECT stamp, count, folders, entries FROM listing WHERE path = $path", "$path");
-            _insert = Prepare("INSERT OR IGNORE INTO listing(path, stamp, count, folders, entries) VALUES($path, $stamp, $count, $folders, $entries)", "$path", "$stamp", "$count", "$folders", "$entries");
-            _update = Prepare("UPDATE listing SET stamp = $stamp, count = $count, folders = $folders, entries = $entries WHERE path = $path", "$path", "$stamp", "$count", "$folders", "$entries");
-            _delete = Prepare("DELETE FROM listing WHERE path = $path", "$path");
-            _range = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path >= $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
-            _rangeFrom = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path > $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
+            Open(key);
         }
-        catch (SqliteException ex)
+        catch (SqliteException first)
         {
-            _db.Dispose();
-            throw new IOException($"the listings database {path} could not be opened: {ex.Message}", ex);
+            // damaged, or not a database at all: put aside (listings.db.damaged, for whoever wants to look), a new one made,
+            // and the listings walked again; a second failure (the folder refused, the disk full) is the caller's
+            _logger.LogWarning("{Name}: the listings database {Path} could not be opened ({Error}); it is put aside and the listings are walked again", _name, path, first.Message);
+            PutAside();
+            try
+            {
+                Open(key);
+            }
+            catch (SqliteException ex)
+            {
+                _db?.Dispose();
+                throw new IOException($"the listings database {path} could not be opened: {ex.Message}", ex);
+            }
+        }
+    }
+
+    /// <summary>Opens the database, makes its tables where they are not there, and checks it is this source's; the connection is left open on failure for the caller to dispose.</summary>
+    private void Open(string key)
+    {
+        _db?.Dispose();
+        _db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _path, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false }.ToString());
+        _db.Open();
+        Run("PRAGMA journal_mode=WAL");
+        Run("PRAGMA synchronous=NORMAL");
+        Run("PRAGMA cache_size=-65536");
+        Run("PRAGMA temp_store=MEMORY");
+        Run("PRAGMA mmap_size=67108864");
+        Run("CREATE TABLE IF NOT EXISTS listing(path TEXT PRIMARY KEY NOT NULL, stamp TEXT, count INTEGER NOT NULL, folders INTEGER NOT NULL, entries BLOB NOT NULL) WITHOUT ROWID");
+        Run("CREATE TABLE IF NOT EXISTS meta(name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID");
+        Run("CREATE TABLE IF NOT EXISTS leftout(folder TEXT PRIMARY KEY NOT NULL, names TEXT NOT NULL) WITHOUT ROWID");
+        var ours = Meta("key") == key && Meta("format") == FormatVersion.ToString(CultureInfo.InvariantCulture);
+        if (!ours)
+        {
+            // another's listings, of another format, or none yet: none of it is this run's
+            if (Meta("key") is not null)
+            {
+                _logger.LogInformation("{Name}: the listings saved by the last run are for something else; listing afresh", _name);
+            }
+
+            Run("DELETE FROM listing");
+            Run("DELETE FROM leftout");
+            Run("DELETE FROM meta");
+            SetMeta("key", key);
+            SetMeta("format", FormatVersion.ToString(CultureInfo.InvariantCulture));
+        }
+
+        using (var count = _db.CreateCommand())
+        {
+            count.CommandText = "SELECT count(*) FROM listing";
+            _count = Convert.ToInt32(count.ExecuteScalar(), CultureInfo.InvariantCulture);
+        }
+
+        FullWalkAt = null;
+        if (Meta("fullwalk") is { } at && at.Split('|') is [var ticks, var minutes] && long.TryParse(ticks, CultureInfo.InvariantCulture, out var t) && int.TryParse(minutes, CultureInfo.InvariantCulture, out var m))
+        {
+            FullWalkAt = new DateTimeOffset(t, TimeSpan.FromMinutes(m));
+        }
+
+        _get = Prepare("SELECT stamp, count, folders, entries FROM listing WHERE path = $path", "$path");
+        _insert = Prepare("INSERT OR IGNORE INTO listing(path, stamp, count, folders, entries) VALUES($path, $stamp, $count, $folders, $entries)", "$path", "$stamp", "$count", "$folders", "$entries");
+        _update = Prepare("UPDATE listing SET stamp = $stamp, count = $count, folders = $folders, entries = $entries WHERE path = $path", "$path", "$stamp", "$count", "$folders", "$entries");
+        _delete = Prepare("DELETE FROM listing WHERE path = $path", "$path");
+        _range = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path >= $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
+        _rangeFrom = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path > $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
+    }
+
+    /// <summary>Moves a database that could not be opened to <c>.damaged</c> beside it (the one before it overwritten), its log and shared memory deleted.</summary>
+    private void PutAside()
+    {
+        _db?.Dispose();
+        _db = null!;
+        try
+        {
+            File.Move(_path, _path + ".damaged", overwrite: true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            File.Delete(_path);
+        }
+
+        foreach (var beside in new[] { _path + "-wal", _path + "-shm" })
+        {
+            File.Delete(beside);
         }
     }
 

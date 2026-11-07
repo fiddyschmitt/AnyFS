@@ -186,6 +186,29 @@ public class KeptListingsOnDiskTests
     }
 
     [TestMethod]
+    public async Task ADamagedDatabaseIsPutAsideAndTheListingsWalkedAgain()
+    {
+        var folder = TempFolder();
+        await using (var kept = Kept(Options(folder)))
+        {
+            await kept.CountAsync(CancellationToken.None);
+        }
+
+        var db = Path.Combine(folder, "listings.db");
+        File.WriteAllBytes(db, Enumerable.Repeat((byte)0x5A, 8192).ToArray());
+        await using (var next = Kept(Options(folder)))
+        {
+            Assert.AreEqual(0, next.Cache.Count, "not a database: nothing of it is read");
+            Assert.IsTrue(File.Exists(db + ".damaged"), "put aside");
+            await next.CountAsync(CancellationToken.None);
+            Assert.AreEqual(41, next.Cache.Count, "walked again into a new one");
+        }
+
+        await using var third = Kept(Options(folder));
+        Assert.AreEqual(41, third.Cache.Count, "and that one is read at the next start");
+    }
+
+    [TestMethod]
     public async Task WhatIsHeldBelowAFolderIsARangeOfThePaths()
     {
         var folder = TempFolder();
