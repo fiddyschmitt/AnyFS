@@ -83,6 +83,7 @@ public class KeptListingsFileTests
     {
         WalkEvery = TimeSpan.Zero,
         SaveTo = file,
+        OnDisk = false,
         SaveKey = Key,
         StampOf = StampOf,
         Parallelism = 1,

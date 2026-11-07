@@ -295,7 +295,7 @@ public class KeptListingsTests
         var file = TempFile();
         try
         {
-            var options = new KeptListingsOptions { WalkEvery = TimeSpan.FromMinutes(30), SaveTo = file, SaveKey = "jane@contoso.com" };
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.FromMinutes(30), SaveTo = file, OnDisk = false, SaveKey = "jane@contoso.com" };
             await using (var first = Kept(new SourceCounters(), options))
             {
                 await first.Cache.GetAsync("", CancellationToken.None);
@@ -713,7 +713,7 @@ public class KeptListingsTests
         var file = Path.Combine(Path.GetTempPath(), $"anyfs-kept-{Guid.NewGuid():N}.json.gz");
         try
         {
-            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, SaveKey = "jane@contoso.com" };
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, OnDisk = false, SaveKey = "jane@contoso.com" };
             await using (var first = Kept(new SourceCounters(), options))
             {
                 await first.Cache.GetAsync("", CancellationToken.None);
@@ -759,7 +759,7 @@ public class KeptListingsTests
         {
             _stamps["docs"] = "v1";
             _stamps["photos"] = "v1";
-            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, SaveKey = "jane@contoso.com", StampOf = StampOf };
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, OnDisk = false, SaveKey = "jane@contoso.com", StampOf = StampOf };
             var then = new DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             await using (var kept = Kept(new SourceCounters(), options))
             {
@@ -797,7 +797,7 @@ public class KeptListingsTests
         {
             _stamps["docs"] = "v1";
             _stamps["photos"] = "v1";
-            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, SaveKey = "jane@contoso.com", StampOf = StampOf };
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, OnDisk = false, SaveKey = "jane@contoso.com", StampOf = StampOf };
             await using (var first = Kept(new SourceCounters(), options))
             {
                 await first.CountAsync(CancellationToken.None);
@@ -840,6 +840,7 @@ public class KeptListingsTests
             {
                 WalkEvery = TimeSpan.Zero,
                 SaveTo = file,
+                OnDisk = false,
                 SaveKey = "jane@contoso.com",
                 StampOf = StampOf,
                 LeftOut = (path, _) =>
@@ -879,7 +880,7 @@ public class KeptListingsTests
         try
         {
             _tree["docs"][1] = _tree["docs"][1] with { Key = "the source's own" };
-            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, SaveKey = "jane@contoso.com" };
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, OnDisk = false, SaveKey = "jane@contoso.com" };
             await using (var first = Kept(new SourceCounters(), options))
             {
                 await first.Cache.GetAsync("docs", CancellationToken.None);
@@ -904,7 +905,7 @@ public class KeptListingsTests
         try
         {
             _stamps["docs"] = "v1";
-            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, SaveKey = "jane@contoso.com", StampOf = StampOf };
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = file, OnDisk = false, SaveKey = "jane@contoso.com", StampOf = StampOf };
             await using (var first = Kept(new SourceCounters(), options))
             {
                 // docs listed by hand, never walked: nothing of docs/sub is held
@@ -934,7 +935,7 @@ public class KeptListingsTests
         {
             var time = new FakeTime();
             _stamps["docs"] = "v1";
-            var options = new KeptListingsOptions { WalkEvery = TimeSpan.FromMilliseconds(50), SaveTo = file, SaveKey = "jane@contoso.com", StampOf = StampOf };
+            var options = new KeptListingsOptions { WalkEvery = TimeSpan.FromMilliseconds(50), SaveTo = file, OnDisk = false, SaveKey = "jane@contoso.com", StampOf = StampOf };
             await using (var first = Kept(new SourceCounters(), options, time))
             {
                 await first.CountAsync(CancellationToken.None);

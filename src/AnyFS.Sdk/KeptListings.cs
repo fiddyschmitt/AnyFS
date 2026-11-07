@@ -59,8 +59,8 @@ public sealed class KeptListings : IAsyncDisposable
     // write: the folders whose left-out names changed, and whether the time of the last whole walk did
     private readonly ListingsFile? _file;
 
-    // the database that holds the listings, where they are kept on disk (KeptListingsOptions.OnDisk): the file then only
-    // ever holds what an earlier run left before, moved in once
+    // the database that holds the listings (the default; KeptListingsOptions.OnDisk false keeps them in memory, with the
+    // file): the file then only ever holds what an earlier run left before, moved in once
     private readonly SqliteListingStore? _disk;
     private readonly Lock _saveGate = new();
     private readonly ConcurrentDictionary<string, byte> _leftOutChanged = new(StringComparer.Ordinal);
@@ -88,7 +88,7 @@ public sealed class KeptListings : IAsyncDisposable
         if (_options.Keep && _options.SaveTo is { } saved)
         {
             _file = new ListingsFile(saved, _options.SaveKey ?? "", _logger, _options.Name);
-            var onDisk = _options.OnDisk ?? Environment.GetEnvironmentVariable("ANYFS_LISTINGS_ON_DISK") is "1" or "true";
+            var onDisk = _options.OnDisk ?? Environment.GetEnvironmentVariable("ANYFS_LISTINGS_ON_DISK") is not ("0" or "false");
             if (onDisk)
             {
                 try
@@ -1050,8 +1050,9 @@ public sealed record KeptListingsOptions
 
     /// <summary>
     /// With <see cref="SaveTo"/>, whether the listings are kept on disk, in a database beside the file, with the last
-    /// few thousand asked for in memory, rather than in memory with the file written as they change: for a source of
-    /// more than fits. Null (the default) keeps them in memory, unless the environment says <c>ANYFS_LISTINGS_ON_DISK=1</c>.
+    /// few thousand asked for in memory (a source of tens of millions of files fits, and the start reads nothing back),
+    /// or in memory with the file written as they change (false). Null, the default, keeps them on disk, unless the
+    /// environment says <c>ANYFS_LISTINGS_ON_DISK=0</c>. What a file holds from before is moved into the database once.
     /// </summary>
     public bool? OnDisk { get; init; }
 

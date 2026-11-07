@@ -241,14 +241,16 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   the rest; `ListTree` hands it a whole subtree at once where you have a quicker way than folder by
   folder (GitLab lists a repository a hundred entries a request), and where it fails the rest of that
   walk goes folder by folder. A folder that could not be listed makes the count a lower bound too.
-  `SaveTo` writes the listings to a file in your state folder as they change (every `SaveEvery`,
-  thirty seconds, after each walk and when the source stops; appended to, so a stop costs only what
-  changed since), and reads them back at the next start, so every folder opens at once from the first
-  moment, and a source stopped part way through its first walk goes on from where it was. Kept
-  listings are held as bytes, a folder's entries made when a client asks (the last few thousand asked
-  for stay made), so a server of tens of millions of files fits; `OnDisk` keeps them in a database
-  beside the file instead, for one of more than fits in memory, and the start then reads nothing back
-  (`KeptListings.DiskStatistics` says what the database has done: reads, writes, commits, waits);
+  `SaveTo` keeps the listings in your state folder, in a database beside the file it names
+  (`listings.db`), written as they change and committed every `SaveEvery`, thirty seconds, after each
+  walk and when the source stops, so every folder opens at once from the first moment of the next
+  start, which reads nothing back, a source stopped part way through its first walk goes on from where
+  it was, and a server of tens of millions of files fits (`KeptListings.DiskStatistics` says what the
+  database has done: reads, writes, commits, waits). Kept listings are held as bytes, a folder's
+  entries made when a client asks (the last few thousand asked for stay made); `OnDisk = false` holds
+  them all in memory instead, with the file written as they change (appended to, so a stop costs only
+  what changed since) and read back at the next start, and what a file holds is moved into the
+  database once when a source goes from the one to the other;
   `SaveKey` says what they were saved for (the account, the server, the settings that shape the tree
   and a version of your own that moves when what you list or how you measure files changes), and
   another's are not read. `StampOf` gives a folder's stamp: what its listing and every listing below

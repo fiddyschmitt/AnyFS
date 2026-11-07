@@ -5,9 +5,9 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace AnyFS.Sdk.Tests;
 
 /// <summary>
-/// The kept listings on disk (<see cref="KeptListingsOptions.OnDisk"/>): a database beside the file, holding what the walks
-/// saw, so a source of more than fits in memory keeps all of it; the start reads nothing back and answers at once; what
-/// an earlier run left in the file goes into the database once; another account's or another shape's database is not read.
+/// The kept listings on disk (<see cref="KeptListingsOptions.OnDisk"/>, the default): a database beside the file, holding what
+/// the walks saw, so a source of more than fits in memory keeps all of it; the start reads nothing back and answers at once;
+/// what an earlier run left in the file goes into the database once; another account's or another shape's database is not read.
 /// </summary>
 [TestClass]
 public class KeptListingsOnDiskTests
@@ -117,6 +117,28 @@ public class KeptListingsOnDiskTests
         Assert.AreEqual(0, Listed("d05"), "kept by its stamp");
         Assert.AreEqual(0, Listed("d05/sub"), "kept below it");
         Assert.AreEqual(41, next.Cache.Count);
+    }
+
+    [TestMethod]
+    public async Task TheDatabaseIsTheDefault()
+    {
+        if (Environment.GetEnvironmentVariable("ANYFS_LISTINGS_ON_DISK") is "0" or "false")
+        {
+            Assert.Inconclusive("the environment keeps the listings in memory");
+        }
+
+        var folder = TempFolder();
+        var options = new KeptListingsOptions { WalkEvery = TimeSpan.Zero, SaveTo = Path.Combine(folder, "listings.json.gz"), SaveKey = Key, StampOf = StampOf, Parallelism = 2, SaveEvery = TimeSpan.Zero };
+        Assert.IsNull(options.OnDisk, "nothing said");
+        await using (var kept = Kept(options))
+        {
+            await kept.CountAsync(CancellationToken.None);
+            Assert.IsNotNull(kept.DiskStatistics, "the database holds the listings");
+            Assert.AreEqual(41, kept.Cache.Count);
+        }
+
+        Assert.IsTrue(File.Exists(Path.Combine(folder, "listings.db")), "the database, with nothing said");
+        Assert.IsFalse(File.Exists(Path.Combine(folder, "listings.json.gz")), "and no file");
     }
 
     [TestMethod]
