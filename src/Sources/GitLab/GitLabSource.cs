@@ -790,22 +790,25 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             return 0;
         }
 
-        // once, however many ask at once: a branch and a tag at the same commit, walked together, read it one time
-        var filling = _filling.GetOrAdd($"{project.Id}@{commit}", _ => Task.Run(() => FillTreeNowAsync(project, commit, _stopping.Token)));
+        // once, however many ask at once: a branch and a tag at the same commit, walked together, read it one time (the
+        // dictionary may make a value for each asker at once, and only the one it keeps may start the read: a task started
+        // in the making ran for each, and the repository was read as many times)
+        var key = $"{project.Id}@{commit}";
+        var filling = _filling.GetOrAdd(key, _ => new Lazy<Task<int>>(() => Task.Run(() => FillTreeNowAsync(project, commit, _stopping.Token))));
         try
         {
-            return await filling.WaitAsync(ct).ConfigureAwait(false);
+            return await filling.Value.WaitAsync(ct).ConfigureAwait(false);
         }
         finally
         {
-            if (filling.IsCompleted)
+            if (filling.Value.IsCompleted)
             {
-                _filling.TryRemove(new KeyValuePair<string, Task<int>>($"{project.Id}@{commit}", filling));
+                _filling.TryRemove(new KeyValuePair<string, Lazy<Task<int>>>(key, filling));
             }
         }
     }
 
-    private readonly ConcurrentDictionary<string, Task<int>> _filling = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Lazy<Task<int>>> _filling = new(StringComparer.Ordinal);
 
     private async Task<int> FillTreeNowAsync(GlProject project, string commit, CancellationToken ct)
     {
