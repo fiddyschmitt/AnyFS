@@ -126,12 +126,25 @@ internal sealed class SqliteListingStore : IListingStore
             Run("DELETE FROM meta");
             SetMeta("key", key);
             SetMeta("format", FormatVersion.ToString(CultureInfo.InvariantCulture));
+            SetMeta("count", "0");
         }
 
-        using (var count = _db.CreateCommand())
+        // how many rows there are is written with every commit, so the open reads nothing else: counting them reads every
+        // page of the table, which from a cold disk took a minute and a half for three and a half million; a database from
+        // before that is counted the once
+        if (Meta("count") is { } counted && int.TryParse(counted, CultureInfo.InvariantCulture, out var rows))
         {
-            count.CommandText = "SELECT count(*) FROM listing";
-            _count = Convert.ToInt32(count.ExecuteScalar(), CultureInfo.InvariantCulture);
+            _count = rows;
+        }
+        else
+        {
+            using (var count = _db.CreateCommand())
+            {
+                count.CommandText = "SELECT count(*) FROM listing";
+                _count = Convert.ToInt32(count.ExecuteScalar(), CultureInfo.InvariantCulture);
+            }
+
+            SetMeta("count", _count.ToString(CultureInfo.InvariantCulture));
         }
 
         FullWalkAt = null;
@@ -547,6 +560,8 @@ internal sealed class SqliteListingStore : IListingStore
             var started = Stopwatch.GetTimestamp();
             try
             {
+                // the count goes with the rows, so the two never disagree
+                SetMeta("count", Volatile.Read(ref _count).ToString(CultureInfo.InvariantCulture));
                 Run("COMMIT");
             }
             finally
