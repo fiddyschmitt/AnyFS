@@ -186,6 +186,41 @@ public class KeptListingsOnDiskTests
     }
 
     [TestMethod]
+    public async Task ADatabaseStillHeldByTheRunBeforeIsWaitedFor()
+    {
+        // a run killed holds its database a moment after it dies (an I/O error, busy, locked at the open): waited for,
+        // never put aside as damaged, which would have thrown away everything it held
+        var folder = TempFolder();
+        await using (var kept = Kept(Options(folder)))
+        {
+            await kept.CountAsync(CancellationToken.None);
+        }
+
+        var db = Path.Combine(folder, "listings.db");
+        using var holder = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={db};Mode=ReadWrite;Pooling=False");
+        holder.Open();
+        using (var take = holder.CreateCommand())
+        {
+            take.CommandText = "BEGIN IMMEDIATE; INSERT OR REPLACE INTO meta(name, value) VALUES('held', 'by the run before')";
+            take.ExecuteNonQuery();
+        }
+
+        var letGo = Task.Run(async () =>
+        {
+            await Task.Delay(700);
+            using var give = holder.CreateCommand();
+            give.CommandText = "COMMIT";
+            give.ExecuteNonQuery();
+        });
+
+        await using var next = Kept(Options(folder));
+        await letGo;
+        Assert.IsFalse(File.Exists(db + ".damaged"), "not put aside");
+        Assert.AreEqual(41, next.Cache.Count, "opened once the run before let go, with everything it held");
+        Assert.AreEqual(6, next.Cache.Held("d05")!.Count);
+    }
+
+    [TestMethod]
     public async Task ADamagedDatabaseIsPutAsideAndTheListingsWalkedAgain()
     {
         var folder = TempFolder();

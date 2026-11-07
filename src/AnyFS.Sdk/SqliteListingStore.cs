@@ -49,22 +49,41 @@ internal sealed class SqliteListingStore : IListingStore
             Directory.CreateDirectory(folder);
         }
 
-        try
+        for (var attempt = 1; ; attempt++)
         {
-            Open(key);
-        }
-        catch (SqliteException first)
-        {
-            // damaged, or not a database at all: put aside (listings.db.damaged, for whoever wants to look), a new one made,
-            // and the listings walked again; a second failure (the folder refused, the disk full) is the caller's
-            _logger.LogWarning("{Name}: the listings database {Path} could not be opened ({Error}); it is put aside and the listings are walked again", _name, path, first.Message);
-            PutAside();
             try
             {
                 Open(key);
+                return;
+            }
+            catch (SqliteException ex) when (ex.SqliteErrorCode is 11 or 26)
+            {
+                // damaged (SQLITE_CORRUPT), or not a database at all (SQLITE_NOTADB): put aside (listings.db.damaged, for
+                // whoever wants to look), a new one made, and the listings walked again; nothing else is ever put aside
+                _logger.LogWarning("{Name}: the listings database {Path} could not be read ({Error}); it is put aside and the listings are walked again", _name, path, ex.Message);
+                PutAside();
+                try
+                {
+                    Open(key);
+                    return;
+                }
+                catch (SqliteException again)
+                {
+                    _db?.Dispose();
+                    throw new IOException($"the listings database {path} could not be opened: {again.Message}", again);
+                }
+            }
+            catch (SqliteException ex) when (attempt < 7 && ex.SqliteErrorCode is 5 or 6 or 10)
+            {
+                // busy, locked, or an I/O error: the run before, just ended, has not let go of it yet (its log and shared
+                // memory beside it are freed a moment after it dies); a moment, and again, two seconds in all
+                _db?.Dispose();
+                _db = null!;
+                Thread.Sleep(100 * attempt);
             }
             catch (SqliteException ex)
             {
+                // the folder refused, the disk full, or still held: the caller keeps the listings in memory for this run
                 _db?.Dispose();
                 throw new IOException($"the listings database {path} could not be opened: {ex.Message}", ex);
             }
@@ -76,6 +95,10 @@ internal sealed class SqliteListingStore : IListingStore
     {
         _db?.Dispose();
         _db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _path, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false }.ToString());
+
+        // how long a statement waits for a lock another connection holds (the one writer is this connection; a run just
+        // ended may hold the file a moment): short, the open trying again a few times
+        _db.DefaultTimeout = 2;
         _db.Open();
         // every commit reaches the disk before it returns (as the file's appends do): commits are a few a minute, so it costs nothing
         Run("PRAGMA journal_mode=WAL");
