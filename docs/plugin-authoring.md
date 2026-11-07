@@ -244,7 +244,9 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   `SaveTo` writes the listings to a file in your state folder as they change (every `SaveEvery`,
   thirty seconds, after each walk and when the source stops; appended to, so a stop costs only what
   changed since), and reads them back at the next start, so every folder opens at once from the first
-  moment, and a source stopped part way through its first walk goes on from where it was;
+  moment, and a source stopped part way through its first walk goes on from where it was. Kept
+  listings are held as bytes, a folder's entries made when a client asks (the last few thousand asked
+  for stay made), so a server of tens of millions of files fits;
   `SaveKey` says what they were saved for (the account, the server, the settings that shape the tree
   and a version of your own that moves when what you list or how you measure files changes), and
   another's are not read. `StampOf` gives a folder's stamp: what its listing and every listing below

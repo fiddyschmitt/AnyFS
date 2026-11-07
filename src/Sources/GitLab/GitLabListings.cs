@@ -18,7 +18,7 @@ internal sealed record TreeItem(string N, char K, string S, long L, bool F);
 /// goes), and a repository's folder is stamped by its commit, so one whose commit has not moved is kept whole without this.
 /// Written whole every five minutes and at every stop, the file this was had grown past a hundred megabytes on a big
 /// server, and its write was what kept a stop from ending in time. Bounded: past <see cref="MaxFolders"/> the
-/// oldest-listed go (a million, as the SDK keeps listings).
+/// oldest-listed go (a million; the SDK's kept listings hold the whole tree, as bytes, since 7-Nov-2026).
 /// </summary>
 internal sealed class TreeStore
 {

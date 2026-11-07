@@ -218,8 +218,58 @@ public class ListingCacheTests
         Assert.AreEqual(0, _calls, "and nothing asked");
 
         var listed = await cache.GetAsync("docs", CancellationToken.None);
-        Assert.AreSame(listed, cache.Held("docs"));
+        CollectionAssert.AreEqual(listed.ToList(), cache.Held("docs")!.ToList(), "what was listed, as held (a cache that keeps its listings holds them as bytes, and makes the entries when asked)");
         Assert.AreEqual(1, _calls, "looking at it is not asking for it");
+    }
+
+    [TestMethod]
+    public void AListingKeptAgainReplacesWhatWasMadeOfTheOneBefore()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
+        cache.Keep("docs", [VfsEntry.File("one.txt", 1)]);
+        Assert.AreEqual("one.txt", cache.Held("docs")!.Single().Name);
+        cache.Keep("docs", [VfsEntry.File("two.txt", 2)]);
+        Assert.AreEqual("two.txt", cache.Held("docs")!.Single().Name, "the entries made of the listing before are let go with it");
+        cache.Update("docs/three.txt", VfsEntry.File("three.txt", 3));
+        CollectionAssert.AreEqual(new[] { "two.txt", "three.txt" }, cache.Held("docs")!.Select(e => e.Name).ToArray());
+    }
+
+    [TestMethod]
+    public void AFolderTheNewListingNoLongerNamesIsLetGoWithEverythingBelowIt()
+    {
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
+        cache.Keep("docs", [VfsEntry.Directory("sub"), VfsEntry.Directory("kept")]);
+        cache.Keep("docs/sub", [VfsEntry.Directory("deep"), VfsEntry.File("c.txt", 3)]);
+        cache.Keep("docs/sub/deep", [VfsEntry.File("d.txt", 4)]);
+        cache.Keep("docs/kept", [VfsEntry.File("k.txt", 5)]);
+        Assert.AreEqual(4, cache.Count);
+
+        cache.Keep("docs", [VfsEntry.Directory("kept")]);
+        Assert.IsNull(cache.Held("docs/sub"), "gone from its parent's listing: nothing can reach it");
+        Assert.IsNull(cache.Held("docs/sub/deep"));
+        Assert.IsNotNull(cache.Held("docs/kept"), "still named");
+        Assert.AreEqual(2, cache.Count);
+    }
+
+    [TestMethod]
+    public async Task AStatInABigFolderFindsTheFirstOfANameHoweverOftenItIsAsked()
+    {
+        // a folder of thousands, stat'd for every file in it (as clients do), is answered by an index of its names after a
+        // few lookups, not a scan each: the index must answer as the scan did, the first of a name ignoring case included
+        var cache = new ListingCache(ListingCache.Kept, ListAsync, time: _time);
+        var big = Enumerable.Range(0, 3000).Select(i => VfsEntry.File($"file{i:D4}.txt", i)).ToList();
+        big.Insert(10, VfsEntry.File("Twice.txt", 1));
+        big.Add(VfsEntry.File("twice.txt", 2));
+        cache.Keep("big", big);
+        for (var round = 0; round < 10; round++)
+        {
+            Assert.AreEqual(1, (await cache.StatAsync("big/Twice.txt", CancellationToken.None, StringComparison.OrdinalIgnoreCase))!.Length, "the first of the name, ignoring case");
+            Assert.AreEqual(2, (await cache.StatAsync("big/twice.txt", CancellationToken.None))!.Length, "the one of exactly that name");
+            Assert.AreEqual(2999, (await cache.StatAsync("big/file2999.txt", CancellationToken.None, StringComparison.OrdinalIgnoreCase))!.Length);
+            Assert.IsNull(await cache.StatAsync("big/none.txt", CancellationToken.None, StringComparison.OrdinalIgnoreCase));
+        }
+
+        Assert.AreEqual(0, _calls, "all from what is held");
     }
 
     [TestMethod]

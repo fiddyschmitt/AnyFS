@@ -81,12 +81,16 @@ public sealed class KeptListings : IAsyncDisposable
         _time = time ?? TimeProvider.System;
         void Listing(string path, string why) => _logger.LogDebug("{Name}: listing '{Path}' from the service: {Why}", _options.Name, path, why);
         var untilNextWalk = _options.WalkEvery > TimeSpan.Zero ? _options.WalkEvery : new KeptListingsOptions().WalkEvery;
-        Cache = _options.Keep
-            ? new ListingCache(ListingCache.Kept, lister, _options.MaxFolders, _time) { OnListing = Listing, StampOf = _options.StampOf, FailureKeptFor = _options.KeepFailures ? _ => untilNextWalk : null }
-            : new ListingCache(_options.UnkeptFor, lister, time: _time) { OnListing = Listing, StampOf = _options.StampOf };
         if (_options.Keep && _options.SaveTo is { } saved)
         {
             _file = new ListingsFile(saved, _options.SaveKey ?? "", _logger, _options.Name);
+        }
+
+        Cache = _options.Keep
+            ? new ListingCache(ListingCache.Kept, lister, 10_000, _time, null) { OnListing = Listing, StampOf = _options.StampOf, FailureKeptFor = _options.KeepFailures ? _ => untilNextWalk : null }
+            : new ListingCache(_options.UnkeptFor, lister, time: _time) { OnListing = Listing, StampOf = _options.StampOf };
+        if (_file is not null)
+        {
             Load();
 
             // what is held from here on is written down as it changes, what the last run left not among it
@@ -107,9 +111,9 @@ public sealed class KeptListings : IAsyncDisposable
     private void Load()
     {
         var saved = _file!.Load();
-        foreach (var (folder, (listing, stamp)) in saved.Listings)
+        foreach (var (folder, listing) in saved.Listings)
         {
-            Cache.Restore(folder, listing, stamp);
+            Cache.Restore(folder, listing);
         }
 
         foreach (var (folder, names) in saved.LeftOut)
@@ -167,7 +171,6 @@ public sealed class KeptListings : IAsyncDisposable
                     return;
                 }
 
-                var (cleared, changes) = Cache.TakeChanges();
                 var leftOut = new List<(string Folder, IReadOnlySet<string>? Names)>();
                 foreach (var folder in _leftOutChanged.Keys)
                 {
@@ -179,6 +182,7 @@ public sealed class KeptListings : IAsyncDisposable
 
                 var fullWalk = _fullWalkChanged;
                 _fullWalkChanged = false;
+                var (cleared, changes) = Cache.TakeChanges();
                 if (cleared || changes.Count > 0 || leftOut.Count > 0 || fullWalk)
                 {
                     _file.Append(cleared, changes, _fullWalkAt, fullWalk, leftOut);
@@ -357,7 +361,7 @@ public sealed class KeptListings : IAsyncDisposable
     private Dictionary<string, int> CountHeldBelow()
     {
         var below = new Dictionary<string, int>(StringComparer.Ordinal);
-        foreach (var path in Cache.Snapshot().Keys)
+        foreach (var path in Cache.Paths())
         {
             for (var at = path; ; at = VfsPath.Parent(at))
             {
@@ -860,26 +864,30 @@ public sealed class KeptListings : IAsyncDisposable
     /// </summary>
     private async Task KeepHeldAsync(string folder, bool heldAlone, Walk walk, Action<string, bool> enqueue, CancellationToken ct)
     {
-        var held = Cache.Under(folder);
+        var held = Cache.HeldUnder(folder);
+        var paths = new HashSet<string>(held.Count, StringComparer.Ordinal);
+        foreach (var (path, _) in held)
+        {
+            paths.Add(path);
+        }
+
         foreach (var (path, listing) in held)
         {
-            Cache.Touch(path);
             Interlocked.Increment(ref walk.Kept);
-            long files = 0;
-            var folders = 0;
+            long files = listing.Files;
+            var folders = listing.Folders;
+            if (folders == 0)
+            {
+                walk.Counters.Add(files, folders);
+                continue;
+            }
+
             IReadOnlySet<string>? leftOut = null;
             var asked = false;
-            foreach (var entry in listing)
+            foreach (var name in listing.FolderNames())
             {
-                if (!entry.IsDirectory)
-                {
-                    files++;
-                    continue;
-                }
-
-                folders++;
-                var child = VfsPath.Join(path, entry.Name);
-                if (held.ContainsKey(child))
+                var child = VfsPath.Join(path, name);
+                if (paths.Contains(child))
                 {
                     continue;
                 }
@@ -896,7 +904,7 @@ public sealed class KeptListings : IAsyncDisposable
                     leftOut = _leftOut.TryGetValue(path, out var known) ? known : _options.LeftOut is { } left ? await left(path, ct).ConfigureAwait(false) : null;
                 }
 
-                if (leftOut?.Contains(entry.Name) == true)
+                if (leftOut?.Contains(name) == true)
                 {
                     walk.LeftSomeOut = true;
                     enqueue(child, true);
@@ -965,8 +973,6 @@ public sealed record KeptListingsOptions
     /// <summary>Listings in flight in a walk in all, whatever the number of parts.</summary>
     public int MaxInFlight { get; init; } = 64;
 
-    /// <summary>With listings kept, the folders whose listings are held at most; past that the oldest go.</summary>
-    public int MaxFolders { get; init; } = 1_000_000;
 
     /// <summary>
     /// Whether the folders in a folder are each walked as a part of their own, <see cref="Parallelism"/> folders of each at a

@@ -14,12 +14,14 @@ namespace AnyFS.Sdk;
 /// first walks, walked again from the start). Written whole again when most of it says what later records undo.
 /// Layout: <c>AFKL</c>, the format, then frames: the compressed length and the plain length (four bytes each, little
 /// endian), then a gzip of records, the first of the file naming what the listings are for. A frame cut short (the process
-/// ended while it was written) is left out, and the next write goes where it began. A file of the format before (gzipped
-/// JSON, <see cref="SavedListings"/>) is read once and written in this one at the first save.
+/// ended while it was written) is left out, and the next write goes where it began. A listing's entries are the bytes the
+/// cache holds (<see cref="ListingCodec"/>), written as they are and read back as they are. A file of format 1 (each
+/// entry's flags one byte, its etag always text) is read once, as is one of the format before (gzipped JSON,
+/// <see cref="SavedListings"/>); the first save writes this one in its place.
 /// </summary>
 internal sealed class ListingsFile
 {
-    private const int FormatVersion = 1;
+    private const int FormatVersion = 2;
 
     // a frame's records, before they are compressed, at most about this (a write of the whole is many frames)
     private const int FrameBytes = 4 << 20;
@@ -52,6 +54,25 @@ internal sealed class ListingsFile
     /// <summary>Whether the next write must be the whole (<see cref="Rewrite"/>), not an append.</summary>
     public bool MustRewrite => _length < 0;
 
+    /// <summary>Whether there is a file to read (of any of the formats): for a source moving its listings elsewhere.</summary>
+    public bool Exists => File.Exists(_path);
+
+    /// <summary>Deletes the file, and a write of it cut short, quietly: for a source that keeps its listings elsewhere now.</summary>
+    public void Delete()
+    {
+        foreach (var path in new[] { _path, _path + ".tmp" })
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _logger.LogDebug("{Name}: {File} could not be deleted ({Error})", _name, path, ex.Message);
+            }
+        }
+    }
+
     private enum Record : byte
     {
         Header = 1,
@@ -60,20 +81,6 @@ internal sealed class ListingsFile
         Cleared = 4,
         FullWalkAt = 5,
         LeftOut = 6,
-    }
-
-    [Flags]
-    private enum EntryFlags : byte
-    {
-        None = 0,
-        Directory = 1,
-        HasLength = 2,
-        HasCreated = 4,
-        HasModified = 8,
-        ModifiedIsCreated = 16,
-        HasAttributes = 32,
-        HasETag = 64,
-        HasKey = 128,
     }
 
     /// <summary>What the file holds for this <c>key</c>: nothing where there is no file, or it is another's or unreadable.</summary>
@@ -107,7 +114,8 @@ internal sealed class ListingsFile
                 return state;
             }
 
-            if (read < 8 || !head[..4].SequenceEqual(Magic) || BinaryPrimitives.ReadInt32LittleEndian(head[4..]) != FormatVersion)
+            var version = read >= 8 ? BinaryPrimitives.ReadInt32LittleEndian(head[4..]) : 0;
+            if (read < 8 || !head[..4].SequenceEqual(Magic) || version is < 1 or > FormatVersion)
             {
                 _logger.LogInformation("{Name}: the listings saved by the last run are of another format; listing afresh", _name);
                 return state;
@@ -137,14 +145,14 @@ internal sealed class ListingsFile
                 try
                 {
                     var records = Decompress(bytes, plain);
-                    if (!Apply(records, state, first, pool))
+                    if (!Apply(records, state, first, pool, version))
                     {
                         // another's listings, or of another source's settings: none of it is this run's
                         _logger.LogInformation("{Name}: the listings saved by the last run are for something else; listing afresh", _name);
                         return new SavedState();
                     }
                 }
-                catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or IOException or FormatException or ArgumentException)
+                catch (Exception ex) when (ex is InvalidDataException or EndOfStreamException or IOException or FormatException or ArgumentException or OverflowException)
                 {
                     break;
                 }
@@ -163,13 +171,14 @@ internal sealed class ListingsFile
                 _logger.LogInformation("{Name}: the end of the listings saved by the last run was cut short (it ended while writing it); what came before it is kept", _name);
             }
 
-            _length = valid;
+            // a file of the format before is written afresh in this one at the first save
+            _length = version == FormatVersion ? valid : -1;
             return state;
         }
     }
 
     /// <summary>Appends a frame of what changed: listings held now (or held no more), the time of the last whole walk, what walks leave out.</summary>
-    public void Append(bool cleared, IReadOnlyList<(string Path, IReadOnlyList<VfsEntry>? Listing, string? Stamp)> changes, DateTimeOffset? fullWalkAt, bool fullWalkChanged, IReadOnlyList<(string Folder, IReadOnlySet<string>? Names)> leftOut)
+    public void Append(bool cleared, IReadOnlyList<(string Path, StoredListing? Listing)> changes, DateTimeOffset? fullWalkAt, bool fullWalkChanged, IReadOnlyList<(string Folder, IReadOnlySet<string>? Names)> leftOut)
     {
         if (_length < 0)
         {
@@ -182,9 +191,9 @@ internal sealed class ListingsFile
             frames.Writer.Write((byte)Record.Cleared);
         }
 
-        foreach (var (path, listing, stamp) in changes)
+        foreach (var (path, listing) in changes)
         {
-            WriteListing(frames.Writer, path, listing, stamp);
+            WriteListing(frames.Writer, path, listing);
             frames.Next();
         }
 
@@ -227,7 +236,7 @@ internal sealed class ListingsFile
     }
 
     /// <summary>Writes the whole file afresh (beside it, then moved into place): every listing held, the time of the last whole walk, what walks leave out.</summary>
-    public void Rewrite(IEnumerable<(string Path, IReadOnlyList<VfsEntry> Listing, string? Stamp)> listings, DateTimeOffset? fullWalkAt, IEnumerable<(string Folder, IReadOnlySet<string> Names)> leftOut)
+    public void Rewrite(IEnumerable<(string Path, StoredListing Listing)> listings, DateTimeOffset? fullWalkAt, IEnumerable<(string Folder, IReadOnlySet<string> Names)> leftOut)
     {
         if (Path.GetDirectoryName(_path) is { Length: > 0 } folder)
         {
@@ -245,9 +254,9 @@ internal sealed class ListingsFile
             using var frames = new FrameWriter(file);
             frames.Writer.Write((byte)Record.Header);
             frames.Writer.Write(_key);
-            foreach (var (path, listing, stamp) in listings)
+            foreach (var (path, listing) in listings)
             {
-                WriteListing(frames.Writer, path, listing, stamp);
+                WriteListing(frames.Writer, path, listing);
                 records++;
                 frames.Next();
             }
@@ -282,7 +291,7 @@ internal sealed class ListingsFile
 
     // --- records -----------------------------------------------------------------------------------------------------
 
-    private bool Apply(byte[] records, SavedState state, bool first, Dictionary<string, string> pool)
+    private bool Apply(byte[] records, SavedState state, bool first, Dictionary<string, string> pool, int version)
     {
         var reader = new RecordReader(records, pool);
         var atStart = true;
@@ -308,13 +317,19 @@ internal sealed class ListingsFile
                     var path = reader.ReadString();
                     var stamp = reader.ReadBoolean() ? reader.ReadPooled() : null;
                     var count = reader.Read7BitInt();
-                    var listing = new VfsEntry[count];
-                    for (var i = 0; i < count; i++)
+                    byte[] packed;
+                    int folders;
+                    if (version >= 2)
                     {
-                        listing[i] = ReadEntry(ref reader);
+                        folders = reader.Read7BitInt();
+                        packed = reader.Take(reader.Read7BitInt()).ToArray();
+                    }
+                    else
+                    {
+                        packed = reader.RepackLegacy(count, out folders);
                     }
 
-                    state.Listings[path] = (listing, stamp);
+                    state.Listings[path] = new StoredListing(0, stamp, packed, count, folders);
                     Records++;
                     break;
                 case Record.Removed:
@@ -324,7 +339,7 @@ internal sealed class ListingsFile
                     state.Listings.Clear();
                     break;
                 case Record.FullWalkAt:
-                    state.FullWalkAt = reader.ReadBoolean() ? ReadTime(ref reader) : null;
+                    state.FullWalkAt = reader.ReadBoolean() ? reader.ReadTime() : null;
                     break;
                 case Record.LeftOut:
                     var folder = reader.ReadString();
@@ -352,7 +367,7 @@ internal sealed class ListingsFile
         return !atStart || !first;
     }
 
-    private static void WriteListing(BinaryWriter writer, string path, IReadOnlyList<VfsEntry>? listing, string? stamp)
+    private static void WriteListing(BinaryWriter writer, string path, StoredListing? listing)
     {
         if (listing is null)
         {
@@ -363,17 +378,17 @@ internal sealed class ListingsFile
 
         writer.Write((byte)Record.Listing);
         writer.Write(path);
-        writer.Write(stamp is not null);
-        if (stamp is not null)
+        writer.Write(listing.Stamp is not null);
+        if (listing.Stamp is not null)
         {
-            writer.Write(stamp);
+            writer.Write(listing.Stamp);
         }
 
+        var packed = listing.Packed ?? ListingCodec.Pack(listing.List!, out _);
         writer.Write7BitEncodedInt(listing.Count);
-        foreach (var entry in listing)
-        {
-            WriteEntry(writer, entry);
-        }
+        writer.Write7BitEncodedInt(listing.Folders);
+        writer.Write7BitEncodedInt(packed.Length);
+        writer.Write(packed);
     }
 
     private static void WriteFullWalkAt(BinaryWriter writer, DateTimeOffset? at)
@@ -382,7 +397,8 @@ internal sealed class ListingsFile
         writer.Write(at.HasValue);
         if (at is { } time)
         {
-            WriteTime(writer, time);
+            writer.Write(time.Ticks);
+            writer.Write((short)time.Offset.TotalMinutes);
         }
     }
 
@@ -397,109 +413,10 @@ internal sealed class ListingsFile
         }
     }
 
-    private static void WriteEntry(BinaryWriter writer, VfsEntry entry)
-    {
-        var flags = EntryFlags.None;
-        if (entry.IsDirectory)
-        {
-            flags |= EntryFlags.Directory;
-        }
-
-        if (entry.Length != 0)
-        {
-            flags |= EntryFlags.HasLength;
-        }
-
-        if (entry.Created.HasValue)
-        {
-            flags |= EntryFlags.HasCreated;
-        }
-
-        if (entry.Modified is { } modified)
-        {
-            flags |= entry.Created is { } created && created.Ticks == modified.Ticks && created.Offset == modified.Offset ? EntryFlags.ModifiedIsCreated : EntryFlags.HasModified;
-        }
-
-        if (entry.Attributes != VfsAttributes.None)
-        {
-            flags |= EntryFlags.HasAttributes;
-        }
-
-        if (entry.ETag is not null)
-        {
-            flags |= EntryFlags.HasETag;
-        }
-
-        if (entry.Key is not null)
-        {
-            flags |= EntryFlags.HasKey;
-        }
-
-        writer.Write((byte)flags);
-        writer.Write(entry.Name);
-        if (flags.HasFlag(EntryFlags.HasLength))
-        {
-            writer.Write7BitEncodedInt64(entry.Length);
-        }
-
-        if (entry.Created is { } c)
-        {
-            WriteTime(writer, c);
-        }
-
-        if (flags.HasFlag(EntryFlags.HasModified))
-        {
-            WriteTime(writer, entry.Modified!.Value);
-        }
-
-        if (flags.HasFlag(EntryFlags.HasAttributes))
-        {
-            writer.Write7BitEncodedInt((int)entry.Attributes);
-        }
-
-        if (entry.ETag is { } etag)
-        {
-            writer.Write(etag);
-        }
-
-        if (entry.Key is { } key)
-        {
-            writer.Write(key);
-        }
-    }
-
-    private static VfsEntry ReadEntry(ref RecordReader reader)
-    {
-        var flags = (EntryFlags)reader.ReadByte();
-        var name = reader.ReadPooled();
-        var length = flags.HasFlag(EntryFlags.HasLength) ? reader.Read7BitLong() : 0;
-        DateTimeOffset? created = flags.HasFlag(EntryFlags.HasCreated) ? ReadTime(ref reader) : null;
-        DateTimeOffset? modified = flags.HasFlag(EntryFlags.HasModified) ? ReadTime(ref reader) : flags.HasFlag(EntryFlags.ModifiedIsCreated) ? created : null;
-        var attributes = flags.HasFlag(EntryFlags.HasAttributes) ? (VfsAttributes)reader.Read7BitInt() : VfsAttributes.None;
-        var etag = flags.HasFlag(EntryFlags.HasETag) ? reader.ReadPooled() : null;
-        var key = flags.HasFlag(EntryFlags.HasKey) ? reader.ReadPooled() : null;
-        return new VfsEntry(name, flags.HasFlag(EntryFlags.Directory), length, created, modified, attributes, etag) { Key = key };
-    }
-
-    // the clock's ticks and the offset in minutes: the same time, told the same way, back
-    private static void WriteTime(BinaryWriter writer, DateTimeOffset time)
-    {
-        writer.Write(time.Ticks);
-        writer.Write((short)time.Offset.TotalMinutes);
-    }
-
-    private static DateTimeOffset ReadTime(ref RecordReader reader)
-    {
-        var ticks = reader.ReadInt64();
-        var minutes = reader.ReadInt16();
-        return new DateTimeOffset(ticks, TimeSpan.FromMinutes(minutes));
-    }
-
     /// <summary>
     /// Records read from a frame's bytes, as <see cref="BinaryWriter"/> wrote them (UTF-8 strings after their byte count in
-    /// seven-bit groups, numbers little endian). The strings that come again and again (a file's name in each branch it is
-    /// in, a blob's id in each branch it is unchanged in, a commit's id as a stamp) are made once from the bytes and shared,
-    /// a repeat looked up without being made: a big server's listings read back in less than half the memory.
+    /// seven-bit groups, numbers little endian). The strings that come again and again (a commit's id as a stamp, a folder's
+    /// left-out names) are made once from the bytes and shared, a repeat looked up without being made.
     /// </summary>
     private ref struct RecordReader(byte[] bytes, Dictionary<string, string> pool)
     {
@@ -512,13 +429,16 @@ internal sealed class ListingsFile
 
         public bool ReadBoolean() => ReadByte() != 0;
 
-        public long ReadInt64()
-        {
-            var value = BinaryPrimitives.ReadInt64LittleEndian(Take(8));
-            return value;
-        }
+        public long ReadInt64() => BinaryPrimitives.ReadInt64LittleEndian(Take(8));
 
         public short ReadInt16() => BinaryPrimitives.ReadInt16LittleEndian(Take(2));
+
+        public DateTimeOffset ReadTime()
+        {
+            var ticks = ReadInt64();
+            var minutes = ReadInt16();
+            return new DateTimeOffset(ticks, TimeSpan.FromMinutes(minutes));
+        }
 
         public int Read7BitInt() => checked((int)Read7BitLong());
 
@@ -563,7 +483,16 @@ internal sealed class ListingsFile
             return made;
         }
 
-        private ReadOnlySpan<byte> Take(int count)
+        /// <summary>The bytes of <paramref name="count"/> entries of format 1, as this format holds them.</summary>
+        public byte[] RepackLegacy(int count, out int folders)
+        {
+            var reader = new ListingCodec.ByteReader(bytes.AsSpan(_at));
+            var packed = ListingCodec.RepackLegacy(ref reader, count, out folders);
+            _at += reader.Position;
+            return packed;
+        }
+
+        public ReadOnlySpan<byte> Take(int count)
         {
             if (count < 0 || bytes.Length - _at < count)
             {
@@ -584,7 +513,7 @@ internal sealed class ListingsFile
         return records;
     }
 
-    /// <summary>The format before this one: the whole as gzipped JSON, read once; the first save writes this format in its place.</summary>
+    /// <summary>The format before the log: the whole as gzipped JSON, read once; the first save writes this format in its place.</summary>
     private void LoadBefore(FileStream file, SavedState state)
     {
         try
@@ -597,7 +526,7 @@ internal sealed class ListingsFile
 
             foreach (var (folder, listing) in saved.Listings)
             {
-                state.Listings[folder] = (listing, saved.Stamps?.GetValueOrDefault(folder));
+                state.Listings[folder] = StoredListing.Pack(0, saved.Stamps?.GetValueOrDefault(folder), listing);
             }
 
             foreach (var (folder, names) in saved.LeftOut ?? [])
@@ -689,10 +618,10 @@ internal sealed class ListingsFile
     }
 }
 
-/// <summary>What a run left in <see cref="ListingsFile"/>: each folder's listing and stamp, what walks leave out, when every folder was last listed.</summary>
+/// <summary>What a run left in <see cref="ListingsFile"/>: each folder's listing (as bytes, with its stamp), what walks leave out, when every folder was last listed.</summary>
 internal sealed class SavedState
 {
-    public Dictionary<string, (IReadOnlyList<VfsEntry> Listing, string? Stamp)> Listings { get; } = new(StringComparer.Ordinal);
+    public Dictionary<string, StoredListing> Listings { get; } = new(StringComparer.Ordinal);
 
     public Dictionary<string, IReadOnlySet<string>> LeftOut { get; } = new(StringComparer.Ordinal);
 

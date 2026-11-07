@@ -12,46 +12,52 @@ namespace AnyFS.Sdk;
 /// write replaced. A folder listed again soon after is no sign of a refresh (programs list a folder over and over: Adobe
 /// Acrobat opening a file does): a source lists afresh with <see cref="RefreshAsync(string, CancellationToken)"/> when it
 /// has a reason of its own.
+/// A cache that keeps its listings holds them as bytes (<see cref="ListingCodec"/>), in memory or on disk
+/// (<see cref="IListingStore"/>), and makes a folder's entries when a client asks for them, holding the last few thousand
+/// made (<see cref="HotListings"/>): clients open a folder and stat what is in it, and a search goes through each folder once.
 /// </summary>
 public sealed class ListingCache
 {
     /// <summary>The time a listing is kept for when it is kept until listed afresh or invalidated.</summary>
     public static readonly TimeSpan Kept = Timeout.InfiniteTimeSpan;
 
+    // how many folders' entries, made from their bytes for answering, are held at once (the first in, the first out)
+    private const int HotListings = 2_048;
+
     private readonly TimeSpan _ttl;
     private readonly Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> _lister;
     private readonly int _maxDirectories;
     private readonly TimeProvider _time;
     private readonly object _gate = new();
-    private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private readonly IListingStore _store;
+    private readonly bool _packed;
     private readonly ConcurrentDictionary<string, Failure> _failures = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Fetch> _fetches = new(StringComparer.Ordinal);
-
-    // the paths held, in order, so the folders below one are found by a range of them, not by a pass over them all
-    private readonly SortedSet<string> _keys = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, HotListing> _hot = new(StringComparer.Ordinal);
+    private readonly ConcurrentQueue<string> _hotOrder = new();
+    private int _hotCount;
     private long _version;
 
     /// <param name="ttl">How long a listing is good for, or <see cref="Kept"/>.</param>
     public ListingCache(TimeSpan ttl, Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> lister, int maxDirectories = 10_000, TimeProvider? time = null)
+        : this(ttl, lister, maxDirectories, time, null)
+    {
+    }
+
+    /// <param name="store">Where the listings are held; in memory when null.</param>
+    internal ListingCache(TimeSpan ttl, Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> lister, int maxDirectories, TimeProvider? time, IListingStore? store)
     {
         ArgumentNullException.ThrowIfNull(lister);
         _ttl = ttl;
         _lister = lister;
         _maxDirectories = maxDirectories;
         _time = time ?? TimeProvider.System;
+        _store = store ?? new MemoryListingStore();
+        _packed = ttl == Kept;
     }
 
     /// <summary>How many listings are held.</summary>
-    public int Count
-    {
-        get
-        {
-            lock (_gate)
-            {
-                return _keys.Count;
-            }
-        }
-    }
+    public int Count => _store.Count;
 
     /// <summary>
     /// Moves with every change to what is held (a listing kept, replaced or let go, a stamp taken off): a source that saves
@@ -82,7 +88,7 @@ public sealed class ListingCache
     public Action<string, string>? OnListing { get; init; }
 
     /// <summary>The listing held of <paramref name="path"/> as it is, nothing asked of the upstream; null where none is held.</summary>
-    public IReadOnlyList<VfsEntry>? Held(string path) => _entries.TryGetValue(path, out var held) && !IsExpired(held) ? held.List : null;
+    public IReadOnlyList<VfsEntry>? Held(string path) => Hot(path)?.List;
 
     /// <summary>Whether <paramref name="path"/> has been asked for: a listing of it is held, or its listing failed and that is kept (<see cref="FailureKeptFor"/>).</summary>
     public bool Asked(string path) => Held(path) is not null || _failures.ContainsKey(path);
@@ -90,11 +96,17 @@ public sealed class ListingCache
     /// <summary>The listing of <paramref name="path"/> (a normalised directory path), from the cache when fresh.</summary>
     public ValueTask<IReadOnlyList<VfsEntry>> GetAsync(string path, CancellationToken ct)
     {
-        if (_entries.TryGetValue(path, out var held) && !IsExpired(held))
+        if (Hot(path) is { } hot)
         {
-            return ValueTask.FromResult(held.List);
+            return ValueTask.FromResult(hot.List);
         }
 
+        return Ask(path, ct);
+    }
+
+    /// <summary>The listing of a folder not held: its failure kept, where it has one, else the upstream's answer.</summary>
+    private ValueTask<IReadOnlyList<VfsEntry>> Ask(string path, CancellationToken ct)
+    {
         if (_failures.TryGetValue(path, out var failed) && _time.GetElapsedTime(failed.At) < failed.For)
         {
             return ValueTask.FromException<IReadOnlyList<VfsEntry>>(new VfsException(failed.Error.Error, failed.Error.Message, failed.Error.InnerException));
@@ -102,7 +114,56 @@ public sealed class ListingCache
 
         return FetchAsync(path, ct, null, failed is not null
             ? $"it failed {_time.GetElapsedTime(failed.At).TotalSeconds:F0} s ago and that failure was kept {failed.For.TotalSeconds:F0} s ({failed.Error.Message})"
-            : held is not null ? "its listing is past its time" : "no listing is held");
+            : _store.Get(path) is not null ? "its listing is past its time" : "no listing is held");
+    }
+
+    /// <summary>
+    /// The listing held of <paramref name="path"/> with its entries made, from those made lately where it is among them;
+    /// null where none is held or it is past its time.
+    /// </summary>
+    private HotListing? Hot(string path)
+    {
+        if (_hot.TryGetValue(path, out var hot))
+        {
+            if (!IsExpired(hot.Source))
+            {
+                return hot;
+            }
+
+            _hot.TryRemove(path, out _);
+        }
+
+        var seen = Volatile.Read(ref _version);
+        var stored = _store.Get(path);
+        if (stored is null || IsExpired(stored))
+        {
+            return null;
+        }
+
+        hot = new HotListing(stored.Entries(), stored);
+        if (_hot.TryAdd(path, hot))
+        {
+            // the first in is the first out: a client opens a folder and stats what is in it, a search goes through each once
+            _hotOrder.Enqueue(path);
+            if (Interlocked.Increment(ref _hotCount) > HotListings && _hotOrder.TryDequeue(out var oldest))
+            {
+                Interlocked.Decrement(ref _hotCount);
+                _hot.TryRemove(oldest, out _);
+            }
+        }
+        else if (_hot.TryGetValue(path, out var there))
+        {
+            hot = there;
+        }
+
+        // stored again between the reading and the holding (something changed meanwhile, and it may have been this):
+        // what was made is answered, and not held
+        if (Volatile.Read(ref _version) != seen && (_store.Get(path) is not { } now || !(ReferenceEquals(now, stored) || (now.Packed is not null && now.SameAs(stored)))))
+        {
+            _hot.TryRemove(path, out _);
+        }
+
+        return hot;
     }
 
     /// <summary>Lets go of the failures kept (<see cref="FailureKeptFor"/>): for a source that knows what refused them may not now (a sign-in renewed), so each is listed again when next asked.</summary>
@@ -127,90 +188,112 @@ public sealed class ListingCache
     public void Keep(string path, IReadOnlyList<VfsEntry> listing, string? stamp = null)
     {
         ArgumentNullException.ThrowIfNull(listing);
+        var stored = Make(listing, stamp);
         lock (_gate)
         {
-            StoreLocked(path, new Entry(_time.GetTimestamp(), listing) { Stamp = stamp });
+            StoreLocked(path, stored);
             _failures.TryRemove(path, out _);
             TrimIfNeededLocked();
         }
     }
 
-    /// <summary>The listings held now, by folder path: what a source saves to answer at once after its next start (<see cref="Restore"/>).</summary>
+    /// <summary>The listings held now, by folder path (every one made from its bytes: for a cache that keeps a big tree, a lot).</summary>
     public IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>> Snapshot()
     {
-        lock (_gate)
+        var all = new Dictionary<string, IReadOnlyList<VfsEntry>>(StringComparer.Ordinal);
+        foreach (var (path, listing) in _store.All())
         {
-            return _entries.Where(e => !IsExpired(e.Value)).ToDictionary(e => e.Key, e => e.Value.List, StringComparer.Ordinal);
+            if (!IsExpired(listing))
+            {
+                all[path] = listing.Entries();
+            }
         }
+
+        return all;
     }
 
-    /// <summary>The stamps held with the listings (<see cref="StampOf"/>), by folder path, for the folders that have one: saved and restored with the listings.</summary>
+    /// <summary>The stamps held with the listings (<see cref="StampOf"/>), by folder path, for the folders that have one.</summary>
     public IReadOnlyDictionary<string, string> Stamps()
     {
-        lock (_gate)
+        var stamps = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (path, listing) in _store.All())
         {
-            return _entries.Where(e => e.Value.Stamp is not null && !IsExpired(e.Value)).ToDictionary(e => e.Key, e => e.Value.Stamp!, StringComparer.Ordinal);
+            if (listing.Stamp is not null && !IsExpired(listing))
+            {
+                stamps[path] = listing.Stamp;
+            }
         }
+
+        return stamps;
     }
 
     /// <summary>The stamp held with the listing of <paramref name="path"/>; null where there is none.</summary>
-    public string? StampHeld(string path)
-    {
-        lock (_gate)
-        {
-            return _entries.TryGetValue(path, out var held) && !IsExpired(held) ? held.Stamp : null;
-        }
-    }
+    public string? StampHeld(string path) => _store.Get(path) is { } held && !IsExpired(held) ? held.Stamp : null;
 
     /// <summary>The listings held of <paramref name="folder"/> and of every folder below it, by path (none where none is held).</summary>
     public IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>> Under(string folder)
     {
+        var held = new Dictionary<string, IReadOnlyList<VfsEntry>>(StringComparer.Ordinal);
+        foreach (var (path, listing) in HeldUnder(folder))
+        {
+            held[path] = listing.Entries();
+        }
+
+        return held;
+    }
+
+    /// <summary>What is held of <paramref name="folder"/> and of every folder below it, as held, nothing made: for a walk that keeps a subtree as it is.</summary>
+    internal List<(string Path, StoredListing Listing)> HeldUnder(string folder)
+    {
+        List<(string Path, StoredListing Listing)> under;
         lock (_gate)
         {
-            var held = new Dictionary<string, IReadOnlyList<VfsEntry>>(StringComparer.Ordinal);
-            foreach (var path in KeysUnderLocked(folder))
-            {
-                if (_entries.TryGetValue(path, out var entry) && !IsExpired(entry))
-                {
-                    held[path] = entry.List;
-                }
-            }
+            under = _store.Under(folder);
+        }
 
-            return held;
+        under.RemoveAll(h => IsExpired(h.Listing));
+        return under;
+    }
+
+    /// <summary>Every path held, in order: for a walk that counts what is held below each folder.</summary>
+    internal List<string> Paths()
+    {
+        lock (_gate)
+        {
+            return _store.Paths();
         }
     }
 
     /// <summary>
-    /// The paths held at <paramref name="folder"/> and below it, in order: the folder's own, then the range its children's
-    /// paths fall in (in ordinal order every "folder/…" lies between "folder/" and "folder0", '0' being the character after
-    /// '/'); every path for the root. Enumerated under the gate, and copied before anything is removed.
+    /// Holds <paramref name="listing"/> for <paramref name="path"/> (under the gate): the version moves, and what was made of
+    /// the folder's entries for answering is let go. The same listing again, with the same stamp (a walk that found a folder
+    /// as it was), moves only when it was listed: a walk over a tree that has not changed leaves nothing to save. In a cache
+    /// that keeps its listings, a folder the new listing no longer names is let go with everything below it: nothing can
+    /// reach it, and it would be held, and saved, for ever.
     /// </summary>
-    private IEnumerable<string> KeysUnderLocked(string folder)
+    private void StoreLocked(string path, StoredListing listing)
     {
-        if (folder.Length == 0)
+        var held = _store.Get(path);
+        if (held is not null && held.SameAs(listing))
         {
-            return _keys;
-        }
-
-        var below = _keys.GetViewBetween(folder + "/", folder + "0").Where(path => path.Length > folder.Length && path[folder.Length] == '/');
-        return _keys.Contains(folder) ? below.Prepend(folder) : below;
-    }
-
-    /// <summary>
-    /// Holds <paramref name="entry"/> for <paramref name="path"/> (under the gate): the path joins the sorted keys, and the
-    /// version moves. The same listing again, with the same stamp (a walk that found a folder as it was), moves only when
-    /// it was listed: a walk over a tree that has not changed leaves nothing to save.
-    /// </summary>
-    private void StoreLocked(string path, Entry entry)
-    {
-        if (_entries.TryGetValue(path, out var held) && held.Stamp == entry.Stamp && held.List.Count == entry.List.Count && held.List.SequenceEqual(entry.List))
-        {
-            _entries[path] = held with { Fetched = entry.Fetched };
+            held.Fetched = listing.Fetched;
             return;
         }
 
-        _entries[path] = entry;
-        _keys.Add(path);
+        if (_packed && held is { Folders: > 0 })
+        {
+            var still = new HashSet<string>(listing.FolderNames(), StringComparer.Ordinal);
+            foreach (var name in held.FolderNames())
+            {
+                if (!still.Contains(name))
+                {
+                    InvalidateTreeLocked(VfsPath.Join(path, name));
+                }
+            }
+        }
+
+        _store.Set(path, listing);
+        _hot.TryRemove(path, out _);
         _changes?.Add(path);
         Interlocked.Increment(ref _version);
     }
@@ -218,16 +301,20 @@ public sealed class ListingCache
     /// <summary>Lets go of what is held for <paramref name="path"/> (under the gate); false where nothing was.</summary>
     private bool RemoveLocked(string path)
     {
-        if (!_entries.TryRemove(path, out _))
+        if (!_store.Remove(path))
         {
             return false;
         }
 
-        _keys.Remove(path);
+        _hot.TryRemove(path, out _);
         _changes?.Add(path);
         Interlocked.Increment(ref _version);
         return true;
     }
+
+    /// <summary>A listing as this cache holds it: as bytes where it keeps its listings, as it is where it holds them for a time.</summary>
+    private StoredListing Make(IReadOnlyList<VfsEntry> listing, string? stamp, long? fetched = null)
+        => _packed ? StoredListing.Pack(fetched ?? _time.GetTimestamp(), stamp, listing) : new StoredListing(fetched ?? _time.GetTimestamp(), stamp, listing);
 
     // with changes followed (KeptListings writing them down as they come), the paths whose listing or stamp changed since
     // they were last taken, and whether everything was let go meanwhile
@@ -245,17 +332,17 @@ public sealed class ListingCache
 
     /// <summary>
     /// What changed since the last time (with <see cref="FollowChanges"/>): whether everything was let go first, then each
-    /// changed folder as it is held now, its listing and stamp, or no listing where it is held no more. Taken, so the next
-    /// time says only what changes after this.
+    /// changed folder as it is held now, or no listing where it is held no more. Taken, so the next time says only what
+    /// changes after this.
     /// </summary>
-    internal (bool Cleared, List<(string Path, IReadOnlyList<VfsEntry>? Listing, string? Stamp)> Changes) TakeChanges()
+    internal (bool Cleared, List<(string Path, StoredListing? Listing)> Changes) TakeChanges()
     {
         lock (_gate)
         {
-            var changes = new List<(string, IReadOnlyList<VfsEntry>?, string?)>(_changes?.Count ?? 0);
+            var changes = new List<(string, StoredListing?)>(_changes?.Count ?? 0);
             foreach (var path in _changes ?? [])
             {
-                changes.Add(_entries.TryGetValue(path, out var held) ? (path, held.List, held.Stamp) : (path, null, null));
+                changes.Add((path, _store.Get(path)));
             }
 
             _changes?.Clear();
@@ -265,14 +352,14 @@ public sealed class ListingCache
         }
     }
 
-    /// <summary>Every listing held now with its stamp, nothing copied: for writing them all down (a moment's view; changes meanwhile are followed as usual).</summary>
-    internal IEnumerable<(string Path, IReadOnlyList<VfsEntry> Listing, string? Stamp)> AllHeld()
+    /// <summary>Every listing held now, nothing copied: for writing them all down (a moment's view; changes meanwhile are followed as usual).</summary>
+    internal IEnumerable<(string Path, StoredListing Listing)> AllHeld()
     {
-        foreach (var (path, entry) in _entries)
+        foreach (var (path, listing) in _store.All())
         {
-            if (!IsExpired(entry))
+            if (!IsExpired(listing))
             {
-                yield return (path, entry.List, entry.Stamp);
+                yield return (path, listing);
             }
         }
     }
@@ -291,9 +378,9 @@ public sealed class ListingCache
                 fetch.Unstamped = true;
             }
 
-            if (_entries.TryGetValue(path, out var held) && held.Stamp is not null)
+            if (_store.Get(path) is { Stamp: not null } held)
             {
-                StoreLocked(path, held with { Stamp = null });
+                StoreLocked(path, held.WithStamp(null));
             }
         }
     }
@@ -303,10 +390,10 @@ public sealed class ListingCache
     {
         lock (_gate)
         {
-            if (_entries.TryGetValue(path, out var held) && !IsExpired(held))
+            if (_store.Get(path) is { } held && !IsExpired(held))
             {
                 // when it was listed is not saved: no change to the version
-                _entries[path] = held with { Fetched = _time.GetTimestamp() };
+                held.Fetched = _time.GetTimestamp();
             }
         }
     }
@@ -319,14 +406,21 @@ public sealed class ListingCache
     public void Restore(string path, IReadOnlyList<VfsEntry> listing, string? stamp = null)
     {
         ArgumentNullException.ThrowIfNull(listing);
+        Restore(path, Make(listing, stamp));
+    }
+
+    /// <summary>The same, with the listing as it was saved.</summary>
+    internal void Restore(string path, StoredListing saved)
+    {
+        saved.Fetched = _time.GetTimestamp();
         lock (_gate)
         {
-            if (_entries.ContainsKey(path))
+            if (_store.Get(path) is not null)
             {
                 return;
             }
 
-            StoreLocked(path, new Entry(_time.GetTimestamp(), listing) { Stamp = stamp });
+            StoreLocked(path, saved);
             TrimIfNeededLocked();
         }
     }
@@ -346,25 +440,20 @@ public sealed class ListingCache
         }
 
         var (parent, name) = VfsPath.SplitLast(path);
-        IReadOnlyList<VfsEntry> listing;
         try
         {
-            listing = await GetAsync(parent, ct).ConfigureAwait(false);
+            if (Hot(parent) is { } hot)
+            {
+                return hot.Find(name, comparison);
+            }
+
+            var listing = await Ask(parent, ct).ConfigureAwait(false);
+            return Hot(parent)?.Find(name, comparison) ?? HotListing.Scan(listing, name, comparison);
         }
         catch (VfsException ex) when (ex.Error is VfsError.NotFound or VfsError.NotADirectory)
         {
             return null;
         }
-
-        foreach (var entry in listing)
-        {
-            if (string.Equals(entry.Name, name, comparison))
-            {
-                return entry;
-            }
-        }
-
-        return null;
     }
 
     /// <summary>
@@ -381,9 +470,9 @@ public sealed class ListingCache
         var change = new Change(name, entry, comparison);
         lock (_gate)
         {
-            if (_entries.TryGetValue(parent, out var held) && !IsExpired(held))
+            if (_store.Get(parent) is { } held && !IsExpired(held))
             {
-                StoreLocked(parent, held with { List = Apply(held.List, [change]) });
+                StoreLocked(parent, Make(Apply(held.Entries(), [change]), held.Stamp, held.Fetched));
             }
 
             if (_fetches.TryGetValue(parent, out var fetch))
@@ -415,25 +504,30 @@ public sealed class ListingCache
     {
         lock (_gate)
         {
-            foreach (var key in KeysUnderLocked(directoryPath).ToList())
-            {
-                RemoveLocked(key);
-            }
+            InvalidateTreeLocked(directoryPath);
+        }
+    }
 
-            foreach (var key in _failures.Keys)
-            {
-                if (VfsPath.IsUnder(key, directoryPath))
-                {
-                    _failures.TryRemove(key, out _);
-                }
-            }
+    private void InvalidateTreeLocked(string directoryPath)
+    {
+        foreach (var (path, _) in _store.Under(directoryPath))
+        {
+            RemoveLocked(path);
+        }
 
-            foreach (var (key, fetch) in _fetches)
+        foreach (var key in _failures.Keys)
+        {
+            if (VfsPath.IsUnder(key, directoryPath))
             {
-                if (VfsPath.IsUnder(key, directoryPath))
-                {
-                    fetch.Invalidated = true;
-                }
+                _failures.TryRemove(key, out _);
+            }
+        }
+
+        foreach (var (key, fetch) in _fetches)
+        {
+            if (VfsPath.IsUnder(key, directoryPath))
+            {
+                fetch.Invalidated = true;
             }
         }
     }
@@ -442,8 +536,10 @@ public sealed class ListingCache
     {
         lock (_gate)
         {
-            _entries.Clear();
-            _keys.Clear();
+            _store.Clear();
+            _hot.Clear();
+            _hotOrder.Clear();
+            Volatile.Write(ref _hotCount, 0);
             Interlocked.Increment(ref _version);
             if (_changes is not null)
             {
@@ -459,7 +555,7 @@ public sealed class ListingCache
         }
     }
 
-    private bool IsExpired(Entry entry) => _ttl != Kept && _time.GetElapsedTime(entry.Fetched) > _ttl;
+    private bool IsExpired(StoredListing listing) => _ttl != Kept && _time.GetElapsedTime(listing.Fetched) > _ttl;
 
     /// <summary>The listing from the upstream: the one on its way when there is one, else a new one, shared by every caller until it lands.</summary>
     /// <param name="stamp">The folder's stamp as the caller read it, to keep with the listing; null to read it here (<see cref="StampOf"/>).</param>
@@ -495,12 +591,7 @@ public sealed class ListingCache
             string? stamp = fetch.Stamp?.Value;
             if (fetch.Stamp is null && StampOf is { } stampOf)
             {
-                string? held;
-                lock (_gate)
-                {
-                    held = _entries.TryGetValue(path, out var current) ? current.Stamp : null;
-                }
-
+                var held = _store.Get(path)?.Stamp;
                 try
                 {
                     stamp = await stampOf(path, held, CancellationToken.None).ConfigureAwait(false);
@@ -527,7 +618,7 @@ public sealed class ListingCache
                 {
                     // good for its time from when it arrived: a folder slower to list than that would otherwise be stale
                     // on arrival, and every stat in it would list it again
-                    StoreLocked(path, new Entry(_time.GetTimestamp(), result) { Stamp = fetch.Unstamped ? null : stamp });
+                    StoreLocked(path, Make(result, fetch.Unstamped ? null : stamp));
                     _failures.TryRemove(path, out _);
                     TrimIfNeededLocked();
                 }
@@ -543,7 +634,7 @@ public sealed class ListingCache
 
                 // a refusal or a failure of the folder's own, where nothing is held to answer instead (FailureKeptFor)
                 if (FailureKeptFor is { } keptFor && ex is VfsException { Error: not (VfsError.NotFound or VfsError.NotADirectory) } failure
-                    && !fetch.Invalidated && !_entries.ContainsKey(path) && keptFor(failure) is { } span && span > TimeSpan.Zero)
+                    && !fetch.Invalidated && _store.Get(path) is null && keptFor(failure) is { } span && span > TimeSpan.Zero)
                 {
                     _failures[path] = new Failure(_time.GetTimestamp(), span, failure);
                 }
@@ -577,43 +668,98 @@ public sealed class ListingCache
         return list;
     }
 
+    /// <summary>A cache that holds listings for a time holds at most so many: past that, those past their time go, then the oldest quarter. One that keeps its listings holds the tree.</summary>
     private void TrimIfNeededLocked()
     {
-        // the paths' index counts what is held at no cost: the dictionary's own Count takes every one of its locks, at every
-        // listing stored, which made bringing back a big run's listings take half a minute
-        if (_keys.Count <= _maxDirectories)
+        if (_packed || _store.Count <= _maxDirectories)
         {
             return;
         }
 
-        foreach (var pair in _entries)
+        foreach (var (path, listing) in _store.All().ToList())
         {
-            if (IsExpired(pair.Value))
+            if (IsExpired(listing))
             {
-                RemoveLocked(pair.Key);
+                RemoveLocked(path);
             }
         }
 
-        if (_keys.Count <= _maxDirectories)
+        if (_store.Count <= _maxDirectories)
         {
             return;
         }
 
         // still over: drop the oldest quarter
-        var oldest = _entries.OrderBy(p => p.Value.Fetched).Take(Math.Max(1, _keys.Count / 4)).ToList();
-        foreach (var pair in oldest)
+        var oldest = _store.All().OrderBy(p => p.Listing.Fetched).Take(Math.Max(1, _store.Count / 4)).Select(p => p.Path).ToList();
+        foreach (var path in oldest)
         {
-            RemoveLocked(pair.Key);
+            RemoveLocked(path);
         }
     }
 
     /// <summary>
-    /// A listing held: when it arrived from the upstream (it expires from then) and what it said, with the writes since
-    /// applied; and the folder's stamp as read before it (<see cref="StampOf"/>), where the source has one.
+    /// A folder's entries made for answering, from the listing held: with an index of their names once they have been
+    /// looked up a few times, since clients stat every file they list, and a scan of a folder of thousands for each is
+    /// the square of its size.
     /// </summary>
-    private sealed record Entry(long Fetched, IReadOnlyList<VfsEntry> List)
+    private sealed class HotListing(IReadOnlyList<VfsEntry> list, StoredListing source)
     {
-        public string? Stamp { get; init; }
+        private const int IndexFrom = 32;
+        private Dictionary<string, VfsEntry>? _ordinal;
+        private Dictionary<string, VfsEntry>? _ignoringCase;
+        private int _lookups;
+
+        public IReadOnlyList<VfsEntry> List { get; } = list;
+
+        /// <summary>What the entries were made from: its time is theirs.</summary>
+        public StoredListing Source { get; } = source;
+
+        public VfsEntry? Find(string name, StringComparison comparison)
+        {
+            if (List.Count < IndexFrom || Interlocked.Increment(ref _lookups) < 4)
+            {
+                return Scan(List, name, comparison);
+            }
+
+            var index = comparison switch
+            {
+                StringComparison.Ordinal => _ordinal ??= Index(StringComparer.Ordinal),
+                StringComparison.OrdinalIgnoreCase => _ignoringCase ??= Index(StringComparer.OrdinalIgnoreCase),
+                _ => null,
+            };
+            if (index is null)
+            {
+                return Scan(List, name, comparison);
+            }
+
+            return index.TryGetValue(name, out var entry) ? entry : null;
+        }
+
+        /// <summary>The first entry of that name, as a scan finds it.</summary>
+        public static VfsEntry? Scan(IReadOnlyList<VfsEntry> list, string name, StringComparison comparison)
+        {
+            foreach (var entry in list)
+            {
+                if (string.Equals(entry.Name, name, comparison))
+                {
+                    return entry;
+                }
+            }
+
+            return null;
+        }
+
+        private Dictionary<string, VfsEntry> Index(StringComparer comparer)
+        {
+            var index = new Dictionary<string, VfsEntry>(List.Count, comparer);
+            foreach (var entry in List)
+            {
+                // the first of a name wins, as in a scan
+                index.TryAdd(entry.Name, entry);
+            }
+
+            return index;
+        }
     }
 
     /// <summary>A write's change to one name in a listing.</summary>

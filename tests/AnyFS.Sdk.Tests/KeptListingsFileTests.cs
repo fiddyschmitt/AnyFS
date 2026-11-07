@@ -91,6 +91,165 @@ public class KeptListingsFileTests
 
     private KeptListings Kept(KeptListingsOptions options, SourceCounters? counters = null) => new(ListAsync, counters ?? new SourceCounters(), NullLogger.Instance, options);
 
+    /// <summary>Entries of every shape the format tells apart: each field there or not, times equal or not, etags as text and as hex, a key, a name beyond ASCII.</summary>
+    private static List<VfsEntry> EveryKindOfEntry()
+    {
+        var created = new DateTimeOffset(2026, 11, 7, 9, 30, 0, TimeSpan.FromHours(10));
+        var modified = new DateTimeOffset(2026, 11, 7, 23, 59, 59, TimeSpan.FromHours(-5)).AddTicks(1234567);
+        return
+        [
+            VfsEntry.Directory("dir", created, created),
+            VfsEntry.Directory("dir-modified-only", modified),
+            VfsEntry.File("plain.txt", 0),
+            VfsEntry.File("len.bin", 123_456_789_012, modified),
+            VfsEntry.File("both.txt", 1, modified, created, VfsAttributes.Hidden | VfsAttributes.ReadOnly, "W/\"abc\""),
+            VfsEntry.File("blob.py", 10, created, created, etag: "0123456789abcdef0123456789abcdef01234567"),
+            VfsEntry.File("sha256.bin", 11, etag: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"),
+            VfsEntry.File("upper.bin", 12, etag: "ABCDEF0123456789"),
+            VfsEntry.File("odd.bin", 13, etag: "abc"),
+            VfsEntry.File("created-only.txt", 14, null, created),
+            VfsEntry.File("ключ 文件.md", 15, modified, created) with { Key = "12345" },
+            VfsEntry.File("empty-etag.txt", 16, etag: ""),
+        ];
+    }
+
+    [TestMethod]
+    public async Task EveryKindOfEntryComesBackAsItWas()
+    {
+        var file = TempFile();
+        var entries = EveryKindOfEntry();
+        await using (var kept = Kept(Options(file)))
+        {
+            kept.Cache.Keep("mix", entries, "stamp");
+            CollectionAssert.AreEqual(entries, kept.Cache.Held("mix")!.ToList(), "as held, made from the bytes");
+        }
+
+        await using var next = Kept(Options(file));
+        var back = next.Cache.Held("mix")!.ToList();
+        CollectionAssert.AreEqual(entries, back, "as saved");
+        Assert.AreEqual("stamp", next.Cache.StampHeld("mix"));
+        Assert.AreEqual(TimeSpan.FromHours(10), back[0].Created!.Value.Offset, "the offset as it was, not the instant alone");
+        Assert.AreEqual(TimeSpan.FromHours(-5), back[3].Modified!.Value.Offset);
+        Assert.AreEqual("ABCDEF0123456789", back[7].ETag, "uppercase hex is text: it comes back as written");
+        Assert.AreEqual("12345", back[10].Key);
+    }
+
+    /// <summary>A file as the format before this one wrote it (format 1: each entry's flags one byte, its etag always text), one frame.</summary>
+    private static void WriteFormatOne(string file, string key, params (string Path, string? Stamp, List<VfsEntry> Entries)[] listings)
+    {
+        using var plain = new MemoryStream();
+        using (var w = new BinaryWriter(plain, Encoding.UTF8, leaveOpen: true))
+        {
+            w.Write((byte)1);
+            w.Write(key);
+            foreach (var (path, stamp, entries) in listings)
+            {
+                w.Write((byte)2);
+                w.Write(path);
+                w.Write(stamp is not null);
+                if (stamp is not null)
+                {
+                    w.Write(stamp);
+                }
+
+                w.Write7BitEncodedInt(entries.Count);
+                foreach (var e in entries)
+                {
+                    var flags = 0;
+                    flags |= e.IsDirectory ? 1 : 0;
+                    flags |= e.Length != 0 ? 2 : 0;
+                    flags |= e.Created.HasValue ? 4 : 0;
+                    if (e.Modified is { } m)
+                    {
+                        flags |= e.Created is { } c && c.Ticks == m.Ticks && c.Offset == m.Offset ? 16 : 8;
+                    }
+
+                    flags |= e.Attributes != VfsAttributes.None ? 32 : 0;
+                    flags |= e.ETag is not null ? 64 : 0;
+                    flags |= e.Key is not null ? 128 : 0;
+                    w.Write((byte)flags);
+                    w.Write(e.Name);
+                    if ((flags & 2) != 0)
+                    {
+                        w.Write7BitEncodedInt64(e.Length);
+                    }
+
+                    if (e.Created is { } created)
+                    {
+                        w.Write(created.Ticks);
+                        w.Write((short)created.Offset.TotalMinutes);
+                    }
+
+                    if ((flags & 8) != 0)
+                    {
+                        w.Write(e.Modified!.Value.Ticks);
+                        w.Write((short)e.Modified.Value.Offset.TotalMinutes);
+                    }
+
+                    if ((flags & 32) != 0)
+                    {
+                        w.Write7BitEncodedInt((int)e.Attributes);
+                    }
+
+                    if (e.ETag is { } etag)
+                    {
+                        w.Write(etag);
+                    }
+
+                    if (e.Key is { } k)
+                    {
+                        w.Write(k);
+                    }
+                }
+            }
+
+            w.Write((byte)5);
+            w.Write(false);
+        }
+
+        using var packed = new MemoryStream();
+        using (var zip = new GZipStream(packed, CompressionLevel.Fastest, leaveOpen: true))
+        {
+            zip.Write(plain.GetBuffer(), 0, (int)plain.Length);
+        }
+
+        using var f = File.Create(file);
+        f.Write("AFKL"u8);
+        Span<byte> n = stackalloc byte[4];
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(n, 1);
+        f.Write(n);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(n, (int)packed.Length);
+        f.Write(n);
+        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(n, (int)plain.Length);
+        f.Write(n);
+        f.Write(packed.GetBuffer(), 0, (int)packed.Length);
+    }
+
+    [TestMethod]
+    public async Task AFileOfFormatOneIsReadOnceAndWrittenInTheFormatNow()
+    {
+        var file = TempFile();
+        var entries = EveryKindOfEntry();
+        WriteFormatOne(file, Key, ("d03", "v1", entries), ("d03/sub", null, [VfsEntry.File("x.txt", 7)]));
+        await using (var kept = Kept(Options(file)))
+        {
+            CollectionAssert.AreEqual(entries, kept.Cache.Held("d03")!.ToList(), "read as the format before wrote it");
+            Assert.AreEqual("v1", kept.Cache.StampHeld("d03"));
+            Assert.AreEqual("x.txt", kept.Cache.Held("d03/sub")!.Single().Name);
+        }
+
+        var head = new byte[8];
+        using (var f = File.OpenRead(file))
+        {
+            f.ReadExactly(head);
+        }
+
+        Assert.AreEqual(2, System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(head.AsSpan(4)), "written whole in the format now at the first save");
+        await using var next = Kept(Options(file));
+        CollectionAssert.AreEqual(entries, next.Cache.Held("d03")!.ToList());
+        Assert.AreEqual("v1", next.Cache.StampHeld("d03"));
+    }
+
     private static async Task UntilAsync(Func<bool> done, string what)
     {
         var deadline = DateTime.UtcNow.AddSeconds(15);
