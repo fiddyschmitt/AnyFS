@@ -15,8 +15,8 @@ namespace AnyFS.Sdk;
 /// the stop, and when it has grown big, so a run that ends without stopping loses only what came after the last of those.
 /// A few connections more read by path (<see cref="Get"/>), so a listing asked for waits for no write and no commit:
 /// write-ahead logging gives each the last commit's view, and what this run stored since is kept beside until the commit
-/// lands. Each commit is on the disk before it returns. The folders below one are a range of the key. What it does is
-/// counted (<see cref="Statistics"/>).
+/// lands. Each commit is on the disk before it returns, and a connection of its own folds the log into the database behind
+/// it. The folders below one are a range of the key. What it does is counted (<see cref="Statistics"/>).
 /// </summary>
 internal sealed class SqliteListingStore : IListingStore
 {
@@ -45,6 +45,7 @@ internal sealed class SqliteListingStore : IListingStore
     private readonly Dictionary<string, StoredListing?> _written = new(StringComparer.Ordinal);
     private bool _clearedSinceCommit;
     private long _commits;
+    private Checkpointer? _checkpointer;
     private SqliteConnection _db = null!;
     private SqliteCommand _insert = null!;
     private SqliteCommand _update = null!;
@@ -120,6 +121,10 @@ internal sealed class SqliteListingStore : IListingStore
         // every commit reaches the disk before it returns (as the file's appends do): commits are a few a minute, so it costs nothing
         Run("PRAGMA journal_mode=WAL");
         Run("PRAGMA synchronous=FULL");
+
+        // the log is folded into the database by a connection of its own (Checkpointer), not by the commit: a commit then
+        // costs the log's write alone, and a walk storing a tree waits for no copying of what it stored a moment ago
+        Run("PRAGMA wal_autocheckpoint=0");
         Run("PRAGMA cache_size=-65536");
         Run("PRAGMA temp_store=MEMORY");
         Run("PRAGMA mmap_size=67108864");
@@ -179,6 +184,9 @@ internal sealed class SqliteListingStore : IListingStore
             _readers[i] = new Reader(_path);
             _free.Push(_readers[i]!);
         }
+
+        _checkpointer?.Dispose();
+        _checkpointer = new Checkpointer(_path, _name);
     }
 
     private void CloseReaders()
@@ -194,6 +202,8 @@ internal sealed class SqliteListingStore : IListingStore
     /// <summary>Moves a database that could not be opened to <c>.damaged</c> beside it (the one before it overwritten), its log and shared memory deleted.</summary>
     private void PutAside()
     {
+        _checkpointer?.Dispose();
+        _checkpointer = null;
         CloseReaders();
         _db?.Dispose();
         _db = null!;
@@ -630,7 +640,9 @@ internal sealed class SqliteListingStore : IListingStore
     {
         lock (_gate)
         {
-            // the readers first: a view one holds would keep the log from being folded in whole
+            // the checkpointer and the readers first: a view one holds would keep the log from being folded in whole
+            _checkpointer?.Dispose();
+            _checkpointer = null;
             CloseReaders();
             _readerSlots.Dispose();
             try
@@ -695,6 +707,15 @@ internal sealed class SqliteListingStore : IListingStore
                 _written.Clear();
                 _clearedSinceCommit = false;
                 Interlocked.Increment(ref _commits);
+            }
+
+            if (_checkpointer is { } checkpointer)
+            {
+                checkpointer.Due();
+                if (checkpointer.LogPages > Checkpointer.LogBound)
+                {
+                    checkpointer.Truncate();
+                }
             }
         }
     }
@@ -828,6 +849,102 @@ internal sealed class SqliteListingStore : IListingStore
         {
             _get.Dispose();
             _db.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Folds the log into the database after each commit, on a thread and a connection of its own, as far as the readers'
+    /// views allow (a passive checkpoint): what it does not get to this time it gets to after the next commit, and the
+    /// stop folds in the rest. The log restarts only when a write begins after it has been folded in whole, and a walk
+    /// begins its next transaction before that, so the log would grow to the size of the database over a first walk: past
+    /// <see cref="LogBound"/>, the writer has it folded in whole and cut back at its next commit (<see cref="Truncate"/>).
+    /// </summary>
+    private sealed class Checkpointer : IDisposable
+    {
+        /// <summary>The log's pages past which the writer cuts it back: a quarter gigabyte of pages of four kilobytes.</summary>
+        public const int LogBound = 65_536;
+
+        private readonly SqliteConnection _db;
+        private readonly SqliteCommand _passive;
+        private readonly SqliteCommand _truncate;
+        private readonly AutoResetEvent _due = new(false);
+        private readonly Lock _running = new();
+        private readonly Thread _thread;
+        private volatile bool _stopping;
+        private int _logPages;
+
+        public Checkpointer(string path, string name)
+        {
+            _db = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false }.ToString()) { DefaultTimeout = 2 };
+            _db.Open();
+            _passive = _db.CreateCommand();
+            _passive.CommandText = "PRAGMA wal_checkpoint(PASSIVE)";
+            _truncate = _db.CreateCommand();
+            _truncate.CommandText = "PRAGMA wal_checkpoint(TRUNCATE)";
+            _thread = new Thread(Run) { IsBackground = true, Name = $"{name}: listings checkpoint" };
+            _thread.Start();
+        }
+
+        /// <summary>How many pages the log held when it was last folded in.</summary>
+        public int LogPages => Volatile.Read(ref _logPages);
+
+        /// <summary>A commit has landed: fold it in when free.</summary>
+        public void Due() => _due.Set();
+
+        /// <summary>Folds the log in whole, waiting for the readers to be done with it (a moment: a read is microseconds), and cuts it back to nothing; busy or not, the next commit tries again.</summary>
+        public void Truncate()
+        {
+            lock (_running)
+            {
+                Checkpoint(_truncate);
+            }
+        }
+
+        private void Run()
+        {
+            while (true)
+            {
+                _due.WaitOne();
+                if (_stopping)
+                {
+                    return;
+                }
+
+                lock (_running)
+                {
+                    Checkpoint(_passive);
+                }
+            }
+        }
+
+        private void Checkpoint(SqliteCommand command)
+        {
+            try
+            {
+                // busy (0 or 1), the pages in the log, and how many of them are in the database now; the log is nothing after a cut
+                using var reader = command.ExecuteReader();
+                if (reader.Read())
+                {
+                    var busy = reader.GetInt32(0);
+                    var log = reader.GetInt32(1);
+                    Volatile.Write(ref _logPages, ReferenceEquals(command, _truncate) && busy == 0 ? 0 : log);
+                }
+            }
+            catch (SqliteException)
+            {
+                // busy, or the file gone from under it (put aside): the next commit asks again, and the stop folds in the rest
+            }
+        }
+
+        public void Dispose()
+        {
+            _stopping = true;
+            _due.Set();
+            _thread.Join();
+            _passive.Dispose();
+            _truncate.Dispose();
+            _db.Dispose();
+            _due.Dispose();
         }
     }
 
