@@ -114,6 +114,15 @@ public sealed class KeptListings : IAsyncDisposable
             if (_disk is null)
             {
                 Cache.FollowChanges();
+
+                // the file in this format from the start (made where there is none, written whole where it is of a format
+                // before), so every save from here on appends whole frames: a write of the whole, to a file beside it moved
+                // into place at the end, leaves nothing if the run ends during it, and a first walk's first one, under the
+                // walk's load, took longer than the time to the next
+                if (_file.MustRewrite)
+                {
+                    Save();
+                }
             }
 
             if (_options.SaveEvery > TimeSpan.Zero)

@@ -185,28 +185,6 @@ internal sealed class ListingsFile
             throw new InvalidOperationException("the file is to be written whole first");
         }
 
-        using var frames = new FrameWriter();
-        if (cleared)
-        {
-            frames.Writer.Write((byte)Record.Cleared);
-        }
-
-        foreach (var (path, listing) in changes)
-        {
-            WriteListing(frames.Writer, path, listing);
-            frames.Next();
-        }
-
-        if (fullWalkChanged)
-        {
-            WriteFullWalkAt(frames.Writer, fullWalkAt);
-        }
-
-        foreach (var (folder, names) in leftOut)
-        {
-            WriteLeftOut(frames.Writer, folder, names);
-        }
-
         try
         {
             if (Path.GetDirectoryName(_path) is { Length: > 0 } folder)
@@ -222,6 +200,31 @@ internal sealed class ListingsFile
             }
 
             file.Position = _length;
+
+            // frames go out as they fill: a run that ends during a long write (a first walk's first save, a million
+            // listings) leaves the whole ones for the next start, and holds none of them in memory meanwhile
+            using var frames = new FrameWriter(file);
+            if (cleared)
+            {
+                frames.Writer.Write((byte)Record.Cleared);
+            }
+
+            foreach (var (path, listing) in changes)
+            {
+                WriteListing(frames.Writer, path, listing);
+                frames.Next();
+            }
+
+            if (fullWalkChanged)
+            {
+                WriteFullWalkAt(frames.Writer, fullWalkAt);
+            }
+
+            foreach (var (left, names) in leftOut)
+            {
+                WriteLeftOut(frames.Writer, left, names);
+            }
+
             frames.WriteTo(file);
             file.Flush(flushToDisk: true);
             _length = file.Position;

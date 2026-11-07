@@ -114,6 +114,26 @@ public class KeptListingsFileTests
     }
 
     [TestMethod]
+    public async Task TheFileIsThereFromTheStartSoEverySaveAppends()
+    {
+        // a save that wrote the whole to a file beside it and moved it into place left nothing if the run ended during it,
+        // and a first walk's first save, under the walk's load, took longer than the time to the next
+        var file = TempFile();
+        await using (var kept = Kept(Options(file)))
+        {
+            Assert.IsTrue(File.Exists(file), "made at the start, the header alone");
+            var header = new FileInfo(file).Length;
+            Assert.IsTrue(header is > 8 and < 200, $"{header} bytes");
+            kept.Cache.Keep("d01", _tree["d01"], "v1");
+            await kept.CountAsync(CancellationToken.None);
+            Assert.IsFalse(File.Exists(file + ".tmp"), "no write of the whole");
+        }
+
+        await using var next = Kept(Options(file));
+        Assert.AreEqual(41, next.Cache.Count, "appended as the walk went, and at the stop");
+    }
+
+    [TestMethod]
     public async Task EveryKindOfEntryComesBackAsItWas()
     {
         var file = TempFile();
