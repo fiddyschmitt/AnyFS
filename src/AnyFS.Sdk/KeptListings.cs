@@ -272,6 +272,9 @@ public sealed class KeptListings : IAsyncDisposable
 
     public KeptListingsOptions Options => _options;
 
+    /// <summary>What the listings database has done since it was opened (<see cref="KeptListingsOptions.OnDisk"/>); null where the listings are in memory.</summary>
+    public ListingStoreStatistics? DiskStatistics => _disk?.Statistics();
+
     /// <summary>
     /// With listings kept, starts the walks: the first now, counting into the source's counters as it goes, then one every
     /// <see cref="KeptListingsOptions.WalkEvery"/> after the last ends, which counts aside and shows its total when done. A

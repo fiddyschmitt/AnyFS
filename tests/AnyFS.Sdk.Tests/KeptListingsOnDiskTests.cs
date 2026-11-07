@@ -120,6 +120,41 @@ public class KeptListingsOnDiskTests
     }
 
     [TestMethod]
+    public async Task WhatTheDatabaseDoesIsCounted()
+    {
+        var folder = TempFolder();
+        await using (var inMemory = Kept(Options(folder, onDisk: false)))
+        {
+            Assert.IsNull(inMemory.DiskStatistics, "no database");
+        }
+
+        File.Delete(Path.Combine(folder, "listings.json.gz"));
+        await using (var kept = Kept(Options(folder)))
+        {
+            var opened = kept.DiskStatistics!;
+            Assert.AreEqual(0, opened.Reads.Count + opened.Inserts.Count + opened.Commits.Count, "nothing done yet");
+            await kept.CountAsync(CancellationToken.None);
+            var walked = kept.DiskStatistics!;
+            Assert.AreEqual(41, walked.Inserts.Count, "a row a folder");
+            Assert.AreEqual(0, walked.Updates.Count);
+            Assert.AreEqual(0, walked.Deletes.Count);
+            Assert.IsTrue(walked.Reads.Count >= 41, $"each folder is looked for before it is stored: {walked.Reads.Count} reads");
+            Assert.AreEqual(1, walked.Commits.Count, "the walk's end commits everything stored since");
+            Assert.IsTrue(walked.Inserts.Total > TimeSpan.Zero && walked.Inserts.Longest >= walked.Inserts.Mean, "timed");
+            Assert.IsTrue(walked.BytesWritten > 41 * 10, "the listings' bytes");
+        }
+
+        await using var next = Kept(Options(folder));
+        var started = next.DiskStatistics!;
+        Assert.AreEqual(0, started.Reads.Count, "the start reads nothing back");
+        Assert.IsNotNull(next.Cache.Held("d05"));
+        Assert.IsNull(next.Cache.Held("nowhere"));
+        var asked = next.DiskStatistics!;
+        Assert.AreEqual(2, asked.Reads.Count);
+        Assert.AreEqual(1, asked.ReadsFound);
+    }
+
+    [TestMethod]
     public async Task TheFileOfAnEarlierRunMovesIntoTheDatabaseOnce()
     {
         var folder = TempFolder();

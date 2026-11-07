@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
@@ -12,6 +13,7 @@ namespace AnyFS.Sdk;
 /// committed when the source saves (<see cref="Save"/>), after a walk and at the stop, and when it has grown big, so a
 /// run that ends without stopping loses only what came after the last of those. Write-ahead logging, so a reader is
 /// never held up by the writer, and each commit is on the disk before it returns. The folders below one are a range of the key.
+/// What it does is counted (<see cref="Statistics"/>).
 /// </summary>
 internal sealed class SqliteListingStore : IListingStore
 {
@@ -27,6 +29,7 @@ internal sealed class SqliteListingStore : IListingStore
     private readonly ILogger _logger;
     private readonly string _name;
     private readonly Lock _gate = new();
+    private readonly Meter _meter = new();
     private SqliteConnection _db = null!;
     private SqliteCommand _get = null!;
     private SqliteCommand _insert = null!;
@@ -170,42 +173,66 @@ internal sealed class SqliteListingStore : IListingStore
 
     public int Count => Volatile.Read(ref _count);
 
+    /// <summary>What the store has done since it was opened, as of now; readable after it is disposed too.</summary>
+    public ListingStoreStatistics Statistics() => _meter.Snapshot();
+
     public StoredListing? Get(string path)
     {
-        lock (_gate)
+        var asked = Stopwatch.GetTimestamp();
+        using (_gate.EnterScope())
         {
+            var started = _meter.Entered(asked);
             try
             {
                 _get.Parameters[0].Value = path;
                 using var reader = _get.ExecuteReader();
-                return reader.Read() ? Read(reader, 0) : null;
+                if (!reader.Read())
+                {
+                    return null;
+                }
+
+                _meter.Found();
+                return Read(reader, 0);
             }
             catch (SqliteException ex)
             {
                 Failed("read", ex);
                 return null;
             }
+            finally
+            {
+                _meter.Note(Meter.Read, started);
+            }
         }
     }
 
     public bool Set(string path, StoredListing listing)
     {
-        lock (_gate)
+        var asked = Stopwatch.GetTimestamp();
+        using (_gate.EnterScope())
         {
+            var started = _meter.Entered(asked);
+            var op = Meter.Insert;
             try
             {
                 Begin();
                 var packed = listing.Packed ?? ListingCodec.Pack(listing.List!, out _);
+                _meter.Bytes(packed.Length);
                 Fill(_insert, path, listing, packed);
                 if (_insert.ExecuteNonQuery() > 0)
                 {
                     Interlocked.Increment(ref _count);
+                    _meter.Note(op, started);
+                    started = 0;
                     Wrote();
                     return true;
                 }
 
+                op = Meter.Update;
                 Fill(_update, path, listing, packed);
                 _update.ExecuteNonQuery();
+                _meter.Note(op, started);
+                started = 0;
                 Wrote();
                 return false;
             }
@@ -214,13 +241,22 @@ internal sealed class SqliteListingStore : IListingStore
                 Failed("write", ex);
                 return false;
             }
+            finally
+            {
+                if (started != 0)
+                {
+                    _meter.Note(op, started);
+                }
+            }
         }
     }
 
     public bool Remove(string path)
     {
-        lock (_gate)
+        var asked = Stopwatch.GetTimestamp();
+        using (_gate.EnterScope())
         {
+            var started = _meter.Entered(asked);
             try
             {
                 Begin();
@@ -231,6 +267,8 @@ internal sealed class SqliteListingStore : IListingStore
                 }
 
                 Interlocked.Decrement(ref _count);
+                _meter.Note(Meter.Delete, started);
+                started = 0;
                 Wrote();
                 return true;
             }
@@ -238,6 +276,13 @@ internal sealed class SqliteListingStore : IListingStore
             {
                 Failed("write", ex);
                 return false;
+            }
+            finally
+            {
+                if (started != 0)
+                {
+                    _meter.Note(Meter.Delete, started);
+                }
             }
         }
     }
@@ -308,8 +353,10 @@ internal sealed class SqliteListingStore : IListingStore
         while (true)
         {
             var page = new List<(string, StoredListing)>(PageRows);
-            lock (_gate)
+            var asked = Stopwatch.GetTimestamp();
+            using (_gate.EnterScope())
             {
+                var started = _meter.Entered(asked);
                 try
                 {
                     var command = first ? _range : _rangeFrom;
@@ -321,11 +368,17 @@ internal sealed class SqliteListingStore : IListingStore
                     {
                         page.Add((reader.GetString(0), Read(reader, 1)));
                     }
+
+                    _meter.Rows(page.Count);
                 }
                 catch (SqliteException ex)
                 {
                     Failed("read", ex);
                     yield break;
+                }
+                finally
+                {
+                    _meter.Note(Meter.Range, started);
                 }
             }
 
@@ -491,7 +544,15 @@ internal sealed class SqliteListingStore : IListingStore
         if (_inTransaction)
         {
             _inTransaction = false;
-            Run("COMMIT");
+            var started = Stopwatch.GetTimestamp();
+            try
+            {
+                Run("COMMIT");
+            }
+            finally
+            {
+                _meter.Note(Meter.Commit, started);
+            }
         }
     }
 
@@ -579,6 +640,77 @@ internal sealed class SqliteListingStore : IListingStore
         if (_failures++ % 1000 == 0)
         {
             _logger.LogWarning("{Name}: the listings database {Path} could not be {What} ({Error})", _name, _path, what == "read" ? "read" : "written", ex.Message);
+        }
+    }
+
+    /// <summary>Counts what the store does: each kind of operation, its time in all and the longest, and the waits for the connection.</summary>
+    private sealed class Meter
+    {
+        public const int Read = 0;
+        public const int Insert = 1;
+        public const int Update = 2;
+        public const int Delete = 3;
+        public const int Range = 4;
+        public const int Commit = 5;
+        private const int Ops = 6;
+
+        private readonly long[] _count = new long[Ops];
+        private readonly long[] _ticks = new long[Ops];
+        private readonly long[] _longest = new long[Ops];
+        private long _found;
+        private long _rows;
+        private long _bytes;
+        private long _waited;
+        private long _longestWait;
+
+        /// <summary>The connection is had, asked for at <paramref name="asked"/>: the wait counted, and now, for the operation's own time.</summary>
+        public long Entered(long asked)
+        {
+            var now = Stopwatch.GetTimestamp();
+            var waited = now - asked;
+            Interlocked.Add(ref _waited, waited);
+            Longest(ref _longestWait, waited);
+            return now;
+        }
+
+        public void Note(int op, long started)
+        {
+            var took = Stopwatch.GetTimestamp() - started;
+            Interlocked.Increment(ref _count[op]);
+            Interlocked.Add(ref _ticks[op], took);
+            Longest(ref _longest[op], took);
+        }
+
+        public void Found() => Interlocked.Increment(ref _found);
+
+        public void Rows(int rows) => Interlocked.Add(ref _rows, rows);
+
+        public void Bytes(int bytes) => Interlocked.Add(ref _bytes, bytes);
+
+        public ListingStoreStatistics Snapshot() => new()
+        {
+            Reads = Of(Read),
+            ReadsFound = Volatile.Read(ref _found),
+            Inserts = Of(Insert),
+            Updates = Of(Update),
+            Deletes = Of(Delete),
+            Ranges = Of(Range),
+            RangeRows = Volatile.Read(ref _rows),
+            Commits = Of(Commit),
+            BytesWritten = Volatile.Read(ref _bytes),
+            Waited = Stopwatch.GetElapsedTime(0, Volatile.Read(ref _waited)),
+            LongestWait = Stopwatch.GetElapsedTime(0, Volatile.Read(ref _longestWait)),
+        };
+
+        private ListingStoreOperation Of(int op)
+            => new(Volatile.Read(ref _count[op]), Stopwatch.GetElapsedTime(0, Volatile.Read(ref _ticks[op])), Stopwatch.GetElapsedTime(0, Volatile.Read(ref _longest[op])));
+
+        private static void Longest(ref long longest, long value)
+        {
+            long seen;
+            while (value > (seen = Volatile.Read(ref longest)) && Interlocked.CompareExchange(ref longest, value, seen) != seen)
+            {
+            }
         }
     }
 }
