@@ -118,9 +118,11 @@ internal sealed class SqliteListingStore : IListingStore
         // ended may hold the file a moment): short, the open trying again a few times
         _db.DefaultTimeout = 2;
         _db.Open();
-        // every commit reaches the disk before it returns (as the file's appends do): commits are a few a minute, so it costs nothing
+        // a commit is written to the log and returns; the log is synced before the database is written from it, so the
+        // database is always whole, and a run killed loses nothing committed; the machine losing power may lose the last
+        // commits, which the next walk lists again
         Run("PRAGMA journal_mode=WAL");
-        Run("PRAGMA synchronous=FULL");
+        Run("PRAGMA synchronous=NORMAL");
 
         // the log is folded into the database by a connection of its own (Checkpointer), not by the commit: a commit then
         // costs the log's write alone, and a walk storing a tree waits for no copying of what it stored a moment ago
