@@ -6,10 +6,6 @@ Anywhere there's information locked away, you can expose it in the only truly un
 
 It comes with a number of sources out of the box:
 
-File systems:
-* Local folders, drives and network shares
-* Any machine you can reach over SSH
-
 Corporate repositories:
 * SharePoint: Online (Microsoft 365), Server (on-premises) and Embedded. Document libraries, subsites, and pages as Markdown
 * Confluence (Data Center): every page as Markdown with its attachments and child pages, and each space's blog
@@ -31,7 +27,7 @@ Systems Engineering repos:
 * DOORS (TBC)
 * Cameo (TBC)
 
-Local folders, SSH and SharePoint can be written to; the other sources are read-only.
+Of these, SharePoint can be written to; the rest are read-only.
 
 Sources sign in the way your organisation allows: through your own browser (no app registration needed), a Windows account, an app registration, an access token, or a user name and password, in the US Government cloud (GCC High) too.
 
