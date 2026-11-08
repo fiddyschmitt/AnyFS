@@ -7,23 +7,23 @@ Anywhere there's information locked away, you can expose it in the only truly un
 It comes with a number of sources out of the box:
 
 Corporate repositories:
-* SharePoint: Online (Microsoft 365), Server (on-premises) and Embedded. Document libraries, subsites, and pages as Markdown
-* Confluence (Data Center): every page as Markdown with its attachments and child pages, and each space's blog
+* SharePoint: Online (Microsoft 365), Server (on-premises) and Embedded
+* Confluence (Data Center)
 
 Messaging apps:
-* Outlook: PST and OST files, Exchange Online, and Exchange Server (EWS). Each message as Markdown and .eml with its attachments, contacts as .vcf, appointments as .ics, and the address books
-* Microsoft Teams: teams, channels, chats and meetings as Markdown, with their files
+* Outlook: PST and OST files, Exchange Online (Microsoft 365) and Exchange Server (on-premises)
+* Teams
 * Mattermost (TBC)
 
 Software Development repos:
-* GitLab (GitLab.com or your own server): each project's repository on every branch and tag, its wiki, issues, merge requests, pipelines and releases
-* Bitbucket (Data Center): each repository's files, branches and tags, and its pull requests as Markdown with their diffs
-* Jira (Data Center): a folder per issue, with its fields, description and comments as Markdown and its attachments
-* Bamboo (Data Center): each plan's builds, with the jobs' logs and the artifacts they kept
+* GitLab: GitLab.com and Self-Managed
+* Bitbucket (Data Center)
+* Jira (Data Center)
+* Bamboo (Data Center)
 * Artifactory (TBC)
 
 Systems Engineering repos:
-* 3DEXPERIENCE (3DX): a platform's documents, a folder per revision with its files
+* 3DEXPERIENCE (3DX)
 * DOORS (TBC)
 * Cameo (TBC)
 
