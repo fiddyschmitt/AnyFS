@@ -82,10 +82,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         _api.Held += (wait, why) => Volatile.Read(ref _counted)?.Waiting(wait, why);
         _listings = new RequestCache(_stopping.Token);
         _trees = new TreeStore();
-
-        // the repository folders were kept in a file of their own until 6-Nov-2026: the kept listings hold them now
-        DeleteQuietly(Path.Combine(Context.StateDirectory, "trees.json.gz"));
-        DeleteQuietly(Path.Combine(Context.StateDirectory, "trees.json.gz.tmp"));
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
         var path = _session.Address.Path;
@@ -856,17 +852,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     }
 
     // --- stopping ------------------------------------------------------------------------------------------------------
-
-    private static void DeleteQuietly(string path)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-        }
-    }
 
     public override async ValueTask DisposeAsync()
     {

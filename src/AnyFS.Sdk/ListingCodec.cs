@@ -63,7 +63,7 @@ internal static class ListingCodec
         var listing = new VfsEntry[count];
         for (var i = 0; i < count; i++)
         {
-            listing[i] = ReadEntry(ref reader, legacyFlags: false);
+            listing[i] = ReadEntry(ref reader);
         }
 
         return listing;
@@ -87,18 +87,6 @@ internal static class ListingCodec
         }
 
         return names;
-    }
-
-    /// <summary>The bytes of <paramref name="count"/> entries as a file of the format before held them: the flags one byte, the etag always text.</summary>
-    public static byte[] RepackLegacy(ref ByteReader reader, int count, out int folders)
-    {
-        var listing = new VfsEntry[count];
-        for (var i = 0; i < count; i++)
-        {
-            listing[i] = ReadEntry(ref reader, legacyFlags: true);
-        }
-
-        return Pack(listing, out folders);
     }
 
     private static void WriteEntry(ref ByteWriter writer, VfsEntry entry)
@@ -185,9 +173,9 @@ internal static class ListingCodec
         }
     }
 
-    private static VfsEntry ReadEntry(ref ByteReader reader, bool legacyFlags)
+    private static VfsEntry ReadEntry(ref ByteReader reader)
     {
-        var flags = (EntryFlags)(legacyFlags ? reader.ReadByte() : reader.Read7BitInt());
+        var flags = (EntryFlags)reader.Read7BitInt();
         var name = reader.ReadString();
         var length = flags.HasFlag(EntryFlags.HasLength) ? reader.Read7BitLong() : 0;
         DateTimeOffset? created = flags.HasFlag(EntryFlags.HasCreated) ? reader.ReadTime() : null;

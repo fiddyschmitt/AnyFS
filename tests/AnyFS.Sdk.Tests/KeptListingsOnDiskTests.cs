@@ -274,7 +274,7 @@ public class KeptListingsOnDiskTests
     }
 
     [TestMethod]
-    public async Task TheFileOfAnEarlierRunMovesIntoTheDatabaseOnce()
+    public async Task AFileARunWithoutTheDatabaseLeftIsDeletedUnread()
     {
         var folder = TempFolder();
         await using (var inMemory = Kept(Options(folder, onDisk: false)))
@@ -286,15 +286,15 @@ public class KeptListingsOnDiskTests
         _listed.Clear();
         await using (var onDisk = Kept(Options(folder)))
         {
-            Assert.AreEqual(41, onDisk.Cache.Count, "moved in");
-            Assert.AreEqual("v1", onDisk.Cache.StampHeld("d07"));
-            Assert.AreEqual(6, onDisk.Cache.Held("d07")!.Count);
-            Assert.IsFalse(File.Exists(Path.Combine(folder, "listings.json.gz")), "and the file is gone");
+            Assert.AreEqual(0, onDisk.Cache.Count, "nothing moves from the file into the database: no migration code while no one runs the program");
+            Assert.IsFalse(File.Exists(Path.Combine(folder, "listings.json.gz")), "and the file is gone: the database is the store");
+            await onDisk.CountAsync(CancellationToken.None);
+            Assert.AreEqual(41, onDisk.Cache.Count, "walked afresh");
         }
 
+        Assert.IsTrue(_listed.Count > 0, "listed from the service, not read from the file");
         await using var third = Kept(Options(folder));
-        Assert.AreEqual(41, third.Cache.Count, "still there at the start after that");
-        Assert.AreEqual(0, _listed.Count);
+        Assert.AreEqual(41, third.Cache.Count, "and in the database after that");
     }
 
     [TestMethod]

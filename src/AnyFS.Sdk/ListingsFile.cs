@@ -1,7 +1,6 @@
 using System.Buffers.Binary;
 using System.IO.Compression;
 using System.Text;
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sdk;
@@ -15,9 +14,9 @@ namespace AnyFS.Sdk;
 /// Layout: <c>AFKL</c>, the format, then frames: the compressed length and the plain length (four bytes each, little
 /// endian), then a gzip of records, the first of the file naming what the listings are for. A frame cut short (the process
 /// ended while it was written) is left out, and the next write goes where it began. A listing's entries are the bytes the
-/// cache holds (<see cref="ListingCodec"/>), written as they are and read back as they are. A file of format 1 (each
-/// entry's flags one byte, its etag always text) is read once, as is one of the format before (gzipped JSON,
-/// <see cref="SavedListings"/>); the first save writes this one in its place.
+/// cache holds (<see cref="ListingCodec"/>), written as they are and read back as they are. A file of another format is
+/// not read (the formats before this one had no users; the user, 8-Nov-2026: no migration code), and the first save
+/// writes this one in its place.
 /// </summary>
 internal sealed class ListingsFile
 {
@@ -54,10 +53,10 @@ internal sealed class ListingsFile
     /// <summary>Whether the next write must be the whole (<see cref="Rewrite"/>), not an append.</summary>
     public bool MustRewrite => _length < 0;
 
-    /// <summary>Whether there is a file to read (of any of the formats): for a source moving its listings elsewhere.</summary>
+    /// <summary>Whether there is a file: for a source that keeps its listings in the database, where a run without the database left one.</summary>
     public bool Exists => File.Exists(_path);
 
-    /// <summary>Deletes the file, and a write of it cut short, quietly: for a source that keeps its listings elsewhere now.</summary>
+    /// <summary>Deletes the file, and a write of it cut short, quietly: for a source that keeps its listings in the database.</summary>
     public void Delete()
     {
         foreach (var path in new[] { _path, _path + ".tmp" })
@@ -107,15 +106,7 @@ internal sealed class ListingsFile
         {
             Span<byte> head = stackalloc byte[8];
             var read = file.ReadAtLeast(head, 8, throwOnEndOfStream: false);
-            if (read >= 2 && head[0] == 0x1F && head[1] == 0x8B)
-            {
-                file.Position = 0;
-                LoadBefore(file, state);
-                return state;
-            }
-
-            var version = read >= 8 ? BinaryPrimitives.ReadInt32LittleEndian(head[4..]) : 0;
-            if (read < 8 || !head[..4].SequenceEqual(Magic) || version is < 1 or > FormatVersion)
+            if (read < 8 || !head[..4].SequenceEqual(Magic) || BinaryPrimitives.ReadInt32LittleEndian(head[4..]) != FormatVersion)
             {
                 _logger.LogInformation("{Name}: the listings saved by the last run are of another format; listing afresh", _name);
                 return state;
@@ -145,7 +136,7 @@ internal sealed class ListingsFile
                 try
                 {
                     var records = Decompress(bytes, plain);
-                    if (!Apply(records, state, first, pool, version))
+                    if (!Apply(records, state, first, pool))
                     {
                         // another's listings, or of another source's settings: none of it is this run's
                         _logger.LogInformation("{Name}: the listings saved by the last run are for something else; listing afresh", _name);
@@ -171,8 +162,7 @@ internal sealed class ListingsFile
                 _logger.LogInformation("{Name}: the end of the listings saved by the last run was cut short (it ended while writing it); what came before it is kept", _name);
             }
 
-            // a file of the format before is written afresh in this one at the first save
-            _length = version == FormatVersion ? valid : -1;
+            _length = valid;
             return state;
         }
     }
@@ -294,7 +284,7 @@ internal sealed class ListingsFile
 
     // --- records -----------------------------------------------------------------------------------------------------
 
-    private bool Apply(byte[] records, SavedState state, bool first, Dictionary<string, string> pool, int version)
+    private bool Apply(byte[] records, SavedState state, bool first, Dictionary<string, string> pool)
     {
         var reader = new RecordReader(records, pool);
         var atStart = true;
@@ -320,18 +310,8 @@ internal sealed class ListingsFile
                     var path = reader.ReadString();
                     var stamp = reader.ReadBoolean() ? reader.ReadPooled() : null;
                     var count = reader.Read7BitInt();
-                    byte[] packed;
-                    int folders;
-                    if (version >= 2)
-                    {
-                        folders = reader.Read7BitInt();
-                        packed = reader.Take(reader.Read7BitInt()).ToArray();
-                    }
-                    else
-                    {
-                        packed = reader.RepackLegacy(count, out folders);
-                    }
-
+                    var folders = reader.Read7BitInt();
+                    var packed = reader.Take(reader.Read7BitInt()).ToArray();
                     state.Listings[path] = new StoredListing(0, stamp, packed, count, folders);
                     Records++;
                     break;
@@ -486,15 +466,6 @@ internal sealed class ListingsFile
             return made;
         }
 
-        /// <summary>The bytes of <paramref name="count"/> entries of format 1, as this format holds them.</summary>
-        public byte[] RepackLegacy(int count, out int folders)
-        {
-            var reader = new ListingCodec.ByteReader(bytes.AsSpan(_at));
-            var packed = ListingCodec.RepackLegacy(ref reader, count, out folders);
-            _at += reader.Position;
-            return packed;
-        }
-
         public ReadOnlySpan<byte> Take(int count)
         {
             if (count < 0 || bytes.Length - _at < count)
@@ -514,37 +485,6 @@ internal sealed class ListingsFile
         using var zip = new GZipStream(new MemoryStream(packed, writable: false), CompressionMode.Decompress);
         zip.ReadExactly(records);
         return records;
-    }
-
-    /// <summary>The format before the log: the whole as gzipped JSON, read once; the first save writes this format in its place.</summary>
-    private void LoadBefore(FileStream file, SavedState state)
-    {
-        try
-        {
-            using var zip = new GZipStream(file, CompressionMode.Decompress, leaveOpen: true);
-            if (JsonSerializer.Deserialize(zip, SavedListingsJson.Default.SavedListings) is not { Version: 2 } saved || saved.Key != _key)
-            {
-                return;
-            }
-
-            foreach (var (folder, listing) in saved.Listings)
-            {
-                state.Listings[folder] = StoredListing.Pack(0, saved.Stamps?.GetValueOrDefault(folder), listing);
-            }
-
-            foreach (var (folder, names) in saved.LeftOut ?? [])
-            {
-                state.LeftOut[folder] = names.ToHashSet(StringComparer.Ordinal);
-            }
-
-            state.FullWalkAt = saved.FullWalkAt;
-        }
-        catch (Exception ex) when (ex is IOException or JsonException or InvalidDataException or NotSupportedException)
-        {
-            _logger.LogInformation("{Name}: the listings saved by the last run could not be read ({Error}); listing afresh", _name, ex.Message);
-            state.Listings.Clear();
-            state.LeftOut.Clear();
-        }
     }
 
     /// <summary>Records gathered into frames: each compressed and written out once it holds <see cref="FrameBytes"/>, or at the end.</summary>

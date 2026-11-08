@@ -1,7 +1,5 @@
 using System.Collections.Concurrent;
-using System.IO.Compression;
 using System.Runtime.CompilerServices;
-using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Sdk.Tests;
@@ -10,7 +8,7 @@ namespace AnyFS.Sdk.Tests;
 /// The kept listings' file (spec 6.6, the user's two GitLab servers of 6-Nov-2026, closed a fifth of the way through their
 /// first walks and walked again from the start the next day): written as a walk goes and when it stops, so the next run goes
 /// on from what the last had; a run that ended without stopping loses only what it had not written yet; a write cut short
-/// is left out and written over; the file before this format is read once.
+/// is left out and written over; a file of another format is not read (no migration code: no one ran the formats before).
 /// </summary>
 [TestClass]
 public class KeptListingsFileTests
@@ -155,122 +153,6 @@ public class KeptListingsFileTests
         Assert.AreEqual("12345", back[10].Key);
     }
 
-    /// <summary>A file as the format before this one wrote it (format 1: each entry's flags one byte, its etag always text), one frame.</summary>
-    private static void WriteFormatOne(string file, string key, params (string Path, string? Stamp, List<VfsEntry> Entries)[] listings)
-    {
-        using var plain = new MemoryStream();
-        using (var w = new BinaryWriter(plain, Encoding.UTF8, leaveOpen: true))
-        {
-            w.Write((byte)1);
-            w.Write(key);
-            foreach (var (path, stamp, entries) in listings)
-            {
-                w.Write((byte)2);
-                w.Write(path);
-                w.Write(stamp is not null);
-                if (stamp is not null)
-                {
-                    w.Write(stamp);
-                }
-
-                w.Write7BitEncodedInt(entries.Count);
-                foreach (var e in entries)
-                {
-                    var flags = 0;
-                    flags |= e.IsDirectory ? 1 : 0;
-                    flags |= e.Length != 0 ? 2 : 0;
-                    flags |= e.Created.HasValue ? 4 : 0;
-                    if (e.Modified is { } m)
-                    {
-                        flags |= e.Created is { } c && c.Ticks == m.Ticks && c.Offset == m.Offset ? 16 : 8;
-                    }
-
-                    flags |= e.Attributes != VfsAttributes.None ? 32 : 0;
-                    flags |= e.ETag is not null ? 64 : 0;
-                    flags |= e.Key is not null ? 128 : 0;
-                    w.Write((byte)flags);
-                    w.Write(e.Name);
-                    if ((flags & 2) != 0)
-                    {
-                        w.Write7BitEncodedInt64(e.Length);
-                    }
-
-                    if (e.Created is { } created)
-                    {
-                        w.Write(created.Ticks);
-                        w.Write((short)created.Offset.TotalMinutes);
-                    }
-
-                    if ((flags & 8) != 0)
-                    {
-                        w.Write(e.Modified!.Value.Ticks);
-                        w.Write((short)e.Modified.Value.Offset.TotalMinutes);
-                    }
-
-                    if ((flags & 32) != 0)
-                    {
-                        w.Write7BitEncodedInt((int)e.Attributes);
-                    }
-
-                    if (e.ETag is { } etag)
-                    {
-                        w.Write(etag);
-                    }
-
-                    if (e.Key is { } k)
-                    {
-                        w.Write(k);
-                    }
-                }
-            }
-
-            w.Write((byte)5);
-            w.Write(false);
-        }
-
-        using var packed = new MemoryStream();
-        using (var zip = new GZipStream(packed, CompressionLevel.Fastest, leaveOpen: true))
-        {
-            zip.Write(plain.GetBuffer(), 0, (int)plain.Length);
-        }
-
-        using var f = File.Create(file);
-        f.Write("AFKL"u8);
-        Span<byte> n = stackalloc byte[4];
-        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(n, 1);
-        f.Write(n);
-        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(n, (int)packed.Length);
-        f.Write(n);
-        System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(n, (int)plain.Length);
-        f.Write(n);
-        f.Write(packed.GetBuffer(), 0, (int)packed.Length);
-    }
-
-    [TestMethod]
-    public async Task AFileOfFormatOneIsReadOnceAndWrittenInTheFormatNow()
-    {
-        var file = TempFile();
-        var entries = EveryKindOfEntry();
-        WriteFormatOne(file, Key, ("d03", "v1", entries), ("d03/sub", null, [VfsEntry.File("x.txt", 7)]));
-        await using (var kept = Kept(Options(file)))
-        {
-            CollectionAssert.AreEqual(entries, kept.Cache.Held("d03")!.ToList(), "read as the format before wrote it");
-            Assert.AreEqual("v1", kept.Cache.StampHeld("d03"));
-            Assert.AreEqual("x.txt", kept.Cache.Held("d03/sub")!.Single().Name);
-        }
-
-        var head = new byte[8];
-        using (var f = File.OpenRead(file))
-        {
-            f.ReadExactly(head);
-        }
-
-        Assert.AreEqual(2, System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(head.AsSpan(4)), "written whole in the format now at the first save");
-        await using var next = Kept(Options(file));
-        CollectionAssert.AreEqual(entries, next.Cache.Held("d03")!.ToList());
-        Assert.AreEqual("v1", next.Cache.StampHeld("d03"));
-    }
-
     private static async Task UntilAsync(Func<bool> done, string what)
     {
         var deadline = DateTime.UtcNow.AddSeconds(15);
@@ -387,36 +269,25 @@ public class KeptListingsFileTests
     }
 
     [TestMethod]
-    public async Task TheFormatBeforeIsReadOnceAndWrittenInThisOne()
+    public async Task AFileOfAnotherFormatIsNotReadAndIsWrittenOver()
     {
         var file = TempFile();
-        var json = $$$"""
-            {"Version":2,"Key":"{{{Key}}}","Listings":{"":[{"Name":"docs","IsDirectory":true,"Length":0,"Created":null,"Modified":null,"Attributes":0,"ETag":null}],
-            "docs":[{"Name":"a.txt","IsDirectory":false,"Length":12,"Created":"2026-10-20T09:30:00+10:00","Modified":"2026-10-21T09:30:00+10:00","Attributes":0,"ETag":"e1"}]},
-            "Stamps":{"docs":"s1"},"FullWalkAt":"2026-10-21T10:00:00+00:00","LeftOut":{"":["issues"]}}
-            """;
-        using (var stream = new GZipStream(File.Create(file), CompressionLevel.Fastest))
-        {
-            stream.Write(Encoding.UTF8.GetBytes(json));
-        }
-
+        File.WriteAllBytes(file, [(byte)'A', (byte)'F', (byte)'K', (byte)'L', 1, 0, 0, 0, 9, 9, 9, 9]);
         await using (var kept = Kept(Options(file)))
         {
-            var docs = kept.Cache.Held("docs")!.Single();
-            Assert.AreEqual(("a.txt", 12L, "e1"), (docs.Name, docs.Length, docs.ETag));
-            Assert.AreEqual("s1", kept.Cache.StampHeld("docs"));
+            Assert.AreEqual(0, kept.Cache.Count, "nothing is read from a format before this one: no one ran it, and nothing migrates");
+            await kept.CountAsync(CancellationToken.None);
         }
 
-        using (var stream = File.OpenRead(file))
+        var head = new byte[8];
+        using (var f = File.OpenRead(file))
         {
-            var head = new byte[4];
-            stream.ReadExactly(head);
-            Assert.AreEqual("AFKL", Encoding.ASCII.GetString(head), "written in the new format at the stop");
+            f.ReadExactly(head);
         }
 
-        await using var again = Kept(Options(file));
-        Assert.AreEqual("a.txt", again.Cache.Held("docs")!.Single().Name);
-        Assert.AreEqual("s1", again.Cache.StampHeld("docs"));
+        Assert.AreEqual(2, System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(head.AsSpan(4)), "written whole in this format at the first save");
+        await using var next = Kept(Options(file));
+        Assert.AreEqual(41, next.Cache.Count, "and read back");
     }
 
     [TestMethod]

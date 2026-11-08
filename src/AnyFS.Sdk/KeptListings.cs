@@ -142,20 +142,10 @@ public sealed class KeptListings : IAsyncDisposable
     {
         if (_disk is not null)
         {
-            // what an earlier run left in the file, before the listings were kept on disk, goes into the database once
-            if (_disk.Count == 0 && _file!.Exists)
+            // a run that could not open the database kept its listings in the file: the database is the store, and nothing
+            // moves from the one to the other (the user, 8-Nov-2026: no migration code while no one runs the program)
+            if (_file!.Exists)
             {
-                var moved = _file.Load();
-                _disk.Import(moved);
-                _file.Delete();
-                if (moved.Listings.Count > 0)
-                {
-                    _logger.LogInformation("{Name}: {Count:N0} folder listings from the last run moved into the database", _options.Name, moved.Listings.Count);
-                }
-            }
-            else if (_file!.Exists)
-            {
-                // a run that could not open the database kept its listings in the file: the database is the store
                 _file.Delete();
             }
 
@@ -1052,7 +1042,7 @@ public sealed record KeptListingsOptions
     /// With <see cref="SaveTo"/>, whether the listings are kept on disk, in a database beside the file, with the last
     /// few thousand asked for in memory (a source of tens of millions of files fits, and the start reads nothing back),
     /// or in memory with the file written as they change (false). Null, the default, keeps them on disk, unless the
-    /// environment says <c>ANYFS_LISTINGS_ON_DISK=0</c>. What a file holds from before is moved into the database once.
+    /// environment says <c>ANYFS_LISTINGS_ON_DISK=0</c>. Nothing moves between the two: a file beside the database is deleted unread.
     /// </summary>
     public bool? OnDisk { get; init; }
 
@@ -1123,16 +1113,3 @@ public sealed record KeptListingsOptions
     /// </summary>
     public TimeSpan FullWalkEvery { get; init; } = TimeSpan.FromDays(1);
 }
-
-/// <summary>The listings a run saved before the file became a log (<see cref="ListingsFile"/>): read once, and written in the new format at the first save.</summary>
-internal sealed record SavedListings(int Version, string Key, Dictionary<string, List<VfsEntry>> Listings)
-{
-    public Dictionary<string, string>? Stamps { get; init; }
-
-    public DateTimeOffset? FullWalkAt { get; init; }
-
-    public Dictionary<string, List<string>>? LeftOut { get; init; }
-}
-
-[System.Text.Json.Serialization.JsonSerializable(typeof(SavedListings))]
-internal sealed partial class SavedListingsJson : System.Text.Json.Serialization.JsonSerializerContext;

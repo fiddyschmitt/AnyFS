@@ -249,8 +249,8 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   database has done: reads, writes, commits, waits). Kept listings are held as bytes, a folder's
   entries made when a client asks (the last few thousand asked for stay made); `OnDisk = false` holds
   them all in memory instead, with the file written as they change (appended to, so a stop costs only
-  what changed since) and read back at the next start, and what a file holds is moved into the
-  database once when a source goes from the one to the other;
+  what changed since) and read back at the next start; nothing moves between the two, and a file
+  beside the database is deleted unread;
   `SaveKey` says what they were saved for (the account, the server, the settings that shape the tree
   and a version of your own that moves when what you list or how you measure files changes), and
   another's are not read. `StampOf` gives a folder's stamp: what its listing and every listing below

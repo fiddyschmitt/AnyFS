@@ -601,44 +601,6 @@ internal sealed class SqliteListingStore : IListingStore
         }
     }
 
-    /// <summary>What the file held before the listings were kept on disk, moved in whole.</summary>
-    public void Import(SavedState saved)
-    {
-        lock (_gate)
-        {
-            try
-            {
-                Begin();
-
-                // in key order: a row added at the end of the tree costs a tenth of one put in among the rest
-                foreach (var (path, listing) in saved.Listings.OrderBy(l => l.Key, StringComparer.Ordinal))
-                {
-                    Fill(_insert, path, listing, listing.Packed!);
-                    if (_insert.ExecuteNonQuery() > 0)
-                    {
-                        _count++;
-                    }
-                }
-
-                foreach (var (folder, names) in saved.LeftOut)
-                {
-                    SetLeftOut(folder, names);
-                }
-
-                if (saved.FullWalkAt is { } at)
-                {
-                    SetFullWalkAt(at);
-                }
-
-                Commit();
-            }
-            catch (SqliteException ex)
-            {
-                throw new IOException($"the listings could not be moved into the database: {ex.Message}", ex);
-            }
-        }
-    }
-
     /// <summary>What walks leave out, as the last run left it.</summary>
     public Dictionary<string, IReadOnlySet<string>> LeftOut()
     {
