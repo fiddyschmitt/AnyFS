@@ -1209,13 +1209,10 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     // --- files ---------------------------------------------------------------------------------------------------------
 
-    // inline images by address: an image's bytes never change; kept to 64 MiB in all, then begun again. Each one's length
-    // and extension are kept once read, so a listing reads an image once to measure it, and its bytes are read again
-    // only when it is opened after they were let go
-    private const long ImagesKept = 64L << 20;
-    private readonly ConcurrentDictionary<string, TeamsImage> _images = new(StringComparer.Ordinal);
+    // inline images by address: an image's bytes never change, so its length and extension are kept once measured (a
+    // listing measures it once); its bytes are read only when it is opened, and kept nowhere (9-Nov-2026: they were kept,
+    // to 64 MiB, after the listing had read each image whole to measure it)
     private readonly ConcurrentDictionary<string, (long Length, string Extension)> _imageSizes = new(StringComparer.Ordinal);
-    private long _imageBytes;
 
     /// <summary>
     /// A conversation's attachments (spec 7.9): the files its messages share, each once, as SharePoint or OneDrive has them now
@@ -1311,25 +1308,18 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         }
     }
 
-    /// <summary>An inline image's length and extension, as first read (the image kept for an open soon after); null when it cannot be read.</summary>
+    /// <summary>
+    /// An inline image's length and extension, measured once without keeping the image (<see cref="ITeamsApi.ImageSizeAsync"/>);
+    /// null when it cannot be read (an address on no Teams media host is never asked).
+    /// </summary>
     private async Task<(long Length, string Extension)?> ImageSizeAsync(string src, CancellationToken ct)
-        => _imageSizes.TryGetValue(src, out var size) ? size
-            : await ImageAsync(src, ct).ConfigureAwait(false) is { } image ? (image.Bytes.Length, image.Extension) : null;
-
-    /// <summary>An inline image's bytes, for an open: as kept, else read again.</summary>
-    internal async Task<byte[]> ImageBytesAsync(string src, CancellationToken ct)
-        => (await ImageAsync(src, ct).ConfigureAwait(false))?.Bytes ?? throw new VfsException(VfsError.IoError, "an inline image could not be read from Teams' media service");
-
-    /// <summary>An inline image, read once while kept; null when it cannot be read (an address on no Teams media host is never asked).</summary>
-    private async Task<TeamsImage?> ImageAsync(string src, CancellationToken ct)
     {
-        if (_images.TryGetValue(src, out var kept))
+        if (_imageSizes.TryGetValue(src, out var known))
         {
-            return kept;
+            return known;
         }
 
-        var image = await Api.ImageAsync(src, ct).ConfigureAwait(false);
-        if (image is null)
+        if (await Api.ImageSizeAsync(src, ct).ConfigureAwait(false) is not { } measured)
         {
             return null;
         }
@@ -1339,15 +1329,13 @@ public sealed partial class TeamsSource : SourceBase, ICountable
             _imageSizes.Clear();
         }
 
-        _imageSizes[src] = (image.Bytes.Length, image.Extension);
-        if (_images.TryAdd(src, image) && Interlocked.Add(ref _imageBytes, image.Bytes.Length) > ImagesKept)
-        {
-            _images.Clear();
-            Interlocked.Exchange(ref _imageBytes, 0);
-        }
-
-        return image;
+        _imageSizes[src] = measured;
+        return measured;
     }
+
+    /// <summary>An inline image's bytes, for an open: read now, kept by nothing but the open file.</summary>
+    internal async Task<byte[]> ImageBytesAsync(string src, CancellationToken ct)
+        => (await Api.ImageAsync(src, ct).ConfigureAwait(false))?.Bytes ?? throw new VfsException(VfsError.IoError, "an inline image could not be read from Teams' media service");
 
     /// <summary>
     /// A SharePoint or OneDrive file (a shared one by its own address too), read in ranges through a download address fetched

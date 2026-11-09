@@ -999,6 +999,68 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
 
     public async Task<TeamsImage?> ImageAsync(string src, CancellationToken ct)
     {
+        using var response = await ImageResponseAsync(src, ct).ConfigureAwait(false);
+        if (response is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var bytes = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+            return new TeamsImage(bytes, TeamsFiles.ExtensionOf(bytes, response.Content.Headers.ContentType?.MediaType));
+        }
+        catch (HttpRequestException ex)
+        {
+            logger.LogInformation("teams: an inline image could not be read ({Error})", ex.Message);
+            return null;
+        }
+    }
+
+    public async Task<(long Length, string Extension)?> ImageSizeAsync(string src, CancellationToken ct)
+    {
+        using var response = await ImageResponseAsync(src, ct).ConfigureAwait(false);
+        if (response is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            var head = new byte[12];
+            var read = await body.ReadAtLeastAsync(head, head.Length, throwOnEndOfStream: false, ct).ConfigureAwait(false);
+            var extension = TeamsFiles.ExtensionOf(head.AsSpan(0, read), response.Content.Headers.ContentType?.MediaType);
+            if (response.Content.Headers.ContentLength is { } given)
+            {
+                return (given, extension);
+            }
+
+            // no length given: counted as it comes, nothing kept
+            long counted = read;
+            var buffer = new byte[64 * 1024];
+            for (int n; (n = await body.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0;)
+            {
+                counted += n;
+                if (counted > MaxImageBytes)
+                {
+                    logger.LogInformation("teams: an inline image is left out: over {Max} bytes", MaxImageBytes);
+                    return null;
+                }
+            }
+
+            return (counted, extension);
+        }
+        catch (HttpRequestException ex)
+        {
+            logger.LogInformation("teams: an inline image could not be read ({Error})", ex.Message);
+            return null;
+        }
+    }
+
+    /// <summary>The media service's answer for an inline image, its headers in; null when it cannot be read or is too big to show.</summary>
+    private async Task<HttpResponseMessage?> ImageResponseAsync(string src, CancellationToken ct)
+    {
         var services = await DiscoverAsync(ct).ConfigureAwait(false);
         if (services.SkypeToken is not { } skype || !TeamsFiles.IsMediaService(src, services.Ams))
         {
@@ -1012,15 +1074,15 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         request.Headers.Accept.ParseAdd("image/*");
         try
         {
-            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > MaxImageBytes)
             {
                 logger.LogInformation("teams: an inline image could not be read ({Status}, {Length} bytes)", (int)response.StatusCode, response.Content.Headers.ContentLength);
+                response.Dispose();
                 return null;
             }
 
-            var bytes = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-            return new TeamsImage(bytes, TeamsFiles.ExtensionOf(bytes, response.Content.Headers.ContentType?.MediaType));
+            return response;
         }
         catch (HttpRequestException ex)
         {

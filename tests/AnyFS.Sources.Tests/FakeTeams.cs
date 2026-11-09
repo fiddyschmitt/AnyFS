@@ -415,6 +415,15 @@ internal sealed class FakeTeams : ITeamsApi
         return Task.FromResult(_images.TryGetValue(src, out var bytes) ? new TeamsImage(bytes, TeamsFiles.ExtensionOf(bytes, null)) : null);
     }
 
+    /// <summary>How many inline images were measured (their length and type asked for, the image not kept).</summary>
+    public int ImageSizeCalls { get; private set; }
+
+    public Task<(long Length, string Extension)?> ImageSizeAsync(string src, CancellationToken ct)
+    {
+        ImageSizeCalls++;
+        return Task.FromResult<(long Length, string Extension)?>(_images.TryGetValue(src, out var bytes) ? (bytes.LongLength, TeamsFiles.ExtensionOf(bytes.AsSpan(0, Math.Min(12, bytes.Length)), null)) : null);
+    }
+
     private readonly Dictionary<string, byte[]> _media = new(StringComparer.Ordinal);
 
     /// <summary>A recording's video in Teams' media service, by its address (amsVideo).</summary>

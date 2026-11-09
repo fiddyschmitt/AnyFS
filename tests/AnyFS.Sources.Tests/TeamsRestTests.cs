@@ -694,4 +694,82 @@ public class TeamsRestTests
         Assert.AreEqual(VfsError.AccessDenied, ex.Error);
         Assert.IsFalse(media.Asked.Any(a => a.Uri.Host == "evil.example"));
     }
+
+    /// <summary>Teams' media service serving one inline image, with its length or without one, counting what the client reads of it.</summary>
+    private sealed class Picture(byte[] image, bool withLength) : HttpMessageHandler
+    {
+        private long _read;
+
+        public long Read => Interlocked.Read(ref _read);
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath == "/api/authsvc/v1.0/authz")
+            {
+                const string Authz = """{"tokens":{"skypeToken":"skype-1","expiresIn":86400},"regionGtms":{"chatServiceAggregator":"https://agg.test","chatService":"https://chat.test","middleTier":"https://mt.test","amsV2":"https://ams.test"}}""";
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Authz, Encoding.UTF8, "application/json") });
+            }
+
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new Counted(image, n => Interlocked.Add(ref _read, n))) };
+            response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/png");
+            if (withLength)
+            {
+                response.Content.Headers.ContentLength = image.Length;
+            }
+
+            return Task.FromResult(response);
+        }
+
+        /// <summary>The image as a stream that cannot seek (so it states no length of itself), counting what is read.</summary>
+        private sealed class Counted(byte[] bytes, Action<int> read) : Stream
+        {
+            private int _at;
+
+            public override bool CanRead => true;
+
+            public override bool CanSeek => false;
+
+            public override bool CanWrite => false;
+
+            public override long Length => throw new NotSupportedException();
+
+            public override long Position { get => _at; set => throw new NotSupportedException(); }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                var n = Math.Min(count, bytes.Length - _at);
+                Array.Copy(bytes, _at, buffer, offset, n);
+                _at += n;
+                read(n);
+                return n;
+            }
+
+            public override void Flush()
+            {
+            }
+
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
+    }
+
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task AnInlineImageIsMeasuredWithoutBeingKept(bool withLength)
+    {
+        // 9-Nov-2026: a listing read each image whole to learn its length and kept it; now its length is the answer's, its
+        // type from its first bytes, and where no length comes it is counted as it comes
+        var image = new byte[1 << 20];
+        new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 13, 10, 26, 10 }.CopyTo(image, 0);
+        var service = new Picture(image, withLength);
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, service);
+        var measured = await rest.ImageSizeAsync("https://ams.test/v1/objects/0-pic/views/imgo", CancellationToken.None);
+        Assert.AreEqual(((long)image.Length, ".png"), measured!.Value);
+        Assert.AreEqual(withLength ? 12 : image.Length, service.Read, withLength ? "its first bytes alone, for its type" : "counted as it came");
+        Assert.IsNull(await rest.ImageSizeAsync("https://evil.example/v1/objects/0-pic/views/imgo", CancellationToken.None), "nowhere but the media service");
+    }
 }

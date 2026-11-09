@@ -144,29 +144,32 @@ public class TeamsSourceTests
         StringAssert.Contains(md, "- 📎 [report.docx](<attachments/report.docx>)");
         StringAssert.Contains(md, $"(attachments/{image})");
         Assert.IsFalse(md.Contains("asyncgw", StringComparison.Ordinal), "the image points at its copy, not the media service");
-        Assert.AreEqual(1, fake.ImageCalls, "an image is read once, however often its thread is listed or opened");
+        Assert.AreEqual((1, 0), (fake.ImageSizeCalls, fake.ImageCalls), "an image is measured once, however often its thread is listed or opened, and read only when it is");
     }
 
     [TestMethod]
-    public async Task AnImageLetGoFromMemoryIsReadAgainWhenOpenedNotWhenListed()
+    public async Task AnInlineImageIsMeasuredWhenListedAndReadOnlyWhenOpened()
     {
-        // past the 64 MiB of images kept: let go as soon as it is read, its length known all the same
-        const string ImageSrc = "https://as-prod.asyncgw.teams.microsoft.com/v1/objects/0-sa-d1-big/views/imgo";
-        var big = new byte[(64 << 20) + 16];
-        new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 13, 10, 26, 10 }.CopyTo(big, 0);
+        // 9-Nov-2026, the user, of anything downloaded and kept just to get its size: a listing read each image whole to
+        // measure it and kept it, to 64 MiB, for an open soon after
+        const string ImageSrc = "https://as-prod.asyncgw.teams.microsoft.com/v1/objects/0-sa-d1-pic/views/imgo";
+        var png = new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 13, 10, 26, 10, 0, 0, 0, 13, 7 };
         var fake = new FakeTeams();
         var chat = fake.AddChat(ChatKind.Group, "Pictures", [Jane], When);
-        fake.AddImage(ImageSrc, big);
+        fake.AddImage(ImageSrc, png);
         fake.Post(chat.Id, Jane, "Jane Doe", $"<p><img itemscope=\"\" itemtype=\"http://schema.skype.com/AMSImage\" src=\"{ImageSrc}\" alt=\"image\"></p>", When);
         await using var source = await StartAsync(fake, s => s.RefreshSeconds = 0); // every listing builds the chat again
 
         var image = $"{When.ToLocalTime():yyyy-MM-dd_HHmm}_image-1.png";
         CollectionAssert.AreEqual(new[] { image }, await NamesAsync(source, "Chats/Pictures/attachments"));
         CollectionAssert.AreEqual(new[] { image }, await NamesAsync(source, "Chats/Pictures/attachments"));
-        Assert.AreEqual(1, fake.ImageCalls, "measured once, though no longer kept");
-        await using var file = await source.OpenAsync($"Chats/Pictures/attachments/{image}", VfsOpenMode.Read, CancellationToken.None);
-        Assert.AreEqual(big.Length, file.Length);
-        Assert.AreEqual(2, fake.ImageCalls, "read again when opened");
+        Assert.AreEqual((1, 0), (fake.ImageSizeCalls, fake.ImageCalls), "measured once, read not at all");
+        for (var open = 1; open <= 2; open++)
+        {
+            await using var file = await source.OpenAsync($"Chats/Pictures/attachments/{image}", VfsOpenMode.Read, CancellationToken.None);
+            Assert.AreEqual(png.Length, file.Length);
+            Assert.AreEqual(open, fake.ImageCalls, "read when opened, kept by nothing after");
+        }
     }
 
     [TestMethod]

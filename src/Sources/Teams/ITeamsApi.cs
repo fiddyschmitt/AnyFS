@@ -70,6 +70,12 @@ internal interface ITeamsApi : IAsyncDisposable
     Task<TeamsImage?> ImageAsync(string src, CancellationToken ct);
 
     /// <summary>
+    /// An inline image's length and file extension without keeping the image: the length as the media service gives it
+    /// (counted as it comes where none is given), the extension from its first bytes; null when it cannot be read.
+    /// </summary>
+    Task<(long Length, string Extension)?> ImageSizeAsync(string src, CancellationToken ct);
+
+    /// <summary>
     /// A meeting recording's video (or another of Teams' media service's objects) from an offset, read in ranges with the
     /// skype token; refused for a host other than the media service's own.
     /// </summary>
