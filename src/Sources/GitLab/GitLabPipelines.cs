@@ -14,22 +14,31 @@ internal sealed record GlPipeline(long Id, string Ref, string Sha, string Status
     public bool Finished => Status is "success" or "failed" or "canceled" or "skipped" or "manual";
 }
 
-/// <summary>A job of a pipeline: its name, stage and status, and its artifacts archive where it kept one.</summary>
-internal sealed record GlJob(long Id, string Name, string Stage, string Status, DateTimeOffset? Started, DateTimeOffset? Finished, double? Duration, long? ArchiveSize, DateTimeOffset? ArtifactsExpire, string WebUrl)
+/// <summary>
+/// A job of a pipeline: its name, stage and status, its artifacts archive where it kept one, and its log's length where
+/// GitLab has archived the log (its "trace" artifact, <c>job.log</c>: a finished job's, not a running one's).
+/// </summary>
+internal sealed record GlJob(long Id, string Name, string Stage, string Status, DateTimeOffset? Started, DateTimeOffset? Finished, double? Duration, long? ArchiveSize, long? LogSize, DateTimeOffset? ArtifactsExpire, string WebUrl)
 {
     public static GlJob Parse(JsonElement e)
     {
         long? archive = null;
+        long? log = null;
         foreach (var a in e.Arr("artifacts"))
         {
-            if (a.Str("file_type") == "archive")
+            switch (a.Str("file_type"))
             {
-                archive = a.Long("size");
+                case "archive":
+                    archive = a.Long("size");
+                    break;
+                case "trace":
+                    log = a.Long("size");
+                    break;
             }
         }
 
         double? duration = e.ValueKind == JsonValueKind.Object && e.TryGetProperty("duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : null;
-        return new GlJob(e.Long("id"), e.Str("name") ?? "", e.Str("stage") ?? "", e.Str("status") ?? "", e.Date("started_at"), e.Date("finished_at"), duration, archive, e.Date("artifacts_expire_at"), e.Str("web_url") ?? "");
+        return new GlJob(e.Long("id"), e.Str("name") ?? "", e.Str("stage") ?? "", e.Str("status") ?? "", e.Date("started_at"), e.Date("finished_at"), duration, archive, log, e.Date("artifacts_expire_at"), e.Str("web_url") ?? "");
     }
 
     public bool Done => Status is "success" or "failed" or "canceled" or "skipped" or "manual";
@@ -86,8 +95,7 @@ internal sealed class JobFolder(GlProject project, GlJob job, string name) : GlF
 {
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
-        var log = await source.TraceAsync(project, job, ct).ConfigureAwait(false);
-        var children = new List<GlNode> { new CachedFile("job.log", log.Path, log.Length, job.Finished ?? job.Started, job.Started) };
+        var children = new List<GlNode> { new JobLog(project, job, await source.LogLengthAsync(project, job, ct).ConfigureAwait(false)) };
         if (job.ArchiveSize is > 0 && (job.ArtifactsExpire is null || job.ArtifactsExpire > DateTimeOffset.UtcNow))
         {
             children.Add(new ArtifactsFolder(project, job, "", "artifacts", job.Finished));
@@ -136,32 +144,13 @@ internal sealed class ArtifactsFolder(GlProject project, GlJob job, string path,
     }
 }
 
-/// <summary>A file the source keeps in its cache folder (a job's log), read from there.</summary>
-internal sealed class CachedFile(string name, string path, long length, DateTimeOffset? modified, DateTimeOffset? created) : GlFile(name, length, modified, created)
+/// <summary>
+/// A job's log, <c>job.log</c>: listed with its length (<see cref="GitLabSource.LogLengthAsync"/>), its bytes asked of GitLab
+/// only when it is read, through the spool as the artifacts' files are.
+/// </summary>
+internal sealed class JobLog(GlProject project, GlJob job, long length) : GlFile("job.log", length, job.Finished ?? job.Started, job.Started)
 {
-    public override Task<IVfsFile> OpenAsync(GitLabSource source, CancellationToken ct) => Task.FromResult<IVfsFile>(new Local(path, Length));
-
-    private sealed class Local(string path, long length) : IVfsFile
-    {
-        private readonly Microsoft.Win32.SafeHandles.SafeFileHandle _handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-
-        public long Length => length;
-
-        public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct)
-            => offset >= length ? ValueTask.FromResult(0) : RandomAccess.ReadAsync(_handle, buffer[..(int)Math.Min(buffer.Length, length - offset)], offset, ct);
-
-        public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct) => throw VfsException.NotSupported("writing a job's log");
-
-        public ValueTask SetLengthAsync(long length, CancellationToken ct) => throw VfsException.NotSupported("writing a job's log");
-
-        public ValueTask FlushAsync(CancellationToken ct) => ValueTask.CompletedTask;
-
-        public ValueTask DisposeAsync()
-        {
-            _handle.Dispose();
-            return ValueTask.CompletedTask;
-        }
-    }
+    public override Task<IVfsFile> OpenAsync(GitLabSource source, CancellationToken ct) => source.OpenLogAsync(project, job, Length, ct);
 }
 
 /// <summary>A file of a job's artifacts: read alone (GitLab takes it out of the archive), never the whole archive.</summary>

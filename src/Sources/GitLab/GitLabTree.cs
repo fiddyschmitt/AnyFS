@@ -54,7 +54,7 @@ internal sealed class EmptyFolder(string name, DateTimeOffset? modified = null) 
     public override Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct) => Task.FromResult<IReadOnlyList<GlNode>>([]);
 }
 
-/// <summary>A file the source makes itself and holds in memory (an issue as Markdown, a job's log).</summary>
+/// <summary>A file the source makes itself and holds in memory (an issue as Markdown, a pipeline's summary).</summary>
 internal sealed class TextFile(string name, byte[] content, DateTimeOffset? modified, DateTimeOffset? created = null) : GlFile(name, content.Length, modified, created)
 {
     public override Task<IVfsFile> OpenAsync(GitLabSource source, CancellationToken ct) => Task.FromResult<IVfsFile>(new MemoryFile(content, "a file made from GitLab's data"));

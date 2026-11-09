@@ -381,6 +381,9 @@ internal sealed partial class FakeGitLab
 
     internal sealed record Response(int Status, byte[] Body, string? ContentType = "application/json", Dictionary<string, string>? Headers = null)
     {
+        /// <summary>Sent compressed: the client reads it unpacked and without a stated length, as .NET hands on a gzip answer.</summary>
+        public bool Compressed { get; init; }
+
         public static Response Json(JsonNode node, int status = 200, Dictionary<string, string>? headers = null) => new(status, Encoding.UTF8.GetBytes(node.ToJsonString()), "application/json", headers);
 
         public static Response Message(int status, string message) => Json(new JsonObject { ["message"] = message }, status);
@@ -1071,7 +1074,7 @@ internal sealed partial class FakeGitLab
             }
 
             var answer = fake.Answer(new Request(message.Method.Method, url, segments, query, headers, body));
-            var response = new HttpResponseMessage((HttpStatusCode)answer.Status) { RequestMessage = message, Content = new ByteArrayContent(message.Method == HttpMethod.Head ? [] : answer.Body) };
+            var response = new HttpResponseMessage((HttpStatusCode)answer.Status) { RequestMessage = message, Content = Body(message, answer) };
             if (answer.ContentType is not null)
             {
                 response.Content.Headers.TryAddWithoutValidation("Content-Type", answer.ContentType);
@@ -1086,6 +1089,24 @@ internal sealed partial class FakeGitLab
             }
 
             return response;
+        }
+
+        /// <summary>The body as the client gets it; a compressed answer's unpacked as it is read, so of no stated length.</summary>
+        private static HttpContent Body(HttpRequestMessage message, Response answer)
+        {
+            if (message.Method == HttpMethod.Head || !answer.Compressed)
+            {
+                return new ByteArrayContent(message.Method == HttpMethod.Head ? [] : answer.Body);
+            }
+
+            var packed = new MemoryStream();
+            using (var gzip = new System.IO.Compression.GZipStream(packed, System.IO.Compression.CompressionLevel.Fastest, leaveOpen: true))
+            {
+                gzip.Write(answer.Body);
+            }
+
+            packed.Position = 0;
+            return new StreamContent(new System.IO.Compression.GZipStream(packed, System.IO.Compression.CompressionMode.Decompress));
         }
     }
 }

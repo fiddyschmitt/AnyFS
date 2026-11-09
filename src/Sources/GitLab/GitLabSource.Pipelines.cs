@@ -3,8 +3,8 @@ using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.GitLab;
 
-/// <summary>A job's log as kept in the cache folder: its file and length.</summary>
-internal sealed record TraceFile(string Path, long Length);
+/// <summary>A job's log's length as GitLab answered it (a class, for the request cache).</summary>
+internal sealed record LogLength(long Bytes);
 
 public sealed partial class GitLabSource
 {
@@ -40,29 +40,54 @@ public sealed partial class GitLabSource
         }, ct);
 
     /// <summary>
-    /// A job's log, downloaded whole into the cache folder (its length is known only once it is: a HEAD says 0): a finished
-    /// job's once and kept, a running job's again once the refresh interval has passed.
+    /// The length of a job's log, without the log: the job list's where GitLab has archived the log (its "trace" artifact),
+    /// none for a job that never started, else (a running job, or a finished one whose log is not archived yet) the length
+    /// of a GET's answer, its body left unread where the length is given (a HEAD says 0). A running job's is asked again
+    /// once the refresh interval has passed.
     /// </summary>
-    internal Task<TraceFile> TraceAsync(GlProject project, GlJob job, CancellationToken ct)
-        => Cache.GetAsync($"trace:{project.Id}:{job.Id}", job.Done ? null : Refresh, async c =>
+    internal async Task<long> LogLengthAsync(GlProject project, GlJob job, CancellationToken ct)
+    {
+        if (job.LogSize is { } archived)
         {
-            var folder = Directory.CreateDirectory(Path.Combine(Context.CacheDirectory, "logs")).FullName;
-            var path = Path.Combine(folder, $"{project.Id}-{job.Id}.log");
-            if (job.Done && File.Exists(path))
+            return archived;
+        }
+
+        if (job.Started is null)
+        {
+            return 0;
+        }
+
+        var asked = await Cache.GetAsync($"log-length:{project.Id}:{job.Id}", job.Done ? null : Refresh, async c =>
+        {
+            using var response = await Api.OpenAsync($"projects/{project.Id}/jobs/{job.Id}/trace", c).ConfigureAwait(false);
+            if (response.Content.Headers.ContentLength is { } given)
             {
-                return new TraceFile(path, new FileInfo(path).Length);
+                return new LogLength(given);
             }
 
-            var temp = path + ".part";
-            using (var response = await Api.OpenAsync($"projects/{project.Id}/jobs/{job.Id}/trace", c).ConfigureAwait(false))
-            await using (var file = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+            // no length given: counted as it comes, nothing kept
+            await using var body = await response.Content.ReadAsStreamAsync(c).ConfigureAwait(false);
+            var buffer = new byte[64 * 1024];
+            long counted = 0;
+            for (int n; (n = await body.ReadAsync(buffer, c).ConfigureAwait(false)) > 0;)
             {
-                await response.Content.CopyToAsync(file, c).ConfigureAwait(false);
+                counted += n;
             }
 
-            File.Move(temp, path, overwrite: true);
-            return new TraceFile(path, new FileInfo(path).Length);
-        }, ct);
+            return new LogLength(counted);
+        }, ct).ConfigureAwait(false);
+        return asked.Bytes;
+    }
+
+    /// <summary>
+    /// A job's log, asked of GitLab when it is read and spooled as the artifacts' files are, as long as it was listed (a
+    /// running job's grows: the key carries the length, so a longer listing reads anew).
+    /// </summary>
+    internal Task<IVfsFile> OpenLogAsync(GlProject project, GlJob job, long length, CancellationToken ct)
+        => length == 0
+            ? Task.FromResult<IVfsFile>(new MemoryFile([]))
+            : Spool.OpenAsync($"gitlab:{Api.Address.Server.Host}:{project.Id}:log:{job.Id}:{length}", length,
+                async c => await ResponseStream.OpenAsync(await Api.OpenAsync($"projects/{project.Id}/jobs/{job.Id}/trace", c).ConfigureAwait(false), c).ConfigureAwait(false), ct);
 
     /// <summary>
     /// A job's artifacts, from the archive's central directory read at its end with ranged requests (spike G: GitLab answers

@@ -1852,14 +1852,18 @@ public class GitLabTicketTests
 [TestClass]
 public class GitLabPipelineTests
 {
-    private static async Task<GitLabSource> StartAsync(FakeGitLab fake, string path = "/anyfs/tools/app", Action<GitLabSettings>? change = null)
+    private static async Task<GitLabSource> StartAsync(FakeGitLab fake, string path = "/anyfs/tools/app", Action<GitLabSettings>? change = null, TestSourceContext? context = null)
     {
         var settings = GitLabSeed.Settings(fake.Server + path);
         change?.Invoke(settings);
         var source = new GitLabSource(settings, fake.StandIn());
-        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        await source.InitialiseAsync(context ?? new TestSourceContext(), CancellationToken.None);
         return source;
     }
+
+    private static FakeGitLab.Job JobOf(FakeGitLab fake, long id) => fake.ProjectAt("anyfs/tools/app").JobsOf.Values.SelectMany(j => j).Single(j => j.Id == id);
+
+    private static bool LogsKept(TestSourceContext context) => Directory.Exists(Path.Combine(context.CacheDirectory, "logs"));
 
     private static async Task<List<VfsEntry>> ListAsync(ISource source, string path)
     {
@@ -1932,6 +1936,76 @@ public class GitLabPipelineTests
         var files = await ListAsync(source, "pipelines/2 main/build/artifacts/out");
         CollectionAssert.AreEqual(new[] { "hello.txt", "sub" }, files.Select(e => e.Name).ToArray());
         Assert.AreEqual(1, fake.RangeRequests, "the whole archive came with the first answer");
+    }
+
+    [TestMethod]
+    public async Task AJobsLogIsListedFromTheJobListAndAskedForOnlyWhenRead()
+    {
+        // 9-Nov-2026, the user: thousands of logs in the cache folder; every job's log was downloaded and kept to learn its
+        // length, so a walk fetched them all
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, context: context);
+        const string build = "pipelines/2 main/build";
+        var log = (await ListAsync(source, build)).Single(e => e.Name == "job.log");
+        Assert.AreEqual(Encoding.UTF8.GetByteCount(JobOf(fake, 31).Log), log.Length, "the length GitLab lists with the job");
+        Assert.AreEqual(0, fake.Count("/trace"), "no log asked for to list it");
+        Assert.AreEqual(JobOf(fake, 31).Log, Encoding.UTF8.GetString(await ReadAsync(source, build + "/job.log")));
+        Assert.AreEqual(1, fake.Count("/jobs/31/trace"), "asked for when read");
+        Assert.IsFalse(LogsKept(context), "no log kept in the cache folder");
+    }
+
+    [TestMethod]
+    public async Task AWalkAsksOnlyForTheLengthsOfLogsGitLabHasNotArchived()
+    {
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, context: context);
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+        Assert.AreEqual(1, fake.Count("/trace"), "the running job's alone: " + string.Join("; ", fake.Requests.Where(r => r.Contains("/trace", StringComparison.Ordinal))));
+        Assert.AreEqual(1, fake.Count("/jobs/41/trace"));
+        Assert.IsFalse(LogsKept(context));
+    }
+
+    [TestMethod]
+    public async Task ARunningJobsLogReadsAsLongAsItWasListed()
+    {
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake);
+        const string running = "pipelines/3 feature_x/build";
+        var listed = JobOf(fake, 41).Log;
+        Assert.AreEqual(listed.Length, (await ListAsync(source, running)).Single(e => e.Name == "job.log").Length, "asked of GitLab: a running job's log is not archived");
+        JobOf(fake, 41).Log += "$ seq 1 400000 > out/sub/numbers.txt\n";
+        Assert.AreEqual(listed, Encoding.UTF8.GetString(await ReadAsync(source, running + "/job.log")), "what was listed, not what came since");
+    }
+
+    [TestMethod]
+    public async Task ALogNotArchivedYetIsMeasuredAsItComesWithoutALength()
+    {
+        // nginx gzips text/plain; .NET unpacks it and the length goes
+        var fake = GitLabSeed.Lab();
+        fake.LogsCompressed = true;
+        JobOf(fake, 32).LogArchived = false;
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, context: context);
+        const string test = "pipelines/2 main/test";
+        Assert.AreEqual(Encoding.UTF8.GetByteCount(JobOf(fake, 32).Log), (await ListAsync(source, test)).Single(e => e.Name == "job.log").Length);
+        Assert.AreEqual(1, fake.Count("/jobs/32/trace"));
+        Assert.AreEqual(JobOf(fake, 32).Log, Encoding.UTF8.GetString(await ReadAsync(source, test + "/job.log")));
+        Assert.IsFalse(LogsKept(context));
+    }
+
+    [TestMethod]
+    public async Task AJobThatNeverRanHasAnEmptyLogAndAsksNothing()
+    {
+        var fake = GitLabSeed.Lab();
+        fake.ProjectAt("anyfs/tools/app").JobsOf[2].Add(new FakeGitLab.Job(33, "deploy", "manual") { Started = null });
+        await using var source = await StartAsync(fake);
+        var log = (await ListAsync(source, "pipelines/2 main/deploy")).Single();
+        Assert.AreEqual(("job.log", 0L), (log.Name, log.Length));
+        Assert.AreEqual(0, (await ReadAsync(source, "pipelines/2 main/deploy/job.log")).Length);
+        Assert.AreEqual(0, fake.Count("/trace"));
     }
 
     [TestMethod]

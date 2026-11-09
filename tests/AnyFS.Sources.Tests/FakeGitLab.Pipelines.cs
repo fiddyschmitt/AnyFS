@@ -23,9 +23,16 @@ internal sealed partial class FakeGitLab
 
         public string Log { get; set; } = "";
 
+        /// <summary>
+        /// Whether GitLab has archived the log, which then shows in the job's artifacts with its size: a finished job's
+        /// is (shortly after it finishes), a running one's never.
+        /// </summary>
+        public bool LogArchived { get; set; } = true;
+
         public Dictionary<string, byte[]> Artifacts { get; } = new(StringComparer.Ordinal);
 
-        public DateTimeOffset Started { get; init; } = new(2026, 10, 2, 8, 0, 0, TimeSpan.Zero);
+        /// <summary>When it started; null for a job that never ran (a manual one not played, a skipped one).</summary>
+        public DateTimeOffset? Started { get; init; } = new(2026, 10, 2, 8, 0, 0, TimeSpan.Zero);
 
         public byte[] Archive => _archive ??= Zip();
 
@@ -75,6 +82,26 @@ internal sealed partial class FakeGitLab
     /// <summary>How many requests for an archive came with a Range header.</summary>
     public int RangeRequests { get; private set; }
 
+    /// <summary>Whether a job's log comes compressed (nginx's gzip of text/plain), so unpacked and of no stated length.</summary>
+    public bool LogsCompressed { get; set; }
+
+    /// <summary>A job's artifacts as GitLab lists them: its archive where it kept one, and its log once GitLab has archived it.</summary>
+    private static JsonArray ArtifactsOf(Job j)
+    {
+        var list = new JsonArray();
+        if (j.Artifacts.Count > 0)
+        {
+            list.Add(new JsonObject { ["file_type"] = "archive", ["size"] = j.Archive.Length, ["filename"] = "artifacts.zip" });
+        }
+
+        if (j.Started is not null && j.Status is not "running" && j.LogArchived)
+        {
+            list.Add(new JsonObject { ["file_type"] = "trace", ["size"] = Encoding.UTF8.GetByteCount(j.Log), ["filename"] = "job.log", ["file_format"] = null });
+        }
+
+        return list;
+    }
+
     private Response? PipelinesAndReleases(Project project, Request r, string[] rest)
     {
         switch (rest)
@@ -99,16 +126,17 @@ internal sealed partial class FakeGitLab
                         ["name"] = j.Name,
                         ["stage"] = "test",
                         ["status"] = j.Status,
-                        ["started_at"] = j.Started.ToString("O", CultureInfo.InvariantCulture),
-                        ["finished_at"] = j.Status is "running" ? null : j.Started.AddSeconds(8).ToString("O", CultureInfo.InvariantCulture),
-                        ["duration"] = 8.4,
-                        ["artifacts"] = j.Artifacts.Count == 0 ? new JsonArray() : new JsonArray(new JsonObject { ["file_type"] = "archive", ["size"] = j.Archive.Length, ["filename"] = "artifacts.zip" }),
+                        ["started_at"] = j.Started?.ToString("O", CultureInfo.InvariantCulture),
+                        ["finished_at"] = j.Status is "running" ? null : j.Started?.AddSeconds(8).ToString("O", CultureInfo.InvariantCulture),
+                        ["duration"] = j.Started is null ? null : 8.4,
+                        ["artifacts"] = ArtifactsOf(j),
                         ["artifacts_expire_at"] = j.Artifacts.Count == 0 ? null : "2099-01-01T00:00:00Z",
                         ["web_url"] = $"{ExternalUrl}/{project.FullPath}/-/jobs/{j.Id}",
                     }))
                     : Response.NotFound("404 Not found");
             case ["jobs", var id, "trace"]:
-                return JobOf(project, id) is { } traced ? new Response(200, Encoding.UTF8.GetBytes(traced.Log), "text/plain") : Response.NotFound("404 Not found");
+                // a job that never ran: 200 and nothing (the API's "trace.raw || ''")
+                return JobOf(project, id) is { } traced ? new Response(200, Encoding.UTF8.GetBytes(traced.Log), "text/plain") { Compressed = LogsCompressed } : Response.NotFound("404 Not found");
             case ["jobs", var id, "artifacts"]:
             {
                 if (JobOf(project, id) is not { Artifacts.Count: > 0 } job)
