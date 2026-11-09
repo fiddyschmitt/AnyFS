@@ -104,8 +104,8 @@ public class GitLabLiveTests
         Assert.IsTrue(asked.All(r => r.Answer is not null || r.Error is not null), "each says how it went");
         Assert.IsFalse(asked.Any(r => r.Target.Contains(token, StringComparison.Ordinal)), "the token is in no row");
         var trees = asked.Where(r => r.Target.Contains("/repository/tree", StringComparison.Ordinal)).ToList();
-        Assert.IsTrue(trees.Count > 0 && trees.All(r => r.What == "GET" && r.Answer == "200 OK" && r.Bytes > 0), string.Join("; ", trees.Select(r => $"{r} {r.Answer} {r.Bytes}")));
-        Assert.IsTrue(asked.Any(r => r.What == "POST" && r.Target.EndsWith("/api/graphql", StringComparison.Ordinal) && r.Answer == "200 OK" && r.Bytes > 0), "the sizes, from GraphQL");
+        Assert.IsTrue(trees.Count > 0 && trees.All(r => r.What is "GET" or "GET (walk)" && r.Answer == "200 OK" && r.Bytes > 0), string.Join("; ", trees.Select(r => $"{r} {r.Answer} {r.Bytes}")));
+        Assert.IsTrue(asked.Any(r => r.What is "POST" or "POST (walk)" && r.Target.EndsWith("/api/graphql", StringComparison.Ordinal) && r.Answer == "200 OK" && r.Bytes > 0), "the sizes, from GraphQL");
         Assert.IsTrue(asked.Any(r => r.Target.Contains("/raw", StringComparison.Ordinal) && r.Bytes > 0), "a file's bytes went by on a row of their own");
     }
 
@@ -144,7 +144,7 @@ public class GitLabLiveTests
         await source.CountFilesAsync(CancellationToken.None);
         counting.Stop();
         Assert.IsTrue(source.Counters.FilesKnown >= 5_000 + 9, $"{source.Counters.FilesKnown:N0} files");
-        Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "branches, tags and pipelines are left out");
+        Assert.AreEqual(EnumerationState.Complete, source.Counters.State, "branches, tags and pipelines walked too, since 6-Nov-2026");
 
         // the repository came whole, a hundred entries a request: its folders answer from what the count kept
         var listing = Stopwatch.StartNew();
