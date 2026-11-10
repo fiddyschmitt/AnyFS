@@ -152,6 +152,20 @@ public class SettingsFormTests
     }
 
     [TestMethod]
+    public void APathPastedWithQuotesIsTakenWithout()
+    {
+        // Explorer's "Copy as path" puts quotes round it; a browser named so was a file that is not there
+        var settings = new EverySetting { Host = "h" };
+        var form = Form(settings);
+        var byName = form.Fields.ToDictionary(f => f.PropertyName);
+        byName["KeyFile"].Text = " \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" ";
+        byName["Comment"].Text = "\"quoted on purpose\"";
+        Assert.IsTrue(form.Validate());
+        Assert.AreEqual(@"C:\Program Files\Google\Chrome\Application\chrome.exe", settings.KeyFile);
+        Assert.AreEqual("\"quoted on purpose\"", settings.Comment, "only a path loses them");
+    }
+
+    [TestMethod]
     public async Task BrowseFillsThePathFromThePicker()
     {
         var dialogs = new FakeDialogs { FileToPick = @"D:\picked.key" };

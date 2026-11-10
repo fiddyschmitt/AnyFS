@@ -410,7 +410,8 @@ internal sealed class AtlassianSession : IDisposable
         => _browser ??= new BrowserSession(
             BrowserLocator.Find(Settings.Browser, Product.Variable("BROWSER")),
             new AtlassianSignInTarget(Product, Address.Base, Settings.TrustAnyCertificate),
-            _logger);
+            _logger,
+            Settings.Browser);
 
     // --- the user name and password -----------------------------------------------------------------------------------
 

@@ -366,7 +366,7 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
 
     /// <summary>The web session for a site: the browser the settings name or the one found, and the site's profile.</summary>
     internal static BrowserSession WebSession(SharePointSettings s, Uri site, Microsoft.Extensions.Logging.ILogger logger)
-        => new(BrowserLocator.Find(s.Browser, BrowserVariable), new SharePointSignInTarget(site), logger);
+        => new(BrowserLocator.Find(s.Browser, BrowserVariable), new SharePointSignInTarget(site), logger, s.Browser);
 
     /// <summary>The web session's message when there is no browser to sign in with at all.</summary>
     internal const string NoBrowser = "No Edge, Chrome, Chromium or Firefox was found for the web session's sign-in. Install one, or set the Browser path under Advanced.";

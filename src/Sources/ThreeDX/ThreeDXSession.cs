@@ -322,7 +322,7 @@ internal sealed class ThreeDXSession : IDisposable
         Save();
     }
 
-    private BrowserSession Browser() => _browser ??= new BrowserSession(BrowserLocator.Find(_settings.Browser, "ANYFS_3DX_BROWSER"), new ThreeDXSignInTarget(Space, _settings.TrustAnyCertificate, _profile), _logger);
+    private BrowserSession Browser() => _browser ??= new BrowserSession(BrowserLocator.Find(_settings.Browser, "ANYFS_3DX_BROWSER"), new ThreeDXSignInTarget(Space, _settings.TrustAnyCertificate, _profile), _logger, _settings.Browser);
 
     /// <summary>
     /// The sign-in without a browser, from <paramref name="service"/>'s probe until the service answers. Once a server has

@@ -510,7 +510,7 @@ public sealed partial class SettingFieldViewModel : ObservableObject
 
                     break;
                 default:
-                    var value = Kind == SettingKind.Multiline ? Text.Replace("\r\n", "\n") : Text.Trim();
+                    var value = Value();
                     _property.Property.SetValue(settings, value.Length == 0 && _nullable ? null : value);
                     break;
             }
@@ -568,7 +568,7 @@ public sealed partial class SettingFieldViewModel : ObservableObject
                     return null;
 
                 default:
-                    var value = Kind == SettingKind.Multiline ? Text.Replace("\r\n", "\n") : Text.Trim();
+                    var value = Value();
                     if (value.Length == 0 && IsRequired)
                     {
                         return "Required.";
@@ -582,6 +582,22 @@ public sealed partial class SettingFieldViewModel : ObservableObject
         {
             return ex.GetBaseException().Message;
         }
+    }
+
+    /// <summary>
+    /// What a text box holds, as the settings take it: a multi-line box as typed (Windows line ends made plain), any other
+    /// trimmed, and a file or folder path without the quotes round it that Explorer's "Copy as path" adds, which would
+    /// otherwise name no file (a web session's Browser setting, 10-Nov-2026).
+    /// </summary>
+    private string Value()
+    {
+        if (Kind == SettingKind.Multiline)
+        {
+            return Text.Replace("\r\n", "\n");
+        }
+
+        var text = Text.Trim();
+        return Kind is SettingKind.FilePath or SettingKind.FolderPath && text.Length >= 2 && text[0] == '"' && text[^1] == '"' ? text[1..^1].Trim() : text;
     }
 
     private bool TryParseNumber(string text, out object? value)

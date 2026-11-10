@@ -273,7 +273,7 @@ internal sealed class GitLabSession : IDisposable
     private string BrowserName => _standIn?.Browser is not null ? "the browser" : Browser().BrowserName;
 
     private BrowserSession Browser()
-        => _browser ??= new BrowserSession(BrowserLocator.Find(Settings.Browser, "ANYFS_GITLAB_BROWSER"), new GitLabSignInTarget(Address.Server, Settings.TrustAnyCertificate), _logger);
+        => _browser ??= new BrowserSession(BrowserLocator.Find(Settings.Browser, "ANYFS_GITLAB_BROWSER"), new GitLabSignInTarget(Address.Server, Settings.TrustAnyCertificate), _logger, Settings.Browser);
 
     // --- the Windows sign-ins ----------------------------------------------------------------------------------------
 

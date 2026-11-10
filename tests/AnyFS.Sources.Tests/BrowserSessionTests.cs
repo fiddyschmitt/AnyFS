@@ -93,6 +93,17 @@ public class BrowserChoiceTests
     }
 
     [TestMethod]
+    public async Task ABrowserTheSettingNamesThatIsNotThereIsSaidSoAndNoOtherOpens()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "anyfs-tests", "no such folder", "chrome.exe");
+        var session = new BrowserSession(BrowserLocator.Find(missing), new NoTarget("profile"), NullLogger.Instance, named: " " + missing + " ");
+        Assert.IsTrue(session.CanSignIn, "the sign-in is tried, so it can say why not");
+        var ex = await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => session.SignInAsync(interactive: true, _ => { }, CancellationToken.None));
+        Assert.IsTrue(ex.Permanent, "a Retry would only fail again: the setting must change");
+        StringAssert.Contains(ex.Message, $"There is no browser at {missing}, the path in the source's Browser setting");
+    }
+
+    [TestMethod]
     public void TheTroubleshootingVariableStillWinsOverTheBrowserSetting()
     {
         const string variable = "ANYFS_TEST_BROWSER_CHOICE_WEBDRIVER";

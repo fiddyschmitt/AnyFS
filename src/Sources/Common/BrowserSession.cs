@@ -27,24 +27,34 @@ public sealed class BrowserSession
     private readonly string _profileDir;
     private readonly ILogger _logger;
     private readonly IReadOnlyList<WebDriverBrowser> _webDriverBrowsers;
+    private readonly string? _missing;
     private WebDriverSession? _webDriver;
 
     /// <param name="browserPath">The browser to use: a Chromium one, driven over DevTools; Firefox, driven through WebDriver; or null when there is no Chromium one (WebDriver only, through Firefox).</param>
     /// <param name="target">What to sign in to, and how to tell the person has.</param>
-    public BrowserSession(string? browserPath, WebSignInTarget target, ILogger logger)
+    /// <param name="named">
+    /// The browser the source's Browser setting names, as given (null for none). When <paramref name="browserPath"/> found
+    /// nothing there, the sign-in says so and opens no other browser: the person chose this one (a path typed wrong, or
+    /// one whose browser has gone, would otherwise sign in through WebDriver's default browser, Edge on most machines).
+    /// </param>
+    public BrowserSession(string? browserPath, WebSignInTarget target, ILogger logger, string? named = null)
     {
         _browserPath = browserPath;
         _target = target;
         _profileDir = target.ProfileDir;
         _logger = logger;
+        _missing = browserPath is null && !string.IsNullOrWhiteSpace(named) ? named.Trim() : null;
         _webDriverBrowsers = NamesFirefox && string.IsNullOrWhiteSpace(ForcedWebDriver) ? [new WebDriverBrowser(BrowserKind.Firefox, browserPath!)] : WebDriverSession.Browsers(ForcedWebDriver);
     }
 
     /// <summary>The browser AnyFS will drive, for messages ("Microsoft Edge").</summary>
     public string BrowserName => _webDriver?.BrowserName ?? (_browserPath is null ? "a browser" : BrowserLocator.DisplayName(_browserPath));
 
-    /// <summary>Whether there is any browser to sign in with, over DevTools or WebDriver.</summary>
-    public bool CanSignIn => _browserPath is not null || _webDriverBrowsers.Count > 0;
+    /// <summary>Whether a sign-in can be tried: a browser to drive over DevTools or WebDriver, or one the settings name, which the sign-in then says is not there.</summary>
+    public bool CanSignIn => _missing is not null || _browserPath is not null || _webDriverBrowsers.Count > 0;
+
+    /// <summary>Why the browser the settings name cannot be used, or null.</summary>
+    private string? Missing => _missing is null ? null : $"There is no browser at {_missing}, the path in the source's Browser setting (under Advanced): correct it, or leave it empty for AnyFS to find one.";
 
     /// <summary>The browsers WebDriver would try, in order.</summary>
     internal IReadOnlyList<WebDriverBrowser> WebDriverBrowsers => _webDriverBrowsers;
@@ -99,6 +109,11 @@ public sealed class BrowserSession
     /// </summary>
     public async Task<IReadOnlyList<SessionCookie>> SignInAsync(bool interactive, Action<string> progress, CancellationToken ct)
     {
+        if (Missing is { } missing)
+        {
+            throw new SignInRequiredException(missing, permanent: true);
+        }
+
         if (_webDriver is not null)
         {
             return await _webDriver.SignInAsync(interactive, progress, ct).ConfigureAwait(false);
