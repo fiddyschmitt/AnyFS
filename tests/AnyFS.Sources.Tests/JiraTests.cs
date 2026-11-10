@@ -298,6 +298,74 @@ public class JiraTests
     }
 
     [TestMethod]
+    public async Task ASessionTheServerEndedIsSignedInAfreshAndTheLogSaysHowTheServerAnswered()
+    {
+        var fake = JiraSeed.Lab();
+        var signIns = 0;
+        var standIn = fake.StandIn((_, _) => { signIns++; return Task.FromResult<IReadOnlyList<SessionCookie>>([fake.SessionFor("tester")]); });
+        var settings = new JiraSettings { Address = fake.Server, SignInMethod = AtlassianSignInChoices.WebSession, RefreshSeconds = 0 };
+        var log = new LineLogger();
+        using var context = new TestSourceContext(logger: log);
+        await (await StartAsync(fake, settings, context, standIn)).DisposeAsync();
+
+        fake.EndSessions();
+        await using var again = await StartAsync(fake, settings, context, standIn);
+        Assert.AreEqual(2, signIns);
+        Assert.AreEqual("with the browser", again.Session.How);
+        Assert.IsTrue(log.Lines.Any(l => l.Contains("no longer takes the session kept from before (asked who is signed in, it answered 401)", StringComparison.Ordinal)), string.Join("\n", log.Lines));
+    }
+
+    [TestMethod]
+    public async Task AStartThatCannotReachTheServerLeavesTheKeptSessionForTheRetry()
+    {
+        // at the host's root, as most installations are, where the failed start and the retry share the sign-in just made
+        var fake = JiraSeed.Lab(root: "");
+        var network = new Reachability();
+        var signIns = 0;
+        var standIn = new AtlassianStandIn(() => network.Around(fake.Handler()), (_, _) => { signIns++; return Task.FromResult<IReadOnlyList<SessionCookie>>([fake.SessionFor("tester")]); });
+        var settings = new JiraSettings { Address = fake.Server, SignInMethod = AtlassianSignInChoices.WebSession, RefreshSeconds = 0 };
+        using var context = new TestSourceContext();
+        await (await StartAsync(fake, settings, context, standIn)).DisposeAsync();
+
+        network.Down = true;
+        var failed = new JiraSource(settings, standIn);
+        await Assert.ThrowsExactlyAsync<SourceFailedException>(() => failed.InitialiseAsync(context, CancellationToken.None));
+        await failed.DisposeAsync();
+
+        network.Down = false;
+        await using var retried = await StartAsync(fake, settings, context, standIn);
+        Assert.AreEqual(1, signIns, "no browser sign-in: the session the server still takes was kept");
+        Assert.AreEqual("with the session kept from before", retried.Session.How);
+    }
+
+    [TestMethod]
+    public async Task AStartStoppedBeforeItSignsInLeavesTheKeptSessionForTheNextStart()
+    {
+        var fake = JiraSeed.Lab(root: "");
+        var network = new Reachability();
+        var signIns = 0;
+        var standIn = new AtlassianStandIn(() => network.Around(fake.Handler()), (_, _) => { signIns++; return Task.FromResult<IReadOnlyList<SessionCookie>>([fake.SessionFor("tester")]); });
+        var settings = new JiraSettings { Address = fake.Server, SignInMethod = AtlassianSignInChoices.WebSession, RefreshSeconds = 0 };
+        using var context = new TestSourceContext();
+        await (await StartAsync(fake, settings, context, standIn)).DisposeAsync();
+
+        // AnyFS closed while the source starts, its first request not answered yet
+        network.Holding = true;
+        using var closing = new CancellationTokenSource();
+        var stopped = new JiraSource(settings, standIn);
+        var starting = stopped.InitialiseAsync(context, closing.Token);
+        await network.Held.Task;
+        await closing.CancelAsync();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => starting);
+        await stopped.DisposeAsync();
+
+        network.Holding = false;
+        await using var next = await StartAsync(fake, settings, context, standIn);
+        Assert.AreEqual(1, signIns, "no browser sign-in: the session the server still takes was kept");
+        Assert.AreEqual("with the session kept from before", next.Session.How);
+    }
+
+    [TestMethod]
     public async Task ASessionServedAsTheAnonymousUserIsRenewedNotBelieved()
     {
         var fake = JiraSeed.Lab();

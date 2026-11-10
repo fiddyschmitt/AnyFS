@@ -2099,12 +2099,17 @@ public class GitLabWebSessionTests
 
     private static FakeGitLab Lab() => GitLabSeed.Lab(origin: $"https://gitlab-ws{Interlocked.Increment(ref _hosts)}.fake.test");
 
-    private static async Task<GitLabSource> StartAsync(FakeGitLab fake, Browser browser, TestSourceContext context, string path = "/anyfs/docs")
+    private static async Task<GitLabSource> StartAsync(FakeGitLab fake, Browser browser, TestSourceContext context, string path = "/anyfs/docs", Reachability? network = null)
     {
-        var settings = new GitLabSettings { Address = fake.Server + path, SignInMethod = GitLabSettings.WebSession };
-        var source = new GitLabSource(settings, new GitLabStandIn(fake.Handler, browser.SignInAsync));
+        var source = Source(fake, browser, path, network);
         await source.InitialiseAsync(context, CancellationToken.None);
         return source;
+    }
+
+    private static GitLabSource Source(FakeGitLab fake, Browser browser, string path = "/anyfs/docs", Reachability? network = null)
+    {
+        var settings = new GitLabSettings { Address = fake.Server + path, SignInMethod = GitLabSettings.WebSession };
+        return new GitLabSource(settings, new GitLabStandIn(network is null ? fake.Handler : () => network.Around(fake.Handler()), browser.SignInAsync));
     }
 
     private static async Task<string[]> NamesAsync(ISource source, string path)
@@ -2153,6 +2158,26 @@ public class GitLabWebSessionTests
         await using var again = await StartAsync(fake, browser, context);
         Assert.AreEqual(1, browser.Calls.Count, "no second browser sign-in");
         Assert.AreEqual("with the session kept from before", again.Session.How);
+    }
+
+    [TestMethod]
+    public async Task AStartThatCannotReachGitLabLeavesTheKeptSessionForTheRetry()
+    {
+        var fake = Lab();
+        var browser = new Browser(fake);
+        var network = new Reachability();
+        using var context = new TestSourceContext();
+        await (await StartAsync(fake, browser, context, network: network)).DisposeAsync();
+
+        network.Down = true;
+        var failed = Source(fake, browser, network: network);
+        await Assert.ThrowsExactlyAsync<SourceFailedException>(() => failed.InitialiseAsync(context, CancellationToken.None));
+        await failed.DisposeAsync();
+
+        network.Down = false;
+        await using var retried = await StartAsync(fake, browser, context, network: network);
+        Assert.AreEqual(1, browser.Calls.Count, "no second browser sign-in: the session GitLab still takes was kept");
+        Assert.AreEqual("with the session kept from before", retried.Session.How);
     }
 
     [TestMethod]

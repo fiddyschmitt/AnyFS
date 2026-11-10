@@ -544,10 +544,15 @@ internal sealed class GitLabSession : IDisposable
         }
     }
 
-    /// <summary>Keeps a web session's cookies: in the secret store for the next start, and for a source started from the dialog whose Test made them.</summary>
+    /// <summary>
+    /// Keeps a signed-in web session's cookies: in the secret store for the next start, and for a source started from the
+    /// dialog whose Test made them. A session that never signed in keeps nothing. A start that failed or was stopped before
+    /// its sign-in holds no cookies, or only GitLab's answers to nobody, and those would take the place of a session GitLab
+    /// still takes.
+    /// </summary>
     public void Save()
     {
-        if (Method == GitLabSignIn.AccessToken)
+        if (Method == GitLabSignIn.AccessToken || User is null)
         {
             return;
         }

@@ -50,6 +50,9 @@ internal sealed class AtlassianSession : IDisposable
     private string? _refused;
     private int _generation;
 
+    // how the last who-am-I call that found nobody signed in was answered ("401", "302 to sso.example.com"), for the log
+    private string? _nobody;
+
     /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
     public AtlassianSession(AtlassianProduct product, IAtlassianSettings settings, ILogger logger, AtlassianStandIn? standIn = null, ISecretStore? secrets = null, IUpstreamWatcher? watcher = null)
     {
@@ -331,6 +334,7 @@ internal sealed class AtlassianSession : IDisposable
 
         // a sign-in just made (the Test's) first, then the one kept from the last run
         var recent = Recent.TryGetValue(RecentKey, out var r) && DateTime.UtcNow - r.At < RecentFor ? r.Cookies : null;
+        string? refused = null;
         foreach (var kept in new[] { recent, _secrets?.Get(CookiesSecret) }.OfType<string>().Distinct(StringComparer.Ordinal))
         {
             CookieJar.Clear(Cookies);
@@ -339,14 +343,30 @@ internal sealed class AtlassianSession : IDisposable
                 continue;
             }
 
-            if (await WhoAsync(ct).ConfigureAwait(false) is { } user && (Method != AtlassianSignIn.Password || SameAccount(user)))
+            if (await WhoAsync(ct).ConfigureAwait(false) is not { } user)
+            {
+                refused = _nobody;
+                continue;
+            }
+
+            if (Method != AtlassianSignIn.Password || SameAccount(user))
             {
                 User = user;
                 return true;
             }
+
+            refused = $"for {user.Name}, not {Settings.User}";
         }
 
-        _logger.LogInformation("{Product}: no session kept from before for {Host} that the server still takes", LogName, Url.Host);
+        if (refused is null)
+        {
+            _logger.LogInformation("{Product}: no session kept from before for {Host}", LogName, Url.Host);
+        }
+        else
+        {
+            _logger.LogInformation("{Product}: {Host} no longer takes the session kept from before (asked who is signed in, it answered {Answer})", LogName, Url.Host, refused);
+        }
+
         CookieJar.Clear(Cookies);
         return false;
     }
@@ -624,6 +644,8 @@ internal sealed class AtlassianSession : IDisposable
         using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden || (int)response.StatusCode is >= 300 and < 400)
         {
+            var status = ((int)response.StatusCode).ToString(System.Globalization.CultureInfo.InvariantCulture);
+            _nobody = response.Headers.Location is { } to ? $"{status} to {(to.IsAbsoluteUri ? to.Host : Address.Base.Host)}" : status;
             return null;
         }
 
@@ -634,11 +656,14 @@ internal sealed class AtlassianSession : IDisposable
 
         if (response.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) != true)
         {
+            _nobody = $"with a page ({response.Content.Headers.ContentType?.MediaType ?? "no type"})";
             _logger.LogDebug("{Product}: {Host} answered a page ({Type}), not data, when asked who is signed in: nobody is", LogName, Url.Host, response.Content.Headers.ContentType?.MediaType ?? "no type");
             return null;
         }
 
-        return await UserOfAsync(response, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false), ct).ConfigureAwait(false);
+        var user = await UserOfAsync(response, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false), ct).ConfigureAwait(false);
+        _nobody = user is null ? "for the anonymous user" : null;
+        return user;
     }
 
     /// <summary>
@@ -762,10 +787,16 @@ internal sealed class AtlassianSession : IDisposable
         }
     }
 
-    /// <summary>Keeps a session's cookies: in the secret store for the next start, and for a source started from the dialog whose Test made them.</summary>
+    /// <summary>
+    /// Keeps a signed-in session's cookies: in the secret store for the next start, and for a source started from the dialog
+    /// whose Test made them. A session that never signed in keeps nothing. A start that failed or was stopped before its
+    /// sign-in (the server not answering, AnyFS closed meanwhile) holds no cookies, or only the server's answers to nobody,
+    /// and those would take the place of a session the server still takes; the next start would then ask the person to sign
+    /// in again.
+    /// </summary>
     public void Save()
     {
-        if (Method == AtlassianSignIn.Token || _basic is not null)
+        if (Method == AtlassianSignIn.Token || _basic is not null || User is null)
         {
             return;
         }
