@@ -192,13 +192,6 @@ internal sealed class GitLabApi : IDisposable
         return (response.StatusCode == HttpStatusCode.PartialContent, await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false));
     }
 
-    /// <summary>A small download's bytes.</summary>
-    public async Task<byte[]> BytesAsync(Uri url, string what, CancellationToken ct)
-    {
-        using var response = await OpenAsync(url, what, ct).ConfigureAwait(false);
-        return await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-    }
-
     /// <summary>
     /// Sends a request (made afresh for each attempt) at the server's pace and returns a successful response; refusals and
     /// failures become <see cref="VfsException"/>s, after the retries the class describes.

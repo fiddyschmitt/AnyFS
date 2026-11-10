@@ -42,8 +42,11 @@ public sealed partial class GitLabSource
     /// <summary>
     /// The length of a job's log, without the log: the job list's where GitLab has archived the log (its "trace" artifact),
     /// none for a job that never started, else (a running job, or a finished one whose log is not archived yet) the length
-    /// of a GET's answer, its body left unread where the length is given (a HEAD says 0). A running job's is asked again
-    /// once the refresh interval has passed.
+    /// of a GET's answer, its body left unread where the length is given, else counted as it comes. Not a HEAD: GitLab
+    /// answers one with a length of 0 (the lab's 19.5, 27-Oct-2026). A GET that asks for no compression carries the length
+    /// (the lab, 9-Nov-2026), but HttpClient reads up to a megabyte of a body left unread to use its connection again: more
+    /// than most logs come to compressed, as they are counted here. A running job's is asked again once the refresh interval
+    /// has passed.
     /// </summary>
     internal async Task<long> LogLengthAsync(GlProject project, GlJob job, CancellationToken ct)
     {
@@ -65,16 +68,9 @@ public sealed partial class GitLabSource
                 return new LogLength(given);
             }
 
-            // no length given: counted as it comes, nothing kept
+            // no length given (the server compressed it as it went): counted as it comes, nothing kept
             await using var body = await response.Content.ReadAsStreamAsync(c).ConfigureAwait(false);
-            var buffer = new byte[64 * 1024];
-            long counted = 0;
-            for (int n; (n = await body.ReadAsync(buffer, c).ConfigureAwait(false)) > 0;)
-            {
-                counted += n;
-            }
-
-            return new LogLength(counted);
+            return new LogLength((await ResponseLength.CountAsync(body, 0, null, c).ConfigureAwait(false))!.Value);
         }, ct).ConfigureAwait(false);
         return asked.Bytes;
     }

@@ -116,8 +116,15 @@ public sealed partial class GitLabSource
                         return new Box<long?>(length);
                     }
 
-                    // no length given: count the bytes
-                    return new Box<long?>((await Api.BytesAsync(UploadUrl(project, upload, page), "an attachment", c).ConfigureAwait(false)).LongLength);
+                    // the HEAD gave no length: a GET's, else its bytes counted as they come, nothing kept
+                    using var response = await Api.OpenAsync(UploadUrl(project, upload, page), "an attachment", c).ConfigureAwait(false);
+                    if (ResponseLength.Of(response) is { } given)
+                    {
+                        return new Box<long?>(given);
+                    }
+
+                    await using var body = await response.Content.ReadAsStreamAsync(c).ConfigureAwait(false);
+                    return new Box<long?>(await ResponseLength.CountAsync(body, 0, null, c).ConfigureAwait(false));
                 }
                 catch (VfsException ex) when (ex.Error is VfsError.NotFound or VfsError.AccessDenied && !page)
                 {
