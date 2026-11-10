@@ -669,10 +669,27 @@ public class TeamsRestTests
 
             var bytes = Enumerable.Range(0, 100).Select(i => (byte)i).ToArray();
             var from = (int)(request.Headers.Range?.Ranges.Single().From ?? 0);
-            var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(bytes[from..]) };
-            response.Content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(from, 99, 100);
+            var to = (int)Math.Min(99, request.Headers.Range?.Ranges.Single().To ?? 99);
+            var response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new ByteArrayContent(bytes[from..(to + 1)]) };
+            response.Content.Headers.ContentRange = new System.Net.Http.Headers.ContentRangeHeaderValue(from, to, 100);
             return Task.FromResult(response);
         }
+    }
+
+    [TestMethod]
+    public async Task ARecordingIsMeasuredByItsFirstByte()
+    {
+        // 10-Nov-2026: the length came from a read from the start, whose answer is the whole video: HttpClient drops the
+        // connection after such an answer's headers rather than read hundreds of megabytes to keep it
+        var media = new Media();
+        await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, media);
+        Assert.AreEqual(100L, await rest.MediaLengthAsync("https://ams.test/v1/objects/0-rec/views/video", CancellationToken.None));
+        var asked = media.Asked.Single(a => a.Uri.Host == "ams.test");
+        Assert.AreEqual(("skype_token skype-1", "bytes=0-0"), (asked.Authorization, asked.Range));
+
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => rest.MediaLengthAsync("https://evil.example/v1/objects/0-rec/views/video", CancellationToken.None));
+        Assert.AreEqual(VfsError.AccessDenied, ex.Error);
+        Assert.IsFalse(media.Asked.Any(a => a.Uri.Host == "evil.example"), "nowhere but the media service");
     }
 
     [TestMethod]
@@ -695,12 +712,23 @@ public class TeamsRestTests
         Assert.IsFalse(media.Asked.Any(a => a.Uri.Host == "evil.example"));
     }
 
+    /// <summary>How the media service fake answers a range: with the whole image (200), with the range and the whole's length, or with the range alone.</summary>
+    public enum PictureRanges
+    {
+        Ignored,
+        Kept,
+        KeptOfUnknownWhole,
+    }
+
     /// <summary>Teams' media service serving one inline image, with its length or without one, counting what the client reads of it.</summary>
-    private sealed class Picture(byte[] image, bool withLength) : HttpMessageHandler
+    private sealed class Picture(byte[] image, bool withLength, PictureRanges ranges = PictureRanges.Ignored) : HttpMessageHandler
     {
         private long _read;
 
         public long Read => Interlocked.Read(ref _read);
+
+        /// <summary>The Range header of each request for the image (null for none).</summary>
+        public List<string?> Asked { get; } = [];
 
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -710,13 +738,32 @@ public class TeamsRestTests
                 return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Authz, Encoding.UTF8, "application/json") });
             }
 
-            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new Counted(image, n => Interlocked.Add(ref _read, n))) };
-            response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/png");
-            if (withLength)
+            lock (Asked)
             {
-                response.Content.Headers.ContentLength = image.Length;
+                Asked.Add(request.Headers.Range?.ToString());
             }
 
+            HttpResponseMessage response;
+            if (request.Headers.Range?.Ranges.Single() is { From: { } from } range && ranges != PictureRanges.Ignored)
+            {
+                var to = Math.Min(image.Length - 1, range.To ?? image.Length - 1);
+                var part = image[(int)from..(int)(to + 1)];
+                response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new StreamContent(new Counted(part, n => Interlocked.Add(ref _read, n))) };
+                response.Content.Headers.ContentRange = ranges == PictureRanges.Kept
+                    ? new System.Net.Http.Headers.ContentRangeHeaderValue(from, to, image.Length)
+                    : new System.Net.Http.Headers.ContentRangeHeaderValue(from, to);
+                response.Content.Headers.ContentLength = part.Length;
+            }
+            else
+            {
+                response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(new Counted(image, n => Interlocked.Add(ref _read, n))) };
+                if (withLength)
+                {
+                    response.Content.Headers.ContentLength = image.Length;
+                }
+            }
+
+            response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/png");
             return Task.FromResult(response);
         }
 
@@ -757,19 +804,32 @@ public class TeamsRestTests
     }
 
     [TestMethod]
-    [DataRow(true)]
-    [DataRow(false)]
-    public async Task AnInlineImageIsMeasuredWithoutBeingKept(bool withLength)
+    [DataRow(true, PictureRanges.Ignored)]
+    [DataRow(false, PictureRanges.Ignored)]
+    [DataRow(true, PictureRanges.Kept)]
+    [DataRow(false, PictureRanges.Kept)]
+    [DataRow(true, PictureRanges.KeptOfUnknownWhole)]
+    [DataRow(false, PictureRanges.KeptOfUnknownWhole)]
+    public async Task AnInlineImageIsMeasuredWithoutBeingKept(bool withLength, PictureRanges ranges)
     {
         // 9-Nov-2026: a listing read each image whole to learn its length and kept it; now its length is the answer's, its
-        // type from its first bytes, and where no length comes it is counted as it comes
+        // type from its first bytes, and where no length comes it is counted as it comes. 10-Nov-2026: the first bytes alone
+        // are asked for, so where the service keeps to ranges the rest of the image does not come (HttpClient reads what is
+        // left of an unread answer of up to a megabyte, to use its connection again)
         var image = new byte[1 << 20];
         new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G', 13, 10, 26, 10 }.CopyTo(image, 0);
-        var service = new Picture(image, withLength);
+        var service = new Picture(image, withLength, ranges);
         await using var rest = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, service);
         var measured = await rest.ImageSizeAsync("https://ams.test/v1/objects/0-pic/views/imgo", CancellationToken.None);
         Assert.AreEqual(((long)image.Length, ".png"), measured!.Value);
-        Assert.AreEqual(withLength ? 12 : image.Length, service.Read, withLength ? "its first bytes alone, for its type" : "counted as it came");
+        var (read, asked) = ranges switch
+        {
+            PictureRanges.Kept => (12, new string?[] { "bytes=0-11" }),
+            PictureRanges.KeptOfUnknownWhole => (withLength ? 24 : 12 + image.Length, new string?[] { "bytes=0-11", null }),
+            _ => (withLength ? 12 : image.Length, new string?[] { "bytes=0-11" }),
+        };
+        Assert.AreEqual(read, service.Read, "the first bytes, for the type; the rest only where nothing gives the length");
+        CollectionAssert.AreEqual(asked, service.Asked, "the first bytes asked for; the whole where a part came with no whole's length");
         Assert.IsNull(await rest.ImageSizeAsync("https://evil.example/v1/objects/0-pic/views/imgo", CancellationToken.None), "nowhere but the media service");
     }
 }

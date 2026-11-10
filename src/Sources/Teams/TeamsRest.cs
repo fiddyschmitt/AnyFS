@@ -999,7 +999,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
 
     public async Task<TeamsImage?> ImageAsync(string src, CancellationToken ct)
     {
-        using var response = await ImageResponseAsync(src, ct).ConfigureAwait(false);
+        using var response = await ImageResponseAsync(src, null, ct).ConfigureAwait(false);
         if (response is null)
         {
             return null;
@@ -1017,49 +1017,61 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
     }
 
+    /// <summary>
+    /// The image's first 12 bytes asked for: the media service, which serves its objects in ranges, gives the whole's length
+    /// in the answer's Content-Range, and the rest of the image does not cross the network. Asked whole where it sends part of a
+    /// whole of unknown length; where it sends the whole, its length is the answer's, or the image is counted as it comes.
+    /// </summary>
     public async Task<(long Length, string Extension)?> ImageSizeAsync(string src, CancellationToken ct)
     {
-        using var response = await ImageResponseAsync(src, ct).ConfigureAwait(false);
-        if (response is null)
+        for (var ranged = true; ; ranged = false)
         {
-            return null;
-        }
-
-        try
-        {
-            await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            var head = new byte[12];
-            var read = await body.ReadAtLeastAsync(head, head.Length, throwOnEndOfStream: false, ct).ConfigureAwait(false);
-            var extension = TeamsFiles.ExtensionOf(head.AsSpan(0, read), response.Content.Headers.ContentType?.MediaType);
-            if (response.Content.Headers.ContentLength is { } given)
+            using var response = await ImageResponseAsync(src, ranged ? ResponseLength.First(12) : null, ct).ConfigureAwait(false);
+            if (response is null)
             {
-                return (given, extension);
+                return null;
             }
 
-            // no length given: counted as it comes, nothing kept
-            long counted = read;
-            var buffer = new byte[64 * 1024];
-            for (int n; (n = await body.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0;)
+            try
             {
-                counted += n;
-                if (counted > MaxImageBytes)
+                await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+                var head = new byte[12];
+                var read = await body.ReadAtLeastAsync(head, head.Length, throwOnEndOfStream: false, ct).ConfigureAwait(false);
+                var extension = TeamsFiles.ExtensionOf(head.AsSpan(0, read), response.Content.Headers.ContentType?.MediaType);
+                if (ResponseLength.Of(response) is { } given)
                 {
-                    logger.LogInformation("teams: an inline image is left out: over {Max} bytes", MaxImageBytes);
+                    return (given, extension);
+                }
+
+                if (ResponseLength.IsPart(response))
+                {
+                    if (ranged)
+                    {
+                        continue;
+                    }
+
                     return null;
                 }
-            }
 
-            return (counted, extension);
-        }
-        catch (HttpRequestException ex)
-        {
-            logger.LogInformation("teams: an inline image could not be read ({Error})", ex.Message);
-            return null;
+                // the whole image with no length given: counted as it comes, nothing kept
+                if (await ResponseLength.CountAsync(body, read, MaxImageBytes, ct).ConfigureAwait(false) is { } counted)
+                {
+                    return (counted, extension);
+                }
+
+                logger.LogInformation("teams: an inline image is left out: over {Max} bytes", MaxImageBytes);
+                return null;
+            }
+            catch (HttpRequestException ex)
+            {
+                logger.LogInformation("teams: an inline image could not be read ({Error})", ex.Message);
+                return null;
+            }
         }
     }
 
-    /// <summary>The media service's answer for an inline image, its headers in; null when it cannot be read or is too big to show.</summary>
-    private async Task<HttpResponseMessage?> ImageResponseAsync(string src, CancellationToken ct)
+    /// <summary>The media service's answer for an inline image (<paramref name="range"/> of it, where given), its headers in; null when it cannot be read or is too big to show.</summary>
+    private async Task<HttpResponseMessage?> ImageResponseAsync(string src, RangeHeaderValue? range, CancellationToken ct)
     {
         var services = await DiscoverAsync(ct).ConfigureAwait(false);
         if (services.SkypeToken is not { } skype || !TeamsFiles.IsMediaService(src, services.Ams))
@@ -1072,12 +1084,13 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         request.Headers.TryAddWithoutValidation("Authorization", $"skype_token {skype}");
         request.Headers.TryAddWithoutValidation("x-ms-client-version", ClientVersion);
         request.Headers.Accept.ParseAdd("image/*");
+        request.Headers.Range = range;
         try
         {
             var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > MaxImageBytes)
+            if (!response.IsSuccessStatusCode || ResponseLength.Of(response) > MaxImageBytes)
             {
-                logger.LogInformation("teams: an inline image could not be read ({Status}, {Length} bytes)", (int)response.StatusCode, response.Content.Headers.ContentLength);
+                logger.LogInformation("teams: an inline image could not be read ({Status}, {Length} bytes)", (int)response.StatusCode, ResponseLength.Of(response));
                 response.Dispose();
                 return null;
             }
@@ -1091,7 +1104,16 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
     }
 
-    public async Task<HttpResponseMessage> MediaAsync(string address, long offset, CancellationToken ct)
+    public Task<HttpResponseMessage> MediaAsync(string address, long offset, CancellationToken ct) => MediaAsync(address, new RangeHeaderValue(offset, null), ct);
+
+    /// <summary>Its first byte asked for: a recording's whole length is in the answer's headers, and none of the video crosses the network but that byte.</summary>
+    public async Task<long?> MediaLengthAsync(string address, CancellationToken ct)
+    {
+        using var response = await MediaAsync(address, ResponseLength.First(1), ct).ConfigureAwait(false);
+        return ResponseLength.Of(response);
+    }
+
+    private async Task<HttpResponseMessage> MediaAsync(string address, RangeHeaderValue range, CancellationToken ct)
     {
         var services = await DiscoverAsync(ct).ConfigureAwait(false);
         if (services.SkypeToken is not { } skype || !TeamsFiles.IsMediaService(address, services.Ams))
@@ -1103,7 +1125,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         using var request = new HttpRequestMessage(HttpMethod.Get, address);
         request.Headers.TryAddWithoutValidation("Authorization", $"skype_token {skype}");
         request.Headers.TryAddWithoutValidation("x-ms-client-version", ClientVersion);
-        request.Headers.Range = new RangeHeaderValue(offset, null);
+        request.Headers.Range = range;
         HttpResponseMessage response;
         try
         {

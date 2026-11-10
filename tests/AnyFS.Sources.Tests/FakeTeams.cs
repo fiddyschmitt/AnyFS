@@ -446,6 +446,15 @@ internal sealed class FakeTeams : ITeamsApi
         return Task.FromResult(response);
     }
 
+    /// <summary>As the media service asked for an object's first byte: its length; one it does not have, not found.</summary>
+    public Task<long?> MediaLengthAsync(string address, CancellationToken ct)
+    {
+        MediaCalls++;
+        return _media.TryGetValue(address, out var bytes)
+            ? Task.FromResult<long?>(bytes.LongLength)
+            : throw new VfsException(VfsError.NotFound, "Teams (fake) has no such recording");
+    }
+
     private static string Download(string site, string path) => "https://download.test/" + Uri.EscapeDataString($"{site}|{path}");
 
     // --- groups --------------------------------------------------------------------------------------------------------

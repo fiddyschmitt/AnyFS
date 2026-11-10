@@ -29,10 +29,10 @@ public class TeamsLiveTests
         return (account, profiles);
     }
 
-    private static async Task<TeamsSource> StartAsync(string account)
+    private static async Task<TeamsSource> StartAsync(string account, TestSourceContext? context = null)
     {
         var source = new TeamsSource(new TeamsSettings { Account = account });
-        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        await source.InitialiseAsync(context ?? new TestSourceContext(), CancellationToken.None);
         return source;
     }
 
@@ -402,7 +402,8 @@ public class TeamsLiveTests
     public async Task TheSeededFilesAndImagesAreServed()
     {
         var (account, _) = Env();
-        await using var source = await StartAsync(account);
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(account, context);
         await SharePointServedAsync(source);
 
         // the channel's files: its folder of the team's library, a subfolder too
@@ -418,17 +419,23 @@ public class TeamsLiveTests
 
         // the thread's attachments: the file a reply shares and the inline image, which its post.md links
         var thread = (await ListAsync(source, "AnyFS Lab/General/posts")).First(p => p.Name.Contains("A thread with replies", StringComparison.Ordinal)).Name;
-        var attachments = (await ListAsync(source, $"AnyFS Lab/General/posts/{thread}/attachments")).Select(e => e.Name).ToList();
+        var listed = await ListAsync(source, $"AnyFS Lab/General/posts/{thread}/attachments");
+        var attachments = listed.Select(e => e.Name).ToList();
         CollectionAssert.Contains(attachments, "anyfs-seed.txt");
 
-        // the media service serves its imgo view as JPEG, whatever was pasted
+        // the media service serves its imgo view as JPEG, whatever was pasted; its length, measured by asking for its first
+        // bytes alone (10-Nov-2026), is the length of what an open reads
         var image = attachments.Single(a => a.Contains("_image-1.", StringComparison.Ordinal));
         StringAssert.EndsWith(image, ".jpg");
+        var measured = context.UpstreamRequests.Requests.FirstOrDefault(r => r.Target.Contains("imgo", StringComparison.Ordinal));
+        Console.WriteLine($"the image measured: {measured?.What} {measured?.Target}, answered {measured?.Answer}, {measured?.Bytes:N0} bytes read of it");
         await using (var jpeg = await source.OpenAsync($"AnyFS Lab/General/posts/{thread}/attachments/{image}", VfsOpenMode.Read, CancellationToken.None))
         {
             var head = new byte[3];
             await jpeg.ReadFullyAsync(0, head, CancellationToken.None);
             CollectionAssert.AreEqual(new byte[] { 0xFF, 0xD8, 0xFF }, head, "the image's bytes, from Teams' media service");
+            var whole = new byte[jpeg.Length + 1];
+            Assert.AreEqual(listed.Single(e => e.Name == image).Length, await jpeg.ReadFullyAsync(0, whole, CancellationToken.None), "the listed length is what the image comes to");
         }
 
         var md = await TextAsync(source, $"AnyFS Lab/General/posts/{thread}/post.md");

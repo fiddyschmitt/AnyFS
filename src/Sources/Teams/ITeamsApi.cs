@@ -70,8 +70,9 @@ internal interface ITeamsApi : IAsyncDisposable
     Task<TeamsImage?> ImageAsync(string src, CancellationToken ct);
 
     /// <summary>
-    /// An inline image's length and file extension without keeping the image: the length as the media service gives it
-    /// (counted as it comes where none is given), the extension from its first bytes; null when it cannot be read.
+    /// An inline image's length and file extension without keeping the image: its first bytes asked for, the length as the
+    /// media service gives it (counted as it comes where none is given), the extension from those bytes; null when it cannot
+    /// be read.
     /// </summary>
     Task<(long Length, string Extension)?> ImageSizeAsync(string src, CancellationToken ct);
 
@@ -80,6 +81,13 @@ internal interface ITeamsApi : IAsyncDisposable
     /// skype token; refused for a host other than the media service's own.
     /// </summary>
     Task<HttpResponseMessage> MediaAsync(string address, long offset, CancellationToken ct);
+
+    /// <summary>
+    /// The length of one of the media service's objects (a recording's video), from its answer to a request for its first
+    /// byte: the whole's in its Content-Range (its Content-Length where the range is not kept to); null where it gives none.
+    /// Refused as <see cref="MediaAsync"/> is.
+    /// </summary>
+    Task<long?> MediaLengthAsync(string address, CancellationToken ct);
 
     /// <summary>
     /// Whether SharePoint's token (and the tenant's host) is in hand now: what the files, the attachments and Other groups

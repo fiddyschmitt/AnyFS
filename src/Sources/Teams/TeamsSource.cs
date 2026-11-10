@@ -593,7 +593,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         return name.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase) ? name : name + ".mp4";
     }
 
-    /// <summary>A recording's length, from the media service's answer to a read from its start, kept; null where it does not serve it (kept so too, unless it could not be reached).</summary>
+    /// <summary>A recording's length, from the media service's answer to a request for its first byte, kept; null where it does not serve it (kept so too, unless it could not be reached).</summary>
     private async Task<long?> MediaLengthAsync(string address, CancellationToken ct)
     {
         if (_mediaLengths.TryGetValue(address, out var known))
@@ -603,8 +603,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
         try
         {
-            using var response = await Api.MediaAsync(address, 0, ct).ConfigureAwait(false);
-            var length = response.Content.Headers.ContentRange?.Length ?? response.Content.Headers.ContentLength;
+            var length = await Api.MediaLengthAsync(address, ct).ConfigureAwait(false);
             _mediaLengths[address] = length is > 0 ? length.Value : -1;
             return length is > 0 ? length : null;
         }
