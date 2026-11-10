@@ -227,6 +227,14 @@ internal sealed class Fake3DX : IDisposable
 
     public int RangedDownloads => _rangedDownloads;
 
+    /// <summary>How many bytes of files the file server has sent.</summary>
+    public long BytesServed => Interlocked.Read(ref _bytesServed);
+
+    private long _bytesServed;
+
+    /// <summary>Whether the file server says how long what it sends is; false sends it in chunks, with no length.</summary>
+    public bool GivesLengths { get; set; } = true;
+
     private int _searchPosts;
     private int _documentPosts;
     private int _signIns;
@@ -770,7 +778,8 @@ internal sealed class Fake3DX : IDisposable
         if (range is not null && HonoursRanges && range.StartsWith("bytes=", StringComparison.Ordinal))
         {
             Interlocked.Increment(ref _rangedDownloads);
-            var from = long.Parse(range[6..].Split('-')[0], System.Globalization.CultureInfo.InvariantCulture);
+            var bounds = range[6..].Split('-');
+            var from = long.Parse(bounds[0], System.Globalization.CultureInfo.InvariantCulture);
             if (from >= content.Length)
             {
                 response.StatusCode = 416;
@@ -778,18 +787,31 @@ internal sealed class Fake3DX : IDisposable
                 return;
             }
 
+            var to = bounds.Length > 1 && bounds[1].Length > 0 ? Math.Min(content.Length - 1, long.Parse(bounds[1], System.Globalization.CultureInfo.InvariantCulture)) : content.Length - 1;
             response.StatusCode = 206;
-            response.AddHeader("Content-Range", $"bytes {from}-{content.Length - 1}/{content.Length}");
-            response.ContentType = "application/octet-stream";
-            response.ContentLength64 = content.Length - from;
-            await response.OutputStream.WriteAsync(content.AsMemory((int)from));
+            response.AddHeader("Content-Range", $"bytes {from}-{to}/{content.Length}");
+            await SendAsync(response, content.AsMemory((int)from, (int)(to - from + 1)));
             return;
         }
 
         response.StatusCode = 200;
+        await SendAsync(response, content);
+    }
+
+    private async Task SendAsync(HttpListenerResponse response, ReadOnlyMemory<byte> bytes)
+    {
         response.ContentType = "application/octet-stream";
-        response.ContentLength64 = content.Length;
-        await response.OutputStream.WriteAsync(content);
+        if (GivesLengths)
+        {
+            response.ContentLength64 = bytes.Length;
+        }
+        else
+        {
+            response.SendChunked = true;
+        }
+
+        Interlocked.Add(ref _bytesServed, bytes.Length);
+        await response.OutputStream.WriteAsync(bytes);
     }
 
     // --- the identity provider -------------------------------------------------------------------------------------

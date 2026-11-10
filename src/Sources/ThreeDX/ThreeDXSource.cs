@@ -381,7 +381,7 @@ public sealed class ThreeDXSource : SourceBase, ICountable
     /// </summary>
     private async Task<Stream> OpenAtAsync(DocumentFolder folder, FolderFile file, long offset, string path, CancellationToken ct)
     {
-        var response = await Run(() => Client.OpenFileAsync(folder.Document.Id, file.File!, offset, path, ct)).ConfigureAwait(false);
+        var response = await Run(() => Client.OpenFileAsync(folder.Document.Id, file.File!, offset, null, path, ct)).ConfigureAwait(false);
         if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
         {
             response.Dispose();
@@ -397,7 +397,12 @@ public sealed class ThreeDXSource : SourceBase, ICountable
         }, ct).ConfigureAwait(false);
     }
 
-    /// <summary>The length of a file 3DX gives no size for: from its download's headers (counted through when they give none), asked once.</summary>
+    /// <summary>
+    /// The length of a file 3DX gives no size for, asked once: its first byte asked for, the whole's length is in the file
+    /// server's answer (its Content-Range), and the file does not cross the network. A file server that ignores the range sends
+    /// the whole file: its length is the answer's, or it is counted as it comes, nothing kept. Asked whole where the server
+    /// sends part of a whole of unknown length.
+    /// </summary>
     private async Task<long> SizeAsync(DocumentFolder folder, FolderFile file, string path, CancellationToken ct)
     {
         if (_sizes.TryGetValue(file.ContentKey, out var known))
@@ -405,21 +410,24 @@ public sealed class ThreeDXSource : SourceBase, ICountable
             return known;
         }
 
-        using var response = await Run(() => Client.OpenFileAsync(folder.Document.Id, file.File!, 0, path, ct)).ConfigureAwait(false);
-        var length = response.Content.Headers.ContentLength ?? -1;
-        if (length < 0)
+        long? length = null;
+        for (var ranged = true; length is null; ranged = false)
         {
-            await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-            var buffer = new byte[64 * 1024];
-            length = 0;
-            for (int n; (n = await body.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0;)
+            using var response = await Run(() => Client.OpenFileAsync(folder.Document.Id, file.File!, 0, ranged ? 0 : null, path, ct)).ConfigureAwait(false);
+            length = ResponseLength.Of(response);
+            if (length is null && !ResponseLength.IsPart(response))
             {
-                length += n;
+                await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+                length = await ResponseLength.CountAsync(body, 0, null, ct).ConfigureAwait(false);
+            }
+            else if (length is null && !ranged)
+            {
+                throw new VfsException(VfsError.IoError, $"'{path}': the file server sent part of the file when asked for all of it");
             }
         }
 
-        _sizes[file.ContentKey] = length;
-        return length;
+        _sizes[file.ContentKey] = length.Value;
+        return length.Value;
     }
 
     /// <summary>A document's <see cref="ThreeDXNames.MetadataFile"/>: made from 3DX's answers, kept for a minute for the reads after the open.</summary>

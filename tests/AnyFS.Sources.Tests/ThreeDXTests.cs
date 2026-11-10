@@ -763,9 +763,13 @@ public class ThreeDXSourceTests
     }
 
     [TestMethod]
-    public async Task AFileWithoutASizeHasItAskedOfTheFileServer()
+    [DataRow(true, true)]
+    [DataRow(true, false)]
+    [DataRow(false, true)]
+    [DataRow(false, false)]
+    public async Task AFileWithoutASizeHasItAskedOfTheFileServer(bool honoursRanges, bool givesLengths)
     {
-        using var fake = new Fake3DX();
+        using var fake = new Fake3DX { HonoursRanges = honoursRanges, GivesLengths = givesLengths };
         var doc = fake.Add("NOSIZE", "1", "No size", "Document");
         var content = Bytes(777, 5);
         doc.Files.Add(new FakeFile(Fake3DX.NewId(), "unsized.bin", content, "03/07/2018 10:12:33 AM", "03/07/2018 10:12:33 AM", SizeGiven: false));
@@ -773,7 +777,15 @@ public class ThreeDXSourceTests
         await using var source = await StartAsync(ThreeDXSignInTests.Settings(fake), context);
         var path = "NOSIZE Rev 1 (No size)/unsized.bin";
         Assert.AreEqual(0, (await ListAsync(source, "NOSIZE Rev 1 (No size)")).Single(f => f.Name == "unsized.bin").Length, "3DX gives none");
+        var served = fake.BytesServed;
         Assert.AreEqual(777, (await source.StatAsync(path, CancellationToken.None))!.Length);
+        if (honoursRanges)
+        {
+            // 10-Nov-2026: the first byte alone asked for, the length from the answer's Content-Range (the whole file was
+            // asked for before, and HttpClient reads what is left of an unread answer of up to a megabyte)
+            Assert.AreEqual(1, fake.BytesServed - served, "one byte of the file, for its length");
+        }
+
         CollectionAssert.AreEqual(content, await ReadAllAsync(source, path));
     }
 

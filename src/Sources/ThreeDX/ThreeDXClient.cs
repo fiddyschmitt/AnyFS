@@ -453,21 +453,23 @@ internal sealed partial class ThreeDXClient
     // --- files ------------------------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// A file's content from <paramref name="offset"/>, its headers read: a download ticket for it (3DSpace hands one out for a
-    /// PUT that carries a CSRF token it has just given), then the file server's answer to a GET of the ticket, with a Range
-    /// when the offset is not 0. The answer may be the whole file (206 not given): the caller skips to the offset then.
+    /// A file's content from <paramref name="offset"/> (to <paramref name="last"/>, where given), its headers read: a download
+    /// ticket for it (3DSpace hands one out for a PUT that carries a CSRF token it has just given), then the file server's
+    /// answer to a GET of the ticket, with a Range when the offset is not 0 or there is a last byte. The answer may be the
+    /// whole file (206 not given): the caller skips to the offset then.
     /// </summary>
     /// <param name="file">The file as the list holds it.</param>
-    public async Task<HttpResponseMessage> OpenFileAsync(string documentId, DxFile file, long offset, string path, CancellationToken ct)
+    /// <param name="last">The last byte wanted; null for the rest of the file.</param>
+    public async Task<HttpResponseMessage> OpenFileAsync(string documentId, DxFile file, long offset, long? last, string path, CancellationToken ct)
     {
         var ticket = await TicketAsync(documentId, file, path, ct).ConfigureAwait(false);
         for (var hop = 0; ; hop++)
         {
             var request = new HttpRequestMessage(HttpMethod.Get, ticket);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*"));
-            if (offset > 0)
+            if (offset > 0 || last is not null)
             {
-                request.Headers.Range = new RangeHeaderValue(offset, null);
+                request.Headers.Range = new RangeHeaderValue(offset, last);
             }
 
             HttpResponseMessage response;
