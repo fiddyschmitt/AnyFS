@@ -747,6 +747,35 @@ public class ViewModelTests
         Assert.AreEqual(expected, ShellOpener.AppendPath(@"\\anyfs\work", "mem/alpha"));
     }
 
+    [TestMethod]
+    public void CopyPathCopiesWhatOpenOpens()
+    {
+        var sep = Path.DirectorySeparatorChar;
+        Assert.AreEqual(@"\\anyfs\work" + sep + "mem", ShellOpener.PathOf(new MountOpenAction.FileManager(@"\\anyfs\work"), "mem"));
+        Assert.AreEqual("http://h/work/mem/", ShellOpener.PathOf(new MountOpenAction.Browser("http://h/work/"), "mem"));
+        Assert.AreEqual(@"\\127.0.0.1\work" + sep + "mem", ShellOpener.PathOf(new MountOpenAction.Command("net", ["use"], @"\\127.0.0.1\work"), "mem"), "the share the command connects to");
+        Assert.IsNull(ShellOpener.PathOf(new MountOpenAction.Command("mount", [], null), "mem"), "a command that opens nothing");
+        Assert.IsNull(ShellOpener.PathOf(new MountOpenAction.ShowText("Mount it", "sudo mount ..."), "mem"), "text shown, no path");
+    }
+
+    [TestMethod]
+    public async Task ASourceTileCopiesThePathItsOpenButtonOpens()
+    {
+        await AddCollectionAsync("work");
+        var source = await AddSourceAsync("alpha", "a.txt=A", path: "mem");
+        await AddMountAsync(7);
+        Assert.IsTrue(source.CopySingleCommand.CanExecute(null), "one mount: the button copies at once");
+        await source.CopySingleCommand.ExecuteAsync(null);
+        CollectionAssert.AreEqual(new[] { "fake://7/work/mem/" }, _clipboard.Texts, "the source's folder in the mount, as Open opens it");
+
+        await AddMountAsync2(8);
+        _vm.Refresh();
+        Assert.IsFalse(source.CopySingleCommand.CanExecute(null), "two mounts: a flyout instead");
+        CollectionAssert.AreEqual(new[] { "Fake   fake://7/work/mem/", "Second   fake://8/work/mem/" }, source.OpenTargets.Select(t => t.CopyHeader).ToList());
+        await source.OpenTargets[1].CopyCommand.ExecuteAsync(null);
+        Assert.AreEqual("fake://8/work/mem/", _clipboard.Texts[^1]);
+    }
+
     private static async Task<List<string>> ListAsync(IVfsOperations ops, string path)
     {
         var names = new List<string>();

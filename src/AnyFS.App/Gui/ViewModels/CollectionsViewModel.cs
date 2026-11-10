@@ -447,7 +447,7 @@ public sealed partial class CollectionsViewModel : ObservableObject
         }
 
         var detail = mount.AccessPaths.Count > 0 ? mount.AccessPaths[0].Value : "";
-        return [new OpenTargetViewModel(mount.Definition.Name, detail, action, string.IsNullOrEmpty(sourcePath) ? null : sourcePath, _opener)];
+        return [new OpenTargetViewModel(mount.Definition.Name, detail, action, string.IsNullOrEmpty(sourcePath) ? null : sourcePath, _opener, _clipboard)];
     }
 
     /// <summary>The Install button, when the provider is missing something it can install (WinFsp through winget, N6).</summary>

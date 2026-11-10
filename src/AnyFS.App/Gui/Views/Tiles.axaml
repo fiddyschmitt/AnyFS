@@ -69,10 +69,12 @@
               </DataTemplate>
             </ItemsControl.ItemTemplate>
           </ItemsControl>
-          <!-- the count first, then the small bar that goes on and on: where a narrow tile has not room for all, the button's words give way, not the number -->
+          <!-- the count first, then the small bar that goes on and on: where a narrow tile has not room for all, the button's words give way, not the number;
+               Copy path, an icon, at the right end beside Open containing folder -->
           <DockPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Margin="0,8,0,0">
             <TextBlock DockPanel.Dock="Left" Text="{Binding FilesText}" VerticalAlignment="Center" FontFeatures="+tnum" Margin="0,0,8,0" />
             <ProgressBar DockPanel.Dock="Left" Classes="endless" IsIndeterminate="True" IsVisible="{Binding Counting}" />
+            <views:CopyPathButton DockPanel.Dock="Right" Margin="4,0,0,0" IsVisible="{Binding InCollection}" />
             <views:OpenButton HorizontalAlignment="Right" IsVisible="{Binding InCollection}" />
           </DockPanel>
         </Grid>

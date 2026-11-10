@@ -17,11 +17,8 @@ public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? show
         {
             switch (action)
             {
-                case MountOpenAction.FileManager fm:
-                    Launch(AppendPath(fm.Path, subPath));
-                    break;
-                case MountOpenAction.Browser browser:
-                    Launch(AppendUrl(browser.Url, subPath));
+                case MountOpenAction.FileManager or MountOpenAction.Browser:
+                    Launch(PathOf(action, subPath)!);
                     break;
                 case MountOpenAction.Command command:
                     if (command.Reset is { } reset)
@@ -37,9 +34,9 @@ public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? show
                         logger.LogWarning("the command before opening {Target} did not succeed: {Command}", command.ThenOpen, command.FileName);
                     }
 
-                    if (command.ThenOpen is { } then)
+                    if (PathOf(command, subPath) is { } then)
                     {
-                        Launch(AppendPath(then, subPath));
+                        Launch(then);
                     }
 
                     break;
@@ -55,6 +52,18 @@ public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? show
     }
 
     public void OpenFile(string path) => Launch(path);
+
+    /// <summary>
+    /// The path <see cref="Open"/> opens, which the Copy path button copies: the folder in the file manager, the URL, the
+    /// share a command connects to first; null where it opens none (text shown instead).
+    /// </summary>
+    public static string? PathOf(MountOpenAction action, string? subPath) => action switch
+    {
+        MountOpenAction.FileManager fm => AppendPath(fm.Path, subPath),
+        MountOpenAction.Browser browser => AppendUrl(browser.Url, subPath),
+        MountOpenAction.Command { ThenOpen: { } then } => AppendPath(then, subPath),
+        _ => null,
+    };
 
     /// <summary><c>&lt;mount root&gt;\&lt;source path&gt;</c> in the OS's separator.</summary>
     public static string AppendPath(string root, string? subPath)

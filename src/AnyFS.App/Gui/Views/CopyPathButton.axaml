@@ -1,0 +1,31 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:AnyFS.App.Gui.ViewModels"
+             x:Class="AnyFS.App.Gui.Views.CopyPathButton"
+             x:DataType="vm:TileViewModel">
+  <!-- Copy path, to the right of Open containing folder (the user, 10-Nov-2026): it copies the path that button opens. One
+       mount copies it; several show a flyout naming each mount and its path; none is disabled. An icon alone, so the
+       tooltip says what it does. -->
+  <Panel>
+    <Button Classes="icon" Command="{Binding CopySingleCommand}" IsVisible="{Binding HasOneOpenTarget}"
+            ToolTip.Tip="Copy path" AutomationProperties.Name="Copy path">
+      <PathIcon Classes="small" Data="{StaticResource IconCopy}" />
+    </Button>
+    <Button Classes="icon" IsVisible="{Binding HasManyOpenTargets}" ToolTip.Tip="Copy path" AutomationProperties.Name="Copy path">
+      <PathIcon Classes="small" Data="{StaticResource IconCopy}" />
+      <Button.Flyout>
+        <MenuFlyout ItemsSource="{Binding OpenTargets}">
+          <MenuFlyout.ItemContainerTheme>
+            <ControlTheme TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}" x:DataType="vm:OpenTargetViewModel">
+              <Setter Property="Header" Value="{Binding CopyHeader}" />
+              <Setter Property="Command" Value="{Binding CopyCommand}" />
+            </ControlTheme>
+          </MenuFlyout.ItemContainerTheme>
+        </MenuFlyout>
+      </Button.Flyout>
+    </Button>
+    <Button Classes="icon" IsEnabled="False" IsVisible="{Binding HasNoOpenTarget}" AutomationProperties.Name="Copy path">
+      <PathIcon Classes="small" Data="{StaticResource IconCopy}" />
+    </Button>
+  </Panel>
+</UserControl>

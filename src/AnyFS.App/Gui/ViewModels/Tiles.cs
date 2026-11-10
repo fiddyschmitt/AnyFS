@@ -8,16 +8,18 @@ using CommunityToolkit.Mvvm.Input;
 
 namespace AnyFS.App.Gui.ViewModels;
 
-/// <summary>One entry of an Open containing folder flyout: a mount and where to open it.</summary>
+/// <summary>One entry of an Open containing folder flyout, and of the Copy path one beside it: a mount and where to open it.</summary>
 public sealed class OpenTargetViewModel
 {
-    public OpenTargetViewModel(string name, string detail, MountOpenAction action, string? subPath, IOpener opener)
+    public OpenTargetViewModel(string name, string detail, MountOpenAction action, string? subPath, IOpener opener, ITextClipboard clipboard)
     {
         Name = name;
         Detail = detail;
         Action = action;
         SubPath = subPath;
+        CopyPath = ShellOpener.PathOf(action, subPath);
         OpenCommand = new RelayCommand(() => opener.Open(action, subPath));
+        CopyCommand = new AsyncRelayCommand(() => clipboard.SetTextAsync(CopyPath!), () => CopyPath is not null);
     }
 
     public string Name { get; }
@@ -32,6 +34,14 @@ public sealed class OpenTargetViewModel
 
     public ICommand OpenCommand { get; }
 
+    /// <summary>What Copy path copies: the path Open containing folder opens; null where that opens none (text shown instead).</summary>
+    public string? CopyPath { get; }
+
+    /// <summary>The Copy path flyout's line: the mount, then the path it copies.</summary>
+    public string CopyHeader => CopyPath is null ? Name : $"{Name}   {CopyPath}";
+
+    public IAsyncRelayCommand CopyCommand { get; }
+
     public bool SameAs(OpenTargetViewModel other)
         => Name == other.Name && Detail == other.Detail && SubPath == other.SubPath && Action.Equals(other.Action);
 }
@@ -43,6 +53,9 @@ public abstract partial class TileViewModel : ObservableObject
     {
         Id = id;
         OpenSingleCommand = new RelayCommand(() => OpenTargets.FirstOrDefault()?.OpenCommand.Execute(null), () => OpenTargets.Count == 1);
+        CopySingleCommand = new AsyncRelayCommand(
+            () => OpenTargets.FirstOrDefault()?.CopyCommand.ExecuteAsync(null) ?? Task.CompletedTask,
+            () => OpenTargets.Count == 1 && OpenTargets[0].CopyPath is not null);
     }
 
     public Guid Id { get; }
@@ -64,6 +77,9 @@ public abstract partial class TileViewModel : ObservableObject
 
     public RelayCommand OpenSingleCommand { get; }
 
+    /// <summary>Copy path for a tile with one mount to open in: the path that mount's Open opens (a source tile's, spec 11.1).</summary>
+    public AsyncRelayCommand CopySingleCommand { get; }
+
     public bool HasOneOpenTarget => OpenTargets.Count == 1;
 
     public bool HasManyOpenTargets => OpenTargets.Count > 1;
@@ -84,6 +100,7 @@ public abstract partial class TileViewModel : ObservableObject
         }
 
         OpenSingleCommand.NotifyCanExecuteChanged();
+        CopySingleCommand.NotifyCanExecuteChanged();
         OnPropertyChanged(nameof(HasOneOpenTarget));
         OnPropertyChanged(nameof(HasManyOpenTargets));
         OnPropertyChanged(nameof(HasNoOpenTarget));
