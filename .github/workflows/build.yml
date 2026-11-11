@@ -43,6 +43,17 @@ jobs:
         shell: pwsh
         run: ./scripts/fetch-winfsp.ps1
 
+      # Firefox's driver, which every build embeds for its runtime (a build without it fails here), kept the same way
+      - name: Cache geckodriver
+        uses: actions/cache@v4
+        with:
+          path: tools/geckodriver
+          key: geckodriver-${{ runner.os }}-${{ hashFiles('scripts/geckodriver.json') }}
+
+      - name: Fetch geckodriver
+        shell: pwsh
+        run: ./scripts/fetch-geckodriver.ps1
+
       - name: Restore
         run: dotnet restore AnyFS.slnx
 

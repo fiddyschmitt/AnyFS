@@ -1054,7 +1054,8 @@ public class ThreeDXBrowserTests
     /// <param name="elsewhere">Whether the identity provider is a site of its own that asks to be kept apart (Cross-Origin-Opener-Policy), as an organisation's sign-in can be.</param>
     /// <param name="alert">Whether the identity provider's page shows a notice in a dialog of the browser's on the way.</param>
     /// <param name="named">Whether the Browser setting names Firefox, with nothing else forcing WebDriver.</param>
-    private static async Task SignInAndSearchAsync(string? driven, bool elsewhere = false, bool alert = false, bool named = false)
+    /// <param name="carried">Whether Firefox's driver is the geckodriver a build carries (the one scripts/fetch-geckodriver.ps1 unpacked), Selenium Manager downloading nothing.</param>
+    private static async Task SignInAndSearchAsync(string? driven, bool elsewhere = false, bool alert = false, bool named = false, bool carried = false)
     {
         Require();
         var webDriver = driven is not null || named;
@@ -1062,6 +1063,19 @@ public class ThreeDXBrowserTests
         fake.Add("DOC-B", "1", "Browser", "Document", ("b.txt", "browser"u8.ToArray()));
         var profile = Path.Combine(Path.GetTempPath(), "anyfs-tests", "3dx-browser-" + Guid.NewGuid().ToString("N"));
         var forced = Environment.GetEnvironmentVariable("ANYFS_3DX_WEBDRIVER");
+        var keptOpen = GeckoDriver.Open;
+        var keptDrivers = Environment.GetEnvironmentVariable("ANYFS_DRIVERS");
+        var keptCache = Environment.GetEnvironmentVariable("SE_CACHE_PATH");
+        var drivers = profile + "-drivers";
+        var seleniumCache = profile + "-selenium-cache";
+        if (carried)
+        {
+            var file = CarriedDriver() ?? throw new AssertInconclusiveException("no geckodriver under tools/geckodriver for this runtime: run scripts/fetch-geckodriver.ps1");
+            GeckoDriver.Open = () => File.OpenRead(file);
+            Environment.SetEnvironmentVariable("ANYFS_DRIVERS", drivers);
+            Environment.SetEnvironmentVariable("SE_CACHE_PATH", Directory.CreateDirectory(seleniumCache).FullName);
+        }
+
         Environment.SetEnvironmentVariable("ANYFS_3DX_WEBDRIVER", driven);
         var log = new LineLogger();
         try
@@ -1087,6 +1101,20 @@ public class ThreeDXBrowserTests
             if (named)
             {
                 Assert.IsTrue(log.Lines.Any(l => l.Contains("the Browser setting names Firefox", StringComparison.Ordinal)), log.ToString());
+                Assert.IsFalse(log.Lines.Any(l => l.Contains("opened Microsoft Edge", StringComparison.Ordinal) || l.Contains("opened Google Chrome", StringComparison.Ordinal) || l.Contains("opened Chromium", StringComparison.Ordinal)), "Firefox and no other browser:\n" + log);
+            }
+
+            if (driven == "edge")
+            {
+                var driver = OperatingSystem.IsWindows() ? "msedgedriver.exe" : "msedgedriver";
+                Assert.IsTrue(log.Lines.Any(l => l.Contains("WebDriver opened Microsoft Edge headless", StringComparison.Ordinal) && l.TrimEnd().EndsWith(driver, StringComparison.Ordinal)), "the driver Selenium Manager found for Edge:\n" + log);
+            }
+
+            if (carried)
+            {
+                var through = $"WebDriver opened Firefox headless for 127.0.0.1, driver {Path.Combine(drivers, "geckodriver-")}";
+                Assert.IsTrue(log.Lines.Any(l => l.Contains(through, StringComparison.Ordinal)), "the driver the build carries:\n" + log);
+                Assert.IsFalse(Directory.EnumerateFiles(seleniumCache, "*", SearchOption.AllDirectories).Any(), "Selenium Manager downloaded nothing");
             }
 
             if (alert && webDriver)
@@ -1120,6 +1148,9 @@ public class ThreeDXBrowserTests
         finally
         {
             Environment.SetEnvironmentVariable("ANYFS_3DX_WEBDRIVER", forced);
+            GeckoDriver.Open = keptOpen;
+            Environment.SetEnvironmentVariable("ANYFS_DRIVERS", keptDrivers);
+            Environment.SetEnvironmentVariable("SE_CACHE_PATH", keptCache);
             foreach (var dir in Directory.GetDirectories(Path.GetDirectoryName(profile)!, Path.GetFileName(profile) + "*"))
             {
                 try
@@ -1147,6 +1178,29 @@ public class ThreeDXBrowserTests
 
     [TestMethod]
     public Task TheBrowserSettingNamingFirefoxSignsInThroughWebDriver() => SignInAndSearchAsync(driven: null, named: true);
+
+    [TestMethod]
+    public Task TheBrowserSettingNamingFirefoxSignsInThroughTheDriverABuildCarries() => SignInAndSearchAsync(driven: null, named: true, carried: true);
+
+    /// <summary>The geckodriver scripts/fetch-geckodriver.ps1 unpacked for this runtime, which src/AnyFS.App embeds; null before it has run.</summary>
+    internal static string? CarriedDriver()
+    {
+        var repo = new DirectoryInfo(AppContext.BaseDirectory);
+        while (repo is not null && !File.Exists(Path.Combine(repo.FullName, "AnyFS.slnx")))
+        {
+            repo = repo.Parent;
+        }
+
+        if (repo is null)
+        {
+            return null;
+        }
+
+        var pins = File.ReadAllText(Path.Combine(repo.FullName, "scripts", "geckodriver.json"));
+        var tag = System.Text.RegularExpressions.Regex.Match(pins, "\"tag\"\\s*:\\s*\"([^\"]+)\"").Groups[1].Value;
+        var file = Path.Combine(repo.FullName, "tools", "geckodriver", tag, System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier, OperatingSystem.IsWindows() ? "geckodriver.exe" : "geckodriver");
+        return File.Exists(file) ? file : null;
+    }
 
     [TestMethod]
     public Task ThroughWebDriverFirefoxSignsInThroughAnIdentityProviderElsewhere() => SignInAndSearchAsync(driven: "firefox", elsewhere: true);
@@ -1253,6 +1307,112 @@ public class ThreeDXPublishedTests
                 Directory.Delete(work, true);
             }
             catch (IOException)
+            {
+            }
+        }
+    }
+
+    /// <summary>
+    /// A published anyfs signing in to the fake platform's web session through the Firefox the Browser setting names: through
+    /// WebDriver from the start and no other browser, with the geckodriver the build carries, written to its drivers folder,
+    /// while Selenium Manager downloads nothing (its cache stays empty). Headless, on profiles of the test's own; needs Firefox.
+    /// </summary>
+    [TestMethod]
+    public async Task APublishedAnyFSSignsInThroughTheNamedFirefoxWithTheDriverItCarries()
+    {
+        var exe = Environment.GetEnvironmentVariable("ANYFS_TEST_3DX_EXE");
+        if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe))
+        {
+            Assert.Inconclusive("set ANYFS_TEST_3DX_EXE to a published anyfs (scripts/publish.ps1)");
+        }
+
+        var firefox = BrowserLocator.FindKind(BrowserKind.Firefox) ?? throw new AssertInconclusiveException("no Firefox on this machine");
+        using var fake = new Fake3DX(Fake3DX.Passport.Saml, Fake3DX.Idp.Script, "127.0.0.1");
+        var content = "signed in through Firefox"u8.ToArray();
+        fake.Add("FFX-1", "A", "Published", "Document", ("firefox.txt", content));
+        var work = Path.Combine(Path.GetTempPath(), "anyfs-tests", "3dx-firefox-" + Guid.NewGuid().ToString("N"));
+        var settings = Directory.CreateDirectory(Path.Combine(work, "settings")).FullName;
+        var drivers = Path.Combine(work, "drivers");
+        var seleniumCache = Directory.CreateDirectory(Path.Combine(work, "selenium-cache")).FullName;
+        var port = 11300 + Random.Shared.Next(500);
+        await File.WriteAllTextAsync(Path.Combine(settings, "sources.json"), $$"""
+            { "version": 1, "sources": [
+              { "id": "aaaaaaaa-0000-0000-0000-000000000001", "name": "fake", "type": "3dx", "enabled": true,
+                "settings": { "serverUrl": "{{fake.SpaceUrl}}", "signInMethod": "{{ThreeDXSettings.WebSession}}", "browserPath": "{{JsonEncodedText.Encode(firefox)}}", "dateOrder": "{{ThreeDXDates.DayFirst}}", "keepAliveMinutes": 0 } } ] }
+            """);
+        await File.WriteAllTextAsync(Path.Combine(settings, "collections.json"), $$"""
+            { "version": 1, "collections": [ { "id": "aaaaaaaa-0000-0000-0000-000000000002", "name": "pub", "enabled": true,
+              "sources": [ { "id": "aaaaaaaa-0000-0000-0000-000000000001", "path": "3dx", "readOnly": true } ],
+              "mounts": [ { "id": "aaaaaaaa-0000-0000-0000-000000000003", "name": "HTTP", "provider": "http", "enabled": true, "readOnly": true, "settings": { "bindAddress": "127.0.0.1", "port": {{port}} } } ] } ] }
+            """);
+        var info = new System.Diagnostics.ProcessStartInfo(exe!) { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var arg in new[] { "serve", "--settings-dir", settings, "--log-level", "debug" })
+        {
+            info.ArgumentList.Add(arg);
+        }
+
+        info.Environment["ANYFS_3DX_PROFILES"] = Path.Combine(work, "profiles");
+        info.Environment["ANYFS_DRIVERS"] = drivers;
+        info.Environment["SE_CACHE_PATH"] = seleniumCache;
+        info.Environment.Remove("ANYFS_3DX_BROWSER");
+        info.Environment.Remove("ANYFS_3DX_WEBDRIVER");
+        using var serve = System.Diagnostics.Process.Start(info)!;
+        var output = new StringBuilder();
+        serve.OutputDataReceived += (_, e) => { lock (output) { output.AppendLine(e.Data); } };
+        serve.ErrorDataReceived += (_, e) => { lock (output) { output.AppendLine(e.Data); } };
+        serve.BeginOutputReadLine();
+        serve.BeginErrorReadLine();
+        string Log()
+        {
+            lock (output)
+            {
+                return output.ToString();
+            }
+        }
+
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+            var file = $"http://127.0.0.1:{port}/pub/3dx/{Uri.EscapeDataString("FFX-1 Rev A (Published)")}/firefox.txt";
+            HttpResponseMessage? answer = null;
+            for (var i = 0; i < 240 && answer is not { IsSuccessStatusCode: true }; i++)
+            {
+                await Task.Delay(500);
+                Assert.IsFalse(serve.HasExited, "anyfs serve stopped:\n" + Log());
+                try
+                {
+                    answer = await http.GetAsync(file);
+                }
+                catch (HttpRequestException)
+                {
+                }
+            }
+
+            Assert.IsTrue(answer is { IsSuccessStatusCode: true }, $"the file was served ({answer?.StatusCode}):\n{Log()}");
+            CollectionAssert.AreEqual(content, await answer!.Content.ReadAsByteArrayAsync());
+            var log = Log();
+            StringAssert.Contains(log, "the Browser setting names Firefox", log);
+            StringAssert.Contains(log, $"WebDriver opened Firefox headless for 127.0.0.1, driver {Path.Combine(drivers, "geckodriver-")}", log);
+            Assert.IsFalse(log.Contains("opened Microsoft Edge", StringComparison.Ordinal) || log.Contains("opened Google Chrome", StringComparison.Ordinal) || log.Contains("opened Chromium", StringComparison.Ordinal), "Firefox and no other browser:\n" + log);
+            Assert.AreEqual(1, Directory.GetFiles(drivers, "geckodriver-*").Length, "one copy, of the version the build carries");
+            Assert.IsFalse(Directory.EnumerateFiles(seleniumCache, "*", SearchOption.AllDirectories).Any(), "Selenium Manager downloaded nothing");
+        }
+        finally
+        {
+            if (!serve.HasExited)
+            {
+                serve.Kill(entireProcessTree: true);
+                serve.WaitForExit(10000);
+            }
+
+            try
+            {
+                Directory.Delete(work, true);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
             {
             }
         }

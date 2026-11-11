@@ -409,7 +409,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             {
                 wrongAccount = other;
             }
-        }, ct).ConfigureAwait(false);
+        }, logger, "teams", ct).ConfigureAwait(false);
         if (launch.Browser is not { } browser)
         {
             return new Capture(false, launch.Failure, Final: true);
@@ -417,7 +417,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
 
         try
         {
-            logger.LogInformation("teams: opened Firefox through WebDriver {Mode} for {Host}", mode, teamsHost.Host);
+            logger.LogInformation("teams: opened Firefox through WebDriver {Mode} for {Host}, driver {Driver}", mode, teamsHost.Host, browser.Driver);
             browser.Navigate(address ?? StartPage);
             return await WaitAsync(headless, deadline, want, () => wrongAccount, () => browser.Page ?? "", () => !browser.Open, ct).ConfigureAwait(false);
         }

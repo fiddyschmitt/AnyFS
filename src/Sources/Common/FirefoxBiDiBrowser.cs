@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using OpenQA.Selenium;
 using OpenQA.Selenium.BiDi;
 using OpenQA.Selenium.BiDi.Network;
@@ -10,7 +11,7 @@ namespace AnyFS.Sources.Common;
 /// reads what the page sends (Teams'): where a Chromium browser's DevTools cannot be reached — an Edge whose policy fixes
 /// its profile folder or turns remote debugging off, as on a work machine — Firefox's WebDriver answers to none of those
 /// policies. Each request the page sends is handed to a callback with its address and Authorization header. Firefox's
-/// driver (geckodriver) is found or fetched by Selenium Manager, as for <see cref="WebDriverSession"/>. Windows sign-in for
+/// driver is the geckodriver AnyFS carries (<see cref="GeckoDriver"/>), as for <see cref="WebDriverSession"/>. Windows sign-in for
 /// Microsoft accounts, the operating system's client certificates (smart cards) and enterprise root certificates are
 /// allowed, as a work sign-in may need them. Hold <see cref="ProfileLocks"/> for the profile around a launch and its use.
 /// </summary>
@@ -22,15 +23,19 @@ public sealed class FirefoxBiDiBrowser : IAsyncDisposable
     private readonly BiDi _bidi;
     private readonly DriverProcesses _processes;
 
-    private FirefoxBiDiBrowser(IWebDriver driver, BiDi bidi, DriverProcesses processes)
+    private FirefoxBiDiBrowser(IWebDriver driver, BiDi bidi, DriverProcesses processes, string driverFile)
     {
         _driver = driver;
         _bidi = bidi;
         _processes = processes;
+        Driver = driverFile;
     }
 
     /// <summary>A launch: the browser, or why there is none (Firefox or its driver would not start).</summary>
     public sealed record Launch(FirefoxBiDiBrowser? Browser, string? Failure);
+
+    /// <summary>The driver it runs through, for the log: the geckodriver AnyFS carries, or Selenium Manager's.</summary>
+    public string Driver { get; }
 
     /// <summary>The page's address now; null when it cannot be read (the browser closed).</summary>
     public string? Page
@@ -68,14 +73,16 @@ public sealed class FirefoxBiDiBrowser : IAsyncDisposable
     /// Launches Firefox on the profile, headless or with a window, each request the page sends handed to
     /// <paramref name="onRequest"/> with its address and Authorization header (null when it has none).
     /// </summary>
-    public static async Task<Launch> LaunchAsync(string firefoxPath, string profileDir, bool headless, Action<string, string?> onRequest, CancellationToken ct)
+    /// <param name="logPrefix">The source's log prefix (<c>teams</c>).</param>
+    public static async Task<Launch> LaunchAsync(string firefoxPath, string profileDir, bool headless, Action<string, string?> onRequest, ILogger logger, string logPrefix, CancellationToken ct)
     {
         Directory.CreateDirectory(profileDir);
         var processes = new DriverProcesses();
         IWebDriver driver;
+        string driverFile;
         try
         {
-            driver = await Task.Run(() => Start(firefoxPath, profileDir, headless, processes), ct).ConfigureAwait(false);
+            (driver, driverFile) = await Task.Run(() => Start(firefoxPath, profileDir, headless, processes, logger, logPrefix), ct).ConfigureAwait(false);
         }
         catch (WebDriverException ex)
         {
@@ -96,7 +103,7 @@ public sealed class FirefoxBiDiBrowser : IAsyncDisposable
                 var authorization = e.Request.Headers.FirstOrDefault(h => h.Name.Equals("Authorization", StringComparison.OrdinalIgnoreCase))?.Value is StringBytesValue v ? v.Value : null;
                 onRequest(e.Request.Url, authorization);
             }).ConfigureAwait(false);
-            return new Launch(new FirefoxBiDiBrowser(driver, bidi, processes), null);
+            return new Launch(new FirefoxBiDiBrowser(driver, bidi, processes, driverFile), null);
         }
         catch (Exception ex)
         {
@@ -142,10 +149,10 @@ public sealed class FirefoxBiDiBrowser : IAsyncDisposable
         }
     }
 
-    private static IWebDriver Start(string firefoxPath, string profileDir, bool headless, DriverProcesses processes)
+    private static (IWebDriver Driver, string DriverFile) Start(string firefoxPath, string profileDir, bool headless, DriverProcesses processes, ILogger logger, string logPrefix)
     {
         SeleniumManagerLocator.Prepare();
-        var service = FirefoxDriverService.CreateDefaultService();
+        var service = GeckoDriver.Service(logger, logPrefix);
         processes.Watch(service);
         service.HideCommandPromptWindow = true;
         service.SuppressInitialDiagnosticInformation = true;
@@ -166,7 +173,7 @@ public sealed class FirefoxBiDiBrowser : IAsyncDisposable
         options.SetPreference("network.http.windows-sso.enabled", true);
         options.SetPreference("security.osclientcerts.autoload", true);
         options.SetPreference("security.enterprise_roots.enabled", true);
-        return new FirefoxDriver(service, options, CommandTimeout);
+        return (new FirefoxDriver(service, options, CommandTimeout), GeckoDriver.FileOf(service));
     }
 
     private static string FirstLine(string message) => message.Split('\n', 2)[0].Trim();

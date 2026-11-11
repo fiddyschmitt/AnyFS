@@ -41,18 +41,35 @@
        because the SDK builds library references without the RuntimeIdentifier.
        - the WinFsp installer: scripts/fetch-winfsp.ps1 puts the pinned MSI under tools/winfsp/; Windows builds embed
          it so the Install button installs the driver silently (winget is the fallback when a build has none).
+       - geckodriver, Firefox's WebDriver driver: scripts/fetch-geckodriver.ps1 unpacks the release scripts/geckodriver.json
+         pins under tools/geckodriver/<tag>/<rid>/; every build embeds the one for its runtime as "geckodriver", which a
+         Firefox sign-in writes out once per version and hands to Selenium (AnyFS.Sources.Common's GeckoDriver), so it
+         downloads no driver. A build without it leaves the driver to Selenium Manager; in CI that is an error, so no
+         published build goes out without it.
        The SMB server is LibSmb, in this process: nothing of it to bundle. -->
   <PropertyGroup>
     <BundleRid Condition="'$(RuntimeIdentifier)' != ''">$(RuntimeIdentifier)</BundleRid>
     <BundleRid Condition="'$(RuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</BundleRid>
     <BundleIsWindows Condition="$(BundleRid.StartsWith('win'))">true</BundleIsWindows>
     <WinFspMsiDir>$(MSBuildThisFileDirectory)..\..\tools\winfsp</WinFspMsiDir>
+    <!-- normalised: on Linux and macOS a path with backslashes reaches File.ReadAllText as one file name -->
+    <GeckoDriverJson>$([MSBuild]::NormalizePath('$(MSBuildThisFileDirectory)', '..', '..', 'scripts', 'geckodriver.json'))</GeckoDriverJson>
+    <GeckoDriverTag Condition="Exists('$(GeckoDriverJson)')">$([System.Text.RegularExpressions.Regex]::Replace($([System.IO.File]::ReadAllText('$(GeckoDriverJson)')), '(?s)^.*?"tag"\s*:\s*"([^"]+)".*$', '$1'))</GeckoDriverTag>
+    <GeckoDriverDir>$([MSBuild]::NormalizeDirectory('$(MSBuildThisFileDirectory)', '..', '..', 'tools', 'geckodriver', '$(GeckoDriverTag)', '$(BundleRid)'))</GeckoDriverDir>
   </PropertyGroup>
   <ItemGroup Condition="'$(BundleIsWindows)' == 'true'">
     <WinFspMsi Include="$(WinFspMsiDir)\winfsp-*.msi" />
     <EmbeddedResource Include="@(WinFspMsi)" LogicalName="winfsp.msi" />
   </ItemGroup>
+  <ItemGroup Condition="'$(GeckoDriverTag)' != ''">
+    <GeckoDriver Include="$(GeckoDriverDir)geckodriver*" />
+    <EmbeddedResource Include="@(GeckoDriver)" LogicalName="geckodriver" />
+  </ItemGroup>
   <Target Name="ReportBundledTools" BeforeTargets="CoreCompile">
+    <Message Importance="high" Text="geckodriver: embedding @(GeckoDriver)" Condition="'@(GeckoDriver)' != ''" />
+    <Message Importance="high" Text="geckodriver: none under $(GeckoDriverDir); run scripts/fetch-geckodriver.ps1 first, or a Firefox sign-in leaves the driver to Selenium Manager, which downloads one" Condition="'@(GeckoDriver)' == '' and '$(GITHUB_ACTIONS)' != 'true'" />
+    <Error Text="geckodriver: none under $(GeckoDriverDir); the workflow must run scripts/fetch-geckodriver.ps1 before it builds, or the build carries no Firefox driver" Condition="'@(GeckoDriver)' == '' and '$(GITHUB_ACTIONS)' == 'true'" />
+    <Error Text="geckodriver: more than one file under $(GeckoDriverDir) (@(GeckoDriver)); keep the one scripts/fetch-geckodriver.ps1 unpacks" Condition="'@(GeckoDriver->Count())' &gt; '1'" />
     <Message Importance="high" Text="WinFsp: embedding @(WinFspMsi)" Condition="'@(WinFspMsi)' != ''" />
     <Message Importance="high" Text="WinFsp: no installer under $(WinFspMsiDir); run scripts/fetch-winfsp.ps1 first or the Install button will fall back to winget" Condition="'$(BundleIsWindows)' == 'true' and '@(WinFspMsi)' == ''" />
     <Error Text="WinFsp: more than one installer under $(WinFspMsiDir) (@(WinFspMsi)); keep the one scripts/winfsp.json pins" Condition="'@(WinFspMsi->Count())' &gt; '1'" />

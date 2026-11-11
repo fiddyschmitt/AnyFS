@@ -23,8 +23,9 @@ internal sealed record WebDriverBrowser(BrowserKind Kind, string Path)
 /// cannot drive the browser's DevTools port itself: remote debugging turned off by policy, a profile folder fixed by
 /// policy, or a browser that never opens the port. The person's default browser comes first, then the others installed,
 /// Firefox among them, whose WebDriver no Edge or Chrome policy touches; a Chromium browser whose policy blocks remote
-/// debugging is left out, since its WebDriver needs it too. Selenium Manager, carried in the single-file build, finds or
-/// fetches the driver that matches each browser. A profile of AnyFS's own per host and browser keeps the sign-in
+/// debugging is left out, since its WebDriver needs it too. Firefox's driver is the geckodriver AnyFS carries
+/// (<see cref="GeckoDriver"/>); Selenium Manager, carried in the single-file build, finds or fetches the one that matches
+/// each Chromium browser. A profile of AnyFS's own per host and browser keeps the sign-in
 /// session, so a headless renewal works as it does over DevTools. WebDriver reads only the cookies of the page the
 /// browser shows, so once signed in it opens the target's other pages in turn for theirs (<see cref="WebSignInTarget.AlsoVisitAsync"/>).
 /// </summary>
@@ -180,9 +181,10 @@ internal sealed class WebDriverSession
         Directory.CreateDirectory(profile);
         using var processes = new DriverProcesses();
         IWebDriver driver;
+        string driverFile;
         try
         {
-            driver = await Task.Run(() => Start(browser, profile, headless, _target.NegotiateHosts, processes), ct).ConfigureAwait(false);
+            (driver, driverFile) = await Task.Run(() => Start(browser, profile, headless, _target.NegotiateHosts, processes, _logger, Prefix), ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is WebDriverException or InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
         {
@@ -192,7 +194,7 @@ internal sealed class WebDriverSession
 
         try
         {
-            _logger.LogInformation("{Prefix}: WebDriver opened {Browser} {Mode} for {Host}", Prefix, browser.Name, mode, Site.Host);
+            _logger.LogInformation("{Prefix}: WebDriver opened {Browser} {Mode} for {Host}, driver {Driver}", Prefix, browser.Name, mode, Site.Host, driverFile);
             await GoAsync(driver, Site, ct).ConfigureAwait(false);
             var until = DateTime.UtcNow + deadline;
             (Uri? Page, IReadOnlyList<SessionCookie> Cookies) seen = (null, []);
@@ -392,14 +394,15 @@ internal sealed class WebDriverSession
         return (page, cookies);
     }
 
-    private static IWebDriver Start(WebDriverBrowser browser, string profile, bool headless, IReadOnlyList<string> negotiateHosts, DriverProcesses processes)
+    /// <summary>The browser started through its driver, and that driver's file: Firefox's the geckodriver AnyFS carries, the others' Selenium Manager's.</summary>
+    private static (IWebDriver Driver, string DriverFile) Start(WebDriverBrowser browser, string profile, bool headless, IReadOnlyList<string> negotiateHosts, DriverProcesses processes, ILogger logger, string logPrefix)
     {
         SeleniumManagerLocator.Prepare();
         switch (browser.Kind)
         {
             case BrowserKind.Firefox:
             {
-                var service = FirefoxDriverService.CreateDefaultService();
+                var service = GeckoDriver.Service(logger, logPrefix);
                 processes.Watch(service);
                 service.HideCommandPromptWindow = true;
                 service.SuppressInitialDiagnosticInformation = true;
@@ -416,7 +419,7 @@ internal sealed class WebDriverSession
                     options.SetPreference("network.negotiate-auth.trusted-uris", string.Join(',', negotiateHosts));
                 }
 
-                return new FirefoxDriver(service, options, CommandTimeout);
+                return (new FirefoxDriver(service, options, CommandTimeout), GeckoDriver.FileOf(service));
             }
 
             case BrowserKind.Edge:
@@ -424,7 +427,7 @@ internal sealed class WebDriverSession
                 var service = EdgeDriverService.CreateDefaultService();
                 processes.Watch(service);
                 Quiet(service);
-                return new EdgeDriver(service, Chromium(new EdgeOptions(), browser, profile, headless, negotiateHosts), CommandTimeout);
+                return (new EdgeDriver(service, Chromium(new EdgeOptions(), browser, profile, headless, negotiateHosts), CommandTimeout), GeckoDriver.FileOf(service));
             }
 
             default:
@@ -432,7 +435,7 @@ internal sealed class WebDriverSession
                 var service = ChromeDriverService.CreateDefaultService();
                 processes.Watch(service);
                 Quiet(service);
-                return new ChromeDriver(service, Chromium(new ChromeOptions(), browser, profile, headless, negotiateHosts), CommandTimeout);
+                return (new ChromeDriver(service, Chromium(new ChromeOptions(), browser, profile, headless, negotiateHosts), CommandTimeout), GeckoDriver.FileOf(service));
             }
         }
     }

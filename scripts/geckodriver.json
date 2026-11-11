@@ -1,0 +1,14 @@
+{
+  "geckodriver": {
+    "repo": "mozilla/geckodriver",
+    "tag": "v0.37.1",
+    "assets": {
+      "win-x64": { "asset": "geckodriver-v0.37.1-win64.zip", "sha256": "dfed9315abe8d2fbc1b6161a2ee8002452e79cf05ee92fdc653a4e26bc35edd8" },
+      "win-arm64": { "asset": "geckodriver-v0.37.1-win-aarch64.zip", "sha256": "30889cca635b794b327a59664ac9657bc338e62e1c66d01e40a8c422ff524057" },
+      "linux-x64": { "asset": "geckodriver-v0.37.1-linux64.tar.gz", "sha256": "e815130ea95983e162ae91843b48d3a3ce991735635fce83a647afde21e09f7e" },
+      "linux-arm64": { "asset": "geckodriver-v0.37.1-linux-aarch64.tar.gz", "sha256": "8fd90b951422fbad5b56539fb344dff66eb3f986d615d8d6fde9f1f62dad610c" },
+      "osx-x64": { "asset": "geckodriver-v0.37.1-macos.tar.gz", "sha256": "d02b3f7003f999caf90974a2ef5da0286c05d01cee19112c86846d759fdba4f5" },
+      "osx-arm64": { "asset": "geckodriver-v0.37.1-macos-aarch64.tar.gz", "sha256": "d02b3f7003f999caf90974a2ef5da0286c05d01cee19112c86846d759fdba4f5" }
+    }
+  }
+}

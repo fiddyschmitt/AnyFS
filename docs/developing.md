@@ -8,15 +8,20 @@ users; this page is for anyone changing the code.
 - The .NET SDK named in [global.json](../global.json) (any later feature band of the same major
   also works).
 - PowerShell for the scripts: Windows PowerShell 5.1 or pwsh 7 both run them.
-- One download the Windows build embeds, fetched once into a gitignored folder:
+- Two downloads the build embeds, fetched once into gitignored folders:
 
 ```
 .\scripts\fetch-winfsp.ps1            # the pinned WinFsp installer into tools/winfsp/
+.\scripts\fetch-geckodriver.ps1       # the pinned geckodriver, every runtime's, into tools/geckodriver/
 ```
 
+A build embeds them for the runtime it targets: the publish RID, or the SDK's own RID for a plain
+`dotnet build`, so a Debug run has them too. The WinFsp installer goes into Windows builds only.
 Without it the solution still builds, but the **Install WinFsp driver** button falls back to
-winget. A build embeds the installer when the runtime it targets is Windows: the publish RID, or
-the SDK's own RID for a plain `dotnet build`, so a Debug run has it too.
+winget. geckodriver, Firefox's WebDriver driver, goes into every build: a web session that signs
+in through Firefox writes it out once per version under `%LOCALAPPDATA%\AnyFS\drivers` and
+downloads nothing. Without it, a local build still works, and Selenium Manager downloads a driver
+when Firefox is first used; in CI, a build without it fails.
 
 ## Build, test, run
 
@@ -78,8 +83,10 @@ platform on 127.0.0.1 (`tests/AnyFS.Sources.Tests/Fake3DX.cs`: 3DPassport, 3DSpa
 server and an identity provider), so they need nothing outside; the Windows sign-ins among them run
 on Windows only. Four of them open more: `ANYFS_TEST_3DX_BROWSER=1` lets the web session's browser
 tests start Edge and Firefox headless (over DevTools, and through WebDriver with each, an identity
-provider on a site of its own, one that shows a dialog and a Browser setting naming Firefox among them), `ANYFS_TEST_3DX_EXE` pointing at
-a published `anyfs.exe` serves a 3DX source of the fake through that build's HTTP mount,
+provider on a site of its own, one that shows a dialog and a Browser setting naming Firefox among them, that one also with
+the geckodriver `scripts/fetch-geckodriver.ps1` fetched), `ANYFS_TEST_3DX_EXE` pointing at
+a published `anyfs.exe` serves a 3DX source of the fake through that build's HTTP mount, signed in once as yourself and
+once through the Firefox a Browser setting names, with the geckodriver the build carries,
 `ANYFS_TEST_3DX_SCALE=1` builds, saves and reads back a tree of 200,000 documents and prints the
 times and memory to the test's output, and `ANYFS_TEST_3DX_WINDOW` pointing at a published
 `anyfs.exe` opens its window over a 3DX source listing the fake and prints how long the window took
@@ -204,8 +211,9 @@ layer refuses the driver it installs; the App project checks this at build time.
 ## Continuous integration and release
 
 [build.yml](../.github/workflows/build.yml) runs on every push to `main` and on pull requests, on
-Windows, Linux and macOS: restore, build with warnings as errors, unit tests, the trimmed publish
-for that runner, the smoke test, and the executable as an artifact.
+Windows, Linux and macOS: the bundled tools fetched (each kept in the workflow's cache, keyed on
+its JSON pin), restore, build with warnings as errors, unit tests, the trimmed publish for that
+runner, the smoke test, and the executable as an artifact.
 
 A tag `v<version>` runs [release.yml](../.github/workflows/release.yml): the five runtimes are
 published (trimmed; smoke-tested where the runner can run them) and attached to a GitHub release
@@ -265,9 +273,11 @@ src/Mounts/Http          the HTTP mount
 tests/                   unit tests per assembly, GUI tests (headless Avalonia), the lab's AnyFS.E2E and LibSmb.E2E
                          (over AnyFS.TestLab), fixtures/MakeTree, fixtures/SamplePlugin, fixtures/SharePointSignIn (the
                          live SharePoint tests' sign-in), fixtures/SmbStress (LibSmb.E2E's load)
-scripts/                 publish.ps1, smoke.ps1, pack.ps1, fetch-winfsp.ps1 (+ winfsp.json)
+scripts/                 publish.ps1, smoke.ps1, pack.ps1, fetch-winfsp.ps1 (+ winfsp.json), fetch-geckodriver.ps1
+                         (+ geckodriver.json)
 provisioning/            the test lab: settings.yml, Vagrantfile, ansible/, windows/, macos/, mac.ps1, check.ps1, publish.ps1
 tools/winfsp/            the fetched WinFsp installer (not in git)
+tools/geckodriver/       the fetched geckodriver, one per runtime (not in git)
 docs/                    settings-format.md, plugin-authoring.md, mounts.md, this page
 ```
 

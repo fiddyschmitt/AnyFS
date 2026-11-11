@@ -9,8 +9,9 @@
        Not part of the SDK: its dependencies (Selenium) are no plugin's business. -->
   <ItemGroup>
     <!-- Selenium (Apache-2.0): the web session's fallback where AnyFS cannot reach the browser's DevTools port itself
-         (a policy, or a profile the browser will not take). Selenium Manager, a native helper in the package, finds or
-         downloads the driver that matches the browser; the single-file publish carries it (spec 7.3.2). -->
+         (a policy, or a profile the browser will not take), and the way it drives Firefox. Selenium Manager, a native
+         helper in the package, finds or downloads the driver that matches a Chromium browser; the single-file publish
+         carries it. Firefox's driver is the geckodriver src/AnyFS.App embeds (GeckoDriver, spec 7.3.2). -->
     <PackageReference Include="Selenium.WebDriver" />
     <!-- System.Threading.RateLimiting (MIT, the .NET runtime's own): the pace of requests to a service (RequestPace) -->
     <PackageReference Include="System.Threading.RateLimiting" />
