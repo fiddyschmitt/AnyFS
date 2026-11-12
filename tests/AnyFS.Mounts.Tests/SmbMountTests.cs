@@ -128,7 +128,7 @@ public class SmbMountTests
 
     /// <summary>
     /// Writes go through the VFS: a new file, a folder, a rename, a delete; an OPEN_IF of an existing file opens it rather
-    /// than truncating it (as the Go server's VFS client did, through the endpoint's create), and an overwrite truncates.
+    /// than truncating it, and an overwrite truncates.
     /// </summary>
     [TestMethod]
     public async Task WritesGoThroughTheVfs()
@@ -248,27 +248,6 @@ public class SmbMountTests
         await client.ListAsync(tree, "");
         await ReadAsync(client, tree, "medium.bin");
         Assert.AreEqual(0, context.ActiveConnections);
-    }
-
-    /// <summary>The copies of portable-smb-server earlier builds unpacked into the provider's cache folder go at the next start.</summary>
-    [TestMethod]
-    public async Task OldServerCopiesAreRemoved()
-    {
-        var provider = new SmbMountProvider();
-        var settings = (SmbMountSettings)provider.CreateDefaultSettings(new Collection("work"));
-        settings.Port = FreePort();
-        settings.Password = Password;
-        var context = new TestMountContext("work", "smb");
-        Directory.CreateDirectory(context.ProviderCacheDirectory);
-        var old = Path.Combine(context.ProviderCacheDirectory, "portable-smb-server-0123abcd.exe");
-        var other = Path.Combine(context.ProviderCacheDirectory, "keep.txt");
-        await File.WriteAllTextAsync(old, "old");
-        await File.WriteAllTextAsync(other, "keep");
-        var mount = provider.CreateMount(settings, new Collection("work"));
-        await mount.StartAsync(await VfsAsync(Tree()), context, CancellationToken.None);
-        _cleanup.Add(mount);
-        Assert.IsFalse(File.Exists(old));
-        Assert.IsTrue(File.Exists(other));
     }
 
     /// <summary>A port another program holds: the mount fails saying so.</summary>

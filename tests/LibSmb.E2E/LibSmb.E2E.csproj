@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- LibSmb end to end: the SMB conditions ported from portable-smb-server's rig (its TestMatrix, TestMultiClient and
-       TestStress), from the Windows, Linux and macOS clients of the lab against anyfs's SMB shares on each lab host. They
+  <!-- LibSmb end to end: the SMB conditions, several clients at once and a stress run, from the Windows, Linux and macOS
+       clients of the lab against anyfs's SMB shares on each lab host. They
        take hours, so they are a project of their own, for when LibSmb or the SMB mount changes; tests/LibSmb.Tests are
        the quick tests, and tests/AnyFS.E2E reaches every collection over SMB with the other mounts. -->
   <PropertyGroup>

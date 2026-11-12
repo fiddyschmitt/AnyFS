@@ -22,7 +22,7 @@ chown "$VM_USER:staff" "$keys"
 chmod 600 "$keys"
 
 # --- TCP segmentation offload off, now and at every boot -----------------------
-# With TSO on, bulk TCP from this VM to the VirtualBox VMs stalls (the rclone lab measured 2 MiB
+# With TSO on, bulk TCP from this VM to the VirtualBox VMs stalls (the earlier SMB lab measured 2 MiB
 # taking 121 s; with TSO off, 4 x 200 MiB took 6.5 s). Small packets get through, so SSH and the
 # SMB handshake work, and then every large transfer hangs.
 plist=/Library/LaunchDaemons/local.anyfs-lab.tso-off.plist

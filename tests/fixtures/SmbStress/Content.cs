@@ -5,7 +5,7 @@ using Microsoft.Win32.SafeHandles;
 namespace AnyFS.Fixtures.SmbStress;
 
 /// <summary>
-/// Deterministic file content, as portable-smb-server's stress worker has it (test/rig/worker/content.go). Every byte a
+/// Deterministic file content. Every byte a
 /// worker writes is a function of the run's seed, a content key (the file's share-relative path, slash-separated, when it
 /// was made), the offset and the block's generation, so any party (the writer, another client reading across the share,
 /// the audit on the host's own disk) can check any range of a file knowing only its path; nothing is shared between

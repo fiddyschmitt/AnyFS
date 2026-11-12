@@ -88,7 +88,7 @@ public sealed partial class StressJson : JsonSerializerContext;
 
 /// <summary>
 /// Every worker's operations: counts, latencies, failures, and what is in flight. An operation past the timeout is a stall,
-/// reported even when it returns in the end; one that never returns is a hang (test/rig/worker/stats.go).
+/// reported even when it returns in the end; one that never returns is a hang.
 /// </summary>
 internal sealed class Recorder
 {

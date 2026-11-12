@@ -242,7 +242,7 @@ every host and exercises every mount provider from the host itself and from each
 against a generated fixture; a machine that is not reachable turns its rows inconclusive rather
 than red. `ANYFS_E2E_MOUNTS=Smb` (or `ANYFS_E2E_CLIENTS=local,macos`) before `dotnet test` runs
 only those rows. `dotnet test tests/LibSmb.E2E` is for after a change to LibSmb or the SMB mount: on
-every host, the SMB conditions ported from portable-smb-server's rig from every client, every client
+every host, the SMB conditions from every client, every client
 at once on one share, and a stress run with `SmbStress` (tests/fixtures/SmbStress), against an anyfs
 that serves the conditions' own shares; `ANYFS_E2E_SMB_CONDITIONS` picks among them (the lab's
 README lists them). The two share the lab's plumbing, `tests/AnyFS.TestLab`. Note that

@@ -102,7 +102,7 @@ internal static class TestSupport
         return reply.AsSpan(Smb2.HeaderSize + 64, 16).ToArray();
     }
 
-    /// <summary>A directory open put straight into the connection's table, as the Go tests' dirHandle does.</summary>
+    /// <summary>A directory open put straight into the connection's table.</summary>
     public static byte[] DirHandle(SmbConnection connection, SmbServer server, string path)
     {
         var share = server.Shares.Single(s => s.Name == "data");

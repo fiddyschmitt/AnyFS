@@ -53,8 +53,8 @@ comma-separated list
 only those rows are generated. A test-name `--filter` cannot do this, because the rows are expanded
 when the run starts, not at discovery.
 
-`tests/LibSmb.E2E` runs the SMB conditions on every host from every client (`SmbConditions.cs`,
-ported from portable-smb-server's rig when AnyFS's own server, LibSmb, took its place): round trips,
+`tests/LibSmb.E2E` runs the SMB conditions on every host from every client (`SmbConditions.cs`):
+round trips,
 a 256 MiB file each way, ranges, edits in place, renames and deletes, special names, case, a deep
 tree, 1000 small files and a 5000-entry folder, timestamps, disk space, a 4.5 GiB sparse file,
 concurrent writers and readers, churn while listing, a copy killed half-way, 50 listings at once,
@@ -80,9 +80,9 @@ source from the farm's test site; a farm's rows are Inconclusive while it is dow
 against a new farm seeds the fixture tree into it, which takes about 25 minutes.
 
 The first `vagrant up` takes about an hour: the Windows VM's first boot 15 to 20 minutes (the box is
-14 GB, already here if the ft or rclone lab is), each Linux VM about 10 (most of it bringing Debian
+14 GB, already here if the ft or the earlier SMB lab is), each Linux VM about 10 (most of it bringing Debian
 up to date). After that, `vagrant up` just boots them. The lab takes about 11 GB of memory on this
-PC and 6 GB on the Mac (the rclone lab's macOS VM can't run at the same time).
+PC and 6 GB on the Mac (the earlier SMB lab's macOS VM can't run at the same time).
 
 ## Everyday commands
 
@@ -153,13 +153,13 @@ when it is the host, its own rows when it is a client.
   what anyfs is tested with, so the play upgrades each Linux VM rather than leaving it on the kernel
   bento's box was built with, and the Vagrantfile reboots into the newest one. The Guest Additions'
   boot script has no modules for a new kernel, so a drop-in makes it load the kernel's own vboxguest
-  and vboxsf instead (as the ft, rclone and SimpleKVM labs do).
+  and vboxsf instead (as the ft, SMB and SimpleKVM labs do).
 - **The WinFsp driver on the Windows VM** is the pinned installer from `scripts/winfsp.json`, the
   same MSI anyfs.exe carries; the provisioner checks its SHA-256 before `msiexec /qn`.
 - **The SSHFS source logs in with a key** the upstream makes at provisioning (`/srv/anyfs/sshfs_key`):
   headless anyfs can't answer a password prompt, and a password would have to be in the secret store,
   which only anyfs can write. The tests copy the key to each host.
-- **The macOS VM** follows the rclone lab exactly: tart on the Mac mini, a MAC address pinned in
+- **The macOS VM** follows the earlier SMB lab exactly: tart on the Mac mini, a MAC address pinned in
   `macos/Vagrantfile` and the address reserved for it on the router, Vagrant run on the Mac by
   `mac.ps1`. TCP segmentation offload is switched off in the VM, or bulk transfers to the VirtualBox
   VMs stall.

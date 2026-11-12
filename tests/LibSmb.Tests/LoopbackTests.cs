@@ -8,8 +8,7 @@ using static LibSmb.Tests.TestSupport;
 namespace LibSmb.Tests;
 
 /// <summary>
-/// The server over a real TCP connection, with the tests' own SMB2 client: portable-smb-server's loopback tests
-/// (test/e2e_test.go, stress_e2e_test.go, internal/smb/server_test.go) ported, and what only the wire shows (signed
+/// The server over a real TCP connection, with the tests' own SMB2 client, and what only the wire shows (signed
 /// sessions on every dialect, compound chains, the SMB1 upgrade, shares coming and going).
 /// </summary>
 [TestClass]

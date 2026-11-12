@@ -6,8 +6,8 @@ namespace AnyFS.Fixtures.SmbStress;
 internal sealed record PubFile(string Rel, long Size);
 
 /// <summary>
-/// One worker driving the share through its mount with the OS's own file API, as every application does
-/// (test/rig/worker/fsmode.go). Several run at once in one process, so one client has requests in flight together on its
+/// One worker driving the share through its mount with the OS's own file API, as every application does.
+/// Several run at once in one process, so one client has requests in flight together on its
 /// connection; several clients run at once on several machines. Each worker owns stress/&lt;client&gt;/w&lt;N&gt;/ on the
 /// share. The files it publishes there are named after their size (pub_&lt;seq&gt;_&lt;size&gt;.bin) and their content is a
 /// function of their share-relative path, so any other client, and the audit, can check them by name alone.

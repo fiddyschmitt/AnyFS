@@ -39,8 +39,8 @@ public sealed class Deployment : IDisposable
 }
 
 /// <summary>
-/// portable-smb-server's rig, ported, against one lab host's anyfs with shares of its own over an empty folder
-/// (<see cref="AnyFsHost.DeploySmbShares"/>): each condition (<see cref="SmbConditions"/>, the rig's TestMatrix) from every
+/// The SMB conditions against one lab host's anyfs with shares of its own over an empty folder
+/// (<see cref="AnyFsHost.DeploySmbShares"/>): each condition (<see cref="SmbConditions"/>) from every
 /// client it applies to, the clients being every machine in the lab (the host itself, the Linux upstream and the hosts of
 /// the other two OSes); then every client at once on one share (the rig's TestMultiClient), every client at once under
 /// load (<see cref="SmbStressRun"/>, its TestStress), and anyfs's log.

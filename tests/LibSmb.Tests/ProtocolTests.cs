@@ -5,7 +5,7 @@ using static LibSmb.Tests.TestSupport;
 
 namespace LibSmb.Tests;
 
-/// <summary>The commands handled one by one, as portable-smb-server's Go tests have them (internal/smb/smb_test.go), ported.</summary>
+/// <summary>The commands handled one by one.</summary>
 [TestClass]
 public class ProtocolTests
 {
@@ -101,7 +101,8 @@ public class ProtocolTests
         Assert.AreNotEqual(OpenFile.PathFileId("s", "a/b"), OpenFile.PathFileId("s", "a/c"));
         Assert.AreNotEqual(OpenFile.PathFileId("s1", "a/b"), OpenFile.PathFileId("s2", "a/b"));
 
-        // the same ids as portable-smb-server's, so a client's cache does not see every file change
+        // an id is MD5 of the share and the path, so it is the same after a restart and a client's cache does not see every
+        // file change
         Span<byte> hash = stackalloc byte[16];
         System.Security.Cryptography.MD5.HashData("data\0a/b"u8, hash);
         Assert.AreEqual(Wire.U64(hash, 0), OpenFile.PathFileId("data", "a/b"));

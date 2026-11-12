@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- LibSmb: an SMB 2/3 file server in plain C#, from Microsoft's open specification [MS-SMB2], ported from
-       portable-smb-server (Go): dialects 2.0.2 to 3.0.2, NTLMv2 through SPNEGO or guests, signing, compounding, Apple's
-       extensions for macOS. It serves any ISmbFileSystem; LocalFileSystem serves a folder. Nothing of AnyFS's, and no
-       dependency but Microsoft's logging abstractions. It is its own package on NuGet.org, with its own version (below,
-       not AnyFS's): a tag libsmb-v<Version> publishes it (.github/workflows/libsmb.yml). -->
+  <!-- LibSmb: an SMB 2/3 file server in plain C#, from Microsoft's open specification [MS-SMB2]: dialects 2.0.2 to 3.0.2,
+       NTLMv2 through SPNEGO or guests, signing, compounding, Apple's extensions for macOS. It serves any ISmbFileSystem;
+       LocalFileSystem serves a folder. Nothing of AnyFS's, and no dependency but Microsoft's logging abstractions. It is
+       its own package on NuGet.org, with its own version (below, not AnyFS's): a tag libsmb-v<Version> publishes it
+       (.github/workflows/libsmb.yml). -->
   <PropertyGroup>
     <AssemblyName>LibSmb</AssemblyName>
     <RootNamespace>LibSmb</RootNamespace>
@@ -33,7 +33,5 @@
     <!-- AnyFS's SMB mount tests use LibSmb.Tests' client (linked), which reads the wire with these internals -->
     <InternalsVisibleTo Include="AnyFS.Mounts.Tests" />
     <None Include="README.md" Pack="true" PackagePath="\" />
-    <!-- the code LibSmb was adapted from, and its licence, travel with the package -->
-    <None Include="THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="\" />
   </ItemGroup>
 </Project>

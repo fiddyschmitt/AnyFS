@@ -2,8 +2,8 @@ using System.Globalization;
 using System.Text.Json;
 using AnyFS.Fixtures.SmbStress;
 
-// SmbStress: the load generator and checker behind LibSmb.E2E's stress run, ported from portable-smb-server's psmbstress
-// (test/rig/worker). The harness can't load a server by driving file operations over SSH one command at a time, so it
+// SmbStress: the load generator and checker behind LibSmb.E2E's stress run.
+// The harness can't load a server by driving file operations over SSH one command at a time, so it
 // puts this on every client machine and lets it hammer the mounted share for a set time, checking every byte it reads:
 //
 //   SmbStress run --root <share folder> --name <client> --seed N --seconds S [--workers 4] [--large-max-mb 32]

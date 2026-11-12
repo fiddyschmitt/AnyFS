@@ -32,4 +32,4 @@ Not implemented: SMB 3.1.1, encryption, byte-range lock enforcement (locks are g
 notifications, named pipes (so no share list for `net view`), DFS, alternate data streams and security descriptors.
 
 MIT licensed. The source is in [AnyFS](https://github.com/fiddyschmitt/AnyFS), which LibSmb was written for, under
-`src/LibSmb`; THIRD-PARTY-NOTICES.txt in the package names the code it was adapted from.
+`src/LibSmb`.

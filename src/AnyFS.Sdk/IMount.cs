@@ -147,7 +147,7 @@ public interface IMountContext
 
     /// <summary>
     /// Gets or creates a resource shared by every mount that asks for the same key (one Kestrel per
-    /// bind address and port, one Go server per port). It is disposed when the last lease is.
+    /// bind address and port, one SMB server per address and port). It is disposed when the last lease is.
     /// </summary>
     Task<ISharedLease<T>> AcquireSharedAsync<T>(string key, Func<CancellationToken, Task<T>> factory, CancellationToken ct)
         where T : class, IAsyncDisposable;

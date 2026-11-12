@@ -17,8 +17,8 @@ public readonly record struct SmbResult(int Code, string Output)
 public sealed class SmbStepException(string message) : Exception(message);
 
 /// <summary>
-/// The file operations the SMB conditions run on a machine, in its own shell, as portable-smb-server's rig has them
-/// (test/rig/ops.go): PowerShell on Windows (.NET calls where a cmdlet's behaviour varies between versions), bash on Linux,
+/// The file operations the SMB conditions run on a machine, in its own shell:
+/// PowerShell on Windows (.NET calls where a cmdlet's behaviour varies between versions), bash on Linux,
 /// and on macOS the BSD userland (shasum, not sha256sum; stat -f, not stat -c; perl for byte-exact work, since macOS has
 /// neither truncate(1) nor a GNU dd). One definition each, so the conditions cannot drift apart; every path is quoted, so
 /// names with quotes, spaces and non-ASCII are safe.
@@ -409,8 +409,8 @@ public static class SmbOps
 }
 
 /// <summary>
-/// A share mounted on a client machine with the OS's own SMB client, as portable-smb-server's rig mounts them
-/// (test/rig/client.go): Windows net use with a drive letter and /TCPPORT (Windows 11 24H2+), Linux mount -t cifs (the
+/// A share mounted on a client machine with the OS's own SMB client:
+/// Windows net use with a drive letter and /TCPPORT (Windows 11 24H2+), Linux mount -t cifs (the
 /// kernel's client), macOS mount_smbfs. <see cref="Root"/> is the mount's local path once mounted.
 /// </summary>
 public sealed class SmbMount(Machine host, string serverIp, string share, int port)
@@ -563,7 +563,7 @@ public sealed class SmbMount(Machine host, string serverIp, string share, int po
 }
 
 /// <summary>
-/// One SMB condition's run, as portable-smb-server's rig has its pair (test/rig/matrix_test.go): the client machine, anyfs's
+/// One SMB condition's run: the client machine, anyfs's
 /// host (the server), the client's mount of smbdata (made the first time a condition asks for <see cref="Root"/>), the
 /// share's folder as the client sees it and as the host has it, a scratch folder on the client's own disk, and what the
 /// condition found. A failed <see cref="Check"/> is recorded and the condition goes on; a failed must stops it.

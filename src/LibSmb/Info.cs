@@ -265,8 +265,8 @@ internal static class Info
     }
 
     /// <summary>
-    /// A volume's size in allocation units. One whose space is unknown is a large volume, 1 TiB with 512 GiB free, as
-    /// portable-smb-server had it: with nothing free, a client takes the share for full and refuses to copy to it.
+    /// A volume's size in allocation units. One whose space is unknown is a large volume, 1 TiB with 512 GiB free: with
+    /// nothing free, a client takes the share for full and refuses to copy to it.
     /// </summary>
     private static (ulong Total, ulong Free) Units(SmbSpace? space)
     {

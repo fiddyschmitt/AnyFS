@@ -4,7 +4,7 @@ namespace AnyFS.Core.Runtime;
 
 /// <summary>
 /// Reference-counted resources shared across mounts by key (one Kestrel per bind address and port, one
-/// Go server per port). Concurrent acquirers of the same key share one creation; the resource is
+/// SMB server per address and port). Concurrent acquirers of the same key share one creation; the resource is
 /// disposed when the last lease goes.
 /// </summary>
 public sealed class SharedResources

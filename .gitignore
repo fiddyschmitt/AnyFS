@@ -494,8 +494,8 @@ $RECYCLE.BIN/
 anyfs.log
 anyfs.*.log
 /scratch/
-# where scripts/fetch-go-servers.ps1 put portable-smb-server before LibSmb served SMB in-process: no longer used, and a
-# leftover folder may be deleted; kept ignored so one is never committed
+# where an earlier fetch script put the servers it downloaded: no longer used, and a leftover folder may be deleted;
+# kept ignored so one is never committed
 /tools/go-servers/
 # the WinFsp installer scripts/fetch-winfsp.ps1 downloads (embedded in Windows builds for the Install button)
 /tools/winfsp/

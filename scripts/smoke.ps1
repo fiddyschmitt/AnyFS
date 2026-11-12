@@ -178,8 +178,8 @@ try {
         }
         catch { }
         Check ($smbDialect -in @('0202', '0210')) "SMB server (LibSmb, in the process) answers a NEGOTIATE on port $($Port + 3) (dialect $smbDialect)"
-        $serverCopies = @(Get-ChildItem ([System.IO.Path]::Combine($work, 'cache', 'mount-providers', 'smb')) -Filter 'portable-smb-server-*' -File -ErrorAction SilentlyContinue)
-        Check ($serverCopies.Count -eq 0) "no server unpacked under cache/mount-providers/smb ($($serverCopies.Count))"
+        $unpacked = @(Get-ChildItem ([System.IO.Path]::Combine($work, 'cache', 'mount-providers', 'smb')) -File -ErrorAction SilentlyContinue)
+        Check ($unpacked.Count -eq 0) "nothing unpacked under cache/mount-providers/smb ($($unpacked.Count))"
 
         if ($winfsp) {
             Write-Host "== WinFsp mount at \\anyfs\smoke (the first open waits for Windows to look the name up; docs/mounts.md)"

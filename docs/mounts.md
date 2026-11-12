@@ -91,8 +91,7 @@ Served by AnyFS's own SMB server, [LibSmb](../src/LibSmb/README.md) (SMB 2.0.2 t
 with signing, or guest), inside the anyfs process. One server runs per bind address and port for
 every collection mounted there, so every collection on a port shares one login (user and password,
 or guest). Every request goes straight through the collection's tree, so the read-only layers and
-the stats apply. (Earlier releases ran a bundled portable-smb-server instead; the copies they
-unpacked into `cache/mount-providers/smb/` are deleted the first time an SMB mount starts.)
+the stats apply.
 
 - **Windows 11 24H2+**: a port other than 445 needs the device-less
   `net use \\<host>\<collection> /TCPPORT:1445 /USER:<user>` once per session (no drive

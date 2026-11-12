@@ -3,7 +3,7 @@ using static LibSmb.Tests.TestSupport;
 
 namespace LibSmb.Tests;
 
-/// <summary>The local folder backend, as portable-smb-server's localfs tests have it, ported.</summary>
+/// <summary>The local folder backend.</summary>
 [TestClass]
 public class LocalFileSystemTests
 {

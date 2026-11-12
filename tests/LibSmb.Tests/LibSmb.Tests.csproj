@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- LibSmb's tests: the handlers driven directly, as portable-smb-server's Go tests drive its own, and the server over a
+  <!-- LibSmb's tests: the handlers driven directly, and the server over a
        real TCP connection with the small SMB2 client here (SmbTestClient). The clients of Windows, macOS and Linux are
        tests/LibSmb.E2E's. -->
   <PropertyGroup>

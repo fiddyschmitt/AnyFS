@@ -8,7 +8,7 @@ using AnyFS.Fixtures.SmbStress;
 namespace LibSmb.E2E;
 
 /// <summary>
-/// The SMB stress run, portable-smb-server's TestStress ported: every client machine at once hammers one host's smbdata
+/// The SMB stress run: every client machine at once hammers one host's smbdata
 /// share for a set time with SmbStress (tests/fixtures/SmbStress): small-file churn, medium and large files with reads at
 /// random offsets, publish-by-rename, overwrites, appends and truncates in place, trees with renames, listing checks, a
 /// shared corpus, and reads of what the other clients published. Every byte read is checked against deterministic content.

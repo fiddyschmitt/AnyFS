@@ -162,7 +162,6 @@ internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collec
         }
 
         _logger = context.Logger;
-        RemoveOldServerCopies(context.ProviderCacheDirectory, context.Logger);
         var key = $"smb:{address}:{settings.Port}";
         _lease = await context.AcquireSharedAsync(key, token => SmbHost.StartAsync(address, settings.Port, context.Logger, token), ct).ConfigureAwait(false);
         try
@@ -260,29 +259,4 @@ internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collec
     }
 
     public ValueTask DisposeAsync() => new(StopAsync(CancellationToken.None));
-
-    /// <summary>
-    /// The copies of portable-smb-server that builds before LibSmb unpacked into the provider's cache folder
-    /// (<c>portable-smb-server-&lt;hash&gt;</c>, one per version): nothing runs them now, so they go. Best effort.
-    /// </summary>
-    internal static void RemoveOldServerCopies(string cacheDirectory, ILogger logger)
-    {
-        try
-        {
-            if (!Directory.Exists(cacheDirectory))
-            {
-                return;
-            }
-
-            foreach (var copy in Directory.EnumerateFiles(cacheDirectory, "portable-smb-server-*"))
-            {
-                File.Delete(copy);
-                logger.LogDebug("SMB: removed {File}, a server copy no longer used", copy);
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            logger.LogDebug("SMB: old server copies in {Dir} left: {Error}", cacheDirectory, ex.Message);
-        }
-    }
 }

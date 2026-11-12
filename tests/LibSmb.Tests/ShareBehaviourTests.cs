@@ -6,8 +6,7 @@ using static LibSmb.Tests.TestSupport;
 namespace LibSmb.Tests;
 
 /// <summary>
-/// Apple's extensions, lookups by name and read-only shares, as portable-smb-server's Go tests have them
-/// (aapl_test.go, lookup_test.go, readonly_test.go), ported.
+/// Apple's extensions, lookups by name and read-only shares.
 /// </summary>
 [TestClass]
 public class ShareBehaviourTests

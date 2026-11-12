@@ -264,13 +264,13 @@ mac:
     - name: anyfs-macos-1
       ip: 192.168.0.98               # the router reserves this address for mac_address
       # tart gives every new VM a random MAC address, and so a new DHCP address. macos/Vagrantfile
-      # pins this one instead, so the VM keeps 192.168.0.98 (the rclone lab's VM is ...:24 -> .34).
+      # pins this one instead, so the VM keeps 192.168.0.98 (the earlier SMB lab's VM is ...:24 -> .34).
       mac_address: "96:e4:f4:b3:84:25"
       # macOS 15 Sequoia, pinned by digest (":latest" moves).
       image: "ghcr.io/cirruslabs/macos-sequoia-base@sha256:4947ac5ab1b2fdc46ab856132d2ba958f8e45b5f85192c66370dafc028c514dd"
       user: admin                    # the image's own account
       password: admin
-      memory_mb: 6144                # the Mac has 16 GB; the rclone lab's VM must not run at the same time
+      memory_mb: 6144                # the Mac has 16 GB; the earlier SMB lab's VM must not run at the same time
       cpus: 4
       disk_gb: 50                    # the image's own size: tart can grow a disk, never shrink it
       bridge_interface: en0          # the Mac's LAN interface

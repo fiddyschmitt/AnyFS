@@ -7,8 +7,7 @@ namespace LibSmb.E2E;
 public sealed record SmbCondition(string Name, IReadOnlyList<string>? Only, Action<SmbPair> Run);
 
 /// <summary>
-/// The SMB conditions of spec 16.2: portable-smb-server's rig (test/rig/matrix_test.go and multiclient_test.go), ported when
-/// LibSmb took its place, so the operating systems' own SMB clients exercise anyfs's server as they did the Go one. Each
+/// The SMB conditions of spec 16.2, through which the operating systems' own SMB clients exercise anyfs's server. Each
 /// runs against one host's anyfs from one client machine. The shares are collections of their own (AnyFsHost): smbdata, a
 /// Mirror of an empty folder of the host's, writable; smbsecond, another, for isolation; smbro, smbdata read-only; and
 /// smbguest, smbdata to guests on a port of its own. Every condition that writes checks the bytes on both ends: what the
@@ -859,7 +858,7 @@ public static class SmbConditions
     }
 
     /// <summary>
-    /// Several clients at once (portable-smb-server's TestMultiClient): every reachable client machine mounts smbdata; each
+    /// Several clients at once: every reachable client machine mounts smbdata; each
     /// writes a file and a directory and sees every other's byte for byte; each renames its file and deletes its own, and the
     /// others see that too. Checks poll for up to 45 s, since Windows keeps directory and file-information caches for 10 s.
     /// </summary>

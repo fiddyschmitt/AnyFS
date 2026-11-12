@@ -204,7 +204,6 @@ otherwise ignored.
 
 - `sources/<id>/`: per-source scratch space (spool files).
 - `mount-providers/<provider>/`: files every mount of one provider shares. None of the built-in
-  providers keeps any now; the SMB provider deletes the `portable-smb-server-<hash>` copies that
-  earlier releases unpacked here.
+  providers keeps any now.
 
 Everything under `cache/` can be deleted while anyfs is stopped; it is made again on demand.

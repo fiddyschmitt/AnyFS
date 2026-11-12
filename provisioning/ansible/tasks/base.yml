@@ -34,7 +34,7 @@
 # kernel their boot script ("vboxadd start") tries a rebuild, fails, and swaps the kernel's own
 # vboxguest and vboxsf out and back in, which unmounts the shared folders Vagrant mounts from
 # /etc/fstab. The kernel's own drivers work with the Guest Additions programs, so for a kernel
-# without modules of its own the script just loads those (as in the ft, rclone and SimpleKVM labs).
+# without modules of its own the script just loads those (as in the ft, SMB and SimpleKVM labs).
 - name: Guest Additions modules of their own for that kernel?  (they install into misc/)
   ansible.builtin.shell: compgen -G '/lib/modules/{{ newest_kernel.stdout }}/misc/vboxguest.ko*'
   args:
