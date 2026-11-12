@@ -2,16 +2,28 @@
   <!-- LibSmb: an SMB 2/3 file server in plain C#, from Microsoft's open specification [MS-SMB2], ported from
        portable-smb-server (Go): dialects 2.0.2 to 3.0.2, NTLMv2 through SPNEGO or guests, signing, compounding, Apple's
        extensions for macOS. It serves any ISmbFileSystem; LocalFileSystem serves a folder. Nothing of AnyFS's, and no
-       dependency but Microsoft's logging abstractions: meant to stand on its own as a NuGet package one day. -->
+       dependency but Microsoft's logging abstractions. It is its own package on NuGet.org, with its own version (below,
+       not AnyFS's): a tag libsmb-v<Version> publishes it (.github/workflows/libsmb.yml). -->
   <PropertyGroup>
     <AssemblyName>LibSmb</AssemblyName>
     <RootNamespace>LibSmb</RootNamespace>
+    <Version>0.1.0</Version>
+    <Product>LibSmb</Product>
+    <IsPackable>true</IsPackable>
     <PackageId>LibSmb</PackageId>
+    <Title>LibSmb</Title>
     <Description>An SMB 2/3 file server in pure C# (dialects 2.0.2 to 3.0.2, NTLMv2 or guest, signing, compounding, Apple's macOS extensions) that serves shares from any file system you implement, or a local folder. No admin rights: listen on any port.</Description>
     <PackageTags>smb;smb2;smb3;cifs;file-server;file-sharing;ntlm</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/fiddyschmitt/AnyFS/tree/main/src/LibSmb</PackageProjectUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <IsTrimmable>true</IsTrimmable>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
@@ -21,5 +33,7 @@
     <!-- AnyFS's SMB mount tests use LibSmb.Tests' client (linked), which reads the wire with these internals -->
     <InternalsVisibleTo Include="AnyFS.Mounts.Tests" />
     <None Include="README.md" Pack="true" PackagePath="\" />
+    <!-- the code LibSmb was adapted from, and its licence, travel with the package -->
+    <None Include="THIRD-PARTY-NOTICES.txt" Pack="true" PackagePath="\" />
   </ItemGroup>
 </Project>

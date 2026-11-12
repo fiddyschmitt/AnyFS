@@ -1,0 +1,66 @@
+name: libsmb
+
+# A tag libsmb-v<version> publishes LibSmb (src/LibSmb), AnyFS's SMB server, to NuGet.org as a package of its own. The
+# tag must name the version in LibSmb.csproj. LibSmb's tests run, the package and its symbols are packed (and kept as
+# the run's artifact) and pushed through NuGet.org's trusted publishing, so no API key is stored: NuGet/login trades
+# this job's GitHub token for a key that lasts an hour. That needs a trusted publishing policy on nuget.org for this
+# repository and this file (libsmb.yml), and the secret NUGET_USER, the nuget.org account's user name. AnyFS's own
+# tags (v*) do not run it.
+on:
+  push:
+    tags: ['libsmb-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  nuget:
+    name: LibSmb to NuGet.org
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      DOTNET_NOLOGO: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Version from the tag
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#libsmb-v}"
+          project=$(dotnet msbuild src/LibSmb/LibSmb.csproj -getProperty:Version | tail -n 1 | tr -d '\r')
+          if [ "$version" != "$project" ]; then
+            echo "::error::the tag names $version but src/LibSmb/LibSmb.csproj has $project"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: dotnet test tests/LibSmb.Tests/LibSmb.Tests.csproj -c Release
+
+      - name: Pack
+        run: dotnet pack src/LibSmb/LibSmb.csproj -c Release -o publish/nuget -p:ContinuousIntegrationBuild=true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libsmb-${{ steps.version.outputs.version }}
+          path: publish/nuget/*
+          if-no-files-found: error
+
+      - name: NuGet login
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
+      # the .snupkg beside it goes to NuGet.org's symbol server with it
+      - name: Push
+        run: >-
+          dotnet nuget push "publish/nuget/LibSmb.${{ steps.version.outputs.version }}.nupkg"
+          --api-key "${{ steps.login.outputs.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json --skip-duplicate

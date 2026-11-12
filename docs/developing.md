@@ -223,6 +223,15 @@ as bare executables named by runtime (`anyfs-win-x64.exe`, `anyfs-linux-x64`, `a
 from `docs/release-notes/<tag>.md` when that file exists. The packages also go to NuGet.org when the `NUGET_API_KEY` secret is
 set. Nothing runs on commit: there are no git hooks.
 
+LibSmb is also a package of its own on NuGet.org, with its own version (`<Version>` in
+`src/LibSmb/LibSmb.csproj`, not AnyFS's). A tag `libsmb-v<version>` naming that version runs
+[libsmb.yml](../.github/workflows/libsmb.yml): LibSmb's tests, the package and its symbols (kept as
+the run's artifact), and the push to NuGet.org through trusted publishing, so no API key is stored.
+That needs a trusted publishing policy on nuget.org for this repository and the workflow file
+`libsmb.yml`, and the repository secret `NUGET_USER` holding the nuget.org user name. AnyFS's `v*`
+tags do not publish it. `dotnet pack src/LibSmb -c Release -o publish/nuget` makes the same package
+locally.
+
 ## Test lab
 
 [provisioning/](../provisioning/README.md) defines the end-to-end lab as code: `vagrant up` for the
@@ -249,7 +258,8 @@ src/AnyFS.Core           model, plugin host, router, read-only layers, status, s
                          logging
 src/AnyFS.App            anyfs: the window (Gui/) and the command line (Cli/)
 src/LibOutlook           a self-contained reader of Outlook's PST and OST files (no AnyFS reference; its own package)
-src/LibSmb               a self-contained SMB 2 and 3 server over a file system you supply (no AnyFS reference)
+src/LibSmb               a self-contained SMB 2 and 3 server over a file system you supply (no AnyFS reference; the
+                         LibSmb package on NuGet.org)
 src/Sources/Mirror       the Mirror source
 src/Sources/Sshfs        the SSHFS source over SSH.NET
 src/Sources/Common       what more than one source needs: the web session's sign-in in a browser of AnyFS's own over
