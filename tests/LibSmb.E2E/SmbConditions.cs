@@ -9,10 +9,10 @@ public sealed record SmbCondition(string Name, IReadOnlyList<string>? Only, Acti
 /// <summary>
 /// The SMB conditions of spec 16.2, through which the operating systems' own SMB clients exercise anyfs's server. Each
 /// runs against one host's anyfs from one client machine. The shares are collections of their own (AnyFsHost): smbdata, a
-/// Mirror of an empty folder of the host's, writable; smbsecond, another, for isolation; smbro, smbdata read-only; and
-/// smbguest, smbdata to guests on a port of its own. Every condition that writes checks the bytes on both ends: what the
-/// client reads back, and what is in the folder on the host. The rig's vfs_share and vfs_readonly_share are every
-/// condition here (each share is a collection's VFS), and its log checks are the host's ZLogHasNoErrors.
+/// Mirror of an empty folder of the host's, writable; smbsecond, another, for isolation; smbro, smbdata read-only;
+/// smbguest, smbdata to guests on a port of its own; and smbslow, smbdata with the lab's slow source in held/. Every
+/// condition that writes checks the bytes on both ends: what the client reads back, and what is in the folder on the host.
+/// Every share is a collection's VFS, and the log checks are the host's ZLogHasNoErrors.
 /// </summary>
 public static class SmbConditions
 {
@@ -44,6 +44,7 @@ public static class SmbConditions
         new("churn_while_listing", null, Churn),
         new("client_killed_mid_transfer", null, KillMidTransfer),
         new("parallel_listings_50", null, ParallelListings),
+        new("slow_read_holds_up_nothing", null, SlowReadHoldsUpNothing),
         new("second_share_isolation", null, SecondShare),
         new("wrong_credentials_refused", null, BadCredentials),
         new("readonly_share", null, ReadOnlyShare),
@@ -652,6 +653,114 @@ public static class SmbConditions
 
         p.Must(SmbOps.WaitForCount(p.C, p.Mnt(d), n, 30), "a settled listing through the client");
     }
+
+    /// <summary>
+    /// A read whose source call is slow holds up nothing else on the client's connection. Through smbslow (smbdata's folder,
+    /// with the lab's slow source in held/), one script reads a slow file of held/slow/, whose every read waits on the source
+    /// for <see cref="AnyFsHost.HeldDelaySeconds"/>, while another, a moment later, lists held/quick and a small folder of the
+    /// data side and reads held/quick.bin over the same mount: each must come back within 3 s, and before the slow read
+    /// does, and the slow read must come back whole. On the way the client meets the server's interim STATUS_PENDING to the
+    /// slow READ. held/quick.bin is 16 KiB, one read for every client: macOS's client, reading a 64 KiB file, sent three
+    /// of its four reads at once and held the fourth back until the slow READ was answered (its read-ahead, as it seems),
+    /// while the server answered each the moment it came.
+    /// </summary>
+    private static void SlowReadHoldsUpNothing(SmbPair p)
+    {
+        const long promptMs = 3000;
+        const int dataFiles = 3;
+        var mount = p.NewMount("smbslow", "T");
+        var held = SmbOps.Join(p.C, mount.Root!, AnyFsHost.HeldFolder);
+        string Q(string path) => SmbOps.Q(p.C, path);
+
+        // a small folder of the data side, made on the host (the share's folder holds whatever other conditions left)
+        var d = SmbPair.Unique("held-data");
+        SmbOps.Mkdir(p.S, p.Backing(d)).Must("make the data folder on the host");
+        p.Cleanup(() => SmbOps.Remove(p.S, p.Backing(d)));
+        SmbOps.NumberedFiles(p.S, p.Backing(d), dataFiles).Must("fill the data folder on the host");
+
+        // a slow file this client has not read: one it had would come from its own cache, held by nothing
+        var (slow, quickDir, quickBin, data) = (Q(SmbOps.Join(p.C, held, "slow", AnyFsHost.HeldFreshSlowFile())), Q(SmbOps.Join(p.C, held, "quick")), Q(SmbOps.Join(p.C, held, "quick.bin")), Q(SmbOps.Join(p.C, p.ShareFolder(mount, p.AnyFs.SmbDataDir), d)));
+        string[] scripts;
+        if (p.C.IsWindows)
+        {
+            const string now = "function Now { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }";
+            scripts =
+            [
+                $$"""
+                {{now}}
+                "start=$(Now)"
+                $h = (Get-FileHash -Algorithm SHA256 -LiteralPath {{slow}}).Hash.ToLowerInvariant()
+                "end=$(Now)"
+                "hash=$h"
+                """,
+                $$"""
+                {{now}}
+                Start-Sleep -Milliseconds 2500
+                $t = Now; $n = @(Get-ChildItem -LiteralPath {{quickDir}} -Force).Count; "list=$t,$(Now),$n"
+                $t = Now; $n = @(Get-ChildItem -LiteralPath {{data}} -Force).Count; "data=$t,$(Now),$n"
+                $t = Now; $h = (Get-FileHash -Algorithm SHA256 -LiteralPath {{quickBin}}).Hash.ToLowerInvariant(); "read=$t,$(Now),$h"
+                """,
+            ];
+        }
+        else
+        {
+            const string now = "now() { perl -MTime::HiRes=time -e 'printf \"%d\\n\", time*1000'; }";
+            var hash = p.ClientOs == "macos" ? "shasum -a 256" : "sha256sum";
+            scripts =
+            [
+                $$"""
+                {{now}}
+                echo "start=$(now)"
+                h=$({{hash}} {{slow}} | cut -c1-64)
+                echo "end=$(now)"
+                echo "hash=$h"
+                """,
+                $$"""
+                {{now}}
+                sleep 2.5
+                t=$(now); n=$(ls -1A {{quickDir}} | wc -l | tr -d ' '); echo "list=$t,$(now),$n"
+                t=$(now); n=$(ls -1A {{data}} | wc -l | tr -d ' '); echo "data=$t,$(now),$n"
+                t=$(now); h=$({{hash}} {{quickBin}} | cut -c1-64); echo "read=$t,$(now),$h"
+                """,
+            ];
+        }
+
+        // bash takes no carriage returns, which a raw string from a CRLF checkout of this file carries
+        if (!p.C.IsWindows)
+        {
+            scripts = [.. scripts.Select(s => s.Replace("\r\n", "\n"))];
+        }
+
+        var results = SmbOps.Scripts(p.C, p.ScratchPath(SmbPair.Unique("held")), scripts, AnyFsHost.HeldDelaySeconds * 6 + 120);
+        for (var i = 0; i < results.Count; i++)
+        {
+            p.Must(results[i].Ok, $"the {(i == 0 ? "slow" : "quick")} script failed (exit {results[i].Code}): {SmbOps.Tail(results[i].Output, 600)}");
+        }
+
+        var slowRead = Fields(results[0].Output);
+        var quick = Fields(results[1].Output);
+        long slowStart = long.Parse(slowRead["start"], CultureInfo.InvariantCulture), slowEnd = long.Parse(slowRead["end"], CultureInfo.InvariantCulture);
+        p.Must(slowEnd - slowStart >= AnyFsHost.HeldDelaySeconds * 800L, $"the slow read took only {slowEnd - slowStart} ms: the source did not hold it, so this proves nothing");
+        p.Check(slowRead["hash"] == AnyFsHost.HeldSha256(AnyFsHost.HeldSlowKiB << 10), "the slow read came back wrong");
+        var timings = new List<string>();
+        foreach (var (what, key) in new[] { ("a listing of held/quick", "list"), ("a listing of the data folder", "data"), ("a read of held/quick.bin", "read") })
+        {
+            var parts = quick[key].Split(',');
+            long start = long.Parse(parts[0], CultureInfo.InvariantCulture), end = long.Parse(parts[1], CultureInfo.InvariantCulture);
+            timings.Add($"{key} {end - start} ms");
+            p.Check(end - start < promptMs, $"{what} took {end - start} ms with a slow read in flight on the connection (at most {promptMs} ms)");
+            p.Check(end < slowEnd, $"{what} came back {end - slowEnd} ms after the slow read, so it waited for it");
+        }
+
+        p.Check(quick["list"].Split(',')[2] == AnyFsHost.HeldQuickFiles.ToString(CultureInfo.InvariantCulture), $"held/quick listed {quick["list"].Split(',')[2]} entries, not {AnyFsHost.HeldQuickFiles}");
+        p.Check(quick["data"].Split(',')[2] == dataFiles.ToString(CultureInfo.InvariantCulture), $"the data folder listed {quick["data"].Split(',')[2]} entries, not {dataFiles}");
+        p.Check(quick["read"].Split(',')[2] == AnyFsHost.HeldSha256(AnyFsHost.HeldQuickBytes), "held/quick.bin came back wrong");
+        p.Note($"the slow read took {(slowEnd - slowStart) / 1000.0:0.0} s; meanwhile {string.Join(", ", timings)}");
+    }
+
+    /// <summary>A script's <c>key=value</c> lines.</summary>
+    private static Dictionary<string, string> Fields(string output)
+        => SmbOps.Lines(output).Select(l => l.Split('=', 2)).Where(kv => kv.Length == 2).ToDictionary(kv => kv[0].Trim(), kv => kv[1].Trim(), StringComparer.Ordinal);
 
     /// <summary>Two shares of one server don't see each other's files.</summary>
     private static void SecondShare(SmbPair p)

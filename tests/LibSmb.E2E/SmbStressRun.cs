@@ -8,10 +8,13 @@ using AnyFS.Fixtures.SmbStress;
 namespace LibSmb.E2E;
 
 /// <summary>
-/// The SMB stress run: every client machine at once hammers one host's smbdata
-/// share for a set time with SmbStress (tests/fixtures/SmbStress): small-file churn, medium and large files with reads at
-/// random offsets, publish-by-rename, overwrites, appends and truncates in place, trees with renames, listing checks, a
-/// shared corpus, and reads of what the other clients published. Every byte read is checked against deterministic content.
+/// The SMB stress run: every client machine at once hammers one host's smbdata folder, through the smbslow share, for a
+/// set time with SmbStress (tests/fixtures/SmbStress): small-file churn, medium and large files with reads at random
+/// offsets, publish-by-rename, overwrites, appends and truncates in place, trees with renames, listing checks, a shared
+/// corpus, and reads of what the other clients published. Every byte read is checked against deterministic content. All
+/// the while each client also reads the lab's slow source's held/slow/ files one after another on the same connection,
+/// every read waiting on the source for seconds (a new file each time, so no client answers it from its cache): no quick
+/// operation (a listing, a small file, a small tree) may take half as long as one of those reads.
 /// Byte-perfect results alone are not enough, since SMB clients reconnect and retry without a word, which can hide a server
 /// that drops connections: the run also fails on reconnect or signing complaints in the clients' own logs, a stalled
 /// operation, anyfs stopping or not giving its memory back, and the audit of the host's folder (every published file there
@@ -33,6 +36,14 @@ public static partial class SmbStressRun
     public const string SeedVariable = "ANYFS_E2E_SMB_STRESS_SEED";
 
     private const int OpTimeoutSeconds = 120;
+
+    /// <summary>
+    /// The worst a quick operation (<see cref="QuickOps"/>: a listing, a small file, a small tree) may take while held reads
+    /// wait on the source: half of one held read.
+    /// </summary>
+    private const int QuickLimitMs = AnyFsHost.HeldDelaySeconds * 1000 / 2;
+
+    private static readonly string[] QuickOps = ["list", "small", "tree"];
 
     /// <summary>The 4 KiB requests in one of SmbStress's randio operations.</summary>
     private const int RandIoCount = 64;
@@ -137,7 +148,8 @@ public static partial class SmbStressRun
                 }
 
                 SmbMount.ForceUnmountAll(m.Machine);
-                m.Mount = new SmbMount(m.Machine, m.Local ? "127.0.0.1" : host.Ip, "smbdata", AnyFsHost.SmbPort) { Tag = "U", Vers = m.Vers };
+                // smbslow: smbdata's folder, with the lab's slow source in held/ on the same mount and connection
+                m.Mount = new SmbMount(m.Machine, m.Local ? "127.0.0.1" : host.Ip, "smbslow", AnyFsHost.SmbPort) { Tag = "U", Vers = m.Vers };
                 var r = m.Mount.TryMount();
                 if (!r.Ok)
                 {
@@ -163,7 +175,8 @@ public static partial class SmbStressRun
             var loadStarted = Stopwatch.StartNew();
             Parallel.ForEach(running, m =>
             {
-                var args = $"run --root {SmbOps.Q(m.Machine, m.Root!)} --name {m.Name} --seed {seed} --seconds {seconds} --workers {workers} --large-max-mb {largeMb} --op-timeout {OpTimeoutSeconds}";
+                var held = SmbOps.Join(m.Machine, m.Mount!.Root!, AnyFsHost.HeldFolder, "slow");
+                var args = $"run --root {SmbOps.Q(m.Machine, m.Root!)} --name {m.Name} --seed {seed} --seconds {seconds} --workers {workers} --large-max-mb {largeMb} --op-timeout {OpTimeoutSeconds} --held {SmbOps.Q(m.Machine, held)}";
                 var r = Invoke(m.Machine, m.Worker!, args, seconds + OpTimeoutSeconds + 180);
                 var line = SmbOps.Lines(r.Output).LastOrDefault(l => l.TrimStart().StartsWith('{'));
                 if (line is null)
@@ -220,6 +233,46 @@ public static partial class SmbStressRun
                     {
                         // 64 requests of 4 KiB each: the round trip of one, as an application with a file open sees it
                         Say($"    {"  per request",-14}{"",8}{"",8}{p50 / RandIoCount,10:0.0}{p95 / RandIoCount,10:0.0}{max / RandIoCount,10:0.0}    (one 4 KiB request: randio / 64)");
+                    }
+                }
+
+                // the held reads were in flight on each client's connection all along, each waiting on the source: no quick
+                // operation may have waited for one (and a client whose held reads came back fast never had one in flight)
+                foreach (var m in running.Where(m => m.Result is not null))
+                {
+                    var held = m.Result!.Ops.GetValueOrDefault("held");
+                    if (held is null || held.Count == 0)
+                    {
+                        problems.Add($"{m.Name}: no held read finished, so nothing showed a slow source call holds up nothing");
+                        continue;
+                    }
+
+                    if (held.P50Ms < AnyFsHost.HeldDelaySeconds * 800)
+                    {
+                        problems.Add($"{m.Name}: its held reads took {held.P50Ms:0} ms at the median, so they did not wait on the source and held nothing up");
+                    }
+
+                    foreach (var op in QuickOps)
+                    {
+                        if (m.Result.Ops.GetValueOrDefault(op) is { Count: > 0 } stats && stats.MaxMs > QuickLimitMs)
+                        {
+                            var slow = $"{m.Name}: a {op} operation took {stats.MaxMs:0} ms with held reads ({AnyFsHost.HeldDelaySeconds} s each) in flight on its connection (at most {QuickLimitMs} ms)";
+                            if (m.Machine.Info.Os == "macos")
+                            {
+                                // macOS's client holds some reads back while another read is unanswered (its read-ahead, as it
+                                // seems): the server answers every request the moment it comes, and Linux's and Windows' do not wait
+                                Say($"    note: {slow}; macOS's client holds some reads back while another read is unanswered");
+                            }
+                            else
+                            {
+                                problems.Add(slow);
+                            }
+                        }
+                    }
+
+                    if (!QuickOps.Any(op => m.Result.Ops.GetValueOrDefault(op) is { Count: > 0 }))
+                    {
+                        problems.Add($"{m.Name}: no quick operation finished beside the held reads");
                     }
                 }
             }

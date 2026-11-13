@@ -61,8 +61,39 @@ public sealed class AnyFsHost : IDisposable
 
     public IReadOnlyList<SourceSpec> Sources { get; }
 
-    /// <summary>The SMB conditions' collections (LibSmb.E2E), each with an SMB mount only.</summary>
-    public static readonly IReadOnlyList<string> SmbCollections = ["smbdata", "smbsecond", "smbro", "smbguest"];
+    /// <summary>
+    /// The SMB conditions' collections (LibSmb.E2E), each with an SMB mount only. smbslow is smbdata's folder with the lab's
+    /// slow source (tests/fixtures/SlowPlugin) in its <see cref="HeldFolder"/>, so a client reads a slow file and works in
+    /// the folder over the same mount, the same connection.
+    /// </summary>
+    public static readonly IReadOnlyList<string> SmbCollections = ["smbdata", "smbsecond", "smbro", "smbguest", "smbslow"];
+
+    /// <summary>Where a collection shows the lab's slow source: slow.bin (each read waits <see cref="HeldDelaySeconds"/>), quick.bin, quick/.</summary>
+    public const string HeldFolder = "held";
+
+    /// <summary>How long every read of the slow source's slow.bin waits on the source.</summary>
+    public const int HeldDelaySeconds = 10;
+
+    /// <summary>The size of the slow source's slow.bin, small enough that every client reads it in one request.</summary>
+    public const int HeldSlowKiB = 4;
+
+    /// <summary>AnyFS.E2E's collection of the slow source alone, with an SMB mount.</summary>
+    public const string HeldCollection = "held";
+
+    /// <summary>The slow source's quick.bin's size, and how many files its quick/ holds (tests/fixtures/SlowPlugin).</summary>
+    public const int HeldQuickBytes = 16 << 10;
+
+    public const int HeldQuickFiles = 5;
+
+    /// <summary>How many slow files the slow source's slow/ holds (s00000.bin on), each read once so no client answers it from its cache.</summary>
+    public const int HeldSlowFiles = 2000;
+
+    /// <summary>One of slow/'s files, picked at random: one this client has not read, as far as any run of the tests goes.</summary>
+    public static string HeldFreshSlowFile() => $"s{Random.Shared.Next(HeldSlowFiles):D5}.bin";
+
+    /// <summary>A file of the slow source as the client must read it: every byte its offset's, as SlowPlugin.ByteAt has it.</summary>
+    public static string HeldSha256(int length)
+        => Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Enumerable.Range(0, length).Select(i => (byte)(((long)i * 31) ^ ((long)i >> 9))).ToArray()));
 
     /// <summary>Collections with every mount: the sources' and their read-only twins.</summary>
     public IEnumerable<(string Collection, SourceSpec Source, bool ReadOnly)> FullCollections
@@ -241,7 +272,7 @@ public sealed class AnyFsHost : IDisposable
                 $ErrorActionPreference = 'Stop'
                 New-Item -ItemType Directory -Force '{LabDir}', '{LabDir}\plugins', '{LabDir}\settings' | Out-Null
                 Copy-Item '\\vboxsvr\publish\{rid}\anyfs.exe', '\\vboxsvr\publish\{rid}\MakeTree.exe' '{LabDir}\' -Force
-                Copy-Item '\\vboxsvr\publish\plugins\AnyFS.SamplePlugin.dll' '{LabDir}\plugins\' -Force
+                Copy-Item '\\vboxsvr\publish\plugins\AnyFS.SamplePlugin.dll', '\\vboxsvr\publish\plugins\AnyFS.SlowPlugin.dll' '{LabDir}\plugins\' -Force
                 Get-Item '{LabDir}\anyfs.exe' | Select-Object -ExpandProperty Length
                 """);
         }
@@ -252,12 +283,13 @@ public sealed class AnyFsHost : IDisposable
             Host.Upload(Path.Combine(Lab.PublishDir, rid, "anyfs"), LabDir + "/anyfs.new");
             Host.Upload(Path.Combine(Lab.PublishDir, rid, "MakeTree"), LabDir + "/MakeTree.new");
             Host.Upload(Path.Combine(Lab.PublishDir, "plugins", "AnyFS.SamplePlugin.dll"), LabDir + "/plugins/AnyFS.SamplePlugin.dll");
+            Host.Upload(Path.Combine(Lab.PublishDir, "plugins", "AnyFS.SlowPlugin.dll"), LabDir + "/plugins/AnyFS.SlowPlugin.dll");
             Host.Sh($"cd '{LabDir}' && chmod +x anyfs.new MakeTree.new && mv -f anyfs.new anyfs && mv -f MakeTree.new MakeTree && xattr -d com.apple.quarantine anyfs MakeTree 2>/dev/null; ls -l anyfs");
         }
         else
         {
             var share = $"{Lab.LinuxPublishDir}/{rid}";
-            Host.Sh($"set -e; mkdir -p '{LabDir}/plugins' '{LabDir}/settings'; test -f '{share}/anyfs' || {{ echo 'no build in {share}: run provisioning/publish.ps1 on the PC' >&2; exit 2; }}; cp '{share}/anyfs' '{share}/MakeTree' '{LabDir}/'; cp '{Lab.LinuxPublishDir}/plugins/AnyFS.SamplePlugin.dll' '{LabDir}/plugins/'; chmod +x '{LabDir}/anyfs' '{LabDir}/MakeTree'; ls -l '{LabDir}/anyfs'");
+            Host.Sh($"set -e; mkdir -p '{LabDir}/plugins' '{LabDir}/settings'; test -f '{share}/anyfs' || {{ echo 'no build in {share}: run provisioning/publish.ps1 on the PC' >&2; exit 2; }}; cp '{share}/anyfs' '{share}/MakeTree' '{LabDir}/'; cp '{Lab.LinuxPublishDir}/plugins/AnyFS.SamplePlugin.dll' '{Lab.LinuxPublishDir}/plugins/AnyFS.SlowPlugin.dll' '{LabDir}/plugins/'; chmod +x '{LabDir}/anyfs' '{LabDir}/MakeTree'; ls -l '{LabDir}/anyfs'");
         }
 
         // the upstream generates its own copy of the fixture with MakeTree from the share
@@ -384,18 +416,28 @@ public sealed class AnyFsHost : IDisposable
 
         collections.Add(CollectionJson("outage", IdOf("outage"), false, [MountJson(MountKind.Http, "outage")]));
         collections.Add(CollectionJson("prompt", IdOf("prompt"), false, [MountJson(MountKind.Http, "prompt")]));
+
+        // the lab's slow source alone, over SMB: a slow source call must hold up nothing else on the mount
+        sources.Add(HeldSourceJson(IdOf("held")));
+        collections.Add(CollectionJson(HeldCollection, IdOf("held"), true, [MountJson(MountKind.Smb, HeldCollection)]));
         UploadSettings(sources, collections);
     }
+
+    /// <summary>The lab's slow source (type lab-slow, tests/fixtures/SlowPlugin).</summary>
+    private static JsonObject HeldSourceJson(Guid id)
+        => SourceJson(id, "held", "lab-slow", new JsonObject { ["delaySeconds"] = HeldDelaySeconds, ["slowKiB"] = HeldSlowKiB });
 
     /// <summary>The SMB conditions' shares: on the port of every collection's SMB mount, with its login; guests on their own.</summary>
     private void WriteSmbShareSettings()
     {
         var smbdata = Guid.NewGuid();
         var smbsecond = Guid.NewGuid();
+        var held = Guid.NewGuid();
         var sources = new JsonArray
         {
             SourceJson(smbdata, "smbdata", "mirror", new JsonObject { ["paths"] = SmbDataDir }),
             SourceJson(smbsecond, "smbsecond", "mirror", new JsonObject { ["paths"] = SmbSecondDir }),
+            HeldSourceJson(held),
         };
         var collections = new JsonArray
         {
@@ -403,6 +445,7 @@ public sealed class AnyFsHost : IDisposable
             CollectionJson("smbsecond", smbsecond, false, [MountJson(MountKind.Smb, "smbsecond")]),
             CollectionJson("smbro", smbdata, true, [MountJson(MountKind.Smb, "smbro")]),
             CollectionJson("smbguest", smbdata, false, [SmbGuestMountJson()]),
+            CollectionJson("smbslow", [(smbdata, "", false), (held, HeldFolder, true)], [MountJson(MountKind.Smb, "smbslow")]),
         };
         UploadSettings(sources, collections);
     }
@@ -437,12 +480,16 @@ public sealed class AnyFsHost : IDisposable
         ["settings"] = settings,
     };
 
-    private static JsonObject CollectionJson(string name, Guid sourceId, bool readOnly, IEnumerable<JsonObject> mounts) => new()
+    private static JsonObject CollectionJson(string name, Guid sourceId, bool readOnly, IEnumerable<JsonObject> mounts)
+        => CollectionJson(name, [(sourceId, "", readOnly)], mounts);
+
+    /// <summary>A collection of several sources, each at its path in the collection's tree.</summary>
+    private static JsonObject CollectionJson(string name, IEnumerable<(Guid Source, string Path, bool ReadOnly)> sources, IEnumerable<JsonObject> mounts) => new()
     {
         ["id"] = Guid.NewGuid().ToString(),
         ["name"] = name,
         ["enabled"] = true,
-        ["sources"] = new JsonArray(new JsonObject { ["id"] = sourceId.ToString(), ["path"] = "", ["readOnly"] = readOnly }),
+        ["sources"] = new JsonArray(sources.Select(s => new JsonObject { ["id"] = s.Source.ToString(), ["path"] = s.Path, ["readOnly"] = s.ReadOnly }).ToArray<JsonNode?>()),
         ["mounts"] = new JsonArray(mounts.ToArray<JsonNode?>()),
     };
 

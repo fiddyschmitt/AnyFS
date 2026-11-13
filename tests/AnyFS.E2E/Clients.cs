@@ -56,6 +56,13 @@ public abstract partial class Client(Machine machine)
 
     public abstract (string Hash, double Seconds) TimedSha256(Access access, string relFile);
 
+    /// <summary>
+    /// Reads <paramref name="relSlow"/> (whose every read waits on its source) and, a moment after it began, lists
+    /// <paramref name="relQuickDir"/> and reads <paramref name="relQuickFile"/> through the same access: when each began and
+    /// ended, the listing's count and the hashes.
+    /// </summary>
+    public abstract HeldTimings HeldCheck(Access access, string relSlow, string relQuickDir, string relQuickFile);
+
     /// <summary>HTTP only: the first half with a Range, then the rest with curl -C -; the hash of the result.</summary>
     public abstract string ResumedDownloadSha256(Access access, string relFile);
 
@@ -78,6 +85,25 @@ public abstract partial class Client(Machine machine)
 }
 
 /// <summary>Linux and macOS share the shell; the differences are the hash tool, how mounts are made and whether wget exists.</summary>
+/// <summary>What <see cref="Client.HeldCheck"/> saw, in Unix milliseconds of the client's clock.</summary>
+public sealed record HeldTimings(long SlowStart, long SlowEnd, string SlowHash, long ListStart, long ListEnd, int ListCount, long ReadStart, long ReadEnd, string ReadHash)
+{
+    /// <summary>From the script's <c>slow=</c>, <c>list=</c> and <c>read=</c> lines: start,end,result.</summary>
+    public static HeldTimings Parse(string output)
+    {
+        var fields = output.Replace("\r", "").Split('\n').Select(l => l.Trim().Split('=', 2)).Where(kv => kv.Length == 2)
+            .ToDictionary(kv => kv[0], kv => kv[1].Split(','), StringComparer.Ordinal);
+        if (!fields.ContainsKey("slow") || !fields.ContainsKey("list") || !fields.ContainsKey("read"))
+        {
+            throw new InvalidOperationException("the held check's output is incomplete: " + output);
+        }
+
+        static long L(string s) => long.Parse(s, System.Globalization.CultureInfo.InvariantCulture);
+        var (slow, list, read) = (fields["slow"], fields["list"], fields["read"]);
+        return new HeldTimings(L(slow[0]), L(slow[1]), slow[2], L(list[0]), L(list[1]), int.Parse(list[2], System.Globalization.CultureInfo.InvariantCulture), L(read[0]), L(read[1]), read[2]);
+    }
+}
+
 public abstract class PosixClient(Machine machine) : Client(machine)
 {
     protected abstract string Sha256Command { get; }
@@ -156,6 +182,22 @@ public abstract class PosixClient(Machine machine) : Client(machine)
     {
         var one = access.IsUrl ? $"curl -sf {Q(UrlOf(access, relFile))} | {Sha256Command} | cut -d' ' -f1" : $"{Sha256Command} {Q(PathOf(access, relFile))} | cut -d' ' -f1";
         return Lines(M.Sh($"for i in $(seq {readers}); do ({one}) & done; wait", 600));
+    }
+
+    public override HeldTimings HeldCheck(Access access, string relSlow, string relQuickDir, string relQuickFile)
+    {
+        var marker = $"/tmp/anyfs-held-{Guid.NewGuid():N}";
+        var script = $$"""
+            now() { perl -MTime::HiRes=time -e 'printf "%d\n", time*1000'; }
+            ( s=$(now); h=$({{Sha256Command}} {{Q(PathOf(access, relSlow))}} | cut -d' ' -f1); echo "slow=$s,$(now),$h" > {{marker}} ) &
+            sleep 2.5
+            t=$(now); n=$(ls -1A {{Q(PathOf(access, relQuickDir))}} | wc -l | tr -d ' '); echo "list=$t,$(now),$n"
+            t=$(now); h=$({{Sha256Command}} {{Q(PathOf(access, relQuickFile))}} | cut -d' ' -f1); echo "read=$t,$(now),$h"
+            wait
+            cat {{marker}}; rm -f {{marker}}
+            """;
+        // bash takes no carriage returns, which a raw string from a CRLF checkout of this file carries
+        return HeldTimings.Parse(M.Sh(script.Replace("\r\n", "\n"), 300));
     }
 
     public override (string Hash, double Seconds) TimedSha256(Access access, string relFile)
@@ -444,6 +486,31 @@ public sealed class WindowsClient(Machine machine) : Client(machine)
             : HashInto(Q(PathOf(access, relFile)));
         var lines = Lines(M.Sh($"$sw = [Diagnostics.Stopwatch]::StartNew(); {one}; $sw.Stop(); $h; $sw.Elapsed.TotalSeconds.ToString([Globalization.CultureInfo]::InvariantCulture)", 600));
         return (lines[0], ParseSeconds(lines[1]));
+    }
+
+    public override HeldTimings HeldCheck(Access access, string relSlow, string relQuickDir, string relQuickFile)
+    {
+        // the slow read in a job (another process of this logon session, so it sees the connection); the quick ones begin
+        // once it has started, and a moment after
+        var marker = $"anyfs-held-{Guid.NewGuid():N}.started";
+        var script = $$"""
+            function Now { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
+            $marker = Join-Path $env:TEMP '{{marker}}'
+            $job = Start-Job -ArgumentList {{Q(PathOf(access, relSlow))}}, $marker -ScriptBlock {
+                param($f, $m)
+                $s = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                Set-Content -LiteralPath $m -Value $s
+                $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash.ToLowerInvariant()
+                "slow=$s,$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()),$h"
+            }
+            while (-not (Test-Path -LiteralPath $marker)) { Start-Sleep -Milliseconds 100 }
+            Start-Sleep -Milliseconds 2000
+            $t = Now; $n = @(Get-ChildItem -LiteralPath {{Q(PathOf(access, relQuickDir))}} -Force).Count; "list=$t,$(Now),$n"
+            $t = Now; $h = (Get-FileHash -Algorithm SHA256 -LiteralPath {{Q(PathOf(access, relQuickFile))}}).Hash.ToLowerInvariant(); "read=$t,$(Now),$h"
+            Receive-Job -Job $job -Wait -AutoRemoveJob
+            Remove-Item -LiteralPath $marker -ErrorAction SilentlyContinue
+            """;
+        return HeldTimings.Parse(M.Sh(script, 300));
     }
 
     public override string ResumedDownloadSha256(Access access, string relFile)

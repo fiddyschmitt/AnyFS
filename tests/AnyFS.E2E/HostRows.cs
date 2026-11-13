@@ -212,7 +212,7 @@ public abstract class HostRows
                 d.AnyFs = new AnyFsHost(d.Host, d.Upstream, sharePoint);
                 d.AnyFs.Deploy();
                 d.AnyFs.Start();
-                var status = d.AnyFs.WaitReady(d.AnyFs.FullCollections.Select(c => c.Collection));
+                var status = d.AnyFs.WaitReady(d.AnyFs.FullCollections.Select(c => c.Collection).Append(AnyFsHost.HeldCollection));
                 d.Clients["local"] = Client.For(d.Host);
                 d.Clients["upstream"] = Client.For(d.Upstream);
                 Trace.WriteLine($"{hostInfo.Name}: anyfs {status.Version} up with {status.Collections.Count} collections in {sw.Elapsed.TotalSeconds:N0} s");
@@ -427,6 +427,49 @@ public abstract class HostRows
         StringAssert.Contains(source.Text, "Needs input", "headless anyfs can't answer the login prompt and says so");
     }
 
+    /// <summary>The slow-source rows: every client of the host (ANYFS_E2E_CLIENTS narrows them), over SMB.</summary>
+    public static IEnumerable<object[]> HeldRowsFor(string os)
+    {
+        var clients = Selection(ClientsVariable);
+        foreach (var client in ClientsOf(os).Where(c => clients is null || clients.Contains(c)))
+        {
+            yield return [client];
+        }
+    }
+
+    /// <summary>
+    /// A slow source call holds up nothing else on the mount. Through the held collection's SMB mount (the lab's slow
+    /// source, tests/fixtures/SlowPlugin) the client reads slow.bin, whose every read waits on the source for
+    /// <see cref="AnyFsHost.HeldDelaySeconds"/>, and a moment later lists quick/ and reads quick.bin: both must come back
+    /// within 3 s, and before the slow read does. Most of AnyFS's sources are network services, so a slow call is its
+    /// normal case; a client machine sends everything over one connection.
+    /// </summary>
+    protected void RunHeld(string clientName)
+    {
+        const long promptMs = 3000;
+        var d = Current();
+        if (!d.Clients.TryGetValue(clientName, out var client))
+        {
+            Assert.Inconclusive(d.ClientUnavailable.GetValueOrDefault(clientName) ?? $"no client named {clientName}");
+            return;
+        }
+
+        using var access = client.Attach(MountKind.Smb, d.AnyFs!, AnyFsHost.HeldCollection, clientName == "local");
+        var t = client.HeldCheck(access, "slow.bin", "quick", "quick.bin");
+        Console.WriteLine($"held over SMB from {client.M.Name}: slow read {t.SlowEnd - t.SlowStart} ms; meanwhile list {t.ListEnd - t.ListStart} ms, read {t.ReadEnd - t.ReadStart} ms");
+        Assert.IsGreaterThanOrEqualTo(AnyFsHost.HeldDelaySeconds * 800L, t.SlowEnd - t.SlowStart, "the slow read was not held by the source, so this proves nothing");
+        Assert.AreEqual(AnyFsHost.HeldSha256(AnyFsHost.HeldSlowKiB << 10), t.SlowHash, "slow.bin came back wrong");
+        Assert.IsGreaterThan(t.SlowStart, t.ListStart, "the listing began before the slow read");
+        foreach (var (what, start, end) in new[] { ("listing quick/", t.ListStart, t.ListEnd), ("reading quick.bin", t.ReadStart, t.ReadEnd) })
+        {
+            Assert.IsLessThan(promptMs, end - start, $"{what} took {end - start} ms with a slow read in flight on the connection (at most {promptMs} ms)");
+            Assert.IsLessThan(t.SlowEnd, end, $"{what} came back {end - t.SlowEnd} ms after the slow read, so it waited for it");
+        }
+
+        Assert.AreEqual(AnyFsHost.HeldQuickFiles, t.ListCount, "quick/ lists completely");
+        Assert.AreEqual(AnyFsHost.HeldSha256(AnyFsHost.HeldQuickBytes), t.ReadHash, "quick.bin came back wrong");
+    }
+
     protected void CheckSamplePluginLoaded()
     {
         var d = Current();
@@ -512,6 +555,13 @@ public class LinuxHostRows : HostRows
 
     public static IEnumerable<object[]> Rows() => RowsFor("linux");
 
+    public static IEnumerable<object[]> HeldRows() => HeldRowsFor("linux");
+
+    [TestMethod]
+    [DynamicData(nameof(HeldRows))]
+    [Timeout(300_000)]
+    public void SlowSourceHoldsUpNothingOverSmb(string client) => RunHeld(client);
+
     [TestMethod]
     [DynamicData(nameof(Rows))]
     [Timeout(900_000)]
@@ -546,6 +596,13 @@ public class WindowsHostRows : HostRows
 
     public static IEnumerable<object[]> Rows() => RowsFor("windows");
 
+    public static IEnumerable<object[]> HeldRows() => HeldRowsFor("windows");
+
+    [TestMethod]
+    [DynamicData(nameof(HeldRows))]
+    [Timeout(300_000)]
+    public void SlowSourceHoldsUpNothingOverSmb(string client) => RunHeld(client);
+
     [TestMethod]
     [DynamicData(nameof(Rows))]
     [Timeout(900_000)]
@@ -579,6 +636,13 @@ public class MacHostRows : HostRows
     public static void Done() => Shutdown("macos");
 
     public static IEnumerable<object[]> Rows() => RowsFor("macos");
+
+    public static IEnumerable<object[]> HeldRows() => HeldRowsFor("macos");
+
+    [TestMethod]
+    [DynamicData(nameof(HeldRows))]
+    [Timeout(300_000)]
+    public void SlowSourceHoldsUpNothingOverSmb(string client) => RunHeld(client);
 
     [TestMethod]
     [DynamicData(nameof(Rows))]

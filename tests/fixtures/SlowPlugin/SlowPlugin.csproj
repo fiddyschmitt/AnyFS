@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The lab's slow source (type lab-slow): a file whose every read waits on the source, for the E2E tests that check a
+       slow source call holds up nothing else on a mount. provisioning/publish.ps1 puts it in publish/plugins. -->
+  <PropertyGroup>
+    <AssemblyName>AnyFS.SlowPlugin</AssemblyName>
+    <RootNamespace>AnyFS.SlowPlugin</RootNamespace>
+    <IsPackable>false</IsPackable>
+    <IsTrimmable>false</IsTrimmable>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\AnyFS.Sdk\AnyFS.Sdk.csproj">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+  </ItemGroup>
+</Project>

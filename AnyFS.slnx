@@ -76,6 +76,7 @@
   <Folder Name="/tests/fixtures/">
     <Project Path="tests/fixtures/MakeTree/MakeTree.csproj" />
     <Project Path="tests/fixtures/SamplePlugin/SamplePlugin.csproj" />
+    <Project Path="tests/fixtures/SlowPlugin/SlowPlugin.csproj" />
     <Project Path="tests/fixtures/SharePointSignIn/SharePointSignIn.csproj" />
     <Project Path="tests/fixtures/SmbStress/SmbStress.csproj" />
   </Folder>

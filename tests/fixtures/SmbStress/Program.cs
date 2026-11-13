@@ -7,7 +7,10 @@ using AnyFS.Fixtures.SmbStress;
 // puts this on every client machine and lets it hammer the mounted share for a set time, checking every byte it reads:
 //
 //   SmbStress run --root <share folder> --name <client> --seed N --seconds S [--workers 4] [--large-max-mb 32]
-//                 [--op-timeout 120] [--max-pub 12] [--out result.json]
+//                 [--op-timeout 120] [--max-pub 12] [--held <folder>] [--out result.json]
+//
+// --held: a folder of files whose every read waits on its source, read one after another beside the workers (operation
+// "held"), each once.
 //
 // and on the host, to prepare and then check the share's folder:
 //
@@ -75,6 +78,13 @@ static int RunCommand(Dictionary<string, string> options)
     var watch = recorder.WatchAsync(settings.OpTimeout, stop.Token);
     var progress = ProgressAsync(recorder, stop.Token);
     var threads = workers.Select(w => new Thread(() => w.Run(deadline)) { IsBackground = true }).ToList();
+    if (options.TryGetValue("held", out var held))
+    {
+        // a file whose every read waits on its source, read over and over on the same connection as the workers: their
+        // operations must not wait for it (the harness checks the listings' worst time)
+        threads.Add(new Thread(() => ReadHeld(held, settings.Name, settings.Workers, recorder, deadline)) { IsBackground = true });
+    }
+
     threads.ForEach(t => t.Start());
 
     // a worker blocked on a hung mount never comes back: give up on it after a grace period, so the run still reports (as
@@ -144,6 +154,44 @@ static async Task ProgressAsync(Recorder recorder, CancellationToken stop)
     }
     catch (OperationCanceledException)
     {
+    }
+}
+
+// The held folder's files read whole, one after another until the deadline, each once (a file read before could come
+// from the client's own cache, held by nothing), from a place of the client's own: operation "held", as worker `id`.
+static void ReadHeld(string folder, string name, int id, Recorder recorder, DateTime deadline)
+{
+    string[] files;
+    try
+    {
+        files = Directory.GetFiles(folder);
+        Array.Sort(files, StringComparer.Ordinal);
+    }
+    catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+    {
+        recorder.Begin(id, "held", folder);
+        recorder.End(id, "held", folder, System.Diagnostics.Stopwatch.StartNew(), 0, 0, ex);
+        return;
+    }
+
+    var next = files.Length == 0 ? 0 : (int)(Content.HashKey(name) % (ulong)files.Length);
+    for (var i = 0; i < files.Length && DateTime.UtcNow < deadline; i++)
+    {
+        var path = files[(next + i) % files.Length];
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        recorder.Begin(id, "held", path);
+        Exception? error = null;
+        long read = 0;
+        try
+        {
+            read = File.ReadAllBytes(path).Length;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            error = ex;
+        }
+
+        recorder.End(id, "held", path, watch, 0, read, error);
     }
 }
 

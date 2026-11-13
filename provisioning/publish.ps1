@@ -60,6 +60,12 @@ if ($LASTEXITCODE -ne 0) { throw "dotnet build of SamplePlugin failed" }
 New-Item -ItemType Directory -Force (Join-Path $out 'plugins') | Out-Null
 Copy-Item (Join-Path $repo 'tests\fixtures\SamplePlugin\bin\Release\net10.0\AnyFS.SamplePlugin.dll') (Join-Path $out 'plugins\') -Force
 
+# the lab's slow source: a file whose every read waits on the source (LibSmb.E2E's smbslow, AnyFS.E2E's held)
+Write-Host "== the slow plugin" -ForegroundColor Cyan
+& dotnet build (Join-Path $repo 'tests\fixtures\SlowPlugin\SlowPlugin.csproj') -c Release -nologo -v quiet
+if ($LASTEXITCODE -ne 0) { throw "dotnet build of SlowPlugin failed" }
+Copy-Item (Join-Path $repo 'tests\fixtures\SlowPlugin\bin\Release\net10.0\AnyFS.SlowPlugin.dll') (Join-Path $out 'plugins\') -Force
+
 Set-Content -Path (Join-Path $out 'version.txt') -Value "$branch $sha $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))" -Encoding ascii
 Get-ChildItem $out -Recurse -File | Where-Object { $_.Name -match '^(anyfs|MakeTree|SmbStress)(\.exe)?$|\.dll$|version\.txt' } |
     ForEach-Object { "   {0,-28} {1,8:N1} MB" -f $_.FullName.Substring($out.Length + 1), ($_.Length / 1MB) }

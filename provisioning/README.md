@@ -37,7 +37,7 @@ same file (`tests/AnyFS.TestLab/Lab.cs`).
     vagrant up                          # the three VirtualBox VMs
     .\mac.ps1 setup                     # once: lets the lab's key in to the Mac, installs tart and Vagrant there
     .\mac.ps1 up                        # the macOS VM
-    .\publish.ps1                       # anyfs for win-x64, linux-x64 and osx-arm64, MakeTree, SmbStress, the sample plugin -> publish\
+    .\publish.ps1                       # anyfs for win-x64, linux-x64 and osx-arm64, MakeTree, SmbStress, the plugins -> publish\
     .\check.ps1                         # is it all ready?
 
 then, from the repo:
@@ -53,18 +53,31 @@ comma-separated list
 only those rows are generated. A test-name `--filter` cannot do this, because the rows are expanded
 when the run starts, not at discovery.
 
+AnyFS.E2E also reads the lab's slow source (`tests/fixtures/SlowPlugin`, the `held` collection) over
+SMB from every client: while `slow.bin` takes 10 s, a listing and another read through the same
+mount must come back within 3 s (`SlowSourceHoldsUpNothingOverSmb`).
+
 `tests/LibSmb.E2E` runs the SMB conditions on every host from every client (`SmbConditions.cs`):
 round trips,
 a 256 MiB file each way, ranges, edits in place, renames and deletes, special names, case, a deep
 tree, 1000 small files and a 5000-entry folder, timestamps, disk space, a 4.5 GiB sparse file,
 concurrent writers and readers, churn while listing, a copy killed half-way, 50 listings at once,
+a read whose source call takes 10 s holding up no listing or other read on the connection,
 isolation between shares, wrong logins, a read-only share, a guest share (not from Windows, which
 refuses unsigned guest sessions), and from Linux every dialect with and without signing, Samba's
 smbclient and 50 sessions at once. Then every client at once on one share, a stress run of every
 client together with `SmbStress` (120 s by default; every byte checked, the clients' own SMB logs
-read, the host's folder audited), and the host's anyfs log. Its anyfs serves only the conditions'
-own shares, over an empty folder on the host: `smbdata`, `smbsecond`, `smbro`, and `smbguest` on
-port 1446. `ANYFS_E2E_SMB_CONDITIONS` narrows the run (`timestamps,guest_roundtrip`,
+read, the host's folder audited, and no listing, small file or small tree slower than 5 s while
+each client also reads, one after another, files whose every read takes 10 s), and the host's
+anyfs log. Its anyfs serves only the conditions'
+own shares, over an empty folder on the host: `smbdata`, `smbsecond`, `smbro`, `smbguest` on
+port 1446, and `smbslow`, smbdata's folder with the lab's slow source (`tests/fixtures/SlowPlugin`:
+`held/slow.bin` and the files of `held/slow/`, whose every read waits 10 s, beside `held/quick.bin`
+and `held/quick/`; each test reads a slow file no client has read, which no client cache answers).
+macOS's client holds some reads back while another read is unanswered (reading a 64 KiB file it sent
+three of four reads at once and the fourth after the slow read; its read-ahead, as it seems), so
+`held/quick.bin` is 16 KiB, one read for every client, and the stress run notes macOS's slow quick
+operations instead of failing on them. `ANYFS_E2E_SMB_CONDITIONS` narrows the run (`timestamps,guest_roundtrip`,
 `several_clients_at_once`, `stress`) and `ANYFS_E2E_CLIENTS` its clients;
 `ANYFS_E2E_SMB_STRESS_SECONDS`, `_WORKERS`, `_LARGE_MB` and `_SEED` shape the stress run.
 
@@ -124,7 +137,7 @@ PASS/WARN/FAIL lines; a FAIL stops Vagrant there.
 | `mac.ps1` | Runs Vagrant for the macOS VM on the Mac, from this PC, over SSH |
 | `macos/Vagrantfile`, `macos/provision.sh` | The macOS VM (tart, pinned MAC address) and what runs inside it |
 | `macos/setup-host.sh`, `macos/shims/tart` | The Mac's one-time setup, and a wrapper that keeps the VM alive after Vagrant exits |
-| `publish.ps1` | Builds anyfs per runtime, MakeTree, SmbStress and the sample plugin into `publish\` (shared into the VMs; not in git) |
+| `publish.ps1` | Builds anyfs per runtime, MakeTree, SmbStress, the sample plugin and the slow plugin into `publish\` (shared into the VMs; not in git) |
 | `check.ps1` | Is the lab ready? |
 
 ## How a test runs
