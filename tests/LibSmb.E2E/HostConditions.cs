@@ -215,6 +215,11 @@ public abstract class HostConditions
             return;
         }
 
+        if (SmbMount.Stuck(client, SmbPair.ServerIpFor(d.AnyFs!, clientName == "local")) is { } stuck)
+        {
+            Assert.Inconclusive(stuck);
+        }
+
         Console.WriteLine($"{condition} from {client.Name} against {d.Host!.Name}");
         new SmbPair(d.AnyFs!, client, clientName == "local").Run(SmbConditions.Named(condition).Run);
     }

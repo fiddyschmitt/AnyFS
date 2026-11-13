@@ -973,15 +973,30 @@ public static class SmbConditions
     /// </summary>
     public static void SeveralClientsAtOnce(AnyFsHost anyfs, IReadOnlyDictionary<string, Machine> clients)
     {
-        if (clients.Count < 2)
+        var everyone = new List<Member>();
+        var leftOut = new List<string>();
+        foreach (var (name, machine) in clients)
         {
-            Assert.Inconclusive($"{clients.Count} client(s) selected or reachable; this needs two or more");
+            // a client whose mount of this host did not finish before would only wait out its time-outs again
+            if (SmbMount.Stuck(machine, SmbPair.ServerIpFor(anyfs, name == "local")) is { } stuck)
+            {
+                leftOut.Add($"{name} left out: {stuck}");
+                Console.WriteLine(leftOut[^1]);
+            }
+            else
+            {
+                everyone.Add(new Member(name, machine, name == "local"));
+            }
+        }
+
+        if (everyone.Count < 2)
+        {
+            Assert.Inconclusive(string.Join("; ", [$"{everyone.Count} client(s) selected or reachable; this needs two or more", .. leftOut]));
         }
 
         var dir = SmbPair.Unique("mc");
         var hostDir = SmbOps.Join(anyfs.Host, anyfs.SmbDataDir, dir);
         SmbOps.Mkdir(anyfs.Host, hostDir).Must("make the shared folder on the host");
-        var everyone = clients.Select(c => new Member(c.Key, c.Value, c.Key == "local")).ToList();
         var members = everyone;
         var failures = new List<string>();
 
@@ -1014,7 +1029,7 @@ public static class SmbConditions
             {
                 SmbMount.ForceUnmountAll(m.Machine);
                 SmbOps.Mkdir(m.Machine, m.Scratch).Must("make the scratch folder");
-                m.Mount = new SmbMount(m.Machine, m.Local ? "127.0.0.1" : anyfs.Host.Ip, "smbdata", AnyFsHost.SmbPort) { Tag = "T" };
+                m.Mount = new SmbMount(m.Machine, SmbPair.ServerIpFor(anyfs, m.Local), "smbdata", AnyFsHost.SmbPort) { Tag = "T" };
                 var r = m.Mount.TryMount();
                 if (!r.Ok && m.Machine.IsWindows && !m.Local && r.Output.Contains("System error 67", StringComparison.Ordinal))
                 {
@@ -1121,6 +1136,10 @@ public static class SmbConditions
         }
 
         Assert.AreEqual(0, failures.Count, string.Join("\n", failures));
+        if (leftOut.Count > 0)
+        {
+            Assert.Inconclusive("no failures, but not every client took part: " + string.Join("; ", leftOut));
+        }
     }
 
     private sealed class Member(string name, Machine machine, bool local)

@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
@@ -421,6 +423,11 @@ public sealed class SmbMount(Machine host, string serverIp, string share, int po
     /// <summary>The drive letters the Windows mounts take (Z when a mount has no tag).</summary>
     public const string WindowsLetters = "ZYXWVUT";
 
+    /// <summary>How long a mount may take: one that has not finished by then makes its client <see cref="Stuck"/> for its server.</summary>
+    public const int MountSeconds = 90;
+
+    private static readonly ConcurrentDictionary<(string Client, string Server), string> stuck = new();
+
     public Machine Host { get; } = host;
 
     public string Share { get; } = share;
@@ -444,6 +451,14 @@ public sealed class SmbMount(Machine host, string serverIp, string share, int po
     public string? Root { get; private set; }
 
     public static string MacPrefix(Machine h) => $"/Users/{h.Info.User}/anyfs-lab/mnt/c-";
+
+    /// <summary>
+    /// Why a client's later rows against a server do not run, or null while its mounts of it finish. A client whose own SMB
+    /// client is stuck (a Mac's kernel smbfs once deadlocked, and every mount after queued behind it) would make each of its
+    /// later rows wait out the same time-outs, 4.5 minutes a row. Kept per client and server: a server that stopped
+    /// answering looks the same from the client, and then the client's rows against the other hosts still run.
+    /// </summary>
+    public static string? Stuck(Machine client, string serverIp) => stuck.GetValueOrDefault((client.Name, serverIp));
 
     private string Suffix => Tag.Length == 0 ? "" : "-" + Tag;
 
@@ -492,11 +507,26 @@ public sealed class SmbMount(Machine host, string serverIp, string share, int po
     /// <summary>Mounts the share and hands back what happened, for the conditions where a refusal is expected.</summary>
     public SmbResult TryMount()
     {
+        if (Stuck(Host, serverIp) is { } earlier)
+        {
+            return new SmbResult(-1, $"[not tried: {earlier}]");
+        }
+
         Unmount();
-        var r = SmbOps.Run(Host, MountCommand(), 90);
+        var sw = Stopwatch.StartNew();
+        var r = SmbOps.Run(Host, MountCommand(), MountSeconds);
         if (r.Ok)
         {
             Root = MountPoint + (Host.IsWindows ? "\\" : "");
+        }
+        else if (r.Code == -1 && sw.Elapsed.TotalSeconds >= MountSeconds - 1)
+        {
+            // the client gave no answer in time (a refusal is the mount command's own exit code, and quick)
+            var why = $"{Host.Name}'s mount of //{serverIp}:{port}/{Share} did not finish within {MountSeconds} s ({DateTime.UtcNow:HH:mm:ss} UTC), so its later rows against {serverIp} do not run";
+            if (stuck.TryAdd((Host.Name, serverIp), why))
+            {
+                Console.WriteLine(why);
+            }
         }
 
         return r;
@@ -581,7 +611,7 @@ public sealed class SmbPair
         AnyFs = anyfs;
         S = anyfs.Host;
         C = client;
-        ServerIp = local ? "127.0.0.1" : anyfs.Host.Ip;
+        ServerIp = ServerIpFor(anyfs, local);
         Scratch = C.Info.Os switch
         {
             "windows" => @"C:\anyfs-lab\smb-scratch",
@@ -603,6 +633,9 @@ public sealed class SmbPair
 
     /// <summary>The address the client reaches the server at: the loopback when it is the host itself.</summary>
     public string ServerIp { get; }
+
+    /// <summary>The address a client reaches anyfs's host at: the loopback when it is the host itself.</summary>
+    public static string ServerIpFor(AnyFsHost anyfs, bool local) => local ? "127.0.0.1" : anyfs.Host.Ip;
 
     public string Scratch { get; }
 

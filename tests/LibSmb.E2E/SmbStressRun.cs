@@ -99,8 +99,21 @@ public static partial class SmbStressRun
             Console.WriteLine(line);
         }
 
-        // the worker on every machine, the host's own first (it seeds the corpus and audits)
-        var members = clients.Select(c => new StressClient(c.Key, c.Value, c.Key == "local")).ToList();
+        // the worker on every machine, the host's own first (it seeds the corpus and audits); a client whose mount of this
+        // host did not finish before would only wait out its time-outs again
+        var members = new List<StressClient>();
+        foreach (var (name, machine) in clients)
+        {
+            if (SmbMount.Stuck(machine, SmbPair.ServerIpFor(anyfs, name == "local")) is { } stuck)
+            {
+                infrastructure.Add($"{name} left out: {stuck}");
+            }
+            else
+            {
+                members.Add(new StressClient(name, machine, name == "local"));
+            }
+        }
+
         var machines = members.Select(m => m.Machine).Append(host).Distinct().ToList();
         var workerPaths = new Dictionary<Machine, string>();
         Parallel.ForEach(machines, m =>
@@ -150,7 +163,7 @@ public static partial class SmbStressRun
 
                 SmbMount.ForceUnmountAll(m.Machine);
                 // smbslow: smbdata's folder, with the lab's slow source in held/ on the same mount and connection
-                m.Mount = new SmbMount(m.Machine, m.Local ? "127.0.0.1" : host.Ip, "smbslow", AnyFsHost.SmbPort) { Tag = "U", Vers = m.Vers };
+                m.Mount = new SmbMount(m.Machine, SmbPair.ServerIpFor(anyfs, m.Local), "smbslow", AnyFsHost.SmbPort) { Tag = "U", Vers = m.Vers };
                 var r = m.Mount.TryMount();
                 if (!r.Ok)
                 {

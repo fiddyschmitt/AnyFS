@@ -80,6 +80,10 @@ three of four reads at once and the fourth after the slow read; its read-ahead, 
 operations instead of failing on them. `ANYFS_E2E_SMB_CONDITIONS` narrows the run (`timestamps,guest_roundtrip`,
 `several_clients_at_once`, `stress`) and `ANYFS_E2E_CLIENTS` its clients;
 `ANYFS_E2E_SMB_STRESS_SECONDS`, `_WORKERS`, `_LARGE_MB` and `_SEED` shape the stress run.
+A mount that a client has not finished within 90 s fails its row, and the client's later rows against
+that host are Inconclusive at once (the several-clients and stress rows leave it out) rather than each
+waiting out the same time-outs: a Mac whose kernel SMB client had deadlocked once cost 2.5 hours that
+way. Its rows against the other hosts still run; a stuck client needs a restart.
 
 From the Windows VM, AnyFS.E2E's SMB rows against the Linux and macOS hosts need `WinFsp.Np` after
 `LanmanWorkstation` in the network provider order
