@@ -273,6 +273,7 @@ internal sealed partial class SmbConnection
                     try
                     {
                         await SendAsync(Interim(pending), ct).ConfigureAwait(false);
+                        Logger.LogTrace("smb: {Remote} << {Command} message {MessageId} STATUS_PENDING, async {AsyncId}", Remote, pending.Header.Command, pending.Header.MessageId, pending.AsyncId);
                         pending.InterimSent.TrySetResult();
                     }
                     catch

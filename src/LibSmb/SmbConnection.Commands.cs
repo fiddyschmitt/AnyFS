@@ -31,7 +31,7 @@ internal sealed partial class SmbConnection
             chain.Failed = null;
         }
 
-        Logger.LogTrace("smb: {Remote} >> {Command} message {MessageId} flags {Flags} ({Length} bytes)", Remote, h.Command, h.MessageId, h.Flags, pdu.Length);
+        Logger.LogTrace("smb: {Remote} >> {Command} message {MessageId} flags {Flags} credits {Charge}/{Request} ({Length} bytes)", Remote, h.Command, h.MessageId, h.Flags, h.CreditCharge, h.CreditRequest, pdu.Length);
 
         // CANCEL is never answered: one from a session that has not signed in, or wrongly signed, is dropped
         if (h.Command == Command.Cancel)
