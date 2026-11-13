@@ -17,6 +17,7 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
     private int _cancelled;
     private int _closed;
     private int _listed;
+    private int _reads;
 
     public bool CaseInsensitive => _inner.CaseInsensitive;
 
@@ -28,6 +29,9 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
 
     /// <summary>Opens closed (disposed).</summary>
     public int Closed => Volatile.Read(ref _closed);
+
+    /// <summary>Calls to read a file, all opens'.</summary>
+    public int Reads => Volatile.Read(ref _reads);
 
     /// <summary>Directories listed.</summary>
     public int Listed => Volatile.Read(ref _listed);
@@ -87,6 +91,7 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
         public async ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken cancellationToken)
         {
             Enter();
+            Interlocked.Increment(ref owner._reads);
             try
             {
                 if (owner._givingUp.ContainsKey(path))

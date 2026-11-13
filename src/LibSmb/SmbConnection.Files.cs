@@ -312,6 +312,13 @@ internal sealed partial class SmbConnection
                     }
 
                     read += n;
+
+                    // at the end the file's length gives, asking again would only hear so: for a slow backend, a second
+                    // round trip on every READ that takes in the end of a file (clients read in big pieces)
+                    if ((long)offset + read >= file.Length)
+                    {
+                        break;
+                    }
                 }
             }
             catch (Exception ex) when (IsFileSystemFailure(ex))

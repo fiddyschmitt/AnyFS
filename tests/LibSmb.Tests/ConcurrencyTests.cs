@@ -312,6 +312,27 @@ public sealed class ConcurrencyTests
         CollectionAssert.AreEqual(FastContent, await client.ReadAsync(tree, fast, 0, FastContent.Length), "the connection carries on");
     }
 
+    /// <summary>
+    /// A READ that reaches the end of the file asks the file system once. Clients read in big pieces (64 KiB of a 16 KiB
+    /// file here), and a second call to hear of the end the file's length already gave would be a slow backend's second
+    /// round trip for every small file read.
+    /// </summary>
+    [TestMethod]
+    public async Task AReadToTheEndAsksTheFileSystemOnce()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        var before = fs.Reads;
+        CollectionAssert.AreEqual(FastContent, await client.ReadAsync(tree, fast, 0, 64 << 10));
+        Assert.AreEqual(1, fs.Reads - before, "the file system's reads for one READ that reaches the end");
+
+        // a short read short of the end still asks again
+        CollectionAssert.AreEqual(FastContent[100..], await client.ReadAsync(tree, fast, 100, 64 << 10));
+    }
+
     /// <summary>A CANCEL is never answered: not one that names nothing, nor one from a session that has not signed in.</summary>
     [TestMethod]
     public async Task ACancelIsNeverAnswered()
