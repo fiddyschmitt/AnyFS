@@ -10,7 +10,7 @@ two OSes' machines reach each host's mounts, so each OS is tested as a client of
 |---|---|---|---|---|---|
 | `anyfs-debian-2` | upstream: sshd + the fixture tree, Samba share `fixture`; remote client (cifs, davfs2, curl, lftp) | Debian 13 | 192.168.0.96 | VirtualBox, this PC | `ansible/playbook.yml` |
 | `anyfs-debian-1` | runs anyfs (linux-x64): FUSE, SMB, WebDAV, FTP, HTTP; local client | Debian 13 | 192.168.0.95 | VirtualBox, this PC | `ansible/playbook.yml` |
-| `anyfs-win11-1` | runs anyfs (win-x64) with WinFsp: WinFsp, SMB, WebDAV, FTP, HTTP; local client (Explorer-style UNC paths, `net use /TCPPORT`, WebClient, curl) | Windows 11 25H2 Enterprise (evaluation) | 192.168.0.99 | VirtualBox, this PC | `windows/provision.ps1` |
+| `anyfs-win11-1` | runs anyfs (win-x64) with WinFsp: WinFsp, SMB, WebDAV, FTP, HTTP; local client (Explorer-style UNC paths, `net use /TCPPORT`, WebClient, curl) | Windows 11 25H2 Enterprise (evaluation) | 192.168.0.97 | VirtualBox, this PC | `windows/provision.ps1` |
 | `anyfs-macos-1` | runs anyfs (osx-arm64): SMB, WebDAV, FTP, HTTP; local client (`mount_smbfs`, `mount_webdav`, curl) | macOS 15 Sequoia | 192.168.0.98 | tart on the Mac mini (192.168.0.33) | `macos/provision.sh` |
 | `anyfs-dc-1` | the SharePoint farms' domain controller: Active Directory, DNS, the farms' accounts (off by default) | Windows Server 2022 Core (evaluation) | 192.168.0.91 | VirtualBox, this PC | `windows/dc-provision.ps1` |
 | `anyfs-sp-1` | SQL Server 2022 Developer + SharePoint Server Subscription Edition, a one-server farm the SharePoint Server source reads from (off by default) | Windows Server 2022 (evaluation) | 192.168.0.92 | VirtualBox, this PC | `windows/sp-provision.ps1`, `windows/sp-farm-configuration.ps1` |
