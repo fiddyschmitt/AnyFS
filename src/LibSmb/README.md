@@ -11,6 +11,13 @@ dotnet add package LibSmb
 - Sign-in with NTLMv2 through SPNEGO (or bare NTLMSSP, as Linux's cifs sends it) for one account, or guests.
 - Message signing: HMAC-SHA256 for 2.x, AES-CMAC for 3.x; signed requests are checked.
 - Compounded requests, related operations included.
+- A connection's requests run side by side. A client machine sends everything over one connection, so a slow file
+  system call holds up only its own request, and small replies go out ahead of big READ data. One open's requests take
+  turns. `MaxConcurrentRequests` (64 by default) bounds how many of a connection's requests run at once.
+- A request still running after half a second (`InterimResponseDelay`) gets an interim STATUS_PENDING reply, so
+  clients wait out a slow call instead of giving up on the connection. A client's CANCEL fires the call's cancellation
+  token, and the request is answered STATUS_CANCELLED. A call that gives up by itself with an
+  `OperationCanceledException` (a time-out) fails its request with STATUS_IO_TIMEOUT, and the connection carries on.
 - Apple's SMB2 extensions: macOS gets each directory entry's access, mode and Finder facts in the listing itself.
 - A lookup by name is one stat, not a listing filtered.
 - Read-only shares, and files that are read-only themselves.

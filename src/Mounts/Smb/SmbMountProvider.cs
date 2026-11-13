@@ -24,6 +24,10 @@ public sealed class SmbMountSettings
 
     [Setting("Password", Secret = true, Order = 5, Group = "Authentication")]
     public string? Password { get; set; }
+
+    [Setting("Requests at a time", Advanced = true, Order = 6,
+        Hint = "How many of one client machine's requests the server works on at once. A machine sends everything over one connection, so a slow read holds up none of the others until this many are waiting. Collections on the same address and port share one server, with the number of the first one mounted.")]
+    public int RequestsAtATime { get; set; } = 64;
 }
 
 /// <summary>
@@ -70,6 +74,11 @@ public sealed class SmbMountProvider : IMountProviderPlugin, IValidatable
         if (s.Port == 445)
         {
             yield return new ValidationMessage("Port 445 is held by Windows' own file sharing on Windows and needs administrator rights elsewhere; 1445 is the usual choice.", nameof(SmbMountSettings.Port), IsError: false);
+        }
+
+        if (s.RequestsAtATime < 1)
+        {
+            yield return new ValidationMessage("The server must work on at least one request at a time.", nameof(SmbMountSettings.RequestsAtATime));
         }
 
         // the letter is a Windows setting: elsewhere the box isn't shown and a value from a shared settings file is ignored
@@ -166,7 +175,7 @@ internal sealed class SmbMount(SmbMountSettings settings, ICollectionInfo collec
         _lease = await context.AcquireSharedAsync(key, token => SmbHost.StartAsync(address, settings.Port, context.Logger, token), ct).ConfigureAwait(false);
         try
         {
-            await _lease.Value.RegisterAsync(collection.Name, fs, context.Stats, credentials, ct).ConfigureAwait(false);
+            await _lease.Value.RegisterAsync(collection.Name, fs, context.Stats, credentials, settings.RequestsAtATime, ct).ConfigureAwait(false);
             _registeredName = collection.Name;
         }
         catch

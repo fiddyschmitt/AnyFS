@@ -14,6 +14,12 @@ internal sealed record SmbResponse(uint Status, Command Command, ulong MessageId
 
     public bool Signed => (Flags & (uint)HeaderFlags.Signed) != 0;
 
+    /// <summary>Whether it answers asynchronously: an interim STATUS_PENDING, or the final reply after one.</summary>
+    public bool Async => (Flags & (uint)HeaderFlags.AsyncCommand) != 0;
+
+    /// <summary>The id of the asynchronous operation, in place of the tree id when <see cref="Async"/>.</summary>
+    public ulong AsyncId => Async ? Wire.U64(Pdu, 32) : 0;
+
     public SmbResponse EnsureSuccess()
     {
         if (LibSmb.Protocol.Status.IsError(Status))
@@ -217,13 +223,24 @@ internal sealed class SmbTestClient : IAsyncDisposable
     }
 
     public Task<SmbResponse> ReadRawAsync(uint treeId, byte[] fileId, long offset, int length)
+        => SendAsync(Command.Read, ReadBody(fileId, offset, length), treeId, CreditCharge(length));
+
+    public static byte[] ReadBody(byte[] fileId, long offset, int length)
     {
         var body = new byte[49];
         Wire.Put16(body, 0, 49);
         Wire.Put32(body, 4, (uint)length);
         Wire.Put64(body, 8, (ulong)offset);
         fileId.CopyTo(body, 16);
-        return SendAsync(Command.Read, body, treeId, CreditCharge(length));
+        return body;
+    }
+
+    /// <summary>The data of a READ response.</summary>
+    public static byte[] ReadData(SmbResponse response)
+    {
+        response.EnsureSuccess();
+        var dataOffset = response.Body[2] - Smb2.HeaderSize;
+        return response.Body.AsSpan(dataOffset, (int)Wire.U32(response.Body, 4)).ToArray();
     }
 
     public async Task<SmbResponse> WriteAsync(uint treeId, byte[] fileId, long offset, ReadOnlyMemory<byte> data)
@@ -396,6 +413,99 @@ internal sealed class SmbTestClient : IAsyncDisposable
         var body = new byte[4];
         Wire.Put16(body, 0, 4);
         return SendAsync(Command.Logoff, body);
+    }
+
+    /// <summary>
+    /// Sends one request without waiting for its response, as a real client with credits does: several can be in flight
+    /// on the connection at once. Its MessageId, which <see cref="ReceiveAsync"/>'s responses carry.
+    /// </summary>
+    public async Task<ulong> PostAsync(Command command, byte[] body, uint treeId = 0, ushort creditCharge = 1)
+    {
+        var messageId = _messageId;
+        _messageId += Math.Max(creditCharge, (ushort)1);
+        await WriteFrameAsync(Pdu(command, body, messageId, treeId, creditCharge, HeaderFlags.None, asyncId: null));
+        return messageId;
+    }
+
+    /// <summary>
+    /// CANCEL ([MS-SMB2] 2.2.30): of the request sent with <paramref name="messageId"/>, or, once an interim response gave
+    /// it one, of the asynchronous operation <paramref name="asyncId"/>. It takes no MessageId of its own and has no response.
+    /// </summary>
+    public Task CancelAsync(ulong messageId, ulong? asyncId = null)
+    {
+        var body = new byte[4];
+        Wire.Put16(body, 0, 4);
+        var flags = asyncId is null ? HeaderFlags.None : HeaderFlags.AsyncCommand;
+        return WriteFrameAsync(Pdu(Command.Cancel, body, messageId, 0, 0, flags, asyncId));
+    }
+
+    /// <summary>
+    /// The next response to arrive, whichever request it answers (signature checked when signed); a
+    /// <see cref="TimeoutException"/> when none comes within <paramref name="timeout"/>.
+    /// </summary>
+    public async Task<SmbResponse> ReceiveAsync(TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        byte[] reply;
+        try
+        {
+            reply = await ReadFrameAsync(cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw new TimeoutException($"no response within {timeout.TotalSeconds:0.#} s");
+        }
+
+        if (_signer is not null && (Wire.U32(reply, 16) & (uint)HeaderFlags.Signed) != 0 && !_signer.Verify(reply))
+        {
+            throw new InvalidOperationException($"the response to {(Command)Wire.U16(reply, 12)} has a wrong signature");
+        }
+
+        return Parse(reply);
+    }
+
+    /// <summary>The next response that is not an interim STATUS_PENDING one, whichever request it answers.</summary>
+    public async Task<SmbResponse> ReceiveFinalAsync(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            var response = await ReceiveAsync(deadline - DateTime.UtcNow is { Ticks: > 0 } left ? left : TimeSpan.Zero);
+            if (!(response.Async && response.Status == Status.Pending))
+            {
+                return response;
+            }
+        }
+    }
+
+    /// <summary>One request PDU, signed when the session signs; an asynchronous one carries its AsyncId where the tree id goes.</summary>
+    private byte[] Pdu(Command command, byte[] body, ulong messageId, uint treeId, ushort creditCharge, HeaderFlags flags, ulong? asyncId)
+    {
+        var pdu = new byte[Smb2.HeaderSize + body.Length];
+        Smb2.Magic.CopyTo(pdu);
+        Wire.Put16(pdu, 4, Smb2.HeaderSize);
+        Wire.Put16(pdu, 6, creditCharge);
+        Wire.Put16(pdu, 12, (ushort)command);
+        Wire.Put16(pdu, 14, command == Command.Cancel ? (ushort)0 : (ushort)64); // CreditRequest
+        Wire.Put32(pdu, 16, (uint)flags);
+        Wire.Put64(pdu, 24, messageId);
+        if (asyncId is { } id)
+        {
+            Wire.Put64(pdu, 32, id);
+        }
+        else
+        {
+            Wire.Put32(pdu, 36, treeId);
+        }
+
+        Wire.Put64(pdu, 40, SessionId);
+        body.CopyTo(pdu, Smb2.HeaderSize);
+        if (_signer is not null && SignRequests)
+        {
+            _signer.Sign(pdu);
+        }
+
+        return pdu;
     }
 
     /// <summary>One request, its response read back (signature checked when the session signs).</summary>
@@ -603,13 +713,13 @@ internal sealed class SmbTestClient : IAsyncDisposable
         await _stream.WriteAsync(frame);
     }
 
-    private async Task<byte[]> ReadFrameAsync()
+    private async Task<byte[]> ReadFrameAsync(CancellationToken ct = default)
     {
         var header = new byte[4];
-        await _stream.ReadExactlyAsync(header);
+        await _stream.ReadExactlyAsync(header, ct);
         var length = (header[1] << 16) | (header[2] << 8) | header[3];
         var message = new byte[length];
-        await _stream.ReadExactlyAsync(message);
+        await _stream.ReadExactlyAsync(message, ct);
         return message;
     }
 }

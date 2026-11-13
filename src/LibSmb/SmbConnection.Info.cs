@@ -32,7 +32,11 @@ internal sealed partial class SmbConnection
             return (Status.InvalidParameter, Reply.Error());
         }
 
-        await open.Gate.WaitAsync(ct).ConfigureAwait(false);
+        if (!await open.EnterAsync(ct).ConfigureAwait(false))
+        {
+            return (Status.FileClosed, Reply.Error());
+        }
+
         try
         {
             if ((flags & (QueryDirectoryFlags.RestartScans | QueryDirectoryFlags.Reopen)) != 0)
@@ -137,12 +141,30 @@ internal sealed partial class SmbConnection
         {
             case InfoType.File:
             {
-                var (attributes, size, modified, created, _) = await open.StatAsync(ct).ConfigureAwait(false);
+                // the open's turn, like every request on it: a rename through it changes its path, a write its length
+                if (!await open.EnterAsync(ct).ConfigureAwait(false))
+                {
+                    return (Status.FileClosed, Reply.Error());
+                }
+
+                (uint Attributes, long Size, DateTimeOffset? Modified, DateTimeOffset? Created, bool ReadOnly) stat;
+                string path;
+                try
+                {
+                    stat = await open.StatAsync(ct).ConfigureAwait(false);
+                    path = open.Path;
+                }
+                finally
+                {
+                    open.Gate.Release();
+                }
+
+                var (attributes, size, modified, created, _) = stat;
                 var isDirectory = (attributes & FileAttribute.Directory) != 0;
                 switch (infoClass)
                 {
                     case FileInfoClass.All:
-                        info = Info.All(attributes, size, modified, created, open.Name, isDirectory, OpenFile.PathFileId(open.Share.Name, open.Path));
+                        info = Info.All(attributes, size, modified, created, SmbPath.Name(path), isDirectory, OpenFile.PathFileId(open.Share.Name, path));
                         break;
                     case FileInfoClass.Standard:
                         info = Info.Standard(size, isDirectory);
@@ -151,7 +173,7 @@ internal sealed partial class SmbConnection
                         info = Info.Basic(attributes, modified, created);
                         break;
                     case FileInfoClass.Internal:
-                        info = Info.Internal(OpenFile.PathFileId(open.Share.Name, open.Path));
+                        info = Info.Internal(OpenFile.PathFileId(open.Share.Name, path));
                         break;
                     case FileInfoClass.Ea:
                         info = new byte[4]; // EaSize 0
@@ -255,7 +277,11 @@ internal sealed partial class SmbConnection
         }
 
         var buffer = request.Slice(bufferOffset, (int)bufferLength);
-        await open.Gate.WaitAsync(ct).ConfigureAwait(false);
+        if (!await open.EnterAsync(ct).ConfigureAwait(false))
+        {
+            return (Status.FileClosed, Reply.Error());
+        }
+
         try
         {
             var status = infoClass switch

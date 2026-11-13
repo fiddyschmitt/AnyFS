@@ -33,6 +33,17 @@ internal sealed partial class SmbConnection
 
         Logger.LogTrace("smb: {Remote} >> {Command} message {MessageId} flags {Flags} ({Length} bytes)", Remote, h.Command, h.MessageId, h.Flags, pdu.Length);
 
+        // CANCEL is never answered: one from a session that has not signed in, or wrongly signed, is dropped
+        if (h.Command == Command.Cancel)
+        {
+            if ((_server.GuestOnly || _sessions.ContainsKey(sessionId)) && (SignerFor(sessionId) is not { } cancelSigner || !h.Signed || cancelSigner.Verify(pdu.Span)))
+            {
+                Cancel(h);
+            }
+
+            return (null, null);
+        }
+
         // with an account to sign in to, every command but the handshake needs a session that signed in: otherwise a
         // client could skip SESSION_SETUP and still connect to a tree and open files
         if (!_server.GuestOnly && h.Command is not (Command.Negotiate or Command.SessionSetup) && !_sessions.ContainsKey(sessionId))
@@ -130,9 +141,6 @@ internal sealed partial class SmbConnection
                 // locking (Windows' among them) carry on
                 (status, reply) = (Status.Success, Reply.Fixed(4));
                 break;
-            case Command.Cancel:
-                // CANCEL has no response
-                return (null, null);
             default:
                 (status, reply) = (Status.NotSupported, Reply.Error());
                 break;

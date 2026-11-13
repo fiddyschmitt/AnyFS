@@ -12,11 +12,15 @@ internal readonly record struct Header(
     uint NextCommand,
     ulong MessageId,
     uint TreeId,
-    ulong SessionId)
+    ulong SessionId,
+    ulong AsyncId = 0)
 {
     public bool Related => (Flags & HeaderFlags.RelatedOperations) != 0;
 
     public bool Signed => (Flags & HeaderFlags.Signed) != 0;
+
+    /// <summary>An asynchronous header ([MS-SMB2] 2.2.1.1): it carries an <see cref="AsyncId"/> where the tree id would be.</summary>
+    public bool Async => (Flags & HeaderFlags.AsyncCommand) != 0;
 
     /// <summary>The 64-byte header at the start of <paramref name="pdu"/>, or false when it is not one.</summary>
     public static bool TryParse(ReadOnlySpan<byte> pdu, out Header header)
@@ -27,16 +31,29 @@ internal readonly record struct Header(
             return false;
         }
 
+        var flags = (HeaderFlags)Wire.U32(pdu, 16);
         header = new Header(
             Wire.U16(pdu, 6),
             (Command)Wire.U16(pdu, 12),
             Wire.U16(pdu, 14),
-            (HeaderFlags)Wire.U32(pdu, 16),
+            flags,
             Wire.U32(pdu, 20),
             Wire.U64(pdu, 24),
             Wire.U32(pdu, 36),
-            Wire.U64(pdu, 40));
+            Wire.U64(pdu, 40),
+            (flags & HeaderFlags.AsyncCommand) != 0 ? Wire.U64(pdu, 32) : 0);
         return true;
+    }
+
+    /// <summary>
+    /// Turns a response's header asynchronous ([MS-SMB2] 3.3.4.2): the flag set, the AsyncId where the tree id was, and no
+    /// credits, which the interim response granted. Before signing.
+    /// </summary>
+    public static void MakeAsync(Span<byte> pdu, ulong asyncId)
+    {
+        Wire.Put32(pdu, 16, Wire.U32(pdu, 16) | (uint)HeaderFlags.AsyncCommand);
+        Wire.Put64(pdu, 32, asyncId);
+        Wire.Put16(pdu, 14, 0);
     }
 
     /// <summary>

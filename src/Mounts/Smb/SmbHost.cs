@@ -23,6 +23,7 @@ internal sealed class SmbHost(IPAddress address, int port, ILogger logger) : IAs
     private readonly SemaphoreSlim _gate = new(1, 1);
     private SmbServer? _server;
     private SmbCredentials? _credentials;
+    private int _requestsAtATime;
 
     /// <summary>Raised when the server stops accepting connections on its own (the message says why), so the mounts can report it.</summary>
     public event Action<string>? Died;
@@ -41,8 +42,11 @@ internal sealed class SmbHost(IPAddress address, int port, ILogger logger) : IAs
         return Task.FromResult(new SmbHost(address, port, logger));
     }
 
-    /// <summary>Serves a collection as a share named after it; the server starts listening with the first.</summary>
-    public async Task RegisterAsync(string collection, IVirtualFileSystem fs, IMountStatsSink stats, SmbCredentials credentials, CancellationToken ct)
+    /// <summary>
+    /// Serves a collection as a share named after it; the server starts listening with the first, which also sets how many
+    /// of a connection's requests it works on at once.
+    /// </summary>
+    public async Task RegisterAsync(string collection, IVirtualFileSystem fs, IMountStatsSink stats, SmbCredentials credentials, int requestsAtATime, CancellationToken ct)
     {
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -67,6 +71,7 @@ internal sealed class SmbHost(IPAddress address, int port, ILogger logger) : IAs
                         User = credentials.Guest ? null : credentials.User,
                         Password = credentials.Guest ? null : credentials.Password,
                         Logger = logger,
+                        MaxConcurrentRequests = requestsAtATime,
                     });
                 }
                 catch (System.Net.Sockets.SocketException ex)
@@ -76,7 +81,12 @@ internal sealed class SmbHost(IPAddress address, int port, ILogger logger) : IAs
 
                 _server.Faulted += OnFaulted;
                 _credentials = credentials;
-                logger.LogInformation("SMB server listening on {Address}:{Port}", address, port);
+                _requestsAtATime = requestsAtATime;
+                logger.LogInformation("SMB server listening on {Address}:{Port}, {Requests} requests at a time per connection", address, port, requestsAtATime);
+            }
+            else if (requestsAtATime != _requestsAtATime)
+            {
+                logger.LogInformation("SMB: '{Collection}' asks for {Asked} requests at a time, but the server on {Address}:{Port} already works on {Running}, as the first collection mounted there set", collection, requestsAtATime, address, port, _requestsAtATime);
             }
 
             try

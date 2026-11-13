@@ -97,12 +97,14 @@ internal static class Status
     public const uint LogonFailure = 0xC000006D;
     public const uint InsufficientResources = 0xC000009A;
     public const uint MediaWriteProtected = 0xC00000A2;
+    public const uint IoTimeout = 0xC00000B5;
     public const uint FileIsADirectory = 0xC00000BA;
     public const uint NotSupported = 0xC00000BB;
     public const uint NetworkNameDeleted = 0xC00000C9;
     public const uint BadNetworkName = 0xC00000CC;
     public const uint DirectoryNotEmpty = 0xC0000101;
     public const uint NotADirectory = 0xC0000103;
+    public const uint Cancelled = 0xC0000120;
     public const uint FileClosed = 0xC0000128;
     public const uint UserSessionDeleted = 0xC0000203;
     public const uint NotFound = 0xC0000225;

@@ -228,9 +228,16 @@ internal sealed partial class SmbConnection
             return (Status.Success, reply);
         }
 
-        await open.Gate.WaitAsync(ct).ConfigureAwait(false);
+        if (!await open.EnterAsync(ct).ConfigureAwait(false))
+        {
+            reply.Dispose();
+            return (Status.FileClosed, Reply.Error());
+        }
+
         try
         {
+            // a request on it still waiting for its turn is answered STATUS_FILE_CLOSED
+            open.Closed = true;
             if ((flags & CloseFlags.PostQueryAttributes) != 0 && !open.DeleteOnClose)
             {
                 var (attributes, size, modified, created, _) = await open.StatAsync(ct).ConfigureAwait(false);
@@ -286,7 +293,12 @@ internal sealed partial class SmbConnection
         var read = 0;
         if (length > 0)
         {
-            await open.Gate.WaitAsync(ct).ConfigureAwait(false);
+            if (!await open.EnterAsync(ct).ConfigureAwait(false))
+            {
+                reply.Dispose();
+                return (Status.FileClosed, Reply.Error());
+            }
+
             try
             {
                 var file = await open.FileToReadAsync(ct).ConfigureAwait(false);
@@ -359,7 +371,11 @@ internal sealed partial class SmbConnection
             return (Status.InvalidParameter, Reply.Error());
         }
 
-        await open.Gate.WaitAsync(ct).ConfigureAwait(false);
+        if (!await open.EnterAsync(ct).ConfigureAwait(false))
+        {
+            return (Status.FileClosed, Reply.Error());
+        }
+
         try
         {
             await file.WriteAsync((long)offset, request.Slice(dataOffset, (int)length), ct).ConfigureAwait(false);
@@ -389,7 +405,11 @@ internal sealed partial class SmbConnection
 
         if (FindOpen(FileId.Read(request.Span[8..24])) is { File: { } file } open)
         {
-            await open.Gate.WaitAsync(ct).ConfigureAwait(false);
+            if (!await open.EnterAsync(ct).ConfigureAwait(false))
+            {
+                return (Status.FileClosed, Reply.Error());
+            }
+
             try
             {
                 await file.FlushAsync(ct).ConfigureAwait(false);
@@ -408,8 +428,9 @@ internal sealed partial class SmbConnection
     }
 
     /// <summary>
-    /// A failure of the file system that answers one request with an error status. Cancellation (the connection or the
-    /// server going) is not one: it ends the connection.
+    /// A failure of the file system that answers one request with an error status. Cancellation is not one: the request's
+    /// own handling answers it (STATUS_CANCELLED after a client's CANCEL, STATUS_IO_TIMEOUT for a file system that gave up
+    /// by itself), or the connection is going.
     /// </summary>
     private bool IsFileSystemFailure(Exception ex)
     {

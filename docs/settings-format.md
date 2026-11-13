@@ -159,6 +159,7 @@ until you edit them (or answer their prompt when they start).
 | `guest` | `true` for guest access (no password; Windows refuses it unless `EnableInsecureGuestLogons` is on). |
 | `user` | The login (default `user`) when `guest` is false. |
 | `password` | Secret: lives in `state/secrets.json`, never here. Required unless `guest`. |
+| `requestsAtATime` | Default 64, at least 1: how many of one client machine's requests the server works on at once. A machine sends everything over one connection, so a slow read holds up none of the others until this many are waiting. The first collection mounted on an address and port sets it for that server. |
 
 ### FUSE mount (`fuse`, Linux)
 

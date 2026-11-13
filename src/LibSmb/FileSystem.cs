@@ -6,6 +6,13 @@ namespace LibSmb;
 /// the root, so a path never leaves the share. Failures are <see cref="SmbFileSystemException"/>s, or the .NET exceptions
 /// of file access (<see cref="FileNotFoundException"/>, <see cref="UnauthorizedAccessException"/>, <see cref="IOException"/>),
 /// which the server turns into the closest NTSTATUS.
+/// <para>
+/// Calls come from many requests at once, of one connection or of several: a client machine's programs all share its one
+/// connection, and the server works on its requests side by side, so a slow call holds up no other. One open's calls
+/// never overlap (see <see cref="ISmbFile"/>). A call's cancellation token fires when the client cancels its request or
+/// goes away; a call that gives up by itself with an <see cref="OperationCanceledException"/> (a time-out) fails its
+/// request with STATUS_IO_TIMEOUT.
+/// </para>
 /// </summary>
 public interface ISmbFileSystem
 {

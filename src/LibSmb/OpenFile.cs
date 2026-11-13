@@ -41,8 +41,33 @@ internal sealed class OpenFile(FileId id, SmbShare share, string path, ISmbFile?
 
     public int DirectoryPosition { get; set; }
 
-    /// <summary>One request at a time works on an open's state.</summary>
+    private volatile bool _closed;
+
+    /// <summary>One request at a time works on an open's state (requests on different opens run side by side).</summary>
     public SemaphoreSlim Gate { get; } = new(1, 1);
+
+    /// <summary>Whether it was closed: a request that waited for its turn on it is answered STATUS_FILE_CLOSED.</summary>
+    public bool Closed
+    {
+        get => _closed;
+        set => _closed = value;
+    }
+
+    /// <summary>
+    /// Waits for the open's turn (<see cref="Gate"/>), which the caller releases after a true: false, holding nothing, when
+    /// the open was closed while the request waited.
+    /// </summary>
+    public async ValueTask<bool> EnterAsync(CancellationToken ct)
+    {
+        await Gate.WaitAsync(ct).ConfigureAwait(false);
+        if (!_closed)
+        {
+            return true;
+        }
+
+        Gate.Release();
+        return false;
+    }
 
     public string Name => SmbPath.Name(Path);
 

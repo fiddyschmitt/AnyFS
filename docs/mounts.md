@@ -91,7 +91,11 @@ Served by AnyFS's own SMB server, [LibSmb](../src/LibSmb/README.md) (SMB 2.0.2 t
 with signing, or guest), inside the anyfs process. One server runs per bind address and port for
 every collection mounted there, so every collection on a port shares one login (user and password,
 or guest). Every request goes straight through the collection's tree, so the read-only layers and
-the stats apply.
+the stats apply. A client machine sends everything over one connection, and the server works on its
+requests side by side: a slow read from a source holds up nothing else, and other programs' listings
+and opens carry on. **Requests at a time** (64) bounds how many of one machine's requests run at
+once. A request still running after half a second gets an interim reply, so the client waits rather
+than giving up on the connection.
 
 - **Windows 11 24H2+**: a port other than 445 needs the device-less
   `net use \\<host>\<collection> /TCPPORT:1445 /USER:<user>` once per session (no drive

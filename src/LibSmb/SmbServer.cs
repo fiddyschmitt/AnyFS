@@ -30,6 +30,22 @@ public sealed class SmbServerOptions
 
     /// <summary>Where the server logs: connections at debug, requests at trace, failures as warnings.</summary>
     public ILogger Logger { get; set; } = NullLogger.Instance;
+
+    /// <summary>
+    /// The most requests of one connection worked on at once (64 unless set; at least 1). A client machine sends all it asks
+    /// of a server over one connection, so this is how many of its requests can wait on the file system together, a slow
+    /// one holding up none of the others; past it, the next request is read when one is done. One open's requests take
+    /// turns whatever this is.
+    /// </summary>
+    public int MaxConcurrentRequests { get; set; } = 64;
+
+    /// <summary>
+    /// How long a request may run before the client is told it is still being worked on (half a second unless set;
+    /// <see cref="Timeout.InfiniteTimeSpan"/> never tells): an interim STATUS_PENDING response, which also returns the
+    /// request's credits, so a client waits out a slow file system call rather than giving up on the connection, and can
+    /// cancel it. The real response follows when the call is done.
+    /// </summary>
+    public TimeSpan InterimResponseDelay { get; set; } = TimeSpan.FromMilliseconds(500);
 }
 
 /// <summary>A share: its name and the file system behind it.</summary>
@@ -115,6 +131,16 @@ public sealed class SmbServer : IAsyncDisposable
         if (!string.IsNullOrEmpty(options.User) && string.IsNullOrEmpty(options.Password))
         {
             throw new ArgumentException("a password is required with a user", nameof(options));
+        }
+
+        if (options.MaxConcurrentRequests < 1)
+        {
+            throw new ArgumentException("MaxConcurrentRequests must be at least 1", nameof(options));
+        }
+
+        if (options.InterimResponseDelay < TimeSpan.Zero && options.InterimResponseDelay != Timeout.InfiniteTimeSpan)
+        {
+            throw new ArgumentException("InterimResponseDelay must not be negative", nameof(options));
         }
 
         var listener = new Socket(options.EndPoint.AddressFamily, SocketType.Stream, ProtocolType.Tcp);

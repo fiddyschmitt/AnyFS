@@ -7,13 +7,15 @@ namespace LibSmb.Security;
 /// <summary>
 /// A session's message signing ([MS-SMB2] 3.1.4.1): HMAC-SHA256 with the session key for the 2.x dialects, AES-CMAC with
 /// a key derived from it for 3.x. The signature covers the whole PDU with its signature field zeroed and the SIGNED flag
-/// set. One instance per session; its methods do not run at the same time.
+/// set. One instance per session, used by its requests at the same time: the AES-CMAC cipher, which keeps state between
+/// blocks, signs one PDU at a time.
 /// </summary>
 internal sealed class Signer : IDisposable
 {
     private readonly byte[] _key;
     private readonly bool _cmac;
     private readonly AesCmac? _aes;
+    private readonly Lock _aesGate = new();
 
     public Signer(byte[] sessionKey, ushort dialect)
     {
@@ -69,7 +71,11 @@ internal sealed class Signer : IDisposable
     {
         if (_aes is not null)
         {
-            _aes.Compute(pdu, signature);
+            lock (_aesGate)
+            {
+                _aes.Compute(pdu, signature);
+            }
+
             return;
         }
 
