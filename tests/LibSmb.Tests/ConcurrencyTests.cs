@@ -313,6 +313,54 @@ public sealed class ConcurrencyTests
     }
 
     /// <summary>
+    /// The same inside a compound chain, as clients send an open, a read and a close in one message: the READ whose
+    /// backend call gives up is answered STATUS_IO_TIMEOUT, the CLOSE after it still closes the file, and the connection
+    /// carries on.
+    /// </summary>
+    [TestMethod]
+    public async Task ABackendThatGivesUpInsideAChainFailsItsCommandNotTheConnection()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        fs.GiveUp("slow.bin");
+
+        var responses = await OpenReadCloseAsync(client, tree, "slow.bin");
+        Assert.AreEqual(3, responses.Count, "a reply to each command of the chain");
+        Assert.AreEqual(Status.Success, responses[0].Status, $"the CREATE: 0x{responses[0].Status:X8}");
+        Assert.AreEqual(Status.IoTimeout, responses[1].Status, $"the READ: 0x{responses[1].Status:X8}");
+        Assert.AreEqual(Status.Success, responses[2].Status, $"the CLOSE: 0x{responses[2].Status:X8}");
+        Assert.AreEqual(1, fs.Closed, "the chain's CLOSE closed the file");
+        CollectionAssert.AreEqual(FastContent, await client.ReadAsync(tree, fast, 0, FastContent.Length), "the connection carries on");
+    }
+
+    /// <summary>
+    /// A chain whose CREATE gives up: the CREATE is answered STATUS_IO_TIMEOUT, and so are the commands after it that
+    /// needed its file ([MS-SMB2] 3.3.5.2.7.2); the connection carries on.
+    /// </summary>
+    [TestMethod]
+    public async Task AChainWhoseCreateGivesUpFailsTheCommandsOnItsFile()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        fs.GiveUpLookups("slow.bin");
+
+        var responses = await OpenReadCloseAsync(client, tree, "slow.bin");
+        Assert.AreEqual(3, responses.Count, "a reply to each command of the chain");
+        foreach (var response in responses)
+        {
+            Assert.AreEqual(Status.IoTimeout, response.Status, $"{response.Command}: 0x{response.Status:X8}");
+        }
+
+        CollectionAssert.AreEqual(FastContent, await client.ReadAsync(tree, fast, 0, FastContent.Length), "the connection carries on");
+    }
+
+    /// <summary>
     /// A READ that reaches the end of the file asks the file system once. Clients read in big pieces (64 KiB of a 16 KiB
     /// file here), and a second call to hear of the end the file's length already gave would be a slow backend's second
     /// round trip for every small file read.
@@ -385,6 +433,29 @@ public sealed class ConcurrencyTests
     [TestMethod]
     public void ANegativeInterimDelayIsRefused()
         => Assert.ThrowsExactly<ArgumentException>(() => SmbServer.Start(new SmbServerOptions { EndPoint = new IPEndPoint(IPAddress.Loopback, 0), InterimResponseDelay = TimeSpan.FromSeconds(-1) }));
+
+    /// <summary>
+    /// An open, a read of the whole file and a close as one compound chain of related commands; a
+    /// <see cref="TimeoutException"/> when the chain is not answered (the connection dropped, say).
+    /// </summary>
+    private static async Task<List<SmbResponse>> OpenReadCloseAsync(SmbTestClient client, uint tree, string name)
+    {
+        try
+        {
+            return await client.SendCompoundAsync(
+                [
+                    (Command.Create, SmbTestClient.CreateBody(name, access: 0x00120089)),
+                    (Command.Read, SmbTestClient.ReadBody(SmbTestClient.NoFileId, 0, SlowContent.Length)),
+                    (Command.Close, SmbTestClient.CloseBody(SmbTestClient.NoFileId)),
+                ],
+                tree,
+                related: true).WaitAsync(Prompt);
+        }
+        catch (Exception ex) when (ex is IOException or EndOfStreamException)
+        {
+            throw new TimeoutException($"the chain was not answered: {ex.Message}", ex);
+        }
+    }
 
     private static SmbServer Start(ISmbFileSystem fs, int maxConcurrentRequests = 64)
         => SmbServer.Start(new SmbServerOptions { EndPoint = new IPEndPoint(IPAddress.Loopback, 0), User = User, Password = Password, MaxConcurrentRequests = maxConcurrentRequests }, [new SmbShare("data", fs)]);

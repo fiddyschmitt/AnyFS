@@ -82,68 +82,80 @@ internal sealed partial class SmbConnection
 
         uint status;
         Reply reply;
-        switch (h.Command)
+        try
         {
-            case Command.Negotiate:
-                (status, reply) = Negotiate(body.Span);
-                break;
-            case Command.SessionSetup:
-                (status, sessionId, reply) = SessionSetup(h, body.Span);
-                chain.SessionId = sessionId;
-                signer = SignerFor(sessionId);
-                break;
-            case Command.TreeConnect:
-                (status, treeId, reply) = TreeConnect(body.Span);
-                chain.TreeId = treeId;
-                break;
-            case Command.TreeDisconnect:
-                _trees.TryRemove(treeId, out _);
-                (status, reply) = (Status.Success, Reply.Fixed(4));
-                break;
-            case Command.Logoff:
-                // signed with the key of the session it ends, which goes now
-                _sessions.TryRemove(sessionId, out _);
-                (status, reply) = (Status.Success, Reply.Fixed(4));
-                break;
-            case Command.Echo:
-                (status, reply) = (Status.Success, Reply.Fixed(4));
-                break;
-            case Command.Create:
-                (status, reply) = await CreateAsync(body, treeId, ct).ConfigureAwait(false);
-                chain.FileId = Status.IsError(status) ? null : FileId.Read(reply.Body[64..80]);
-                break;
-            case Command.Close:
-                (status, reply) = await CloseAsync(body, ct).ConfigureAwait(false);
-                break;
-            case Command.Read:
-                (status, reply) = await ReadAsync(body, ct).ConfigureAwait(false);
-                break;
-            case Command.Write:
-                (status, reply) = await WriteAsync(body, ct).ConfigureAwait(false);
-                break;
-            case Command.Flush:
-                (status, reply) = await FlushAsync(body, ct).ConfigureAwait(false);
-                break;
-            case Command.QueryDirectory:
-                (status, reply) = await QueryDirectoryAsync(body, ct).ConfigureAwait(false);
-                break;
-            case Command.QueryInfo:
-                (status, reply) = await QueryInfoAsync(body, ct).ConfigureAwait(false);
-                break;
-            case Command.SetInfo:
-                (status, reply) = await SetInfoAsync(body, ct).ConfigureAwait(false);
-                break;
-            case Command.Ioctl:
-                (status, reply) = Ioctl(body.Span);
-                break;
-            case Command.Lock:
-                // byte-range locks are not enforced, but every request is granted, so clients that rely on advisory
-                // locking (Windows' among them) carry on
-                (status, reply) = (Status.Success, Reply.Fixed(4));
-                break;
-            default:
-                (status, reply) = (Status.NotSupported, Reply.Error());
-                break;
+            switch (h.Command)
+            {
+                case Command.Negotiate:
+                    (status, reply) = Negotiate(body.Span);
+                    break;
+                case Command.SessionSetup:
+                    (status, sessionId, reply) = SessionSetup(h, body.Span);
+                    chain.SessionId = sessionId;
+                    signer = SignerFor(sessionId);
+                    break;
+                case Command.TreeConnect:
+                    (status, treeId, reply) = TreeConnect(body.Span);
+                    chain.TreeId = treeId;
+                    break;
+                case Command.TreeDisconnect:
+                    _trees.TryRemove(treeId, out _);
+                    (status, reply) = (Status.Success, Reply.Fixed(4));
+                    break;
+                case Command.Logoff:
+                    // signed with the key of the session it ends, which goes now
+                    _sessions.TryRemove(sessionId, out _);
+                    (status, reply) = (Status.Success, Reply.Fixed(4));
+                    break;
+                case Command.Echo:
+                    (status, reply) = (Status.Success, Reply.Fixed(4));
+                    break;
+                case Command.Create:
+                    chain.FileId = null;
+                    (status, reply) = await CreateAsync(body, treeId, ct).ConfigureAwait(false);
+                    chain.FileId = Status.IsError(status) ? null : FileId.Read(reply.Body[64..80]);
+                    break;
+                case Command.Close:
+                    (status, reply) = await CloseAsync(body, ct).ConfigureAwait(false);
+                    break;
+                case Command.Read:
+                    (status, reply) = await ReadAsync(body, ct).ConfigureAwait(false);
+                    break;
+                case Command.Write:
+                    (status, reply) = await WriteAsync(body, ct).ConfigureAwait(false);
+                    break;
+                case Command.Flush:
+                    (status, reply) = await FlushAsync(body, ct).ConfigureAwait(false);
+                    break;
+                case Command.QueryDirectory:
+                    (status, reply) = await QueryDirectoryAsync(body, ct).ConfigureAwait(false);
+                    break;
+                case Command.QueryInfo:
+                    (status, reply) = await QueryInfoAsync(body, ct).ConfigureAwait(false);
+                    break;
+                case Command.SetInfo:
+                    (status, reply) = await SetInfoAsync(body, ct).ConfigureAwait(false);
+                    break;
+                case Command.Ioctl:
+                    (status, reply) = Ioctl(body.Span);
+                    break;
+                case Command.Lock:
+                    // byte-range locks are not enforced, but every request is granted, so clients that rely on advisory
+                    // locking (Windows' among them) carry on
+                    (status, reply) = (Status.Success, Reply.Fixed(4));
+                    break;
+                default:
+                    (status, reply) = (Status.NotSupported, Reply.Error());
+                    break;
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // The file system gave up by itself (a time-out): nobody cancelled the request, and the connection is not
+            // going. This command alone fails; in a chain the ones after it are still answered, and the connection,
+            // which carries every other program's requests and opens, carries on.
+            Logger.LogDebug("smb: {Remote}: {Command} message {MessageId} given up by the file system", Remote, h.Command, h.MessageId);
+            (status, reply) = (Status.IoTimeout, Reply.Error());
         }
 
         if (Status.IsError(status))

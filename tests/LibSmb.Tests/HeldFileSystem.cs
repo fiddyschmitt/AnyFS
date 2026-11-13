@@ -13,6 +13,7 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
     private readonly LocalFileSystem _inner = new(root);
     private readonly ConcurrentDictionary<string, Held> _held = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, byte> _givingUp = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, Countdown> _lookupsGivingUp = new(StringComparer.Ordinal);
     private int _mostAtOnce;
     private int _cancelled;
     private int _closed;
@@ -42,6 +43,16 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
     /// <summary>Makes every read of <paramref name="path"/> give up on its own, as a backend's call that times out does.</summary>
     public void GiveUp(string path) => _givingUp[path] = 0;
 
+    /// <summary>
+    /// Makes the lookups of <paramref name="path"/> give up on their own, as <see cref="GiveUp"/> does its reads, once
+    /// <paramref name="after"/> more of them were answered (a CREATE looks its file up twice: to see whether it is there, and
+    /// for its reply), until <see cref="AnswerLookups"/>.
+    /// </summary>
+    public void GiveUpLookups(string path, int after = 0) => _lookupsGivingUp[path] = new Countdown(after);
+
+    /// <summary>Lets the lookups of <paramref name="path"/> through again.</summary>
+    public void AnswerLookups(string path) => _lookupsGivingUp.TryRemove(path, out _);
+
     /// <summary>Lets the held reads of <paramref name="path"/> go, and every later one through at once.</summary>
     public void Release(string path)
     {
@@ -54,7 +65,15 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
     /// <summary>Completes once a read of the held <paramref name="path"/> is waiting.</summary>
     public Task Reached(string path) => _held[path].Reached.Task;
 
-    public ValueTask<SmbEntry?> StatAsync(string path, CancellationToken cancellationToken) => _inner.StatAsync(path, cancellationToken);
+    public ValueTask<SmbEntry?> StatAsync(string path, CancellationToken cancellationToken)
+    {
+        if (_lookupsGivingUp.TryGetValue(path, out var left) && left.Passed())
+        {
+            throw new TaskCanceledException("the backend gave up waiting for the remote store");
+        }
+
+        return _inner.StatAsync(path, cancellationToken);
+    }
 
     public IAsyncEnumerable<SmbEntry> ListAsync(string path, CancellationToken cancellationToken)
     {
@@ -74,6 +93,15 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
     public ValueTask SetTimesAsync(string path, DateTimeOffset? created, DateTimeOffset? modified, CancellationToken cancellationToken) => _inner.SetTimesAsync(path, created, modified, cancellationToken);
 
     public ValueTask<SmbSpace?> GetSpaceAsync(CancellationToken cancellationToken) => _inner.GetSpaceAsync(cancellationToken);
+
+    /// <summary>So many calls pass before the rest are affected.</summary>
+    private sealed class Countdown(int passing)
+    {
+        private int _left = passing;
+
+        /// <summary>Whether the calls that pass are used up; each call counts one.</summary>
+        public bool Passed() => Interlocked.Decrement(ref _left) < 0;
+    }
 
     private sealed class Held
     {

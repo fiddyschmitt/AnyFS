@@ -335,8 +335,9 @@ internal sealed partial class SmbConnection
     /// <summary>
     /// A request that may go asynchronous: still running after <see cref="SmbServerOptions.InterimResponseDelay"/>, it is
     /// answered STATUS_PENDING under a new AsyncId (<see cref="SweepAsync"/>), and its real reply follows under it.
-    /// Cancelled by the client's CANCEL, it is answered STATUS_CANCELLED; given up by the file system on its own (a
-    /// time-out), STATUS_IO_TIMEOUT: the connection, which carries every other program's requests and opens, carries on.
+    /// Cancelled by the client's CANCEL, it is answered STATUS_CANCELLED. (Given up by the file system on its own, a
+    /// time-out, it is answered STATUS_IO_TIMEOUT where the command was handled, like a chain's.) Either way the
+    /// connection, which carries every other program's requests and opens, carries on.
     /// </summary>
     private async Task ServePendingAsync(byte[] message, int length, PendingRequest pending, CancellationToken ct)
     {
@@ -347,11 +348,10 @@ internal sealed partial class SmbConnection
             {
                 reply = await ProcessAsync(message.AsMemory(0, length), pending.Cancellation.Token, pending).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested && pending.Cancellation.IsCancellationRequested)
             {
-                var cancelled = pending.Cancellation.IsCancellationRequested;
-                Logger.LogDebug("smb: {Remote}: {Command} message {MessageId} {What}", Remote, pending.Header.Command, pending.Header.MessageId, cancelled ? "cancelled by the client" : "given up by the file system");
-                reply = Failed(pending, cancelled ? Status.Cancelled : Status.IoTimeout);
+                Logger.LogDebug("smb: {Remote}: {Command} message {MessageId} cancelled by the client", Remote, pending.Header.Command, pending.Header.MessageId);
+                reply = Failed(pending, Status.Cancelled);
             }
 
             if (reply is not null)
