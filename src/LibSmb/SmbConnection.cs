@@ -55,12 +55,18 @@ internal sealed partial class SmbConnection
     private readonly ConcurrentDictionary<ulong, PendingRequest> _byAsyncId = new();
     private long _nextAsyncId;
 
-    /// <summary>Completes once the connection is ending and no request is running any more.</summary>
+    /// <summary>Completes once the reader has ended and no request is running any more.</summary>
     private readonly TaskCompletionSource _idle = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private ulong _nextFileId;
     private int _closed;
-    private int _running;
-    private bool _ending;
+
+    /// <summary>
+    /// The requests running, and one more for the reader until it ends. The reader alone adds to it, so at nought it stays
+    /// there: the reader has ended and its last request is done. It is one count on purpose. A count of requests beside a
+    /// flag for "ending" had each side write its own and then read the other's, and both could read the old value: the
+    /// end then waited for ever for a request already gone, with the connection's files left open.
+    /// </summary>
+    private int _running = 1;
 
     public SmbConnection(SmbServer server, Socket? socket)
     {
@@ -178,8 +184,7 @@ internal sealed partial class SmbConnection
                 pending.Cancel();
             }
 
-            Volatile.Write(ref _ending, true);
-            if (Volatile.Read(ref _running) == 0)
+            if (Interlocked.Decrement(ref _running) == 0)
             {
                 _idle.TrySetResult();
             }
@@ -445,7 +450,7 @@ internal sealed partial class SmbConnection
             }
 
             _slots.Release();
-            if (Interlocked.Decrement(ref _running) == 0 && Volatile.Read(ref _ending))
+            if (Interlocked.Decrement(ref _running) == 0)
             {
                 _idle.TrySetResult();
             }
