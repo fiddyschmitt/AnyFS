@@ -240,8 +240,13 @@ internal sealed partial class SmbConnection
             open.Closed = true;
             if ((flags & CloseFlags.PostQueryAttributes) != 0 && !open.DeleteOnClose)
             {
+                // an entry gone from under the open (renamed or deleted through another open meanwhile) gets what the open
+                // last saw of it; one it never saw gets none rather than empty times
                 var (attributes, size, modified, created, _) = await open.StatAsync(ct).ConfigureAwait(false);
-                Info.WriteCloseAttributes(reply.Body, attributes, size, modified, created);
+                if (modified is not null)
+                {
+                    Info.WriteCloseAttributes(reply.Body, attributes, size, modified, created);
+                }
             }
 
             if (open.File is { } file)

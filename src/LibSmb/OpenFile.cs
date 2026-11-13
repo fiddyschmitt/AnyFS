@@ -79,8 +79,11 @@ internal sealed class OpenFile(FileId id, SmbShare share, string path, ISmbFile?
         => File ??= await Share.FileSystem.OpenAsync(Path, SmbOpenMode.Read, ct).ConfigureAwait(false);
 
     /// <summary>
-    /// The open's attributes, size and modification time as they are now (a write through it shows), looked up afresh:
-    /// bare attributes when the entry is gone from under it.
+    /// The open's attributes, size and modification time as they are now (a write through it shows), looked up afresh.
+    /// When the entry is gone from under it (renamed or deleted through another open), what the open last saw of it, with
+    /// the length written through it: a client that asks at CLOSE (macOS always does) takes empty times, or none, for a
+    /// broken server. Bare attributes for an entry it never saw. Called under <see cref="Gate"/>, or before the open is
+    /// anyone's (its CREATE).
     /// </summary>
     public async ValueTask<(uint Attributes, long Size, DateTimeOffset? Modified, DateTimeOffset? Created, bool ReadOnly)> StatAsync(CancellationToken ct)
     {
@@ -95,12 +98,19 @@ internal sealed class OpenFile(FileId id, SmbShare share, string path, ISmbFile?
 
         if (entry is null)
         {
-            return (IsDirectory ? FileAttribute.Directory : FileAttribute.Normal, File?.Length ?? 0, null, null, false);
+            return _lastSeen is { } seen
+                ? (seen.Attributes, File?.Length ?? seen.Size, seen.Modified, seen.Created, seen.ReadOnly)
+                : (IsDirectory ? FileAttribute.Directory : FileAttribute.Normal, File?.Length ?? 0, null, null, false);
         }
 
         var size = entry.IsDirectory ? 0 : File?.Length ?? entry.Length;
-        return (Info.Attributes(entry), size, entry.Modified, entry.Created, Info.IsReadOnlyFile(entry));
+        var stat = (Info.Attributes(entry), size, (DateTimeOffset?)entry.Modified, entry.Created, Info.IsReadOnlyFile(entry));
+        _lastSeen = stat;
+        return stat;
     }
+
+    /// <summary>What <see cref="StatAsync"/> last found of the entry.</summary>
+    private (uint Attributes, long Size, DateTimeOffset? Modified, DateTimeOffset? Created, bool ReadOnly)? _lastSeen;
 
     /// <summary>
     /// A stable 64-bit file id for a path of a share: Windows caches file ids and takes them as stable, so they must not

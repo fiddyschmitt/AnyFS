@@ -333,6 +333,34 @@ public sealed class ConcurrencyTests
         CollectionAssert.AreEqual(FastContent[100..], await client.ReadAsync(tree, fast, 100, 64 << 10));
     }
 
+    /// <summary>
+    /// A CLOSE asking for the attributes of an entry gone from under its open (renamed or deleted through another open
+    /// meanwhile, likelier with a connection's requests side by side) is answered with what the open last saw of it. macOS's
+    /// client asks on every CLOSE and calls the server broken both for empty times ("Bad SMB 2/3 Server, close attr of
+    /// LastWriteTime is 0") and for none ("did not return close attributes").
+    /// </summary>
+    [TestMethod]
+    public async Task ACloseOfAnEntryGoneFromUnderItsOpenGivesWhatItLastSaw()
+    {
+        await using var server = Start(new HeldFileSystem(_dir));
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var create = (await client.CreateAsync(tree, "docs", options: CreateOptions.DirectoryFile)).EnsureSuccess();
+        var docs = SmbTestClient.FileIdOf(create);
+        Directory.Delete(Path.Combine(_dir, "docs"));
+        var gone = (await client.CloseAsync(tree, docs, postQuery: true)).EnsureSuccess();
+        Assert.AreEqual(CloseFlags.PostQueryAttributes, Wire.U16(gone.Body, 2), "the CLOSE gave no attributes for an entry gone from under its open");
+        Assert.AreEqual(Wire.U64(create.Body, 24), Wire.U64(gone.Body, 24), "the last write time the open last saw");
+        Assert.AreNotEqual(0UL, Wire.U64(gone.Body, 24), "a last write time");
+        Assert.AreEqual(Wire.U32(create.Body, 56), Wire.U32(gone.Body, 56), "the attributes the open last saw");
+
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        var there = (await client.CloseAsync(tree, fast, postQuery: true)).EnsureSuccess();
+        Assert.AreEqual(CloseFlags.PostQueryAttributes, Wire.U16(there.Body, 2), "an entry that is there has its attributes");
+        Assert.AreNotEqual(0UL, Wire.U64(there.Body, 24), "a last write time");
+        Assert.AreEqual((ulong)FastContent.Length, Wire.U64(there.Body, 48), "its length");
+    }
+
     /// <summary>A CANCEL is never answered: not one that names nothing, nor one from a session that has not signed in.</summary>
     [TestMethod]
     public async Task ACancelIsNeverAnswered()
