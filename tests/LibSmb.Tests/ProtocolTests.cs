@@ -336,7 +336,7 @@ public class ProtocolTests
         var server = NewServer(Dir());
         var c = Connection(server);
         var share = server.Shares.Single();
-        var id = c.AddOpen(id => new OpenFile(id, share, "f.txt", new FailingClose(), isDirectory: false, canWrite: true));
+        var id = c.AddOpen(id => new OpenFile(id, share, "f.txt", new FailingClose(), isDirectory: false, canWrite: true)).Id;
         var body = new byte[24];
         id.Write(body.AsSpan(8));
         var (status, reply) = await c.CloseAsync(body, None);

@@ -37,6 +37,12 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
     /// <summary>Directories listed.</summary>
     public int Listed => Volatile.Read(ref _listed);
 
+    /// <summary>
+    /// How long a held read whose cancellation came takes to come back (no time unless set): a backend across a network
+    /// does not stop the moment it is told to.
+    /// </summary>
+    public TimeSpan StopDelay { get; set; }
+
     /// <summary>Holds every read of <paramref name="path"/> from now until <see cref="Release"/>.</summary>
     public void Hold(string path) => _held[path] = new Held();
 
@@ -137,6 +143,11 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
                     catch (OperationCanceledException)
                     {
                         Interlocked.Increment(ref owner._cancelled);
+                        if (owner.StopDelay > TimeSpan.Zero)
+                        {
+                            await Task.Delay(owner.StopDelay, CancellationToken.None);
+                        }
+
                         throw;
                     }
                 }

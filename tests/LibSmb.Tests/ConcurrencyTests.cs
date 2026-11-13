@@ -361,6 +361,125 @@ public sealed class ConcurrencyTests
     }
 
     /// <summary>
+    /// A client that goes away while its CLOSE waits its turn behind a held READ of the same open. The CLOSE took the open
+    /// out of the connection's table, so no one else can close its file any more; it does, although its own wait was
+    /// cancelled with everything else and the READ's backend call takes a moment to stop.
+    /// </summary>
+    [TestMethod]
+    public async Task ACloseWaitingItsTurnWhenTheClientGoesStillClosesTheFile()
+    {
+        var fs = new HeldFileSystem(_dir) { StopDelay = TimeSpan.FromMilliseconds(100) };
+        await using var server = Start(fs);
+        var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var slow = await client.OpenAsync(tree, "slow.bin");
+        fs.Hold("slow.bin");
+        try
+        {
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(slow, 0, SlowContent.Length), tree);
+            await fs.Reached("slow.bin").WaitAsync(Prompt);
+            await client.PostAsync(Command.Close, SmbTestClient.CloseBody(slow), tree);
+            await Task.Delay(300);
+            await client.DisposeAsync();
+
+            var deadline = DateTime.UtcNow + Prompt;
+            while ((fs.Closed == 0 || !server.Connections.IsEmpty) && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(20);
+            }
+
+            Assert.AreEqual(1, fs.Cancelled, "the held READ's backend call was cancelled");
+            Assert.AreEqual(1, fs.Closed, "the file was closed");
+            Assert.IsTrue(server.Connections.IsEmpty, "the connection was let go");
+        }
+        finally
+        {
+            fs.Release("slow.bin");
+        }
+    }
+
+    /// <summary>
+    /// A CLOSE cancelled while it waits its turn behind a held READ is not given up: nobody else could close the file. It
+    /// is answered once the READ is done, and the file is closed.
+    /// </summary>
+    [TestMethod]
+    public async Task ACloseCancelledWhileItWaitsItsTurnStillClosesTheFile()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var slow = await client.OpenAsync(tree, "slow.bin");
+        fs.Hold("slow.bin");
+        ulong read, close;
+        try
+        {
+            read = await client.PostAsync(Command.Read, SmbTestClient.ReadBody(slow, 0, SlowContent.Length), tree);
+            await fs.Reached("slow.bin").WaitAsync(Prompt);
+            close = await client.PostAsync(Command.Close, SmbTestClient.CloseBody(slow), tree);
+            await Task.Delay(200);
+            await client.CancelAsync(close);
+            await Task.Delay(300);
+            Assert.AreEqual(0, fs.Closed, "the file is not closed under the READ");
+        }
+        finally
+        {
+            fs.Release("slow.bin");
+        }
+
+        var answered = new[] { await client.ReceiveFinalAsync(Prompt), await client.ReceiveFinalAsync(Prompt) }.ToDictionary(r => r.MessageId);
+        Assert.IsTrue(answered.ContainsKey(read) && answered.ContainsKey(close), "the READ and the CLOSE were answered");
+        CollectionAssert.AreEqual(SlowContent, SmbTestClient.ReadData(answered[read]));
+        Assert.AreEqual(1, fs.Closed, "the file was closed");
+    }
+
+    /// <summary>
+    /// A CLOSE asking for the attributes of a file whose lookup gives up (a backend time-out) still closes the file, and
+    /// answers with what the open last saw of it: an error would leave the client to send the CLOSE again, to a server
+    /// that no longer knows the open, with the file left open behind it.
+    /// </summary>
+    [TestMethod]
+    public async Task ACloseWhoseLookupGivesUpStillClosesTheFile()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var create = (await client.CreateAsync(tree, "fast.bin", access: 0x00120089)).EnsureSuccess();
+        fs.GiveUpLookups("fast.bin");
+
+        var close = (await client.CloseAsync(tree, SmbTestClient.FileIdOf(create), postQuery: true).WaitAsync(Prompt)).EnsureSuccess();
+        Assert.AreEqual(1, fs.Closed, "the file was closed");
+        Assert.AreEqual(CloseFlags.PostQueryAttributes, Wire.U16(close.Body, 2), "the CLOSE gave no attributes");
+        Assert.AreEqual(Wire.U64(create.Body, 24), Wire.U64(close.Body, 24), "the last write time the open last saw");
+        Assert.AreEqual((ulong)FastContent.Length, Wire.U64(close.Body, 48), "its length");
+    }
+
+    /// <summary>
+    /// A CREATE whose reply cannot be made (the lookup for it gives up) is answered STATUS_IO_TIMEOUT and leaves nothing
+    /// open: no reply named the open, so no CLOSE would ever come for its file, which stayed open until the client's
+    /// connection ended.
+    /// </summary>
+    [TestMethod]
+    public async Task ACreateWhoseReplyGivesUpLeavesNoFileOpen()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+
+        // the first lookup, whether the file is there, is answered; the one for the reply gives up
+        fs.GiveUpLookups("fast.bin", after: 1);
+        var create = await client.CreateAsync(tree, "fast.bin", access: 0x00120089).WaitAsync(Prompt);
+        Assert.AreEqual(Status.IoTimeout, create.Status, $"0x{create.Status:X8}");
+        Assert.AreEqual(1, fs.Closed, "the file the CREATE opened was closed");
+
+        fs.AnswerLookups("fast.bin");
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        CollectionAssert.AreEqual(FastContent, await client.ReadAsync(tree, fast, 0, FastContent.Length), "the connection carries on");
+    }
+
+    /// <summary>
     /// A READ that reaches the end of the file asks the file system once. Clients read in big pieces (64 KiB of a 16 KiB
     /// file here), and a second call to hear of the end the file's length already gave would be a slow backend's second
     /// round trip for every small file read.

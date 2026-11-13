@@ -132,11 +132,35 @@ internal sealed partial class SmbConnection
             return (Errors.StatusOf(ex), Reply.Error());
         }
 
-        var fileId = AddOpen(open);
-        Logger.LogTrace("smb: {Remote}: {Path} of {Share} opened as {FileId} (access {Access:X8}, disposition {Disposition}, options {Options:X8})", Remote, path, share.Name, fileId.Volatile, desiredAccess, disposition, options);
-        var opened = FindOpen(fileId)!;
-        opened.DeleteOnClose = deleteOnClose;
-        return (Status.Success, await CreateResponseAsync(action, opened, AppleContext(appleQuery, share), ct).ConfigureAwait(false));
+        var opened = AddOpen(id =>
+        {
+            var made = open(id);
+            made.DeleteOnClose = deleteOnClose;
+            return made;
+        });
+        Logger.LogTrace("smb: {Remote}: {Path} of {Share} opened as {FileId} (access {Access:X8}, disposition {Disposition}, options {Options:X8})", Remote, path, share.Name, opened.Id.Volatile, desiredAccess, disposition, options);
+        try
+        {
+            return (Status.Success, await CreateResponseAsync(action, opened, AppleContext(appleQuery, share), ct).ConfigureAwait(false));
+        }
+        catch
+        {
+            // No reply names the open (its lookup gave up, or the request was cancelled), so no CLOSE will ever come for
+            // it: its file is closed now, not held until the connection ends.
+            if (RemoveOpen(opened.Id) is { File: { } orphan })
+            {
+                try
+                {
+                    await orphan.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogDebug("smb: closing {Path} of {Share} for {Remote} after its CREATE failed: {Error}", path, share.Name, Remote, ex.Message);
+                }
+            }
+
+            throw;
+        }
     }
 
     /// <summary>A CREATE request's access, disposition, options and path, and its Apple create context's data when it has one.</summary>
@@ -228,31 +252,35 @@ internal sealed partial class SmbConnection
             return (Status.Success, reply);
         }
 
-        if (!await open.EnterAsync(ct).ConfigureAwait(false))
-        {
-            reply.Dispose();
-            return (Status.FileClosed, Reply.Error());
-        }
-
+        // Out of the table, the open is this request's alone to close: no later CLOSE finds it, and neither does the
+        // connection's end. So nothing comes between here and its file's close. The wait for its turn is not given up
+        // (the requests ahead of it end when they are done, or cancelled), and the file is closed whatever becomes of the
+        // attributes' lookup or of the request.
+        await open.Gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
             // a request on it still waiting for its turn is answered STATUS_FILE_CLOSED
             open.Closed = true;
-            if ((flags & CloseFlags.PostQueryAttributes) != 0 && !open.DeleteOnClose)
+            try
             {
-                // an entry gone from under the open (renamed or deleted through another open meanwhile) gets what the open
-                // last saw of it; one it never saw gets none rather than empty times
-                var (attributes, size, modified, created, _) = await open.StatAsync(ct).ConfigureAwait(false);
-                if (modified is not null)
+                if ((flags & CloseFlags.PostQueryAttributes) != 0 && !open.DeleteOnClose)
                 {
-                    Info.WriteCloseAttributes(reply.Body, attributes, size, modified, created);
+                    // an entry gone from under the open (renamed or deleted through another open meanwhile), or whose
+                    // lookup gave up, gets what the open last saw of it; one it never saw gets none rather than empty times
+                    var (attributes, size, modified, created, _) = await open.StatAsync(ct, orLastSeen: true).ConfigureAwait(false);
+                    if (modified is not null)
+                    {
+                        Info.WriteCloseAttributes(reply.Body, attributes, size, modified, created);
+                    }
                 }
             }
-
-            if (open.File is { } file)
+            finally
             {
-                // a failed close means a buffered write did not land: said, not passed off as success
-                await file.DisposeAsync().ConfigureAwait(false);
+                if (open.File is { } file)
+                {
+                    // a failed close means a buffered write did not land: said, not passed off as success
+                    await file.DisposeAsync().ConfigureAwait(false);
+                }
             }
 
             if (open.DeleteOnClose)
@@ -264,6 +292,11 @@ internal sealed partial class SmbConnection
         {
             reply.Dispose();
             return (Errors.StatusOf(ex), Reply.Error());
+        }
+        catch
+        {
+            reply.Dispose();
+            throw;
         }
         finally
         {

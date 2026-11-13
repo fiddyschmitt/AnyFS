@@ -82,10 +82,11 @@ internal sealed class OpenFile(FileId id, SmbShare share, string path, ISmbFile?
     /// The open's attributes, size and modification time as they are now (a write through it shows), looked up afresh.
     /// When the entry is gone from under it (renamed or deleted through another open), what the open last saw of it, with
     /// the length written through it: a client that asks at CLOSE (macOS always does) takes empty times, or none, for a
-    /// broken server. Bare attributes for an entry it never saw. Called under <see cref="Gate"/>, or before the open is
-    /// anyone's (its CREATE).
+    /// broken server. Bare attributes for an entry it never saw. With <paramref name="orLastSeen"/> the same goes for a
+    /// lookup that gives up by itself (a time-out), which otherwise fails the request: a CLOSE closes its file all the
+    /// same, and says what it knows. Called under <see cref="Gate"/>, or before the open is anyone's (its CREATE).
     /// </summary>
-    public async ValueTask<(uint Attributes, long Size, DateTimeOffset? Modified, DateTimeOffset? Created, bool ReadOnly)> StatAsync(CancellationToken ct)
+    public async ValueTask<(uint Attributes, long Size, DateTimeOffset? Modified, DateTimeOffset? Created, bool ReadOnly)> StatAsync(CancellationToken ct, bool orLastSeen = false)
     {
         SmbEntry? entry = null;
         try
@@ -93,6 +94,9 @@ internal sealed class OpenFile(FileId id, SmbShare share, string path, ISmbFile?
             entry = await Share.FileSystem.StatAsync(Path, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+        catch (OperationCanceledException) when (orLastSeen && !ct.IsCancellationRequested)
         {
         }
 

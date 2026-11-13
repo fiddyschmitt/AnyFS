@@ -609,14 +609,14 @@ internal sealed partial class SmbConnection
 
     // ----- the handle table -----
 
-    internal FileId AddOpen(Func<FileId, OpenFile> create)
+    internal OpenFile AddOpen(Func<FileId, OpenFile> create)
     {
         lock (_opensGate)
         {
             var id = new FileId(++_nextFileId, _nextFileId);
             var open = create(id);
             _opens[id] = open;
-            return id;
+            return open;
         }
     }
 

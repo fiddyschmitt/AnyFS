@@ -106,7 +106,7 @@ internal static class TestSupport
     public static byte[] DirHandle(SmbConnection connection, SmbServer server, string path)
     {
         var share = server.Shares.Single(s => s.Name == "data");
-        var id = connection.AddOpen(id => new OpenFile(id, share, path, null, isDirectory: true, canWrite: true));
+        var id = connection.AddOpen(id => new OpenFile(id, share, path, null, isDirectory: true, canWrite: true)).Id;
         var bytes = new byte[16];
         id.Write(bytes);
         return bytes;
