@@ -67,7 +67,7 @@ isolation between shares, wrong logins, a read-only share, a guest share (not fr
 refuses unsigned guest sessions), and from Linux every dialect with and without signing, Samba's
 smbclient and 50 sessions at once. Then every client at once on one share, a stress run of every
 client together with `SmbStress` (120 s by default; every byte checked, the clients' own SMB logs
-read, the host's folder audited, and no listing, small file or small tree slower than 5 s while
+read, the host's folder audited, and no listing or small file slower than 5 s while
 each client also reads, one after another, files whose every read takes 10 s), and the host's
 anyfs log. Its anyfs serves only the conditions'
 own shares, over an empty folder on the host: `smbdata`, `smbsecond`, `smbro`, `smbguest` on

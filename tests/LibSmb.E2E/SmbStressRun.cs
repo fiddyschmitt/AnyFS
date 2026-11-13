@@ -14,7 +14,7 @@ namespace LibSmb.E2E;
 /// corpus, and reads of what the other clients published. Every byte read is checked against deterministic content. All
 /// the while each client also reads the lab's slow source's held/slow/ files one after another on the same connection,
 /// every read waiting on the source for seconds (a new file each time, so no client answers it from its cache): no quick
-/// operation (a listing, a small file, a small tree) may take half as long as one of those reads.
+/// operation (a listing, a small file) may take half as long as one of those reads.
 /// Byte-perfect results alone are not enough, since SMB clients reconnect and retry without a word, which can hide a server
 /// that drops connections: the run also fails on reconnect or signing complaints in the clients' own logs, a stalled
 /// operation, anyfs stopping or not giving its memory back, and the audit of the host's folder (every published file there
@@ -38,12 +38,13 @@ public static partial class SmbStressRun
     private const int OpTimeoutSeconds = 120;
 
     /// <summary>
-    /// The worst a quick operation (<see cref="QuickOps"/>: a listing, a small file, a small tree) may take while held reads
+    /// The worst a quick operation (<see cref="QuickOps"/>: a listing, a small file) may take while held reads
     /// wait on the source: half of one held read.
     /// </summary>
     private const int QuickLimitMs = AnyFsHost.HeldDelaySeconds * 1000 / 2;
 
-    private static readonly string[] QuickOps = ["list", "small", "tree"];
+    // a small tree is dozens of requests (folders made, renamed, deleted), whose time under load says nothing of waiting
+    private static readonly string[] QuickOps = ["list", "small"];
 
     /// <summary>The 4 KiB requests in one of SmbStress's randio operations.</summary>
     private const int RandIoCount = 64;
