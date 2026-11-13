@@ -85,11 +85,13 @@ that host are Inconclusive at once (the several-clients and stress rows leave it
 waiting out the same time-outs: a Mac whose kernel SMB client had deadlocked once cost 2.5 hours that
 way. Its rows against the other hosts still run; a stuck client needs a restart.
 
-From the Windows VM, AnyFS.E2E's SMB rows against the Linux and macOS hosts need `WinFsp.Np` after
-`LanmanWorkstation` in the network provider order
-(`HKLM\SYSTEM\CurrentControlSet\Control\NetworkProvider\Order`): with WinFsp 2026's provider first,
-`net use /TCPPORT` to another machine fails with error 67 before it reaches the server. LibSmb.E2E
-maps a drive letter, which gets through; a condition that still meets error 67 reports Inconclusive.
+From the Windows VM, both suites map a drive letter for another machine's share
+(`net use Z: \\<host>\<share> /TCPPORT:1445`, AnyFS.E2E the first free letter from Z: down to S:).
+With WinFsp 2026's network provider (`WinFsp.Np`) first in the provider order
+(`HKLM\SYSTEM\CurrentControlSet\Control\NetworkProvider\Order`), where its installer puts it, the
+device-less `net use \\<host>\<share> /TCPPORT:1445` fails with error 67 before it reaches the
+server; the loopback is not affected, so the Windows host's own rows keep the UNC path. A LibSmb.E2E
+condition that still meets error 67 reports Inconclusive.
 
 With the SharePoint farms in `settings.yml`, every host also gets their collections (`sharepoint` for
 Subscription Edition and `sharepoint2019`, each with a `-ro` twin), served by the SharePoint Server

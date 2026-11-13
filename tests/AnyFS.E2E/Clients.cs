@@ -307,6 +307,9 @@ public sealed class MacClient(Machine machine) : PosixClient(machine)
 /// <summary>PowerShell over SSH; file names and hashes come back one per line.</summary>
 public sealed class WindowsClient(Machine machine) : Client(machine)
 {
+    /// <summary>The drive letters another machine's shares take, the first free one (R, A and B never).</summary>
+    private const string DriveLetters = "ZYXWVUTS";
+
     private static string Q(string s) => "'" + s.Replace("'", "''") + "'";
 
     private static string PathOf(Access access, string rel) => rel.Length == 0 ? access.Path! : access.Path!.TrimEnd('\\') + "\\" + rel.Replace('/', '\\');
@@ -326,8 +329,26 @@ public sealed class WindowsClient(Machine machine) : Client(machine)
             case MountKind.Smb:
             {
                 var unc = $@"\\{address}\{collection}";
-                M.Sh($"net use {unc} /delete /y 2>$null | Out-Null; $o = net use {unc} /TCPPORT:{AnyFsHost.SmbPort} /USER:{AnyFsHost.SmbUser} {AnyFsHost.SmbPassword} 2>&1; if ($LASTEXITCODE -ne 0) {{ throw \"net use: $o\" }}; 'ok'");
-                return new Access(unc, null, () => M.Run($"net use {unc} /delete /y 2>&1 | Out-Null"));
+                if (local)
+                {
+                    M.Sh($"net use {unc} /delete /y 2>$null | Out-Null; $o = net use {unc} /TCPPORT:{AnyFsHost.SmbPort} /USER:{AnyFsHost.SmbUser} {AnyFsHost.SmbPassword} 2>&1; if ($LASTEXITCODE -ne 0) {{ throw \"net use: $o\" }}; 'ok'");
+                    return new Access(unc, null, () => M.Run($"net use {unc} /delete /y 2>&1 | Out-Null"));
+                }
+
+                // another machine's share takes a drive letter: with WinFsp's network provider first in the provider order
+                // (where its installer puts it), a device-less net use /TCPPORT to another machine fails with error 67 before
+                // it reaches the server, and one with a letter gets through. The loopback is not affected, so the host's own
+                // rows keep the UNC path.
+                var letters = string.Join(", ", DriveLetters.Select(c => $"'{c}'"));
+                var letter = Lines(M.Sh($$"""
+                    $used = [IO.Directory]::GetLogicalDrives() | ForEach-Object { $_.Substring(0, 1) }
+                    $l = @({{letters}}) | Where-Object { $used -notcontains $_ } | Select-Object -First 1
+                    if (-not $l) { throw 'no free drive letter among {{DriveLetters}}' }
+                    $o = net use "${l}:" {{unc}} /TCPPORT:{{AnyFsHost.SmbPort}} /PERSISTENT:NO /USER:{{AnyFsHost.SmbUser}} {{AnyFsHost.SmbPassword}} 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw "net use ${l}: $o" }
+                    "${l}:"
+                    """))[^1];
+                return new Access(letter + "\\", null, () => M.Run($"net use {letter} /delete /y 2>&1 | Out-Null"));
             }
 
             case MountKind.WebDav:
