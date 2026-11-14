@@ -116,6 +116,138 @@ public sealed class ConcurrencyTests
         Assert.IsTrue(data.Any(d => d.SequenceEqual(SlowContent[..half])) && data.Any(d => d.SequenceEqual(SlowContent[half..])), "both halves read");
     }
 
+    /// <summary>
+    /// What goes for a held READ goes for the file system's other calls. A listing, a lookup and an open that wait on their
+    /// backend hold up nothing else on the connection, are answered STATUS_PENDING meanwhile, and for real once let go.
+    /// </summary>
+    [TestMethod]
+    [DataRow(HeldCall.Listing)]
+    [DataRow(HeldCall.Lookup)]
+    [DataRow(HeldCall.Open)]
+    public async Task AHeldCallOfAnyKindHoldsUpNothingElseAndIsToldToWait(HeldCall call)
+    {
+        File.WriteAllText(Path.Combine(_dir, "docs", "a.txt"), "a");
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        var docs = await client.OpenAsync(tree, "docs", options: CreateOptions.DirectoryFile);
+        var held = call == HeldCall.Listing ? "docs" : "slow.bin";
+        fs.Hold(held, call);
+        ulong request;
+        try
+        {
+            request = await PostHeldAsync(client, tree, docs, call);
+            await fs.Reached(held, call).WaitAsync(Prompt);
+            var fastRead = await client.PostAsync(Command.Read, SmbTestClient.ReadBody(fast, 0, FastContent.Length), tree);
+
+            // the other file's READ, and the word to the held request that it is still worked on, in whichever order
+            var answered = new[] { await client.ReceiveAsync(Prompt), await client.ReceiveAsync(Prompt) }.ToDictionary(r => r.MessageId);
+            Assert.IsTrue(answered.ContainsKey(fastRead) && answered.ContainsKey(request), "the READ of another file was answered, and the held request told to wait");
+            CollectionAssert.AreEqual(FastContent, SmbTestClient.ReadData(answered[fastRead]));
+            Assert.AreEqual(Status.Pending, answered[request].Status, $"0x{answered[request].Status:X8}");
+        }
+        finally
+        {
+            fs.Release(held, call);
+        }
+
+        var final = await client.ReceiveAsync(Prompt);
+        Assert.AreEqual(request, final.MessageId);
+        Assert.IsTrue(final.Async, "the real reply follows the interim one, asynchronous too");
+        final.EnsureSuccess();
+        if (call == HeldCall.Listing)
+        {
+            CollectionAssert.Contains(SmbTestClient.DirectoryNames(final, 0x25), "a.txt");
+        }
+    }
+
+    /// <summary>A CANCEL ends a held listing, lookup or open as it does a held READ: the backend call is cancelled, the request answered STATUS_CANCELLED, and the connection carries on.</summary>
+    [TestMethod]
+    [DataRow(HeldCall.Listing)]
+    [DataRow(HeldCall.Lookup)]
+    [DataRow(HeldCall.Open)]
+    public async Task ACancelEndsAHeldCallOfAnyKind(HeldCall call)
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var docs = await client.OpenAsync(tree, "docs", options: CreateOptions.DirectoryFile);
+        var held = call == HeldCall.Listing ? "docs" : "slow.bin";
+        fs.Hold(held, call);
+        try
+        {
+            var request = await PostHeldAsync(client, tree, docs, call);
+            await fs.Reached(held, call).WaitAsync(Prompt);
+            await client.CancelAsync(request);
+            var final = await client.ReceiveFinalAsync(Prompt);
+            Assert.AreEqual(request, final.MessageId);
+            Assert.AreEqual(Status.Cancelled, final.Status, $"0x{final.Status:X8}");
+            Assert.AreEqual(1, fs.Cancelled, "the backend call was cancelled");
+            Assert.AreEqual(0, fs.Closed, "nothing was opened, so nothing closed");
+        }
+        finally
+        {
+            fs.Release(held, call);
+        }
+
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        CollectionAssert.AreEqual(FastContent, await client.ReadAsync(tree, fast, 0, FastContent.Length), "the connection carries on");
+    }
+
+    /// <summary>
+    /// A held call inside a compound chain (an open, a read and a close in one message, as clients send them) holds up
+    /// nothing else either. The chain is not told to wait: the protocol allows that for a chain's last command alone, so
+    /// its one reply comes when all of it is done.
+    /// </summary>
+    [TestMethod]
+    public async Task AHeldCallInsideAChainHoldsUpNothingElse()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        fs.Hold("slow.bin", HeldCall.Open);
+        ulong chain;
+        try
+        {
+            chain = await client.PostCompoundAsync(
+                [
+                    (Command.Create, SmbTestClient.CreateBody("slow.bin", access: 0x00120089)),
+                    (Command.Read, SmbTestClient.ReadBody(SmbTestClient.NoFileId, 0, SlowContent.Length)),
+                    (Command.Close, SmbTestClient.CloseBody(SmbTestClient.NoFileId)),
+                ],
+                tree,
+                related: true);
+            await fs.Reached("slow.bin", HeldCall.Open).WaitAsync(Prompt);
+            var fastRead = await client.PostAsync(Command.Read, SmbTestClient.ReadBody(fast, 0, FastContent.Length), tree);
+            var answer = await client.ReceiveAsync(Prompt);
+            Assert.AreEqual(fastRead, answer.MessageId, "the READ of another file was answered while the chain waited");
+            CollectionAssert.AreEqual(FastContent, SmbTestClient.ReadData(answer));
+
+            // long enough for an interim reply to have been sent, were the chain given one
+            await Task.Delay(1000);
+        }
+        finally
+        {
+            fs.Release("slow.bin", HeldCall.Open);
+        }
+
+        var responses = await client.ReceiveCompoundAsync(Prompt);
+        Assert.AreEqual(3, responses.Count, "the next message is the chain's whole reply");
+        Assert.AreEqual(chain, responses[0].MessageId);
+        foreach (var response in responses)
+        {
+            response.EnsureSuccess();
+        }
+
+        CollectionAssert.AreEqual(SlowContent, SmbTestClient.ReadData(responses[1]));
+        Assert.AreEqual(1, fs.Closed, "the chain's CLOSE closed the file");
+    }
+
     /// <summary>A client that goes away while its READ is held: the backend call is cancelled and the open closed.</summary>
     [TestMethod]
     public async Task AClientThatGoesAwayEndsItsHeldRequests()
@@ -794,6 +926,12 @@ public sealed class ConcurrencyTests
     [TestMethod]
     public void ANegativeInterimDelayIsRefused()
         => Assert.ThrowsExactly<ArgumentException>(() => SmbServer.Start(new SmbServerOptions { EndPoint = new IPEndPoint(IPAddress.Loopback, 0), InterimResponseDelay = TimeSpan.FromSeconds(-1) }));
+
+    /// <summary>The request that makes the held call, sent without waiting for its reply: a listing of docs, or an open of slow.bin (which looks it up first).</summary>
+    private static Task<ulong> PostHeldAsync(SmbTestClient client, uint tree, byte[] docs, HeldCall call)
+        => call == HeldCall.Listing
+            ? client.PostAsync(Command.QueryDirectory, SmbTestClient.QueryDirectoryBody(docs, flags: QueryDirectoryFlags.RestartScans), tree)
+            : client.PostAsync(Command.Create, SmbTestClient.CreateBody("slow.bin", access: 0x00120089), tree);
 
     /// <summary>
     /// An open, a read of the whole file and a close as one compound chain of related commands; a

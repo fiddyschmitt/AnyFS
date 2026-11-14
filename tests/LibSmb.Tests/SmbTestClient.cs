@@ -518,6 +518,14 @@ internal sealed class SmbTestClient : IAsyncDisposable
     /// </summary>
     public async Task<List<SmbResponse>> SendCompoundAsync(IReadOnlyList<(Command Command, byte[] Body)> commands, uint treeId, bool related, ushort creditCharge = 1)
     {
+        await PostCompoundAsync(commands, treeId, related, creditCharge);
+        return await ReceiveCompoundAsync();
+    }
+
+    /// <summary>Sends a compound chain (see <see cref="SendCompoundAsync"/>) without waiting for its reply; its first command's MessageId.</summary>
+    public async Task<ulong> PostCompoundAsync(IReadOnlyList<(Command Command, byte[] Body)> commands, uint treeId, bool related, ushort creditCharge = 1)
+    {
+        var first = _messageId;
         var pdus = new List<byte[]>();
         for (var i = 0; i < commands.Count; i++)
         {
@@ -561,8 +569,34 @@ internal sealed class SmbTestClient : IAsyncDisposable
         Command CommandAt(int i) => commands[i].Command;
 
         await WriteFrameAsync([.. message]);
+        return first;
+    }
+
+    /// <summary>
+    /// The next message to arrive, as the responses it carries: a compound chain's, or one alone (signatures checked when
+    /// signed); a <see cref="TimeoutException"/> when none comes within <paramref name="timeout"/>.
+    /// </summary>
+    public async Task<List<SmbResponse>> ReceiveCompoundAsync(TimeSpan? timeout = null)
+    {
+        byte[] reply;
+        if (timeout is { } limit)
+        {
+            using var cts = new CancellationTokenSource(limit);
+            try
+            {
+                reply = await ReadFrameAsync(cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                throw new TimeoutException($"no response within {limit.TotalSeconds:0.#} s");
+            }
+        }
+        else
+        {
+            reply = await ReadFrameAsync();
+        }
+
         var responses = new List<SmbResponse>();
-        var reply = await ReadFrameAsync();
         for (var at = 0; at < reply.Length;)
         {
             var next = (int)Wire.U32(reply, at + 20);

@@ -2,16 +2,33 @@ using System.Collections.Concurrent;
 
 namespace LibSmb.Tests;
 
+/// <summary>The calls of a file system a test can hold (<see cref="HeldFileSystem.Hold"/>).</summary>
+public enum HeldCall
+{
+    /// <summary>The reads of a file.</summary>
+    Read,
+
+    /// <summary>The listings of a folder.</summary>
+    Listing,
+
+    /// <summary>The lookups of a path.</summary>
+    Lookup,
+
+    /// <summary>The opens of a file.</summary>
+    Open,
+}
+
 /// <summary>
-/// A folder served as <see cref="LocalFileSystem"/> serves it, except that the reads of a file the test holds wait until
-/// the test lets them go: a backend call as slow as a cold fetch from a remote store, for as long as the test likes. It
-/// counts what a test needs to see: the calls in flight on each open (one open's calls must never overlap), the held reads
-/// whose cancellation came, and the files closed.
+/// A folder served as <see cref="LocalFileSystem"/> serves it, except that the calls the test holds (the reads of a file,
+/// as a rule; a folder's listings, a path's lookups or a file's opens as well) wait until the test lets them go: a backend
+/// call as slow as a cold fetch from a remote store, for as long as the test likes. It counts what a test needs to see:
+/// the calls in flight on each open (one open's calls must never overlap), the held calls whose cancellation came, and
+/// the files closed.
 /// </summary>
 internal sealed class HeldFileSystem(string root) : ISmbFileSystem
 {
     private readonly LocalFileSystem _inner = new(root);
-    private readonly ConcurrentDictionary<string, Held> _held = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<(HeldCall Call, string Path), Held> _held = new();
     private readonly ConcurrentDictionary<string, byte> _givingUp = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Countdown> _lookupsGivingUp = new(StringComparer.Ordinal);
     private int _mostAtOnce;
@@ -25,7 +42,7 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
     /// <summary>The most calls seen in flight at once on any one open.</summary>
     public int MostAtOnce => Volatile.Read(ref _mostAtOnce);
 
-    /// <summary>Held reads that ended because their cancellation token fired.</summary>
+    /// <summary>Held calls that ended because their cancellation token fired.</summary>
     public int Cancelled => Volatile.Read(ref _cancelled);
 
     /// <summary>Opens closed (disposed).</summary>
@@ -43,8 +60,8 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
     /// </summary>
     public TimeSpan StopDelay { get; set; }
 
-    /// <summary>Holds every read of <paramref name="path"/> from now until <see cref="Release"/>.</summary>
-    public void Hold(string path) => _held[path] = new Held();
+    /// <summary>Holds every read of <paramref name="path"/> (or every call of another kind on it) from now until <see cref="Release"/>.</summary>
+    public void Hold(string path, HeldCall call = HeldCall.Read) => _held[(call, path)] = new Held();
 
     /// <summary>Makes every read of <paramref name="path"/> give up on its own, as a backend's call that times out does.</summary>
     public void GiveUp(string path) => _givingUp[path] = 0;
@@ -59,36 +76,74 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
     /// <summary>Lets the lookups of <paramref name="path"/> through again.</summary>
     public void AnswerLookups(string path) => _lookupsGivingUp.TryRemove(path, out _);
 
-    /// <summary>Lets the held reads of <paramref name="path"/> go, and every later one through at once.</summary>
-    public void Release(string path)
+    /// <summary>Lets the held calls of <paramref name="path"/> go, and every later one through at once.</summary>
+    public void Release(string path, HeldCall call = HeldCall.Read)
     {
-        if (_held.TryRemove(path, out var held))
+        if (_held.TryRemove((call, path), out var held))
         {
             held.Gate.TrySetResult();
         }
     }
 
-    /// <summary>Completes once a read of the held <paramref name="path"/> is waiting.</summary>
-    public Task Reached(string path) => _held[path].Reached.Task;
+    /// <summary>Completes once a held call of <paramref name="path"/> is waiting.</summary>
+    public Task Reached(string path, HeldCall call = HeldCall.Read) => _held[(call, path)].Reached.Task;
 
-    public ValueTask<SmbEntry?> StatAsync(string path, CancellationToken cancellationToken)
+    public async ValueTask<SmbEntry?> StatAsync(string path, CancellationToken cancellationToken)
     {
         if (_lookupsGivingUp.TryGetValue(path, out var left) && left.Passed())
         {
             throw new TaskCanceledException("the backend gave up waiting for the remote store");
         }
 
-        return _inner.StatAsync(path, cancellationToken);
+        await WhileHeldAsync(HeldCall.Lookup, path, cancellationToken);
+        return await _inner.StatAsync(path, cancellationToken);
     }
 
     public IAsyncEnumerable<SmbEntry> ListAsync(string path, CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _listed);
-        return _inner.ListAsync(path, cancellationToken);
+        return ListHeldAsync(path, cancellationToken);
     }
 
     public async ValueTask<ISmbFile> OpenAsync(string path, SmbOpenMode mode, CancellationToken cancellationToken)
-        => new File(this, path, await _inner.OpenAsync(path, mode, cancellationToken));
+    {
+        await WhileHeldAsync(HeldCall.Open, path, cancellationToken);
+        return new File(this, path, await _inner.OpenAsync(path, mode, cancellationToken));
+    }
+
+    private async IAsyncEnumerable<SmbEntry> ListHeldAsync(string path, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        await WhileHeldAsync(HeldCall.Listing, path, cancellationToken);
+        await foreach (var entry in _inner.ListAsync(path, cancellationToken))
+        {
+            yield return entry;
+        }
+    }
+
+    /// <summary>Waits while the test holds the calls of this kind on <paramref name="path"/>; a wait that was cancelled is counted.</summary>
+    private async ValueTask WhileHeldAsync(HeldCall call, string path, CancellationToken cancellationToken)
+    {
+        if (!_held.TryGetValue((call, path), out var held))
+        {
+            return;
+        }
+
+        held.Reached.TrySetResult();
+        try
+        {
+            await held.Gate.Task.WaitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            Interlocked.Increment(ref _cancelled);
+            if (StopDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(StopDelay, CancellationToken.None);
+            }
+
+            throw;
+        }
+    }
 
     public ValueTask CreateDirectoryAsync(string path, CancellationToken cancellationToken) => _inner.CreateDirectoryAsync(path, cancellationToken);
 
@@ -133,25 +188,7 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
                     throw new TaskCanceledException("the backend gave up waiting for the remote store");
                 }
 
-                if (owner._held.TryGetValue(path, out var held))
-                {
-                    held.Reached.TrySetResult();
-                    try
-                    {
-                        await held.Gate.Task.WaitAsync(cancellationToken);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        Interlocked.Increment(ref owner._cancelled);
-                        if (owner.StopDelay > TimeSpan.Zero)
-                        {
-                            await Task.Delay(owner.StopDelay, CancellationToken.None);
-                        }
-
-                        throw;
-                    }
-                }
-
+                await owner.WhileHeldAsync(HeldCall.Read, path, cancellationToken);
                 return await inner.ReadAsync(offset, buffer, cancellationToken);
             }
             finally
