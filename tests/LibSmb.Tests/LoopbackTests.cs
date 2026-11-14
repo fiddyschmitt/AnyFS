@@ -194,8 +194,8 @@ public class LoopbackTests
         await using var client = await SmbTestClient.SignInAsync(Serve(dir), User, Password);
         var tree = await client.TreeConnectAsync("data");
         var payload = RandomNumberGenerator.GetBytes(10 << 20);
-        await WriteFileAsync(client, tree, "big.bin", payload, chunk: 1 << 20);
-        CollectionAssert.AreEqual(payload, await ReadFileAsync(client, tree, "big.bin", chunk: 1 << 20));
+        await WriteFileAsync(client, tree, "big.bin", payload, chunk: Smb2.MaxIoSize);
+        CollectionAssert.AreEqual(payload, await ReadFileAsync(client, tree, "big.bin", chunk: Smb2.MaxIoSize));
         CollectionAssert.AreEqual(payload, await File.ReadAllBytesAsync(Path.Combine(dir, "big.bin")));
     }
 
@@ -296,7 +296,7 @@ public class LoopbackTests
         {
             await using var client = await SmbTestClient.SignInAsync(server, User, Password);
             var tree = await client.TreeConnectAsync("data");
-            return Convert.ToHexString(SHA256.HashData(await ReadFileAsync(client, tree, "big.bin", chunk: 1 << 20)));
+            return Convert.ToHexString(SHA256.HashData(await ReadFileAsync(client, tree, "big.bin", chunk: Smb2.MaxIoSize)));
         });
         foreach (var hash in await Task.WhenAll(readers))
         {

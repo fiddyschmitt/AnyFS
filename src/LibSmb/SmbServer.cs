@@ -46,8 +46,8 @@ public sealed class SmbServerOptions
     /// How much the requests of one connection read and not yet worked on, and their replies not yet with the writer,
     /// may hold in memory together (64 MiB): past it, the next message is left in the socket until some of them are
     /// done. A reader that always read would let a client that never stops sending, or never reads, fill the memory. A
-    /// READ or a listing waiting is a few hundred bytes, so this is met only by writes queued by the megabyte behind a
-    /// file system that takes none of them.
+    /// READ or a listing waiting is a few hundred bytes, so this is met only by a thousand writes queued behind a file
+    /// system that takes none of them.
     /// </summary>
     internal long WaitingBytes { get; set; } = 64L << 20;
 

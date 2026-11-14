@@ -469,17 +469,17 @@ public sealed class ConcurrencyTests
     }
 
     /// <summary>
-    /// A READ whose reply waits for the wire takes no place. A client asks for a megabyte many times over and reads none
-    /// of it, so the replies back up from the socket; with two places, a listing still reaches the file system. And only
-    /// as many of those replies as there are places are kept in memory: the READs behind them wait their turn, unread
-    /// data and all, rather than each hold its megabyte.
+    /// A READ whose reply waits for the wire takes no place. A client asks for the most a READ gives, 96 MiB of it in
+    /// all, and reads none of it, so the replies back up from the socket; with two places, a listing still reaches the
+    /// file system. And only as many of those replies as there are places are kept in memory: the READs behind them wait
+    /// their turn, unread data and all, rather than each hold its buffer.
     /// </summary>
     [TestMethod]
     public async Task ARequestWhoseReplyWaitsForTheWireTakesNoPlace()
     {
-        const int megabyte = 1 << 20;
-        const int reads = 96;
-        File.WriteAllBytes(Path.Combine(_dir, "big.bin"), new byte[megabyte]);
+        const int most = Smb2.MaxIoSize;
+        const int reads = (96 << 20) / most;
+        File.WriteAllBytes(Path.Combine(_dir, "big.bin"), new byte[most]);
         var fs = new HeldFileSystem(_dir);
         await using var server = Start(fs, maxConcurrentRequests: 2);
         await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
@@ -488,7 +488,7 @@ public sealed class ConcurrencyTests
         var root = await client.OpenAsync(tree, "", options: CreateOptions.DirectoryFile);
         for (var i = 0; i < reads; i++)
         {
-            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(big, 0, megabyte), tree);
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(big, 0, most), tree);
         }
 
         // until no READ has reached the file system for a while: the wire is full, and so is the memory for replies

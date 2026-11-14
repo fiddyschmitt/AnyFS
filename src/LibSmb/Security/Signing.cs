@@ -88,7 +88,7 @@ internal sealed class Signer : IDisposable
 /// <summary>
 /// AES-CMAC ([RFC 4493], NIST SP 800-38B). CMAC is CBC-MAC with the last block tweaked by a subkey, so every whole block
 /// before the last goes through .NET's CBC encryption (its fastest AES path) in chunks, the chain carried over as the
-/// next chunk's IV, and only the last block is done by hand. Signing a 1 MiB READ response a block at a time would cost
+/// next chunk's IV, and only the last block is done by hand. Signing a READ response's data a block at a time would cost
 /// more than serving it.
 /// </summary>
 internal sealed class AesCmac : IDisposable

@@ -59,7 +59,8 @@ mount must come back within 3 s (`SlowSourceHoldsUpNothingOverSmb`).
 
 `tests/LibSmb.E2E` runs the SMB conditions on every host from every client (`SmbConditions.cs`):
 round trips,
-a 256 MiB file each way, ranges, edits in place, renames and deletes, special names, case, a deep
+a 256 MiB file each way (neither way over four times slower than the other: a client held up, as
+a Mac was by megabyte writes, copies right and slowly), ranges, edits in place, renames and deletes, special names, case, a deep
 tree, 1000 small files and a 5000-entry folder, timestamps, disk space, a 4.5 GiB sparse file,
 concurrent writers and readers, churn while listing, a copy killed half-way, 50 listings at once,
 a read, a listing, a lookup and an open whose source call takes 10 s, each holding up no listing or

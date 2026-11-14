@@ -567,7 +567,7 @@ internal sealed partial class SmbConnection
     }
 
     /// <summary>
-    /// The replies as the message to send: one alone, from its own buffer (the big one, a 1 MiB READ, is not copied); a
+    /// The replies as the message to send: one alone, from its own buffer (the big one, a READ's data, is not copied); a
     /// chain laid out 8-aligned with each NextCommand set. Each PDU is signed with its session's key, padding included.
     /// </summary>
     private static Outbound? Assemble(List<(Reply Reply, Signer? Signer)> replies)

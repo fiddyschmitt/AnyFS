@@ -230,7 +230,7 @@ internal sealed partial class SmbConnection
         return null;
     }
 
-    /// <summary>The NEGOTIATE response ([MS-SMB2] 2.2.4): signing enabled (not required), no capabilities, 1 MiB transfers, no security blob.</summary>
+    /// <summary>The NEGOTIATE response ([MS-SMB2] 2.2.4): signing enabled (not required), no capabilities, 64 KiB transfers (<see cref="Smb2.MaxIoSize"/>), no security blob.</summary>
     private Reply NegotiateBody(ushort dialect)
     {
         var reply = Reply.Rent(64);

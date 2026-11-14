@@ -54,6 +54,36 @@ public class ProtocolTests
         Assert.AreEqual(Dialect.Smb302, Wire.U16(reply, Smb2.HeaderSize + 4));
     }
 
+    /// <summary>
+    /// NEGOTIATE offers 64 KiB for a READ, a WRITE and a query, and no large MTU: the two go together. Offered a megabyte
+    /// without large MTU, macOS writes 16 MiB at a time from each of four threads and a Mac short of memory stalls; told
+    /// large MTU, Windows reads a megabyte at a time at half the speed. A WRITE longer than offered is refused.
+    /// </summary>
+    [TestMethod]
+    public async Task NegotiateOffers64KiBAndNoLargeMtu()
+    {
+        const uint LargeMtu = 0x00000004;
+        foreach (var dialect in Dialect.Supported)
+        {
+            var c = Connection(NewServer(Dir()));
+            var reply = await HandleAsync(c, Head(Command.Negotiate), Seg(NegotiateBody(dialect)));
+            Assert.AreEqual(Status.Success, StatusOf(reply));
+            Assert.AreEqual(0u, Wire.U32(reply, Smb2.HeaderSize + 24) & LargeMtu, $"dialect {dialect:X4}: capabilities");
+            Assert.AreEqual(65536u, Wire.U32(reply, Smb2.HeaderSize + 28), $"dialect {dialect:X4}: MaxTransactSize");
+            Assert.AreEqual(65536u, Wire.U32(reply, Smb2.HeaderSize + 32), $"dialect {dialect:X4}: MaxReadSize");
+            Assert.AreEqual(65536u, Wire.U32(reply, Smb2.HeaderSize + 36), $"dialect {dialect:X4}: MaxWriteSize");
+        }
+
+        var connection = Connection(NewServer(Dir()));
+        var write = new byte[48 + 65537];
+        Wire.Put16(write, 0, 49);
+        Wire.Put16(write, 2, Smb2.HeaderSize + 48);
+        Wire.Put32(write, 4, 65537);
+        var (status, refused) = await connection.WriteAsync(write, None);
+        refused.Dispose();
+        Assert.AreEqual(Status.InvalidParameter, status, "a WRITE of 64 KiB and a byte");
+    }
+
     /// <summary>TREE_CONNECT routes to the right share (names matched in any case) and a CREATE on each tree opens that share's file.</summary>
     [TestMethod]
     public async Task TreeConnectRoutesToTheShare()

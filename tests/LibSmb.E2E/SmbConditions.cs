@@ -100,6 +100,12 @@ public static class SmbConditions
         var got = SmbOps.Hash(p.C, readBack);
         p.Must(got == want, $"read back hash {got}, wrote {want}");
         p.Must(SmbOps.WaitForHash(p.S, p.Backing(name), want, 60), "the host's folder");
+
+        // One way far behind the other is a client held up, not a slow disk or network, which slow both. A Mac wrote at
+        // a tenth of the speed it read at while its megabyte WRITEs stalled (till 14-Nov-2026), and every copy still
+        // came out right, so nothing here said so. The lab's rows are within two of each other; four leaves room.
+        var (wrote, readAt) = (size / write.Elapsed.TotalSeconds, size / read.Elapsed.TotalSeconds);
+        p.Check(wrote >= readAt / 4 && readAt >= wrote / 4, $"one way over four times slower than the other: write {MiBps(size, write)}, read {MiBps(size, read)}");
     }
 
     /// <summary>MiB-aligned ranges out of the middle of a 64 MiB file (what a video player or a zip reader does), compared with the source.</summary>

@@ -8,8 +8,16 @@ internal static class Smb2
     /// <summary>The largest message accepted over Direct TCP: a sanity bound, far above what is negotiated.</summary>
     public const int MaxMessageSize = 16 * 1024 * 1024;
 
-    /// <summary>The largest READ or WRITE payload, advertised as MaxReadSize and MaxWriteSize.</summary>
-    public const int MaxIoSize = 1 << 20;
+    /// <summary>
+    /// The largest READ or WRITE payload, and the most a QUERY_INFO returns, advertised as MaxReadSize, MaxWriteSize and
+    /// MaxTransactSize: 64 KiB, which is all a request may carry on one credit, since the server does not say it takes
+    /// more (large MTU, [MS-SMB2] 2.2.4). Windows and Linux keep to 64 KiB without that word whatever is advertised.
+    /// macOS does not: offered 1 MiB, it writes 16 MiB at a time from each of four threads, 64 MiB of its network
+    /// buffers, which is all a Mac with 6 GB of memory has. Its copies then stop for up to half a minute, and now and
+    /// then for good. Saying large MTU instead makes Windows read a megabyte at a time, one after the other, at half
+    /// the speed of its 64 KiB reads side by side.
+    /// </summary>
+    public const int MaxIoSize = 64 << 10;
 
     public static ReadOnlySpan<byte> Magic => [0xFE, (byte)'S', (byte)'M', (byte)'B'];
 

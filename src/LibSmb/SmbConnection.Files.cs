@@ -341,7 +341,7 @@ internal sealed partial class SmbConnection
         Reply? reply = null;
         try
         {
-            // the buffer for the data only now, with the turn in hand: a READ that waits for it holds no megabyte
+            // the buffer for the data only now, with the turn in hand: a READ that waits for it holds none
             reply = await ReadReplyAsync((int)length, place, ct).ConfigureAwait(false);
             var file = await open.FileToReadAsync(ct).ConfigureAwait(false);
             var target = reply.Buffer.AsMemory(Reply.Headroom + Smb2.HeaderSize + ReadResponseFixed, (int)length);

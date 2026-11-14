@@ -39,8 +39,9 @@ await using var server = SmbServer.Start(
 Console.ReadLine(); // it serves until disposed
 ```
 
-Not implemented: SMB 3.1.1, encryption, byte-range lock enforcement (locks are granted), oplocks and leases, change
-notifications, named pipes (so no share list for `net view`), DFS, alternate data streams and security descriptors.
+Not implemented: SMB 3.1.1, encryption, large MTU (a READ or a WRITE carries at most 64 KiB, and clients send many
+side by side), byte-range lock enforcement (locks are granted), oplocks and leases, change notifications, named pipes
+(so no share list for `net view`), DFS, alternate data streams and security descriptors.
 
 MIT licensed. The source is in [AnyFS](https://github.com/fiddyschmitt/AnyFS), which LibSmb was written for, under
 `src/LibSmb`.
