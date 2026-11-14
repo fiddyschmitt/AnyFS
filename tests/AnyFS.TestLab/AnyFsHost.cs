@@ -553,12 +553,19 @@ public sealed class AnyFsHost : IDisposable
 
     // ---- the process ------------------------------------------------------------------------------------------
 
+    /// <summary>
+    /// The log level anyfs runs at on the hosts: debug, unless <c>ANYFS_E2E_LOG_LEVEL</c> says otherwise (<c>trace</c> has
+    /// the SMB server log every request and reply as it comes and goes, to tell a server that holds a request from a
+    /// client that has not sent it).
+    /// </summary>
+    public static string LogLevel => Environment.GetEnvironmentVariable("ANYFS_E2E_LOG_LEVEL") is { Length: > 0 } level ? level : "debug";
+
     public void Start()
     {
         if (Host.IsWindows)
         {
             // through RunRemote, in the logged-on session (spec 16.2): WinFsp's \\anyfs\... and stored credentials live there
-            RunRemote(Exe, "serve", "--settings-dir", SettingsDir, "--log-level", "debug");
+            RunRemote(Exe, "serve", "--settings-dir", SettingsDir, "--log-level", LogLevel);
             if (!WaitForProcess(30))
             {
                 throw new InvalidOperationException($"anyfs did not start on {Host.Name} through RunRemote (no {Exe} process after 30 s); RunRemote's own log on the machine says what it ran");
@@ -566,7 +573,7 @@ public sealed class AnyFsHost : IDisposable
         }
         else
         {
-            Host.Sh($"cd '{LabDir}' && (nohup '{Exe}' serve --settings-dir '{SettingsDir}' --log-level debug > '{LabDir}/serve.out' 2>&1 &) ; sleep 1; pgrep -f '{Exe} serve' >/dev/null && echo started");
+            Host.Sh($"cd '{LabDir}' && (nohup '{Exe}' serve --settings-dir '{SettingsDir}' --log-level {LogLevel} > '{LabDir}/serve.out' 2>&1 &) ; sleep 1; pgrep -f '{Exe} serve' >/dev/null && echo started");
         }
 
         _started.Add(Exe);

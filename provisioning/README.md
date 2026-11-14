@@ -83,9 +83,15 @@ client cache answers.
 macOS's client holds some reads back while another read is unanswered (reading a 64 KiB file it sent
 three of four reads at once and the fourth after the slow read; its read-ahead, as it seems), so
 `held/quick.bin` is 16 KiB, one read for every client, and the stress run notes macOS's slow quick
-operations instead of failing on them. `ANYFS_E2E_SMB_CONDITIONS` narrows the run (`timestamps,guest_roundtrip`,
+operations instead of failing on them. Even that one read it holds back about one run in three: its
+own packets show the file's open answered at once, nothing sent until the slow read's reply, then the
+read, answered within a millisecond. So the slow-read rows of both suites note a Mac's held read
+instead of failing on it; its listings, and every other client's reads, are held to the 3 s.
+`ANYFS_E2E_SMB_CONDITIONS` narrows the run (`timestamps,guest_roundtrip`,
 `several_clients_at_once`, `stress`) and `ANYFS_E2E_CLIENTS` its clients;
 `ANYFS_E2E_SMB_STRESS_SECONDS`, `_WORKERS`, `_LARGE_MB` and `_SEED` shape the stress run.
+`ANYFS_E2E_LOG_LEVEL=trace` (both suites; `debug` otherwise) has the hosts' anyfs log every SMB
+request and reply, which tells a server holding a request from a client that has not sent it.
 A mount that a client has not finished within 90 s fails its row, and the client's later rows against
 that host are Inconclusive at once (the several-clients and stress rows leave it out) rather than each
 waiting out the same time-outs: a Mac whose kernel SMB client had deadlocked once cost 2.5 hours that
