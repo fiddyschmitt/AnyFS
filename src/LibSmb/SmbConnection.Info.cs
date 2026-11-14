@@ -15,7 +15,7 @@ internal sealed partial class SmbConnection
     /// then STATUS_NO_MORE_FILES. The search pattern is honoured: a client looks a child up by name with a pattern of that
     /// name (macOS does it for every entry, Windows for path resolution), which one stat answers, not a listing filtered.
     /// </summary>
-    internal async ValueTask<(uint Status, Reply Reply)> QueryDirectoryAsync(Memory<byte> request, CancellationToken ct)
+    internal async ValueTask<(uint Status, Reply Reply)> QueryDirectoryAsync(Memory<byte> request, CancellationToken ct, Place? place = null)
     {
         if (request.Length < 32)
         {
@@ -32,7 +32,7 @@ internal sealed partial class SmbConnection
             return (Status.InvalidParameter, Reply.Error());
         }
 
-        if (!await open.EnterAsync(ct).ConfigureAwait(false))
+        if (!await EnterAsync(open, place, ct).ConfigureAwait(false))
         {
             return (Status.FileClosed, Reply.Error());
         }
@@ -120,7 +120,7 @@ internal sealed partial class SmbConnection
     /// buffer is cut to it and answered STATUS_BUFFER_OVERFLOW: more bytes than were asked for make the Windows
     /// redirector reject the whole response (ERROR_BAD_NET_RESP).
     /// </summary>
-    internal async ValueTask<(uint Status, Reply Reply)> QueryInfoAsync(Memory<byte> request, CancellationToken ct)
+    internal async ValueTask<(uint Status, Reply Reply)> QueryInfoAsync(Memory<byte> request, CancellationToken ct, Place? place = null)
     {
         if (request.Length < 40)
         {
@@ -142,7 +142,7 @@ internal sealed partial class SmbConnection
             case InfoType.File:
             {
                 // the open's turn, like every request on it: a rename through it changes its path, a write its length
-                if (!await open.EnterAsync(ct).ConfigureAwait(false))
+                if (!await EnterAsync(open, place, ct).ConfigureAwait(false))
                 {
                     return (Status.FileClosed, Reply.Error());
                 }
@@ -249,7 +249,7 @@ internal sealed partial class SmbConnection
     // ----- SET_INFO -----
 
     /// <summary>SET_INFO ([MS-SMB2] 2.2.39): delete on close, end of file, allocation, rename and times.</summary>
-    internal async ValueTask<(uint Status, Reply Reply)> SetInfoAsync(Memory<byte> request, CancellationToken ct)
+    internal async ValueTask<(uint Status, Reply Reply)> SetInfoAsync(Memory<byte> request, CancellationToken ct, Place? place = null)
     {
         if (request.Length < 32)
         {
@@ -277,7 +277,7 @@ internal sealed partial class SmbConnection
         }
 
         var buffer = request.Slice(bufferOffset, (int)bufferLength);
-        if (!await open.EnterAsync(ct).ConfigureAwait(false))
+        if (!await EnterAsync(open, place, ct).ConfigureAwait(false))
         {
             return (Status.FileClosed, Reply.Error());
         }

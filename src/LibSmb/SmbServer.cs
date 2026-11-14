@@ -34,10 +34,22 @@ public sealed class SmbServerOptions
     /// <summary>
     /// The most requests of one connection worked on at once (64 unless set; at least 1). A client machine sends all it asks
     /// of a server over one connection, so this is how many of its requests can wait on the file system together, a slow
-    /// one holding up none of the others; past it, the next request is read when one is done. One open's requests take
-    /// turns whatever this is.
+    /// one holding up none of the others; past it, a request waits for one to be done. It is read all the same: it is told
+    /// it is waiting like any request that takes long (<see cref="InterimResponseDelay"/>), a CANCEL reaches it, and what
+    /// never calls the file system (an ECHO) is answered at once. A request counts while the file system works for it:
+    /// not while it waits for its open's turn (one open's requests take turns whatever this is), nor while its reply
+    /// waits for the wire. As many READ replies as this are kept in memory at once.
     /// </summary>
     public int MaxConcurrentRequests { get; set; } = 64;
+
+    /// <summary>
+    /// How much the requests of one connection read and not yet worked on, and their replies not yet with the writer,
+    /// may hold in memory together (64 MiB): past it, the next message is left in the socket until some of them are
+    /// done. A reader that always read would let a client that never stops sending, or never reads, fill the memory. A
+    /// READ or a listing waiting is a few hundred bytes, so this is met only by writes queued by the megabyte behind a
+    /// file system that takes none of them.
+    /// </summary>
+    internal long WaitingBytes { get; set; } = 64L << 20;
 
     /// <summary>
     /// How long a request may run before the client is told it is still being worked on (half a second unless set;

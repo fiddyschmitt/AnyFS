@@ -13,6 +13,7 @@ internal sealed class Reply : IDisposable
     public const int Headroom = 4;
 
     private byte[]? _buffer;
+    private SemaphoreSlim? _lease;
 
     private Reply(byte[] buffer, int bodyLength)
     {
@@ -21,6 +22,15 @@ internal sealed class Reply : IDisposable
     }
 
     public int BodyLength { get; private set; }
+
+    /// <summary>
+    /// Makes it one of the big replies its connection keeps in memory at once (a READ's data): the lease is given back with
+    /// the buffer, when the reply has been sent or is dropped.
+    /// </summary>
+    public SemaphoreSlim? Lease
+    {
+        set => _lease = value;
+    }
 
     public byte[] Buffer => _buffer ?? throw new ObjectDisposedException(nameof(Reply));
 
@@ -81,16 +91,26 @@ internal sealed class Reply : IDisposable
         {
             ArrayPool<byte>.Shared.Return(buffer);
         }
+
+        Interlocked.Exchange(ref _lease, null)?.Release();
     }
 
-    /// <summary>Hands the buffer over to whoever sends it, who returns it to the pool; the reply is done with.</summary>
-    public void ReleaseBuffer() => _buffer = null;
+    /// <summary>Hands the buffer over to whoever sends it, who returns it to the pool, and its lease with it; the reply is done with.</summary>
+    public SemaphoreSlim? ReleaseBuffer()
+    {
+        _buffer = null;
+        return Interlocked.Exchange(ref _lease, null);
+    }
 }
 
 /// <summary>A message on its way out: a frame (the 4-byte header and the message after it) in a pooled buffer.</summary>
-internal sealed class Outbound(byte[] buffer, int length) : IDisposable
+internal sealed class Outbound(byte[] buffer, int length, SemaphoreSlim? lease = null) : IDisposable
 {
     private byte[]? _buffer = buffer;
+    private SemaphoreSlim? _lease = lease;
+
+    /// <summary>Whether it is one of the big replies its connection counts already (see <see cref="Reply.Lease"/>).</summary>
+    public bool Leased => _lease is not null;
 
     public ReadOnlyMemory<byte> Frame => (_buffer ?? throw new ObjectDisposedException(nameof(Outbound))).AsMemory(0, length);
 
@@ -100,7 +120,7 @@ internal sealed class Outbound(byte[] buffer, int length) : IDisposable
         var length = reply.PduLength;
         WriteFrameHeader(reply.Buffer, length);
         var buffer = reply.Buffer;
-        return new Outbound(Detach(reply, buffer), Reply.Headroom + length);
+        return new Outbound(buffer, Reply.Headroom + length, reply.ReleaseBuffer());
     }
 
     /// <summary>Several replies chained into one compound message (already laid out by the caller).</summary>
@@ -116,6 +136,8 @@ internal sealed class Outbound(byte[] buffer, int length) : IDisposable
         {
             ArrayPool<byte>.Shared.Return(b);
         }
+
+        Interlocked.Exchange(ref _lease, null)?.Release();
     }
 
     /// <summary>The Direct TCP frame header ([MS-SMB2] 2.1): a zero byte and the message's length in 24 bits, big-endian.</summary>
@@ -125,12 +147,5 @@ internal sealed class Outbound(byte[] buffer, int length) : IDisposable
         buffer[1] = (byte)(messageLength >> 16);
         buffer[2] = (byte)(messageLength >> 8);
         buffer[3] = (byte)messageLength;
-    }
-
-    /// <summary>Takes the buffer from the reply (which no longer returns it to the pool).</summary>
-    private static byte[] Detach(Reply reply, byte[] buffer)
-    {
-        reply.ReleaseBuffer();
-        return buffer;
     }
 }

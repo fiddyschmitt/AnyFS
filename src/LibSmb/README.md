@@ -13,11 +13,15 @@ dotnet add package LibSmb
 - Compounded requests, related operations included.
 - A connection's requests run side by side. A client machine sends everything over one connection, so a slow file
   system call holds up only its own request, and small replies go out ahead of big READ data. One open's requests take
-  turns. `MaxConcurrentRequests` (64 by default) bounds how many of a connection's requests run at once.
-- A request still running after half a second (`InterimResponseDelay`) gets an interim STATUS_PENDING reply, so
-  clients wait out a slow call instead of giving up on the connection. A client's CANCEL fires the call's cancellation
-  token, and the request is answered STATUS_CANCELLED. A call that gives up by itself with an
-  `OperationCanceledException` (a time-out) fails its request with STATUS_IO_TIMEOUT, and the connection carries on.
+  turns. `MaxConcurrentRequests` (64 by default) bounds how many of a connection's requests the file system works on
+  at once: a request waiting for its open's turn, or whose reply waits for the wire, counts for none.
+- Every message is read as it comes. A request past that bound waits its turn in memory, an ECHO is answered at once,
+  and a CANCEL reaches a request that waits as well as one that runs.
+- A request still running, or waiting, after half a second (`InterimResponseDelay`) gets an interim STATUS_PENDING
+  reply, so clients wait out a slow call instead of giving up on the connection. A client's CANCEL fires the call's
+  cancellation token, and the request is answered STATUS_CANCELLED. A call that gives up by itself with an
+  `OperationCanceledException` (a time-out) fails its command with STATUS_IO_TIMEOUT, also inside a compound chain,
+  and the connection carries on.
 - Apple's SMB2 extensions: macOS gets each directory entry's access, mode and Finder facts in the listing itself.
 - A lookup by name is one stat, not a listing filtered.
 - Read-only shares, and files that are read-only themselves.

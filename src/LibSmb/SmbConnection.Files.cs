@@ -237,7 +237,7 @@ internal sealed partial class SmbConnection
     /// a delete-on-close: that file ceases to exist, and attributes for it make a caching client (macOS smbfs) believe
     /// the file it just deleted is still there.
     /// </summary>
-    internal async ValueTask<(uint Status, Reply Reply)> CloseAsync(Memory<byte> request, CancellationToken ct)
+    internal async ValueTask<(uint Status, Reply Reply)> CloseAsync(Memory<byte> request, CancellationToken ct, Place? place = null)
     {
         if (request.Length < 24)
         {
@@ -256,7 +256,7 @@ internal sealed partial class SmbConnection
         // connection's end. So nothing comes between here and its file's close. The wait for its turn is not given up
         // (the requests ahead of it end when they are done, or cancelled), and the file is closed whatever becomes of the
         // attributes' lookup or of the request.
-        await open.Gate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        await TurnAsync(open, place, CancellationToken.None).ConfigureAwait(false);
         try
         {
             // a request on it still waiting for its turn is answered STATUS_FILE_CLOSED
@@ -312,7 +312,7 @@ internal sealed partial class SmbConnection
     /// READ ([MS-SMB2] 2.2.19): the data read straight into the reply, behind its fixed part. A length over MaxReadSize is
     /// refused rather than allocated; a read wholly at or past the end is STATUS_END_OF_FILE.
     /// </summary>
-    internal async ValueTask<(uint Status, Reply Reply)> ReadAsync(Memory<byte> request, CancellationToken ct)
+    internal async ValueTask<(uint Status, Reply Reply)> ReadAsync(Memory<byte> request, CancellationToken ct, Place? place = null)
     {
         if (request.Length < 48)
         {
@@ -327,65 +327,112 @@ internal sealed partial class SmbConnection
             return (Status.InvalidParameter, Reply.Error());
         }
 
-        var reply = Reply.Rent(ReadResponseFixed + (int)length);
-        var read = 0;
-        if (length > 0)
+        if (length == 0)
         {
-            if (!await open.EnterAsync(ct).ConfigureAwait(false))
-            {
-                reply.Dispose();
-                return (Status.FileClosed, Reply.Error());
-            }
+            return (Status.Success, ReadResponse(Reply.Rent(ReadResponseFixed), 0));
+        }
 
-            try
+        if (!await EnterAsync(open, place, ct).ConfigureAwait(false))
+        {
+            return (Status.FileClosed, Reply.Error());
+        }
+
+        // the reply, disposed unless it is the one returned: a big one's lease must come back whatever ends the request
+        Reply? reply = null;
+        try
+        {
+            // the buffer for the data only now, with the turn in hand: a READ that waits for it holds no megabyte
+            reply = await ReadReplyAsync((int)length, place, ct).ConfigureAwait(false);
+            var file = await open.FileToReadAsync(ct).ConfigureAwait(false);
+            var target = reply.Buffer.AsMemory(Reply.Headroom + Smb2.HeaderSize + ReadResponseFixed, (int)length);
+            var read = 0;
+            while (read < target.Length)
             {
-                var file = await open.FileToReadAsync(ct).ConfigureAwait(false);
-                var target = reply.Buffer.AsMemory(Reply.Headroom + Smb2.HeaderSize + ReadResponseFixed, (int)length);
-                while (read < target.Length)
+                var n = await file.ReadAsync((long)offset + read, target[read..], ct).ConfigureAwait(false);
+                if (n <= 0)
                 {
-                    var n = await file.ReadAsync((long)offset + read, target[read..], ct).ConfigureAwait(false);
-                    if (n <= 0)
-                    {
-                        break;
-                    }
-
-                    read += n;
-
-                    // at the end the file's length gives, asking again would only hear so: for a slow backend, a second
-                    // round trip on every READ that takes in the end of a file (clients read in big pieces)
-                    if ((long)offset + read >= file.Length)
-                    {
-                        break;
-                    }
+                    break;
                 }
-            }
-            catch (Exception ex) when (IsFileSystemFailure(ex))
-            {
-                reply.Dispose();
-                return (Errors.StatusOf(ex), Reply.Error());
-            }
-            finally
-            {
-                open.Gate.Release();
+
+                read += n;
+
+                // at the end the file's length gives, asking again would only hear so: for a slow backend, a second
+                // round trip on every READ that takes in the end of a file (clients read in big pieces)
+                if ((long)offset + read >= file.Length)
+                {
+                    break;
+                }
             }
 
             if (read == 0)
             {
-                reply.Dispose();
                 return (Status.EndOfFile, Reply.Error());
+            }
+
+            var done = ReadResponse(reply, read);
+            reply = null;
+            return (Status.Success, done);
+        }
+        catch (Exception ex) when (IsFileSystemFailure(ex))
+        {
+            return (Errors.StatusOf(ex), Reply.Error());
+        }
+        finally
+        {
+            reply?.Dispose();
+            open.Gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// The reply a READ's data is read into. One too long for the small replies' line is one of the big replies the
+    /// connection keeps in memory at once (<see cref="_bigReplies"/>): the READ waits for its turn among them, without a
+    /// place meanwhile, and the reply gives the lease back when it has gone out or is dropped.
+    /// </summary>
+    private async ValueTask<Reply> ReadReplyAsync(int length, Place? place, CancellationToken ct)
+    {
+        var bodyLength = ReadResponseFixed + length;
+        if (Reply.Headroom + Smb2.HeaderSize + bodyLength <= UrgentLimit)
+        {
+            return Reply.Rent(bodyLength);
+        }
+
+        if (!_bigReplies.Wait(0, CancellationToken.None))
+        {
+            var had = place?.GiveBack() ?? false;
+            await _bigReplies.WaitAsync(ct).ConfigureAwait(false);
+            if (had)
+            {
+                try
+                {
+                    await place!.TakeAsync(ct).ConfigureAwait(false);
+                }
+                catch
+                {
+                    _bigReplies.Release();
+                    throw;
+                }
             }
         }
 
+        var reply = Reply.Rent(bodyLength);
+        reply.Lease = _bigReplies;
+        return reply;
+    }
+
+    /// <summary>The READ response ([MS-SMB2] 2.2.20) around the <paramref name="read"/> bytes already in the reply.</summary>
+    private static Reply ReadResponse(Reply reply, int read)
+    {
         reply.Shrink(ReadResponseFixed + read);
         var b = reply.Body;
         Wire.Put16(b, 0, 17);
         b[2] = Smb2.HeaderSize + ReadResponseFixed; // DataOffset, from the header
         Wire.Put32(b, 4, (uint)read);               // DataLength
-        return (Status.Success, reply);
+        return reply;
     }
 
     /// <summary>WRITE ([MS-SMB2] 2.2.21).</summary>
-    internal async ValueTask<(uint Status, Reply Reply)> WriteAsync(Memory<byte> request, CancellationToken ct)
+    internal async ValueTask<(uint Status, Reply Reply)> WriteAsync(Memory<byte> request, CancellationToken ct, Place? place = null)
     {
         if (request.Length < 48)
         {
@@ -416,7 +463,7 @@ internal sealed partial class SmbConnection
             return (Status.InvalidParameter, Reply.Error());
         }
 
-        if (!await open.EnterAsync(ct).ConfigureAwait(false))
+        if (!await EnterAsync(open, place, ct).ConfigureAwait(false))
         {
             return (Status.FileClosed, Reply.Error());
         }
@@ -441,7 +488,7 @@ internal sealed partial class SmbConnection
     }
 
     /// <summary>FLUSH ([MS-SMB2] 2.2.17).</summary>
-    internal async ValueTask<(uint Status, Reply Reply)> FlushAsync(Memory<byte> request, CancellationToken ct)
+    internal async ValueTask<(uint Status, Reply Reply)> FlushAsync(Memory<byte> request, CancellationToken ct, Place? place = null)
     {
         if (request.Length < 24)
         {
@@ -450,7 +497,7 @@ internal sealed partial class SmbConnection
 
         if (FindOpen(FileId.Read(request.Span[8..24])) is { File: { } file } open)
         {
-            if (!await open.EnterAsync(ct).ConfigureAwait(false))
+            if (!await EnterAsync(open, place, ct).ConfigureAwait(false))
             {
                 return (Status.FileClosed, Reply.Error());
             }

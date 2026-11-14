@@ -84,6 +84,13 @@ internal sealed partial class SmbConnection
         Reply reply;
         try
         {
+            // a place among the requests worked on at once, before the first call of the file system (a chain keeps it
+            // to its end); the commands that never call it are answered whatever the file system is slow with
+            if (chain.Place is { } place && ReachesFileSystem(h.Command))
+            {
+                await place.TakeAsync(ct).ConfigureAwait(false);
+            }
+
             switch (h.Command)
             {
                 case Command.Negotiate:
@@ -116,25 +123,25 @@ internal sealed partial class SmbConnection
                     chain.FileId = Status.IsError(status) ? null : FileId.Read(reply.Body[64..80]);
                     break;
                 case Command.Close:
-                    (status, reply) = await CloseAsync(body, ct).ConfigureAwait(false);
+                    (status, reply) = await CloseAsync(body, ct, chain.Place).ConfigureAwait(false);
                     break;
                 case Command.Read:
-                    (status, reply) = await ReadAsync(body, ct).ConfigureAwait(false);
+                    (status, reply) = await ReadAsync(body, ct, chain.Place).ConfigureAwait(false);
                     break;
                 case Command.Write:
-                    (status, reply) = await WriteAsync(body, ct).ConfigureAwait(false);
+                    (status, reply) = await WriteAsync(body, ct, chain.Place).ConfigureAwait(false);
                     break;
                 case Command.Flush:
-                    (status, reply) = await FlushAsync(body, ct).ConfigureAwait(false);
+                    (status, reply) = await FlushAsync(body, ct, chain.Place).ConfigureAwait(false);
                     break;
                 case Command.QueryDirectory:
-                    (status, reply) = await QueryDirectoryAsync(body, ct).ConfigureAwait(false);
+                    (status, reply) = await QueryDirectoryAsync(body, ct, chain.Place).ConfigureAwait(false);
                     break;
                 case Command.QueryInfo:
-                    (status, reply) = await QueryInfoAsync(body, ct).ConfigureAwait(false);
+                    (status, reply) = await QueryInfoAsync(body, ct, chain.Place).ConfigureAwait(false);
                     break;
                 case Command.SetInfo:
-                    (status, reply) = await SetInfoAsync(body, ct).ConfigureAwait(false);
+                    (status, reply) = await SetInfoAsync(body, ct, chain.Place).ConfigureAwait(false);
                     break;
                 case Command.Ioctl:
                     (status, reply) = Ioctl(body.Span);

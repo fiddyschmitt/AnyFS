@@ -190,6 +190,248 @@ public sealed class ConcurrencyTests
     }
 
     /// <summary>
+    /// With every place taken by held READs, a CANCEL of one of them is still read and acted on: it must not wait in the
+    /// socket behind the very requests it is for.
+    /// </summary>
+    [TestMethod]
+    public async Task ACancelReachesAHeldRequestWithEveryPlaceTaken()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs, maxConcurrentRequests: 2);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var slow = await client.OpenAsync(tree, "slow.bin");
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        fs.Hold("slow.bin");
+        fs.Hold("fast.bin");
+        try
+        {
+            var slowRead = await client.PostAsync(Command.Read, SmbTestClient.ReadBody(slow, 0, SlowContent.Length), tree);
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(fast, 0, FastContent.Length), tree);
+            await Task.WhenAll(fs.Reached("slow.bin"), fs.Reached("fast.bin")).WaitAsync(Prompt);
+            await client.CancelAsync(slowRead);
+            var final = await client.ReceiveFinalAsync(Prompt);
+            Assert.AreEqual(slowRead, final.MessageId);
+            Assert.AreEqual(Status.Cancelled, final.Status, $"0x{final.Status:X8}");
+        }
+        finally
+        {
+            fs.Release("slow.bin");
+            fs.Release("fast.bin");
+        }
+    }
+
+    /// <summary>
+    /// With every place taken by held READs, an ECHO is still answered: a client sends one to see whether a server that
+    /// has gone quiet is still there, and gives the connection up when it is not answered.
+    /// </summary>
+    [TestMethod]
+    public async Task AnEchoIsAnsweredWithEveryPlaceTaken()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs, maxConcurrentRequests: 2);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var slow = await client.OpenAsync(tree, "slow.bin");
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        fs.Hold("slow.bin");
+        fs.Hold("fast.bin");
+        try
+        {
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(slow, 0, SlowContent.Length), tree);
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(fast, 0, FastContent.Length), tree);
+            await Task.WhenAll(fs.Reached("slow.bin"), fs.Reached("fast.bin")).WaitAsync(Prompt);
+            var echo = await client.PostAsync(Command.Echo, [4, 0, 0, 0]);
+            var final = await client.ReceiveFinalAsync(Prompt);
+            Assert.AreEqual(echo, final.MessageId);
+            Assert.AreEqual(Status.Success, final.Status, $"0x{final.Status:X8}");
+        }
+        finally
+        {
+            fs.Release("slow.bin");
+            fs.Release("fast.bin");
+        }
+    }
+
+    /// <summary>
+    /// A request waiting for a place (two held READs have both) is told so by an interim reply, like any request that
+    /// takes long, and a CANCEL ends it there: it never reaches the file system.
+    /// </summary>
+    [TestMethod]
+    public async Task ARequestWaitingForAPlaceIsToldSoAndCanBeCancelled()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs, maxConcurrentRequests: 2);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var slow = await client.OpenAsync(tree, "slow.bin");
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        var root = await client.OpenAsync(tree, "", options: CreateOptions.DirectoryFile);
+        fs.Hold("slow.bin");
+        fs.Hold("fast.bin");
+        try
+        {
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(slow, 0, SlowContent.Length), tree);
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(fast, 0, FastContent.Length), tree);
+            await Task.WhenAll(fs.Reached("slow.bin"), fs.Reached("fast.bin")).WaitAsync(Prompt);
+            var listing = await client.PostAsync(Command.QueryDirectory, SmbTestClient.QueryDirectoryBody(root, flags: QueryDirectoryFlags.RestartScans), tree);
+
+            // the two held READs are told they are still worked on too
+            SmbResponse interim;
+            var deadline = DateTime.UtcNow + Prompt;
+            do
+            {
+                interim = await client.ReceiveAsync(deadline - DateTime.UtcNow is { Ticks: > 0 } left ? left : TimeSpan.Zero);
+                Assert.AreEqual(Status.Pending, interim.Status, $"nothing is answered for real yet: 0x{interim.Status:X8}");
+            }
+            while (interim.MessageId != listing);
+
+            await client.CancelAsync(listing, interim.AsyncId);
+            var final = await client.ReceiveFinalAsync(Prompt);
+            Assert.AreEqual(listing, final.MessageId);
+            Assert.AreEqual(Status.Cancelled, final.Status, $"0x{final.Status:X8}");
+            Assert.AreEqual(0, fs.Listed, "the listing reached the file system");
+        }
+        finally
+        {
+            fs.Release("slow.bin");
+            fs.Release("fast.bin");
+        }
+    }
+
+    /// <summary>
+    /// A READ waiting for its open's turn behind a held READ takes no place: with two places, another file's READ is
+    /// still answered. Clients keep several reads of a file in flight, so a few slow files would otherwise take every
+    /// place and hold up everything else on the connection.
+    /// </summary>
+    [TestMethod]
+    public async Task ARequestWaitingForItsOpensTurnTakesNoPlace()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs, maxConcurrentRequests: 2);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var slow = await client.OpenAsync(tree, "slow.bin");
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        const int half = 32 << 10;
+        fs.Hold("slow.bin");
+        try
+        {
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(slow, 0, half), tree);
+            await fs.Reached("slow.bin").WaitAsync(Prompt);
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(slow, half, half), tree);
+            await Task.Delay(200);
+            var fastRead = await client.PostAsync(Command.Read, SmbTestClient.ReadBody(fast, 0, FastContent.Length), tree);
+            var final = await client.ReceiveFinalAsync(Prompt);
+            Assert.AreEqual(fastRead, final.MessageId);
+            CollectionAssert.AreEqual(FastContent, SmbTestClient.ReadData(final));
+        }
+        finally
+        {
+            fs.Release("slow.bin");
+        }
+
+        var halves = new List<byte[]> { SmbTestClient.ReadData(await client.ReceiveFinalAsync(Prompt)), SmbTestClient.ReadData(await client.ReceiveFinalAsync(Prompt)) };
+        Assert.AreEqual(1, fs.MostAtOnce, "calls on one open overlapped");
+        Assert.IsTrue(halves.Any(d => d.SequenceEqual(SlowContent[..half])) && halves.Any(d => d.SequenceEqual(SlowContent[half..])), "both halves read");
+    }
+
+    /// <summary>
+    /// A READ whose reply waits for the wire takes no place. A client asks for a megabyte many times over and reads none
+    /// of it, so the replies back up from the socket; with two places, a listing still reaches the file system. And only
+    /// as many of those replies as there are places are kept in memory: the READs behind them wait their turn, unread
+    /// data and all, rather than each hold its megabyte.
+    /// </summary>
+    [TestMethod]
+    public async Task ARequestWhoseReplyWaitsForTheWireTakesNoPlace()
+    {
+        const int megabyte = 1 << 20;
+        const int reads = 96;
+        File.WriteAllBytes(Path.Combine(_dir, "big.bin"), new byte[megabyte]);
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs, maxConcurrentRequests: 2);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var big = await client.OpenAsync(tree, "big.bin");
+        var root = await client.OpenAsync(tree, "", options: CreateOptions.DirectoryFile);
+        for (var i = 0; i < reads; i++)
+        {
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(big, 0, megabyte), tree);
+        }
+
+        // until no READ has reached the file system for a while: the wire is full, and so is the memory for replies
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
+        for (int seen = -1, quiet = 0; quiet < 5 && DateTime.UtcNow < deadline; quiet = fs.Reads == seen ? quiet + 1 : 0)
+        {
+            seen = fs.Reads;
+            await Task.Delay(100);
+        }
+
+        var stalledAt = fs.Reads;
+        Assert.IsLessThan(reads, stalledAt, "every READ was read into memory though the client took none of the replies");
+
+        await client.PostAsync(Command.QueryDirectory, SmbTestClient.QueryDirectoryBody(root, flags: QueryDirectoryFlags.RestartScans), tree);
+        deadline = DateTime.UtcNow + Prompt;
+        while (fs.Listed == 0 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(20);
+        }
+
+        Assert.AreEqual(1, fs.Listed, "the listing reached the file system while READ replies waited for the wire");
+
+        // the client reads at last: every READ and the listing are answered
+        for (var i = 0; i < reads + 1; i++)
+        {
+            (await client.ReceiveFinalAsync(TimeSpan.FromSeconds(30))).EnsureSuccess();
+        }
+    }
+
+    /// <summary>
+    /// A client that sends more than may wait: with one place taken by a held READ and room for a few requests in the
+    /// line, the rest of thirty READs is left in the socket, not read into memory; once the held READ is done every one
+    /// of them is read and answered.
+    /// </summary>
+    [TestMethod]
+    public async Task WhatMayWaitIsBoundedAndReadOnceThereIsRoom()
+    {
+        const int waitingBytes = 8 << 10;
+        const int reads = 30;
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs, maxConcurrentRequests: 1, waitingBytes: waitingBytes);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var slow = await client.OpenAsync(tree, "slow.bin");
+        var fast = await client.OpenAsync(tree, "fast.bin");
+        var connection = server.Connections.Keys.Single();
+        fs.Hold("slow.bin");
+        try
+        {
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(slow, 0, SlowContent.Length), tree);
+            await fs.Reached("slow.bin").WaitAsync(Prompt);
+            for (var i = 0; i < reads; i++)
+            {
+                await client.PostAsync(Command.Read, SmbTestClient.ReadBody(fast, 0, FastContent.Length), tree);
+            }
+
+            await Task.Delay(500);
+            var waiting = connection.WaitingBytes;
+            Assert.IsGreaterThanOrEqualTo(waitingBytes, waiting, "the line filled");
+            Assert.IsLessThan(waitingBytes + (2 << 10), waiting, "no more was read than may wait, and the request that filled the line");
+        }
+        finally
+        {
+            fs.Release("slow.bin");
+        }
+
+        for (var i = 0; i < reads + 1; i++)
+        {
+            (await client.ReceiveFinalAsync(Prompt)).EnsureSuccess();
+        }
+
+        Assert.AreEqual(0, connection.WaitingBytes, "nothing waits any more");
+    }
+
+    /// <summary>
     /// A READ still running after a moment is answered STATUS_PENDING at once: asynchronous, with an AsyncId and the
     /// credits it asked for, unsigned ([MS-SMB2] 3.3.4.2); its real reply comes when it is done, under the same AsyncId,
     /// signed, granting no more credits.
@@ -576,6 +818,14 @@ public sealed class ConcurrencyTests
         }
     }
 
-    private static SmbServer Start(ISmbFileSystem fs, int maxConcurrentRequests = 64)
-        => SmbServer.Start(new SmbServerOptions { EndPoint = new IPEndPoint(IPAddress.Loopback, 0), User = User, Password = Password, MaxConcurrentRequests = maxConcurrentRequests }, [new SmbShare("data", fs)]);
+    private static SmbServer Start(ISmbFileSystem fs, int maxConcurrentRequests = 64, long? waitingBytes = null)
+    {
+        var options = new SmbServerOptions { EndPoint = new IPEndPoint(IPAddress.Loopback, 0), User = User, Password = Password, MaxConcurrentRequests = maxConcurrentRequests };
+        if (waitingBytes is { } bytes)
+        {
+            options.WaitingBytes = bytes;
+        }
+
+        return SmbServer.Start(options, [new SmbShare("data", fs)]);
+    }
 }

@@ -16,8 +16,9 @@ namespace LibSmb;
 /// request whose file system call is slow holds up only itself. Replies go to one writer as they are done, in whatever
 /// order: SMB2 matches them to their requests by MessageId. The handshake is handled before the next message is read,
 /// one open's requests take turns (<see cref="OpenFile.Gate"/>), and at most
-/// <see cref="SmbServerOptions.MaxConcurrentRequests"/> are worked on at once: past that, the next message waits in the
-/// socket until one is done.
+/// <see cref="SmbServerOptions.MaxConcurrentRequests"/> are worked on at once: past that, a request waits for a place
+/// (<see cref="Place"/>). The reader reads on meanwhile, so a CANCEL reaches a request that waits or is slow, and an ECHO
+/// is answered.
 /// </summary>
 internal sealed partial class SmbConnection
 {
@@ -29,6 +30,12 @@ internal sealed partial class SmbConnection
 
     /// <summary>A reply this long or shorter goes out ahead of the big ones (READ data) that wait.</summary>
     private const int UrgentLimit = 64 << 10;
+
+    /// <summary>
+    /// How many small replies go out in a row while a big one waits: the big one goes then, so a stream of listings and
+    /// opens does not starve the READ data of the same connection of the wire.
+    /// </summary>
+    private const int SmallRepliesInARow = 8;
 
     /// <summary>The most opens a connection may hold, so a client that never closes cannot use up the backend's handles.</summary>
     internal const int MaxOpenFiles = 16384;
@@ -47,8 +54,15 @@ internal sealed partial class SmbConnection
     private readonly Dictionary<FileId, OpenFile> _opens = [];
     private readonly Lock _opensGate = new();
 
-    /// <summary>One per request worked on at once; the reader takes one before it reads the next message.</summary>
+    /// <summary>One per request worked on at once: a request's <see cref="Place"/>, taken before its first call of the file system.</summary>
     private readonly SemaphoreSlim _slots;
+
+    /// <summary>
+    /// One per big reply (a READ's data) in memory, from before its data is read until it has gone out: as many as there
+    /// are places. A READ's reply waits for the wire without a place, which a listing can take meanwhile, so the places
+    /// no longer bound what the replies hold; this does.
+    /// </summary>
+    private readonly SemaphoreSlim _bigReplies;
 
     /// <summary>The requests a CANCEL can name, by MessageId, and by AsyncId once they went asynchronous.</summary>
     private readonly ConcurrentDictionary<ulong, PendingRequest> _byMessageId = new();
@@ -73,6 +87,7 @@ internal sealed partial class SmbConnection
         _server = server;
         _socket = socket;
         _slots = new SemaphoreSlim(server.Options.MaxConcurrentRequests);
+        _bigReplies = new SemaphoreSlim(server.Options.MaxConcurrentRequests);
         Remote = socket?.RemoteEndPoint?.ToString() ?? "(none)";
     }
 
@@ -105,63 +120,58 @@ internal sealed partial class SmbConnection
             var header = new byte[4];
             while (true)
             {
-                // a slot before the next message: with every one taken, it waits in the socket until a request is done
-                await _slots.WaitAsync(ct).ConfigureAwait(false);
-                var handedOver = false;
-                try
+                // Every message is read as it comes, whatever the requests before it are waiting for: a CANCEL or an ECHO
+                // must never sit unread behind requests the file system is slow with. Only when the requests read and
+                // not yet worked on hold too much (WaitingBytes) is the next left in the socket until there is room.
+                await RoomAsync().WaitAsync(ct).ConfigureAwait(false);
+                await stream.ReadExactlyAsync(header, ct).ConfigureAwait(false);
+
+                // the first byte is zero, then the message's length, 24 bits big-endian
+                var length = (header[1] << 16) | (header[2] << 8) | header[3];
+                if (length == 0)
                 {
-                    await stream.ReadExactlyAsync(header, ct).ConfigureAwait(false);
-
-                    // the first byte is zero, then the message's length, 24 bits big-endian
-                    var length = (header[1] << 16) | (header[2] << 8) | header[3];
-                    if (length == 0)
-                    {
-                        continue;
-                    }
-
-                    if (length > Smb2.MaxMessageSize)
-                    {
-                        Logger.LogDebug("smb: {Remote} sent a message of {Length} bytes; dropping the connection", Remote, length);
-                        return;
-                    }
-
-                    var message = ArrayPool<byte>.Shared.Rent(length);
-                    try
-                    {
-                        await stream.ReadExactlyAsync(message.AsMemory(0, length), ct).ConfigureAwait(false);
-                    }
-                    catch
-                    {
-                        ArrayPool<byte>.Shared.Return(message);
-                        throw;
-                    }
-
-                    if (InTurn(message.AsSpan(0, length)))
-                    {
-                        // the handshake, before the next message is read: what a client sends after it needs what it set
-                        // up; and a CANCEL, at once
-                        await ServeAsync(message, length, ct).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        // known by its MessageId before the next message is read, so a CANCEL right behind it finds it
-                        var pending = Cancellable(message.AsSpan(0, length), ct);
-                        Interlocked.Increment(ref _running);
-                        handedOver = true;
-                        _ = Task.Run(() => ServeBesideAsync(message, length, pending, ct), CancellationToken.None);
-                    }
+                    continue;
                 }
-                catch (InvalidDataException ex)
+
+                if (length > Smb2.MaxMessageSize)
                 {
-                    Logger.LogDebug("smb: {Remote}: {Error}; dropping the connection", Remote, ex.Message);
+                    Logger.LogDebug("smb: {Remote} sent a message of {Length} bytes; dropping the connection", Remote, length);
                     return;
                 }
-                finally
+
+                var message = ArrayPool<byte>.Shared.Rent(length);
+                try
                 {
-                    if (!handedOver)
+                    await stream.ReadExactlyAsync(message.AsMemory(0, length), ct).ConfigureAwait(false);
+                }
+                catch
+                {
+                    ArrayPool<byte>.Shared.Return(message);
+                    throw;
+                }
+
+                if (InTurn(message.AsSpan(0, length)))
+                {
+                    // the handshake, before the next message is read: what a client sends after it needs what it set
+                    // up; and a CANCEL, at once
+                    try
                     {
-                        _slots.Release();
+                        await ServeAsync(message, length, null, ct).ConfigureAwait(false);
                     }
+                    catch (InvalidDataException ex)
+                    {
+                        Logger.LogDebug("smb: {Remote}: {Error}; dropping the connection", Remote, ex.Message);
+                        return;
+                    }
+                }
+                else
+                {
+                    // known by its MessageId before the next message is read, so a CANCEL right behind it finds it; and in
+                    // the line from now, so the reader knows what waits before it reads on
+                    var pending = Cancellable(message.AsSpan(0, length), ct);
+                    var place = new Place(this, length);
+                    Interlocked.Increment(ref _running);
+                    _ = Task.Run(() => ServeBesideAsync(message, length, pending, place, ct), CancellationToken.None);
                 }
             }
         }
@@ -240,7 +250,7 @@ internal sealed partial class SmbConnection
     /// </summary>
     private PendingRequest? Cancellable(ReadOnlySpan<byte> message, CancellationToken ct)
     {
-        if (!Header.TryParse(message, out var h) || h.NextCommand != 0 || h.Command is not (Command.Create or Command.Close or Command.Read or Command.Write or Command.Flush or Command.QueryDirectory or Command.QueryInfo or Command.SetInfo))
+        if (!Header.TryParse(message, out var h) || h.NextCommand != 0 || !ReachesFileSystem(h.Command))
         {
             return null;
         }
@@ -313,13 +323,25 @@ internal sealed partial class SmbConnection
         target.Cancel();
     }
 
-    /// <summary>One message handled and its reply handed to the writer; its buffer goes back to the pool.</summary>
-    private async Task ServeAsync(byte[] message, int length, CancellationToken ct)
+    /// <summary>
+    /// One message handled and its reply handed to the writer. Its buffer goes back to the pool and its place to the next
+    /// request before the reply waits for the writer: the file system's work for it is done.
+    /// </summary>
+    private async Task ServeAsync(byte[] message, int length, Place? place, CancellationToken ct)
     {
         Outbound? reply = null;
         try
         {
-            reply = await ProcessAsync(message.AsMemory(0, length), ct).ConfigureAwait(false);
+            try
+            {
+                reply = await ProcessAsync(message.AsMemory(0, length), ct, place: place).ConfigureAwait(false);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(message);
+                place?.Done();
+            }
+
             if (reply is not null)
             {
                 await SendAsync(reply, ct).ConfigureAwait(false);
@@ -329,13 +351,33 @@ internal sealed partial class SmbConnection
         finally
         {
             reply?.Dispose();
-            ArrayPool<byte>.Shared.Return(message);
         }
     }
 
-    /// <summary>A reply handed to the writer: a small one in the line that goes first.</summary>
-    private ValueTask SendAsync(Outbound reply, CancellationToken ct)
-        => (reply.Frame.Length <= UrgentLimit ? _urgent : _outbound).Writer.WriteAsync(reply, ct);
+    /// <summary>
+    /// A reply handed to the writer: a small one in the line that goes first. When the writer is behind (the client reads
+    /// slowly, or not at all), a reply waiting for it counts in the connection's line, so a client that sends on without
+    /// reading is in the end left unread; a big reply of a READ is counted already (<see cref="_bigReplies"/>).
+    /// </summary>
+    private async ValueTask SendAsync(Outbound reply, CancellationToken ct)
+    {
+        var writer = (reply.Frame.Length <= UrgentLimit ? _urgent : _outbound).Writer;
+        if (writer.TryWrite(reply))
+        {
+            return;
+        }
+
+        var counted = reply.Leased ? 0 : reply.Frame.Length;
+        Line(counted);
+        try
+        {
+            await writer.WriteAsync(reply, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            Line(-counted);
+        }
+    }
 
     /// <summary>
     /// A request that may go asynchronous: still running after <see cref="SmbServerOptions.InterimResponseDelay"/>, it is
@@ -344,19 +386,25 @@ internal sealed partial class SmbConnection
     /// time-out, it is answered STATUS_IO_TIMEOUT where the command was handled, like a chain's.) Either way the
     /// connection, which carries every other program's requests and opens, carries on.
     /// </summary>
-    private async Task ServePendingAsync(byte[] message, int length, PendingRequest pending, CancellationToken ct)
+    private async Task ServePendingAsync(byte[] message, int length, PendingRequest pending, Place place, CancellationToken ct)
     {
         Outbound? reply = null;
         try
         {
             try
             {
-                reply = await ProcessAsync(message.AsMemory(0, length), pending.Cancellation.Token, pending).ConfigureAwait(false);
+                reply = await ProcessAsync(message.AsMemory(0, length), pending.Cancellation.Token, pending, place).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested && pending.Cancellation.IsCancellationRequested)
             {
                 Logger.LogDebug("smb: {Remote}: {Command} message {MessageId} cancelled by the client", Remote, pending.Header.Command, pending.Header.MessageId);
                 reply = Failed(pending, Status.Cancelled);
+            }
+            finally
+            {
+                // the file system's work for it is done: its buffer and its place go before its reply waits for the writer
+                ArrayPool<byte>.Shared.Return(message);
+                place.Done();
             }
 
             if (reply is not null)
@@ -374,7 +422,6 @@ internal sealed partial class SmbConnection
         finally
         {
             reply?.Dispose();
-            ArrayPool<byte>.Shared.Return(message);
         }
     }
 
@@ -408,17 +455,17 @@ internal sealed partial class SmbConnection
     /// A message handled beside the others. A failure that would have ended the connection still does (and never the
     /// server), so no request is left unanswered while the connection goes on.
     /// </summary>
-    private async Task ServeBesideAsync(byte[] message, int length, PendingRequest? pending, CancellationToken ct)
+    private async Task ServeBesideAsync(byte[] message, int length, PendingRequest? pending, Place place, CancellationToken ct)
     {
         try
         {
             if (pending is null)
             {
-                await ServeAsync(message, length, ct).ConfigureAwait(false);
+                await ServeAsync(message, length, place, ct).ConfigureAwait(false);
             }
             else
             {
-                await ServePendingAsync(message, length, pending, ct).ConfigureAwait(false);
+                await ServePendingAsync(message, length, pending, place, ct).ConfigureAwait(false);
             }
         }
         catch (Exception) when (ct.IsCancellationRequested)
@@ -449,7 +496,7 @@ internal sealed partial class SmbConnection
                 pending.Dispose();
             }
 
-            _slots.Release();
+            place.Done();
             if (Interlocked.Decrement(ref _running) == 0)
             {
                 _idle.TrySetResult();
@@ -461,7 +508,7 @@ internal sealed partial class SmbConnection
     /// Handles one message: a single command, or a compound chain of them ([MS-SMB2] 3.3.5.2.7), answered as one compound
     /// reply. Null when nothing is to be sent back (a CANCEL).
     /// </summary>
-    internal async ValueTask<Outbound?> ProcessAsync(Memory<byte> message, CancellationToken ct, PendingRequest? pending = null)
+    internal async ValueTask<Outbound?> ProcessAsync(Memory<byte> message, CancellationToken ct, PendingRequest? pending = null, Place? place = null)
     {
         // The Windows redirector may open with a legacy SMB1 negotiate offering SMB2 dialects: an SMB2 negotiate reply
         // with the wildcard dialect makes it negotiate again in SMB2.
@@ -476,7 +523,7 @@ internal sealed partial class SmbConnection
         }
 
         var replies = new List<(Reply Reply, Signer? Signer)>();
-        var chain = new Chain();
+        var chain = new Chain { Place = place };
         try
         {
             for (var offset = 0; offset + Smb2.HeaderSize <= message.Length;)
@@ -566,15 +613,24 @@ internal sealed partial class SmbConnection
         return Outbound.FromBuffer(buffer, total);
     }
 
-    /// <summary>The one writer: a small reply waiting goes before a big one, and it ends once both lines are completed and empty.</summary>
+    /// <summary>
+    /// The one writer: a small reply waiting goes before a big one, though not without end
+    /// (<see cref="SmallRepliesInARow"/>), and it ends once both lines are completed and empty.
+    /// </summary>
     private async Task WriteAsync(NetworkStream stream, CancellationToken ct)
     {
         var urgent = _urgent.Reader;
         var bulk = _outbound.Reader;
+        var small = 0;
         while (true)
         {
-            if (urgent.TryRead(out var outbound) || bulk.TryRead(out outbound))
+            Outbound? outbound;
+            var got = small < SmallRepliesInARow
+                ? urgent.TryRead(out outbound) || bulk.TryRead(out outbound)
+                : bulk.TryRead(out outbound) || urgent.TryRead(out outbound);
+            if (got)
             {
+                small = outbound!.Frame.Length <= UrgentLimit ? Math.Min(small + 1, SmallRepliesInARow) : 0;
                 using (outbound)
                 {
                     try
@@ -721,6 +777,9 @@ internal sealed partial class SmbConnection
     /// <summary>What the commands of a compound chain share: the FileId a CREATE made and the session and tree to report.</summary>
     internal sealed class Chain
     {
+        /// <summary>The message's place among those worked on at once; none for one handled in turn, which takes none.</summary>
+        public Place? Place { get; init; }
+
         public FileId? FileId { get; set; }
 
         public ulong SessionId { get; set; }

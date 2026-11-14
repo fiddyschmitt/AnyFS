@@ -53,22 +53,6 @@ internal sealed class OpenFile(FileId id, SmbShare share, string path, ISmbFile?
         set => _closed = value;
     }
 
-    /// <summary>
-    /// Waits for the open's turn (<see cref="Gate"/>), which the caller releases after a true: false, holding nothing, when
-    /// the open was closed while the request waited.
-    /// </summary>
-    public async ValueTask<bool> EnterAsync(CancellationToken ct)
-    {
-        await Gate.WaitAsync(ct).ConfigureAwait(false);
-        if (!_closed)
-        {
-            return true;
-        }
-
-        Gate.Release();
-        return false;
-    }
-
     public string Name => SmbPath.Name(Path);
 
     /// <summary>
