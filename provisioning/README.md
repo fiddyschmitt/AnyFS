@@ -62,7 +62,9 @@ round trips,
 a 256 MiB file each way, ranges, edits in place, renames and deletes, special names, case, a deep
 tree, 1000 small files and a 5000-entry folder, timestamps, disk space, a 4.5 GiB sparse file,
 concurrent writers and readers, churn while listing, a copy killed half-way, 50 listings at once,
-a read whose source call takes 10 s holding up no listing or other read on the connection,
+a read, a listing, a lookup and an open whose source call takes 10 s, each holding up no listing or
+other read on the connection, a read the source holds for 90 s (longer than a client waits for a
+server that says nothing) coming back whole all the same,
 isolation between shares, wrong logins, a read-only share, a guest share (not from Windows, which
 refuses unsigned guest sessions), and from Linux every dialect with and without signing, Samba's
 smbclient and 50 sessions at once. Then every client at once on one share, a stress run of every
@@ -71,9 +73,13 @@ read, the host's folder audited, and no listing or small file slower than 5 s wh
 each client also reads, one after another, files whose every read takes 10 s), and the host's
 anyfs log. Its anyfs serves only the conditions'
 own shares, over an empty folder on the host: `smbdata`, `smbsecond`, `smbro`, `smbguest` on
-port 1446, and `smbslow`, smbdata's folder with the lab's slow source (`tests/fixtures/SlowPlugin`:
-`held/slow.bin` and the files of `held/slow/`, whose every read waits 10 s, beside `held/quick.bin`
-and `held/quick/`; each test reads a slow file no client has read, which no client cache answers).
+port 1446, and `smbslow`, smbdata's folder with the lab's slow source (`tests/fixtures/SlowPlugin`).
+That source is slow one call at a time: `held/slow.bin` and the files of `held/slow/` wait 10 s on
+every read, the folders of `held/slowdirs/` on every listing, the files of `held/slowstat/` on every
+lookup (an open asks more than once) and those of `held/slowopen/` on every open; the files of
+`held/long/` wait 90 s on every read; `held/quick.bin` and `held/quick/` answer at once. Each test
+takes a slow file or folder at random among hundreds, one no client has asked about, which no
+client cache answers.
 macOS's client holds some reads back while another read is unanswered (reading a 64 KiB file it sent
 three of four reads at once and the fourth after the slow read; its read-ahead, as it seems), so
 `held/quick.bin` is 16 KiB, one read for every client, and the stress run notes macOS's slow quick

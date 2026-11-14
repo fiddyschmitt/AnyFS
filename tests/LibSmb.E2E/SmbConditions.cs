@@ -45,6 +45,10 @@ public static class SmbConditions
         new("client_killed_mid_transfer", null, KillMidTransfer),
         new("parallel_listings_50", null, ParallelListings),
         new("slow_read_holds_up_nothing", null, SlowReadHoldsUpNothing),
+        new("slow_listing_holds_up_nothing", null, SlowListingHoldsUpNothing),
+        new("slow_lookup_holds_up_nothing", null, SlowLookupHoldsUpNothing),
+        new("slow_open_holds_up_nothing", null, SlowOpenHoldsUpNothing),
+        new("long_read_outlasts_the_client", null, LongReadOutlastsTheClient),
         new("second_share_isolation", null, SecondShare),
         new("wrong_credentials_refused", null, BadCredentials),
         new("readonly_share", null, ReadOnlyShare),
@@ -654,23 +658,73 @@ public static class SmbConditions
         p.Must(SmbOps.WaitForCount(p.C, p.Mnt(d), n, 30), "a settled listing through the client");
     }
 
+    /// <summary>The slow calls of the lab's slow source that <see cref="SlowCallHoldsUpNothing"/> makes, one a condition.</summary>
+    private enum SlowCall
+    {
+        /// <summary>A read of a file of held/slow/: the READ waits.</summary>
+        Read,
+
+        /// <summary>A listing of a folder of held/slowdirs/: the QUERY_DIRECTORY waits.</summary>
+        Listing,
+
+        /// <summary>A lookup of a file of held/slowstat/: the CREATE waits, and whatever asks about the file after it.</summary>
+        Lookup,
+
+        /// <summary>A read of a file of held/slowopen/: the CREATE waits for the file to be opened.</summary>
+        Open,
+
+        /// <summary>A read of a file of held/long/: the READ waits longer than a client waits for a server that says nothing.</summary>
+        LongRead,
+    }
+
     /// <summary>
-    /// A read whose source call is slow holds up nothing else on the client's connection. Through smbslow (smbdata's folder,
-    /// with the lab's slow source in held/), one script reads a slow file of held/slow/, whose every read waits on the source
-    /// for <see cref="AnyFsHost.HeldDelaySeconds"/>, while another, a moment later, lists held/quick and a small folder of the
-    /// data side and reads held/quick.bin over the same mount: each must come back within 3 s, and before the slow read
-    /// does, and the slow read must come back whole. On the way the client meets the server's interim STATUS_PENDING to the
-    /// slow READ. held/quick.bin is 16 KiB, one read for every client: macOS's client, reading a 64 KiB file, sent three
-    /// of its four reads at once and held the fourth back until the slow READ was answered (its read-ahead, as it seems),
-    /// while the server answered each the moment it came.
+    /// A read whose source call is slow holds up nothing else on the client's connection (<see cref="SlowCallHoldsUpNothing"/>).
+    /// On the way the client meets the server's interim STATUS_PENDING to the slow READ. held/quick.bin is 16 KiB, one read
+    /// for every client: macOS's client, reading a 64 KiB file, sent three of its four reads at once and held the fourth
+    /// back until the slow READ was answered (its read-ahead, as it seems), while the server answered each the moment it came.
     /// </summary>
-    private static void SlowReadHoldsUpNothing(SmbPair p)
+    private static void SlowReadHoldsUpNothing(SmbPair p) => SlowCallHoldsUpNothing(p, SlowCall.Read);
+
+    /// <summary>
+    /// The same with a slow listing: of a folder the source takes its time to list. Windows and macOS send a listing in a
+    /// compound chain, which gets no interim reply and cannot be cancelled; the other requests go on beside it all the same.
+    /// </summary>
+    private static void SlowListingHoldsUpNothing(SmbPair p) => SlowCallHoldsUpNothing(p, SlowCall.Listing);
+
+    /// <summary>
+    /// The same with a slow lookup: of a file the source takes its time to find, each time it is asked (an open asks twice,
+    /// a client asking for its size once more), in a chain or alone as the client pleases.
+    /// </summary>
+    private static void SlowLookupHoldsUpNothing(SmbPair p) => SlowCallHoldsUpNothing(p, SlowCall.Lookup);
+
+    /// <summary>The same with a slow open: of a file the source takes its time to open, so the CREATE waits.</summary>
+    private static void SlowOpenHoldsUpNothing(SmbPair p) => SlowCallHoldsUpNothing(p, SlowCall.Open);
+
+    /// <summary>
+    /// A read the source holds for <see cref="AnyFsHost.HeldLongDelaySeconds"/>, longer than a client waits for a server
+    /// that says nothing (Windows gives a silent server a minute, then gives the connection up with everything open on it).
+    /// The server's interim STATUS_PENDING is what keeps the client waiting: the read must come back whole, in the time the
+    /// source took and not that time over again (a client that gave up and asked again on a new connection), with nothing
+    /// else held up meanwhile and the mount in use after.
+    /// </summary>
+    private static void LongReadOutlastsTheClient(SmbPair p) => SlowCallHoldsUpNothing(p, SlowCall.LongRead);
+
+    /// <summary>
+    /// A slow call of the source holds up nothing else on the client's connection. Through smbslow (smbdata's folder, with
+    /// the lab's slow source in held/), one script makes the slow call, which waits on the source for
+    /// <see cref="AnyFsHost.HeldDelaySeconds"/> (the long read for <see cref="AnyFsHost.HeldLongDelaySeconds"/>), while
+    /// another, a moment later, lists held/quick and a small folder of the data side and reads held/quick.bin over the same
+    /// mount: each must come back within 3 s, and before the slow call does; the slow call must give what it should; and a
+    /// listing after it, on the same mount, must work.
+    /// </summary>
+    private static void SlowCallHoldsUpNothing(SmbPair p, SlowCall call)
     {
         const long promptMs = 3000;
         const int dataFiles = 3;
         var mount = p.NewMount("smbslow", "T");
         var held = SmbOps.Join(p.C, mount.Root!, AnyFsHost.HeldFolder);
         string Q(string path) => SmbOps.Q(p.C, path);
+        string Held(string relative) => Q(SmbOps.Join(p.C, held, relative.Split('/')));
 
         // a small folder of the data side, made on the host (the share's folder holds whatever other conditions left)
         var d = SmbPair.Unique("held-data");
@@ -678,20 +732,39 @@ public static class SmbConditions
         p.Cleanup(() => SmbOps.Remove(p.S, p.Backing(d)));
         SmbOps.NumberedFiles(p.S, p.Backing(d), dataFiles).Must("fill the data folder on the host");
 
-        // a slow file this client has not read: one it had would come from its own cache, held by nothing
-        var (slow, quickDir, quickBin, data) = (Q(SmbOps.Join(p.C, held, "slow", AnyFsHost.HeldFreshSlowFile())), Q(SmbOps.Join(p.C, held, "quick")), Q(SmbOps.Join(p.C, held, "quick.bin")), Q(SmbOps.Join(p.C, p.ShareFolder(mount, p.AnyFs.SmbDataDir), d)));
+        // The slow call: its name, what it is made on (something this client has not asked about before: what it had would
+        // come from its own cache, held by nothing), what the client is asked for (a file's hash, a folder's count, a file's
+        // size), what that must be, and how long the source holds it.
+        var slowBytes = AnyFsHost.HeldSlowKiB << 10;
+        var (what, target, asked, expected, delaySeconds) = call switch
+        {
+            SlowCall.Read => ("read", Held("slow/" + AnyFsHost.HeldFreshSlowFile()), "hash", AnyFsHost.HeldSha256(slowBytes), AnyFsHost.HeldDelaySeconds),
+            SlowCall.Listing => ("listing", Held(AnyFsHost.HeldFreshSlowFolder()), "count", AnyFsHost.HeldQuickFiles.ToString(CultureInfo.InvariantCulture), AnyFsHost.HeldDelaySeconds),
+            SlowCall.Lookup => ("lookup", Held(AnyFsHost.HeldFreshSlowToFindFile()), "size", slowBytes.ToString(CultureInfo.InvariantCulture), AnyFsHost.HeldDelaySeconds),
+            SlowCall.Open => ("open", Held(AnyFsHost.HeldFreshSlowToOpenFile()), "hash", AnyFsHost.HeldSha256(slowBytes), AnyFsHost.HeldDelaySeconds),
+            _ => ("long read", Held(AnyFsHost.HeldFreshLongFile()), "hash", AnyFsHost.HeldSha256(slowBytes), AnyFsHost.HeldLongDelaySeconds),
+        };
+        var (quickDir, quickBin, data) = (Held("quick"), Held("quick.bin"), Q(SmbOps.Join(p.C, p.ShareFolder(mount, p.AnyFs.SmbDataDir), d)));
         string[] scripts;
         if (p.C.IsWindows)
         {
             const string now = "function Now { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }";
+            var ask = asked switch
+            {
+                "hash" => $"$g = (Get-FileHash -Algorithm SHA256 -LiteralPath {target}).Hash.ToLowerInvariant()",
+                "count" => $"$g = @(Get-ChildItem -LiteralPath {target} -Force).Count",
+                // (one question of the server; Get-Item asks about the file fifteen times over)
+                _ => $"$g = ([IO.FileInfo]{target}).Length",
+            };
             scripts =
             [
                 $$"""
                 {{now}}
                 "start=$(Now)"
-                $h = (Get-FileHash -Algorithm SHA256 -LiteralPath {{slow}}).Hash.ToLowerInvariant()
+                {{ask}}
                 "end=$(Now)"
-                "hash=$h"
+                "got=$g"
+                "after=$(@(Get-ChildItem -LiteralPath {{quickDir}} -Force).Count)"
                 """,
                 $$"""
                 {{now}}
@@ -706,14 +779,21 @@ public static class SmbConditions
         {
             const string now = "now() { perl -MTime::HiRes=time -e 'printf \"%d\\n\", time*1000'; }";
             var hash = p.ClientOs == "macos" ? "shasum -a 256" : "sha256sum";
+            var ask = asked switch
+            {
+                "hash" => $"g=$({hash} {target} | cut -c1-64)",
+                "count" => $"g=$(ls -1A {target} | wc -l | tr -d ' ')",
+                _ => p.ClientOs == "macos" ? $"g=$(stat -f %z {target})" : $"g=$(stat -c %s {target})",
+            };
             scripts =
             [
                 $$"""
                 {{now}}
                 echo "start=$(now)"
-                h=$({{hash}} {{slow}} | cut -c1-64)
+                {{ask}}
                 echo "end=$(now)"
-                echo "hash=$h"
+                echo "got=$g"
+                echo "after=$(ls -1A {{quickDir}} | wc -l | tr -d ' ')"
                 """,
                 $$"""
                 {{now}}
@@ -731,31 +811,39 @@ public static class SmbConditions
             scripts = [.. scripts.Select(s => s.Replace("\r\n", "\n"))];
         }
 
-        var results = SmbOps.Scripts(p.C, p.ScratchPath(SmbPair.Unique("held")), scripts, AnyFsHost.HeldDelaySeconds * 6 + 120);
+        var results = SmbOps.Scripts(p.C, p.ScratchPath(SmbPair.Unique("held")), scripts, delaySeconds * 6 + 120);
         for (var i = 0; i < results.Count; i++)
         {
             p.Must(results[i].Ok, $"the {(i == 0 ? "slow" : "quick")} script failed (exit {results[i].Code}): {SmbOps.Tail(results[i].Output, 600)}");
         }
 
-        var slowRead = Fields(results[0].Output);
+        var slow = Fields(results[0].Output);
         var quick = Fields(results[1].Output);
-        long slowStart = long.Parse(slowRead["start"], CultureInfo.InvariantCulture), slowEnd = long.Parse(slowRead["end"], CultureInfo.InvariantCulture);
-        p.Must(slowEnd - slowStart >= AnyFsHost.HeldDelaySeconds * 800L, $"the slow read took only {slowEnd - slowStart} ms: the source did not hold it, so this proves nothing");
-        p.Check(slowRead["hash"] == AnyFsHost.HeldSha256(AnyFsHost.HeldSlowKiB << 10), "the slow read came back wrong");
+        long slowStart = long.Parse(slow["start"], CultureInfo.InvariantCulture), slowEnd = long.Parse(slow["end"], CultureInfo.InvariantCulture);
+        var slowMs = slowEnd - slowStart;
+        p.Must(slowMs >= delaySeconds * (call == SlowCall.LongRead ? 950L : 800L), $"the slow {what} took only {slowMs} ms: the source did not hold it, so this proves nothing");
+        p.Check(slow.GetValueOrDefault("got") == expected, $"the slow {what} came back wrong: its {asked} is '{slow.GetValueOrDefault("got")}', not '{expected}'");
+        if (call == SlowCall.LongRead)
+        {
+            // a client that gave the connection up and asked again on a new one would take the source's time over again
+            p.Check(slowMs < (delaySeconds + 45) * 1000L, $"the long read took {slowMs} ms, as if the client had asked for it more than once (the source holds it {delaySeconds} s)");
+        }
+
+        p.Check(slow.GetValueOrDefault("after") == AnyFsHost.HeldQuickFiles.ToString(CultureInfo.InvariantCulture), $"after the slow {what}, held/quick listed '{slow.GetValueOrDefault("after")}' entries on the same mount, not {AnyFsHost.HeldQuickFiles}");
         var timings = new List<string>();
-        foreach (var (what, key) in new[] { ("a listing of held/quick", "list"), ("a listing of the data folder", "data"), ("a read of held/quick.bin", "read") })
+        foreach (var (operation, key) in new[] { ("a listing of held/quick", "list"), ("a listing of the data folder", "data"), ("a read of held/quick.bin", "read") })
         {
             var parts = quick[key].Split(',');
             long start = long.Parse(parts[0], CultureInfo.InvariantCulture), end = long.Parse(parts[1], CultureInfo.InvariantCulture);
             timings.Add($"{key} {end - start} ms");
-            p.Check(end - start < promptMs, $"{what} took {end - start} ms with a slow read in flight on the connection (at most {promptMs} ms)");
-            p.Check(end < slowEnd, $"{what} came back {end - slowEnd} ms after the slow read, so it waited for it");
+            p.Check(end - start < promptMs, $"{operation} took {end - start} ms with a slow {what} in flight on the connection (at most {promptMs} ms)");
+            p.Check(end < slowEnd, $"{operation} came back {end - slowEnd} ms after the slow {what}, so it waited for it");
         }
 
         p.Check(quick["list"].Split(',')[2] == AnyFsHost.HeldQuickFiles.ToString(CultureInfo.InvariantCulture), $"held/quick listed {quick["list"].Split(',')[2]} entries, not {AnyFsHost.HeldQuickFiles}");
         p.Check(quick["data"].Split(',')[2] == dataFiles.ToString(CultureInfo.InvariantCulture), $"the data folder listed {quick["data"].Split(',')[2]} entries, not {dataFiles}");
         p.Check(quick["read"].Split(',')[2] == AnyFsHost.HeldSha256(AnyFsHost.HeldQuickBytes), "held/quick.bin came back wrong");
-        p.Note($"the slow read took {(slowEnd - slowStart) / 1000.0:0.0} s; meanwhile {string.Join(", ", timings)}");
+        p.Note($"the slow {what} took {slowMs / 1000.0:0.0} s; meanwhile {string.Join(", ", timings)}");
     }
 
     /// <summary>A script's <c>key=value</c> lines.</summary>

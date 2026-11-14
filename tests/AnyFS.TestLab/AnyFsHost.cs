@@ -71,8 +71,17 @@ public sealed class AnyFsHost : IDisposable
     /// <summary>Where a collection shows the lab's slow source: slow.bin (each read waits <see cref="HeldDelaySeconds"/>), quick.bin, quick/.</summary>
     public const string HeldFolder = "held";
 
-    /// <summary>How long every read of the slow source's slow.bin waits on the source.</summary>
+    /// <summary>
+    /// How long a slow call of the slow source waits on the source: every read of slow.bin and of slow/'s files, every
+    /// listing of one of slowdirs/'s folders, every lookup of one of slowstat/'s files, every open of one of slowopen/'s.
+    /// </summary>
     public const int HeldDelaySeconds = 10;
+
+    /// <summary>
+    /// How long every read of one of the slow source's long/ files waits: longer than a client waits for a server that
+    /// says nothing (Windows gives a silent server a minute), so it comes back only to a client the server kept waiting.
+    /// </summary>
+    public const int HeldLongDelaySeconds = 90;
 
     /// <summary>The size of the slow source's slow.bin, small enough that every client reads it in one request.</summary>
     public const int HeldSlowKiB = 4;
@@ -90,6 +99,20 @@ public sealed class AnyFsHost : IDisposable
 
     /// <summary>One of slow/'s files, picked at random: one this client has not read, as far as any run of the tests goes.</summary>
     public static string HeldFreshSlowFile() => $"s{Random.Shared.Next(HeldSlowFiles):D5}.bin";
+
+    /// <summary>
+    /// The slow source's other slow things, each picked at random like <see cref="HeldFreshSlowFile"/>, as paths from its
+    /// root: a file of long/ (g00000.bin on, 200), a folder of slowdirs/ (d00000 on, 200, each holding
+    /// <see cref="HeldQuickFiles"/> small files), a file of slowstat/ (t00000.bin on, 500) and one of slowopen/
+    /// (o00000.bin on, 500).
+    /// </summary>
+    public static string HeldFreshLongFile() => $"long/g{Random.Shared.Next(200):D5}.bin";
+
+    public static string HeldFreshSlowFolder() => $"slowdirs/d{Random.Shared.Next(200):D5}";
+
+    public static string HeldFreshSlowToFindFile() => $"slowstat/t{Random.Shared.Next(500):D5}.bin";
+
+    public static string HeldFreshSlowToOpenFile() => $"slowopen/o{Random.Shared.Next(500):D5}.bin";
 
     /// <summary>A file of the slow source as the client must read it: every byte its offset's, as SlowPlugin.ByteAt has it.</summary>
     public static string HeldSha256(int length)
@@ -425,7 +448,7 @@ public sealed class AnyFsHost : IDisposable
 
     /// <summary>The lab's slow source (type lab-slow, tests/fixtures/SlowPlugin).</summary>
     private static JsonObject HeldSourceJson(Guid id)
-        => SourceJson(id, "held", "lab-slow", new JsonObject { ["delaySeconds"] = HeldDelaySeconds, ["slowKiB"] = HeldSlowKiB });
+        => SourceJson(id, "held", "lab-slow", new JsonObject { ["delaySeconds"] = HeldDelaySeconds, ["slowKiB"] = HeldSlowKiB, ["longDelaySeconds"] = HeldLongDelaySeconds });
 
     /// <summary>The SMB conditions' shares: on the port of every collection's SMB mount, with its login; guests on their own.</summary>
     private void WriteSmbShareSettings()
