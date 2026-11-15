@@ -224,7 +224,8 @@ from `docs/release-notes/<tag>.md` when that file exists. The packages also go t
 set. Nothing runs on commit: there are no git hooks.
 
 LibSmb is also a package of its own on NuGet.org, with its own version (`<Version>` in
-`src/LibSmb/LibSmb.csproj`, not AnyFS's). A tag `libsmb-v<version>` naming that version runs
+`src/LibSmb/LibSmb.csproj`, not AnyFS's; `<PackageReleaseNotes>` beside it says what the version
+changed). A tag `libsmb-v<version>` naming that version runs
 [libsmb.yml](../.github/workflows/libsmb.yml): LibSmb's tests, the package and its symbols (kept as
 the run's artifact), and the push to NuGet.org through trusted publishing, so no API key is stored.
 That needs a trusted publishing policy on nuget.org for this repository and the workflow file

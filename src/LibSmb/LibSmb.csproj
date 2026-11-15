@@ -7,7 +7,15 @@
   <PropertyGroup>
     <AssemblyName>LibSmb</AssemblyName>
     <RootNamespace>LibSmb</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
+    <!-- what changed in this version, as NuGet.org shows it: rewritten with each version -->
+    <PackageReleaseNotes>0.2.0
+- A connection's requests run side by side, so a slow file system call holds up only its own request (MaxConcurrentRequests, 64 by default). An ISmbFileSystem is therefore called from several requests at once; one open's calls still never overlap, and its READs and WRITEs keep the order they were sent in.
+- A request that takes long gets an interim STATUS_PENDING reply (InterimResponseDelay, half a second by default), so clients wait it out; a client's CANCEL fires the call's cancellation token.
+- A file system call that gives up with an OperationCanceledException fails its own command with STATUS_IO_TIMEOUT, also inside a compound chain, and the connection carries on. A CLOSE closes its file whatever becomes of the request.
+- READs and WRITEs carry 64 KiB. The megabyte offered before stalled a Mac's writes and could hang it.
+- A port a server listens on is its own. On Linux and macOS a second server on it started without an error and took connections; it is refused now.
+- A session's messages are signed on several processors at once.</PackageReleaseNotes>
     <Product>LibSmb</Product>
     <IsPackable>true</IsPackable>
     <PackageId>LibSmb</PackageId>
