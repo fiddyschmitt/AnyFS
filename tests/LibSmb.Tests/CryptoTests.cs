@@ -135,6 +135,56 @@ public class CryptoTests
         Assert.AreEqual(Convert.ToHexString(sessionKey), Convert.ToHexString(smb2.Key), "2.x signs with the session key itself");
     }
 
+    /// <summary>
+    /// A session's requests sign and verify at the same time, each with a cipher of its own: every signature is the one
+    /// the PDU gets signed alone, and a session ended while they sign leaves them to finish.
+    /// </summary>
+    [TestMethod]
+    public void ASessionsRequestsSignAtTheSameTime()
+    {
+        var sessionKey = Convert.FromHexString("8de40ccadbc14a82f15cb0ad0de95ca3");
+        var random = new Random(7);
+        var pdus = Enumerable.Range(0, 48).Select(i =>
+        {
+            var pdu = new byte[Smb2.HeaderSize + 1 + random.Next(70_000)];
+            random.NextBytes(pdu);
+            return pdu;
+        }).ToArray();
+        byte[][] expected;
+        using (var alone = new Signer(sessionKey, Dialect.Smb302))
+        {
+            expected = pdus.Select(p =>
+            {
+                var copy = (byte[])p.Clone();
+                alone.Sign(copy);
+                return copy;
+            }).ToArray();
+        }
+
+        var signer = new Signer(sessionKey, Dialect.Smb302);
+        var wrong = 0;
+        Parallel.For(0, 24, new ParallelOptions { MaxDegreeOfParallelism = 24 }, worker =>
+        {
+            for (var round = 0; round < 40; round++)
+            {
+                var i = (worker * 7 + round) % pdus.Length;
+                var copy = (byte[])pdus[i].Clone();
+                signer.Sign(copy);
+                if (!copy.AsSpan().SequenceEqual(expected[i]) || !signer.Verify(copy))
+                {
+                    Interlocked.Increment(ref wrong);
+                }
+
+                if (worker == 0 && round == 20)
+                {
+                    signer.Dispose();
+                }
+            }
+        });
+        Assert.AreEqual(0, wrong, "signatures that differ from the PDU signed alone, or do not verify");
+        signer.Dispose();
+    }
+
     /// <summary>SPNEGO in and out: the NTLMSSP token out of a negTokenInit and a negTokenResp, and a negTokenResp built.</summary>
     [TestMethod]
     public void SpnegoCarriesTheNtlmToken()

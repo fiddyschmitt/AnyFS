@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using LibSmb.Protocol;
 
@@ -7,21 +8,22 @@ namespace LibSmb.Security;
 /// <summary>
 /// A session's message signing ([MS-SMB2] 3.1.4.1): HMAC-SHA256 with the session key for the 2.x dialects, AES-CMAC with
 /// a key derived from it for 3.x. The signature covers the whole PDU with its signature field zeroed and the SIGNED flag
-/// set. One instance per session, used by its requests at the same time: the AES-CMAC cipher, which keeps state between
-/// blocks, signs one PDU at a time.
+/// set. One instance per session, used by its requests at the same time. An AES-CMAC cipher keeps state between blocks
+/// and signs one PDU at a time, so each request signing takes a cipher of its own from the ones not in use (a new one
+/// when there is none): with one cipher for the session its requests signed in turn, on one processor however many
+/// there were, and signing is most of what a 64 KiB READ or WRITE costs the server.
 /// </summary>
 internal sealed class Signer : IDisposable
 {
     private readonly byte[] _key;
     private readonly bool _cmac;
-    private readonly AesCmac? _aes;
-    private readonly Lock _aesGate = new();
+    private readonly ConcurrentQueue<AesCmac> _ciphers = new();
+    private volatile bool _disposed;
 
     public Signer(byte[] sessionKey, ushort dialect)
     {
         _cmac = Dialect.IsSmb3(dialect);
         _key = _cmac ? Kdf(sessionKey, "SMB2AESCMAC\0"u8, "SmbSign\0"u8) : sessionKey;
-        _aes = _cmac ? new AesCmac(_key) : null;
     }
 
     /// <summary>The key messages are signed with (for the tests).</summary>
@@ -52,7 +54,14 @@ internal sealed class Signer : IDisposable
         return CryptographicOperations.FixedTimeEquals(received, expected);
     }
 
-    public void Dispose() => _aes?.Dispose();
+    public void Dispose()
+    {
+        _disposed = true;
+        while (_ciphers.TryDequeue(out var cipher))
+        {
+            cipher.Dispose();
+        }
+    }
 
     /// <summary>The SP 800-108 counter-mode KDF the SMB 3.x keys come from (HMAC-SHA256, r = 32, L = 128).</summary>
     public static byte[] Kdf(ReadOnlySpan<byte> key, ReadOnlySpan<byte> label, ReadOnlySpan<byte> context)
@@ -69,11 +78,25 @@ internal sealed class Signer : IDisposable
 
     private void Compute(ReadOnlySpan<byte> pdu, Span<byte> signature)
     {
-        if (_aes is not null)
+        if (_cmac)
         {
-            lock (_aesGate)
+            if (!_ciphers.TryDequeue(out var cipher))
             {
-                _aes.Compute(pdu, signature);
+                cipher = new AesCmac(_key);
+            }
+
+            try
+            {
+                cipher.Compute(pdu, signature);
+            }
+            finally
+            {
+                // back for the next request; a session ended meanwhile (its last replies still being signed) keeps none
+                _ciphers.Enqueue(cipher);
+                if (_disposed)
+                {
+                    Dispose();
+                }
             }
 
             return;
