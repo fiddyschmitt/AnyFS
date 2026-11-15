@@ -43,7 +43,10 @@ internal sealed class OpenFile(FileId id, SmbShare share, string path, ISmbFile?
 
     private volatile bool _closed;
 
-    /// <summary>One request at a time works on an open's state (requests on different opens run side by side).</summary>
+    /// <summary>
+    /// One request at a time works on an open's state (requests on different opens run side by side); its READs and WRITEs
+    /// in the order they came, each asking for its turn as it is read.
+    /// </summary>
     public SemaphoreSlim Gate { get; } = new(1, 1);
 
     /// <summary>Whether it was closed: a request that waited for its turn on it is answered STATUS_FILE_CLOSED.</summary>

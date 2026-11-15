@@ -22,8 +22,8 @@ public enum HeldCall
 /// A folder served as <see cref="LocalFileSystem"/> serves it, except that the calls the test holds (the reads of a file,
 /// as a rule; a folder's listings, a path's lookups or a file's opens as well) wait until the test lets them go: a backend
 /// call as slow as a cold fetch from a remote store, for as long as the test likes. It counts what a test needs to see:
-/// the calls in flight on each open (one open's calls must never overlap), the held calls whose cancellation came, and
-/// the files closed.
+/// the calls in flight on each open (one open's calls must never overlap), the held calls whose cancellation came, the
+/// files closed, and where the reads and writes started, in the order they came.
 /// </summary>
 internal sealed class HeldFileSystem(string root) : ISmbFileSystem
 {
@@ -31,6 +31,8 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
     private readonly ConcurrentDictionary<(HeldCall Call, string Path), Held> _held = new();
     private readonly ConcurrentDictionary<string, byte> _givingUp = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Countdown> _lookupsGivingUp = new(StringComparer.Ordinal);
+    private readonly ConcurrentQueue<long> _readOffsets = new();
+    private readonly ConcurrentQueue<long> _writeOffsets = new();
     private int _mostAtOnce;
     private int _cancelled;
     private int _closed;
@@ -53,6 +55,12 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
 
     /// <summary>Directories listed.</summary>
     public int Listed => Volatile.Read(ref _listed);
+
+    /// <summary>Where the reads of a file started, all opens', in the order they reached the file system.</summary>
+    public IReadOnlyList<long> ReadOffsets => [.. _readOffsets];
+
+    /// <summary>Where the writes to a file started, all opens', in the order they reached the file system.</summary>
+    public IReadOnlyList<long> WriteOffsets => [.. _writeOffsets];
 
     /// <summary>
     /// How long a held read whose cancellation came takes to come back (no time unless set): a backend across a network
@@ -181,6 +189,7 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
         {
             Enter();
             Interlocked.Increment(ref owner._reads);
+            owner._readOffsets.Enqueue(offset);
             try
             {
                 if (owner._givingUp.ContainsKey(path))
@@ -200,6 +209,7 @@ internal sealed class HeldFileSystem(string root) : ISmbFileSystem
         public async ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
         {
             Enter();
+            owner._writeOffsets.Enqueue(offset);
             try
             {
                 await inner.WriteAsync(offset, data, cancellationToken);

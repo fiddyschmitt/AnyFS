@@ -117,6 +117,117 @@ public sealed class ConcurrencyTests
     }
 
     /// <summary>
+    /// A burst of READs (or WRITEs) on one open, sent in one write as a client with credits sends its read-ahead, reaches
+    /// the file system in the order it was sent, though the thread pool starts a burst's requests newest first. A backend
+    /// that streams (an HTTP download) reads on from where it stands only in that order: the Mac's read-ahead of sixteen
+    /// READs, worked on backwards, cost a download opened afresh for every 64 KiB (0.5 MiB/s from SharePoint, 15-Nov-2026).
+    /// </summary>
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task ABurstOnOneOpenReachesTheFileSystemInTheOrderSent(bool writes)
+    {
+        var command = writes ? Command.Write : Command.Read;
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var slow = await client.OpenAsync(tree, "slow.bin", write: true);
+        const int piece = 4 << 10;
+        var pieces = SlowContent.Length / piece;
+        var burst = Enumerable.Range(1, pieces - 1)
+            .Select(i => (command, command == Command.Read ? SmbTestClient.ReadBody(slow, i * piece, piece) : SmbTestClient.WriteBody(slow, i * piece, SlowContent.AsSpan(i * piece, piece))))
+            .ToList();
+
+        fs.Hold("slow.bin");
+        try
+        {
+            // the first READ holds the open's turn, and the burst comes in one write behind it
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(slow, 0, piece), tree);
+            await fs.Reached("slow.bin").WaitAsync(Prompt);
+            await client.PostBurstAsync(burst, tree);
+            await Task.Delay(300);
+        }
+        finally
+        {
+            fs.Release("slow.bin");
+        }
+
+        for (var i = 0; i < pieces; i++)
+        {
+            (await client.ReceiveFinalAsync(Prompt)).EnsureSuccess();
+        }
+
+        var sent = Enumerable.Range(1, pieces - 1).Select(i => (long)i * piece).ToList();
+        var seen = command == Command.Read ? fs.ReadOffsets.Skip(1).ToList() : [.. fs.WriteOffsets];
+        CollectionAssert.AreEqual(sent, seen, "in the order sent: " + string.Join(", ", seen.Select(o => o / piece)));
+        Assert.AreEqual(1, fs.MostAtOnce, "calls on one open overlapped");
+    }
+
+    /// <summary>
+    /// The turns asked for as the READs were read go to the next in line when a READ never takes its own: one answered
+    /// without the file system (nothing to read) and one cancelled while it waited. The READs behind them are worked on,
+    /// in order, and none waits for ever.
+    /// </summary>
+    [TestMethod]
+    public async Task ATurnAskedForAndNotTakenGoesToTheNext()
+    {
+        var fs = new HeldFileSystem(_dir);
+        await using var server = Start(fs);
+        await using var client = await SmbTestClient.SignInAsync(server.LocalEndPoint, User, Password);
+        var tree = await client.TreeConnectAsync("data");
+        var slow = await client.OpenAsync(tree, "slow.bin");
+        const int piece = 4 << 10;
+        List<ulong> ids;
+        fs.Hold("slow.bin");
+        try
+        {
+            await client.PostAsync(Command.Read, SmbTestClient.ReadBody(slow, 0, piece), tree);
+            await fs.Reached("slow.bin").WaitAsync(Prompt);
+            ids = await client.PostBurstAsync(
+                [
+                    (Command.Read, SmbTestClient.ReadBody(slow, piece, piece)),
+                    (Command.Read, SmbTestClient.ReadBody(slow, 2 * piece, 0)),
+                    (Command.Read, SmbTestClient.ReadBody(slow, 3 * piece, piece)),
+                    (Command.Read, SmbTestClient.ReadBody(slow, 4 * piece, piece)),
+                    (Command.Read, SmbTestClient.ReadBody(slow, 5 * piece, piece)),
+                ],
+                tree);
+            await Task.Delay(200);
+            await client.CancelAsync(ids[3]);
+            await Task.Delay(200);
+        }
+        finally
+        {
+            fs.Release("slow.bin");
+        }
+
+        var answered = new Dictionary<ulong, SmbResponse>();
+        try
+        {
+            for (var i = 0; i < 6; i++)
+            {
+                var response = await client.ReceiveFinalAsync(Prompt);
+                answered[response.MessageId] = response;
+            }
+        }
+        catch (TimeoutException)
+        {
+            Assert.Fail($"{answered.Count} of the 6 READs answered within {Prompt.TotalSeconds} s");
+        }
+
+        Assert.AreEqual(Status.Cancelled, answered[ids[3]].Status, $"0x{answered[ids[3]].Status:X8}");
+        Assert.AreEqual(0, SmbTestClient.ReadData(answered[ids[1]]).Length);
+        foreach (var (id, at) in new[] { (ids[0], 1), (ids[2], 3), (ids[4], 5) })
+        {
+            CollectionAssert.AreEqual(SlowContent.AsSpan(at * piece, piece).ToArray(), SmbTestClient.ReadData(answered[id]), $"the READ at {at * piece}");
+        }
+
+        CollectionAssert.AreEqual(new long[] { 0, piece, 3 * piece, 5 * piece }, fs.ReadOffsets.ToList(), "reads in the order sent: " + string.Join(", ", fs.ReadOffsets));
+        Assert.AreEqual(1, fs.MostAtOnce, "calls on one open overlapped");
+    }
+
+    /// <summary>
     /// What goes for a held READ goes for the file system's other calls. A listing, a lookup and an open that wait on their
     /// backend hold up nothing else on the connection, are answered STATUS_PENDING meanwhile, and for real once let go.
     /// </summary>

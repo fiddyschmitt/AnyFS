@@ -15,7 +15,7 @@ namespace LibSmb;
 /// requests, over every open. So each message (a compound chain whole) is handled on its own, beside the others, and a
 /// request whose file system call is slow holds up only itself. Replies go to one writer as they are done, in whatever
 /// order: SMB2 matches them to their requests by MessageId. The handshake is handled before the next message is read,
-/// one open's requests take turns (<see cref="OpenFile.Gate"/>), and at most
+/// one open's requests take turns (<see cref="OpenFile.Gate"/>), its READs and WRITEs in the order they came, and at most
 /// <see cref="SmbServerOptions.MaxConcurrentRequests"/> are worked on at once: past that, a request waits for a place
 /// (<see cref="Place"/>). The reader reads on meanwhile, so a CANCEL reaches a request that waits or is slow, and an ECHO
 /// is answered.
@@ -166,10 +166,12 @@ internal sealed partial class SmbConnection
                 }
                 else
                 {
-                    // known by its MessageId before the next message is read, so a CANCEL right behind it finds it; and in
-                    // the line from now, so the reader knows what waits before it reads on
+                    // known by its MessageId before the next message is read, so a CANCEL right behind it finds it; in the
+                    // line from now, so the reader knows what waits before it reads on; and a READ or WRITE in line for its
+                    // open's turn, behind the ones read before it
                     var pending = Cancellable(message.AsSpan(0, length), ct);
                     var place = new Place(this, length);
+                    AskTurn(message.AsSpan(0, length), pending, place);
                     Interlocked.Increment(ref _running);
                     _ = Task.Run(() => ServeBesideAsync(message, length, pending, place, ct), CancellationToken.None);
                 }

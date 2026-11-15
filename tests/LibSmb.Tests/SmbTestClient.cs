@@ -244,6 +244,9 @@ internal sealed class SmbTestClient : IAsyncDisposable
     }
 
     public async Task<SmbResponse> WriteAsync(uint treeId, byte[] fileId, long offset, ReadOnlyMemory<byte> data)
+        => await SendAsync(Command.Write, WriteBody(fileId, offset, data.Span), treeId, CreditCharge(data.Length));
+
+    public static byte[] WriteBody(byte[] fileId, long offset, ReadOnlySpan<byte> data)
     {
         var body = new byte[48 + data.Length];
         Wire.Put16(body, 0, 49);
@@ -251,8 +254,8 @@ internal sealed class SmbTestClient : IAsyncDisposable
         Wire.Put32(body, 4, (uint)data.Length);
         Wire.Put64(body, 8, (ulong)offset);
         fileId.CopyTo(body, 16);
-        data.Span.CopyTo(body.AsSpan(48));
-        return await SendAsync(Command.Write, body, treeId, CreditCharge(data.Length));
+        data.CopyTo(body.AsSpan(48));
+        return body;
     }
 
     public Task<SmbResponse> FlushAsync(uint treeId, byte[] fileId)
@@ -425,6 +428,28 @@ internal sealed class SmbTestClient : IAsyncDisposable
         _messageId += Math.Max(creditCharge, (ushort)1);
         await WriteFrameAsync(Pdu(command, body, messageId, treeId, creditCharge, HeaderFlags.None, asyncId: null));
         return messageId;
+    }
+
+    /// <summary>
+    /// Sends several requests in one write without waiting for their responses, as a client with credits sends a burst
+    /// (the Mac its read-ahead: sixteen READs of 64 KiB): the server has them all to read at once. Their MessageIds, in the
+    /// order sent.
+    /// </summary>
+    public async Task<List<ulong>> PostBurstAsync(IReadOnlyList<(Command Command, byte[] Body)> requests, uint treeId)
+    {
+        var ids = new List<ulong>();
+        var burst = new MemoryStream();
+        foreach (var (command, body) in requests)
+        {
+            var messageId = _messageId++;
+            ids.Add(messageId);
+            var pdu = Pdu(command, body, messageId, treeId, 1, HeaderFlags.None, asyncId: null);
+            burst.Write([0, (byte)(pdu.Length >> 16), (byte)(pdu.Length >> 8), (byte)pdu.Length]);
+            burst.Write(pdu);
+        }
+
+        await _stream.WriteAsync(burst.ToArray());
+        return ids;
     }
 
     /// <summary>
