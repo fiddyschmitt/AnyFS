@@ -682,6 +682,12 @@ public sealed class SmbPair
         return mount;
     }
 
+    /// <summary>
+    /// Mounts the smbdata share again (a mount starts by unmounting), so what the client kept of it is gone and the next
+    /// reads come from the server.
+    /// </summary>
+    public void Remount() => (_main ?? throw new InvalidOperationException("the smbdata share is not mounted yet")).Mount();
+
     /// <summary>A file of random bytes in the client's scratch folder (removed when the condition ends): its path and hash.</summary>
     public (string Path, string Hash) RandomFile(string name, long size)
     {

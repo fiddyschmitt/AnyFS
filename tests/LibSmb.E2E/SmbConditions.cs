@@ -92,6 +92,10 @@ public static class SmbConditions
         var write = Stopwatch.StartNew();
         SmbOps.Copy(p.C, src, dst).Must("copy 256 MiB to the share");
         write.Stop();
+
+        // The read over a fresh mount: a Mac kept what it had just written and read it back from that, with no READ sent
+        // (2478.9 MiB/s over a 1 Gbps link, 15-Nov-2026), so the check below set the wire against the Mac's memory.
+        p.Remount();
         var readBack = p.ScratchPath("rb-" + name);
         var read = Stopwatch.StartNew();
         SmbOps.Copy(p.C, dst, readBack).Must("copy 256 MiB back");
