@@ -129,6 +129,21 @@ public static class SmbOps
     public static SmbResult Copy(Machine h, string from, string to)
         => Run(h, h.IsWindows ? $"Copy-Item -LiteralPath {Q(h, from)} -Destination {Q(h, to)} -Force" : $"cp {Q(h, from)} {Q(h, to)}", 1200);
 
+    /// <summary>
+    /// Copies a file and says how many seconds the copy itself took, by the machine's own clock. Clocked from here it
+    /// counts the shell's start in: a PowerShell on the lab's Windows VM takes 3 s to come up and a Copy-Item of 1 KiB
+    /// 4.3 s, which made a copy of 256 MiB at 75 MiB/s read as 33 (15-Nov-2026).
+    /// </summary>
+    public static double TimedCopy(Machine h, string from, string to, string what)
+    {
+        var r = Run(h, h.IsWindows
+            ? $"$sw = [Diagnostics.Stopwatch]::StartNew(); Copy-Item -LiteralPath {Q(h, from)} -Destination {Q(h, to)} -Force; 'copied in ' + $sw.Elapsed.TotalSeconds.ToString([Globalization.CultureInfo]::InvariantCulture)"
+            : $"perl -MTime::HiRes=time -e '$t = time; system(\"cp\", @ARGV) == 0 or exit 1; printf \"copied in %.3f\\n\", time - $t' {Q(h, from)} {Q(h, to)}", 1200).Must(what);
+        var line = Lines(r.Output).LastOrDefault(l => l.StartsWith("copied in ", StringComparison.Ordinal))
+            ?? throw new SmbStepException($"{what}: no time in what the copy said: {Tail(r.Output, 300)}");
+        return double.Parse(line["copied in ".Length..].Trim(), CultureInfo.InvariantCulture);
+    }
+
     /// <summary>A file's SHA-256, lower-case hex, computed on the machine.</summary>
     public static string Hash(Machine h, string path) => TryHash(h, path).Must("hash " + path).Output.Trim().ToLowerInvariant();
 

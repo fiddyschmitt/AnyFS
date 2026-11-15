@@ -62,7 +62,7 @@ public static class SmbConditions
 
     private static string Seconds(Stopwatch sw) => sw.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) + " s";
 
-    private static string MiBps(long bytes, Stopwatch sw) => (bytes / 1048576.0 / Math.Max(sw.Elapsed.TotalSeconds, 0.001)).ToString("0.0", CultureInfo.InvariantCulture) + " MiB/s";
+    private static string MiBps(long bytes, double seconds) => (bytes / 1048576.0 / Math.Max(seconds, 0.001)).ToString("0.0", CultureInfo.InvariantCulture) + " MiB/s";
 
     /// <summary>Writes a file of <paramref name="size"/> bytes through the share, reads it back, and checks the bytes on both ends.</summary>
     private static Action<SmbPair> RoundTrip(long size) => p =>
@@ -89,17 +89,13 @@ public static class SmbConditions
         var (src, want) = p.RandomFile("src-" + name, size);
         var dst = p.Mnt(name);
         p.Cleanup(() => SmbOps.Remove(p.C, dst));
-        var write = Stopwatch.StartNew();
-        SmbOps.Copy(p.C, src, dst).Must("copy 256 MiB to the share");
-        write.Stop();
+        var write = SmbOps.TimedCopy(p.C, src, dst, "copy 256 MiB to the share");
 
         // The read over a fresh mount: a Mac kept what it had just written and read it back from that, with no READ sent
         // (2478.9 MiB/s over a 1 Gbps link, 15-Nov-2026), so the check below set the wire against the Mac's memory.
         p.Remount();
         var readBack = p.ScratchPath("rb-" + name);
-        var read = Stopwatch.StartNew();
-        SmbOps.Copy(p.C, dst, readBack).Must("copy 256 MiB back");
-        read.Stop();
+        var read = SmbOps.TimedCopy(p.C, dst, readBack, "copy 256 MiB back");
         p.Note($"write {MiBps(size, write)}, read {MiBps(size, read)}");
         var got = SmbOps.Hash(p.C, readBack);
         p.Must(got == want, $"read back hash {got}, wrote {want}");
@@ -108,7 +104,7 @@ public static class SmbConditions
         // One way far behind the other is a client held up, not a slow disk or network, which slow both. A Mac wrote at
         // a tenth of the speed it read at while its megabyte WRITEs stalled (till 14-Nov-2026), and every copy still
         // came out right, so nothing here said so. The lab's rows are within two of each other; four leaves room.
-        var (wrote, readAt) = (size / write.Elapsed.TotalSeconds, size / read.Elapsed.TotalSeconds);
+        var (wrote, readAt) = (size / Math.Max(write, 0.001), size / Math.Max(read, 0.001));
         p.Check(wrote >= readAt / 4 && readAt >= wrote / 4, $"one way over four times slower than the other: write {MiBps(size, write)}, read {MiBps(size, read)}");
     }
 
