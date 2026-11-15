@@ -76,7 +76,12 @@ internal sealed class SmbHost(IPAddress address, int port, ILogger logger) : IAs
                 }
                 catch (System.Net.Sockets.SocketException ex)
                 {
-                    throw new InvalidOperationException($"the SMB server cannot listen on {address}:{port}: {ex.Message}", ex);
+                    // Windows calls a port another program holds on another of this machine's addresses (or on every
+                    // address), and one it keeps for itself, "forbidden by its access permissions"
+                    var hint = OperatingSystem.IsWindows() && ex.SocketErrorCode == System.Net.Sockets.SocketError.AccessDenied
+                        ? " Another program is using the port, or Windows keeps it for itself: choose another port."
+                        : "";
+                    throw new InvalidOperationException($"the SMB server cannot listen on {address}:{port}: {ex.Message}{hint}", ex);
                 }
 
                 _server.Faulted += OnFaulted;
