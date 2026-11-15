@@ -163,11 +163,15 @@ public sealed class SmbServer : IAsyncDisposable
                 listener.DualMode = true;
             }
 
-            if (!OperatingSystem.IsWindows())
+            // The port is this server's alone, and a second server on it is refused. On Linux and macOS that takes asking
+            // for nothing: ReuseAddress there is SO_REUSEPORT as well, with which a second server of the same user started
+            // on the port without a word and took some of the connections (Linux) or all of them (macOS), and a bind takes
+            // a port back while the last run's connections linger without it. On Windows a server on one address could
+            // start beside one on every address and take its connections at that address, which exclusive use refuses.
+            // macOS still lets that pair be: its rule for one address beside every address.
+            if (OperatingSystem.IsWindows())
             {
-                // a restart can take the port back while the last run's connections are in TIME_WAIT (on Windows the same
-                // option would let another process take a port this one holds, so it is left off there)
-                listener.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                listener.ExclusiveAddressUse = true;
             }
 
             listener.Bind(options.EndPoint);

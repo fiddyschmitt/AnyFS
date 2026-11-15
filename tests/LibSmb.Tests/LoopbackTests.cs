@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using LibSmb.Protocol;
@@ -439,6 +440,55 @@ public class LoopbackTests
             await client.EchoAsync();
             await client.EchoAsync();
         });
+    }
+
+    /// <summary>
+    /// A port a server listens on is its own: a second server on it is refused. On Linux and macOS it once started
+    /// without a word, and on macOS took every new connection from the first.
+    /// </summary>
+    [TestMethod]
+    public async Task ASecondServerOnAPortInUseIsRefused()
+    {
+        var dir = Dir();
+        var endPoint = Serve(dir);
+        var ex = Assert.ThrowsExactly<SocketException>(() => SmbServer.Start(new SmbServerOptions { EndPoint = endPoint, User = User, Password = Password }, [new SmbShare("other", new LocalFileSystem(Dir()))]));
+        Assert.AreEqual(SocketError.AddressAlreadyInUse, ex.SocketErrorCode);
+
+        // and the first still serves
+        await using var client = await SmbTestClient.SignInAsync(endPoint, User, Password);
+        await client.TreeConnectAsync("data");
+    }
+
+    /// <summary>
+    /// A server stopped with a client connected starts again on its port at once, whether that client is still there
+    /// (the old connection's end waits for it) or left after the server did (the end lingers in TIME_WAIT).
+    /// </summary>
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task ARestartTakesItsPortBack(bool clientLeaves)
+    {
+        var dir = Dir();
+        var first = SmbServer.Start(new SmbServerOptions { EndPoint = new IPEndPoint(IPAddress.Loopback, 0), User = User, Password = Password }, [new SmbShare("data", new LocalFileSystem(dir))]);
+        var endPoint = first.LocalEndPoint;
+        var old = await SmbTestClient.SignInAsync(endPoint, User, Password);
+        try
+        {
+            await first.DisposeAsync();
+            if (clientLeaves)
+            {
+                await old.DisposeAsync();
+            }
+
+            var second = SmbServer.Start(new SmbServerOptions { EndPoint = endPoint, User = User, Password = Password }, [new SmbShare("data", new LocalFileSystem(dir))]);
+            _servers.Add(second);
+            await using var client = await SmbTestClient.SignInAsync(endPoint, User, Password);
+            await client.TreeConnectAsync("data");
+        }
+        finally
+        {
+            await old.DisposeAsync();
+        }
     }
 
     /// <summary>Times set through the share, read back on both ends; the free space is the volume's.</summary>
