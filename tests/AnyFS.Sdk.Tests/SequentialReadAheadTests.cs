@@ -27,11 +27,110 @@ public class SequentialReadAheadTests
         }
 
         CollectionAssert.AreEqual(Data, all.ToArray(), "sequential 1000-byte reads");
-        // a fill starts where the read that overran the previous fill started; near the end a read that is not
-        // wholly inside the (short) last fill fills again, and ReadFullyAsync probes once more after a short fill
+        // a fill starts where the one before ended (where a source's stream stands), a read that runs past one taking
+        // the rest from the next; past the short last fill (after which ReadFullyAsync probes once more) the read that
+        // runs into the end finds nothing more, and so does the one at the end
         var fills = file.Reads.Where(r => r.Length == SequentialReadAhead.DefaultAheadBytes).Select(r => r.Offset).ToList();
-        CollectionAssert.AreEqual(new long[] { 0, 1_048_000, 2_096_000, 2_109_000, Data.Length }, fills, "fills of 1 MiB");
+        CollectionAssert.AreEqual(new long[] { 0, 1 << 20, 2 << 20, Data.Length, Data.Length }, fills, "fills of 1 MiB");
         Assert.IsTrue(file.Reads.Count <= 8, $"the source saw {file.Reads.Count} reads, not one per 1000 bytes");
+    }
+
+    /// <summary>
+    /// The Mac's SMB client reads a big file at two places in turn, 64 KiB at each: each keeps a fill of its own, and
+    /// every fill starts where that place's last one ended. With one fill for the handle every read went to the source.
+    /// </summary>
+    [TestMethod]
+    public async Task TwoPlacesReadInTurnEachKeepAFillOfTheirOwn()
+    {
+        const int mib = 1 << 20;
+        const int piece = 64 << 10;
+        var data = Enumerable.Range(0, 8 * mib).Select(i => (byte)(i % 253)).ToArray();
+        var file = new CountingFile(data);
+        using var ahead = new SequentialReadAhead();
+        var buffer = new byte[piece];
+        for (var i = 0; i < 32; i++)
+        {
+            foreach (var place in new long[] { 0, 4 * mib })
+            {
+                var at = place + (i * piece);
+                Assert.AreEqual(piece, await ahead.ReadAsync(file, at, buffer, CancellationToken.None));
+                CollectionAssert.AreEqual(data[(int)at..(int)(at + piece)], buffer, $"the read at {at}");
+            }
+        }
+
+        // the second place's first read is a seek, so it goes to the source as it is; the fills follow from there
+        CollectionAssert.AreEqual(
+            new (long, int)[] { (0, mib), (4 * mib, piece), ((4 * mib) + piece, mib), (mib, mib), ((5 * mib) + piece, mib) },
+            file.Reads,
+            string.Join(", ", file.Reads));
+    }
+
+    /// <summary>A big read that starts inside a fill takes what the fill holds and the rest from the source as it is.</summary>
+    [TestMethod]
+    public async Task ABigReadThatStartsInAFillTakesTheRestFromTheSource()
+    {
+        var file = new CountingFile(Data);
+        using var ahead = new SequentialReadAhead();
+        await ahead.ReadAsync(file, 0, new byte[4096], CancellationToken.None);
+        var big = new byte[SequentialReadAhead.DefaultThreshold + 1];
+        const int at = (1 << 20) - 576;
+        Assert.AreEqual(big.Length, await ahead.ReadAsync(file, at, big, CancellationToken.None));
+        CollectionAssert.AreEqual(Data[at..(at + big.Length)], big);
+        Assert.AreEqual((1L << 20, big.Length - 576), file.Reads[^1], "the rest straight from the source");
+
+        // and a small read going on from it fills from there
+        var next = at + big.Length;
+        var small = new byte[4096];
+        await ahead.ReadAsync(file, next, small, CancellationToken.None);
+        Assert.AreEqual((next, SequentialReadAhead.DefaultAheadBytes), file.Reads[^2]);
+        CollectionAssert.AreEqual(Data[next..(next + 4096)], small);
+    }
+
+    /// <summary>
+    /// More places than tracks, sequential runs between seeks, pieces of every size, a write and a forget among them:
+    /// every read gets the file's bytes as they are.
+    /// </summary>
+    [TestMethod]
+    public async Task WhateverTheReadsTheyGetTheFilesBytes()
+    {
+        var data = Enumerable.Range(0, 6 << 20).Select(i => (byte)((i * 31) % 257)).ToArray();
+        var file = new CountingFile(data);
+        using var ahead = new SequentialReadAhead(tracks: 2);
+        var random = new Random(20261115);
+        var places = Enumerable.Range(0, 5).Select(_ => (long)random.Next(data.Length)).ToArray();
+        for (var i = 0; i < 4000; i++)
+        {
+            var which = random.Next(places.Length);
+            if (random.Next(50) == 0)
+            {
+                places[which] = random.Next(data.Length + 100);
+            }
+
+            if (random.Next(400) == 0)
+            {
+                var patch = new byte[random.Next(1, 5000)];
+                random.NextBytes(patch);
+                var where = random.Next(data.Length - patch.Length);
+                await file.WriteAsync(where, patch, CancellationToken.None);
+                patch.CopyTo(data, where);
+                ahead.Forget();
+            }
+
+            var count = random.Next(4) switch
+            {
+                0 => random.Next(1, 600),
+                1 => 64 << 10,
+                2 => random.Next(1, 300 << 10),
+                _ => 4096,
+            };
+            var buffer = new byte[count];
+            var offset = places[which];
+            var n = await ahead.ReadAsync(file, offset, buffer, CancellationToken.None);
+            var expected = (int)Math.Clamp(data.Length - offset, 0, count);
+            Assert.AreEqual(expected, n, $"read {i}: {count} at {offset}");
+            CollectionAssert.AreEqual(data.AsSpan((int)Math.Min(offset, data.Length), n).ToArray(), buffer[..n], $"read {i}: {count} at {offset}");
+            places[which] = offset + n;
+        }
     }
 
     [TestMethod]
