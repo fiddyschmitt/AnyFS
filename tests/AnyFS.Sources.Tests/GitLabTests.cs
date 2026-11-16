@@ -845,6 +845,60 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
+    public async Task FilesOpenFromTheKeptListingsAfterARestartWithNoRepositoryFolderRead()
+    {
+        // a repository's entries carry what reading them takes (the blob id as the ETag; an LFS mark, a submodule's, git's name
+        // where another shows), so the next start opens a file deep in a repository from the listings kept, asking GitLab for
+        // no folder of it (until 16-Nov-2026 every folder on the way was read again, with its files' sizes: the source's own
+        // copy of the repositories it had read lived for the run alone)
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        var (first, _) = await StartAsync(fake, GitLabSeed.Settings(App(fake)), context);
+        await first.CountFilesAsync(CancellationToken.None);
+        await first.DisposeAsync();
+
+        fake.Requests.Clear();
+        var (second, _) = await StartAsync(fake, GitLabSeed.Settings(App(fake)), context);
+        await using var _s = second;
+        Assert.AreEqual("/* strings */\n", Encoding.UTF8.GetString(await ReadAsync(second, "files/src/util/strings.c")));
+        CollectionAssert.AreEqual(GitLabSeed.Large, await ReadAsync(second, "files/e2e/large.bin"), "a file in LFS, read as its object");
+        Assert.AreEqual(1, fake.Count("lfs=true"));
+        Assert.AreEqual("lower-case twin\n", Encoding.UTF8.GetString(await ReadAsync(second, "files/readme (2).md")), "a twin in case, read by git's name");
+        Assert.AreEqual("a name Windows refuses\n", Encoding.UTF8.GetString(await ReadAsync(second, "files/bad_name_.txt")), "a name made safe, read by git's");
+        Assert.AreEqual("on feature/x\n", Encoding.UTF8.GetString(await ReadAsync(second, "branches/feature (2)/x/feature.txt")), "a branch's repository too");
+        CollectionAssert.AreEqual(Array.Empty<VfsEntry>(), await ListAsync(second, "files/vendor/lib"), "a submodule is an empty folder");
+        Assert.IsTrue((await second.StatAsync("files/vendor/lib", CancellationToken.None))!.IsDirectory);
+        Assert.AreEqual(0, fake.Count("/repository/tree"), "no repository folder read: " + string.Join("; ", fake.Requests.Where(r => r.Contains("/repository/tree", StringComparison.Ordinal)).Take(3)));
+        Assert.AreEqual(0, fake.Count("POST /api/graphql"), "nor any file's size");
+    }
+
+    [TestMethod]
+    public async Task ABranchMadeAtACommitKeptIsCopiedNotRead()
+    {
+        // a ref at a commit another folder of the project is kept at (a branch made from the default branch's head) takes that
+        // folder's listings, whatever order the walk comes to them in: nothing of its repository is asked of GitLab
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        var (first, _) = await StartAsync(fake, GitLabSeed.Settings(App(fake)), context);
+        await first.CountFilesAsync(CancellationToken.None);
+        await first.DisposeAsync();
+
+        var app = fake.ProjectAt("anyfs/tools/app");
+        app.Branches["copy"] = app.Branches["main"];
+        app.LastActivity = app.LastActivity.AddMinutes(1);
+        fake.Requests.Clear();
+        var (second, _) = await StartAsync(fake, GitLabSeed.Settings(App(fake)), context);
+        await using var _s = second;
+        await second.CountFilesAsync(CancellationToken.None);
+        Assert.IsTrue(fake.Count($"/projects/{app.Id}/repository/branches") > 0, "the branches listed again");
+        Assert.AreEqual(0, fake.Count("/repository/tree"), "the new branch copied from the folders kept at its commit: " + string.Join("; ", fake.Requests.Where(r => r.Contains("/repository/tree", StringComparison.Ordinal)).Take(3)));
+        var asked = fake.Requests.Count;
+        Assert.AreEqual(250, (await ListAsync(second, "branches/copy/many")).Count);
+        CollectionAssert.AreEqual(GitLabSeed.Large, await ReadAsync(second, "branches/copy/e2e/large.bin"));
+        Assert.AreEqual(asked + 1, fake.Requests.Count, "only the LFS object read: " + string.Join("; ", fake.Requests.Skip(asked)));
+    }
+
+    [TestMethod]
     public async Task AMovedDefaultBranchShowsOnceTheRefreshIntervalHasPassed()
     {
         var fake = GitLabSeed.Lab();

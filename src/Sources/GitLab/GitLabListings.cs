@@ -1,9 +1,8 @@
-using System.Collections.Concurrent;
-using System.Diagnostics.CodeAnalysis;
+using AnyFS.Sdk;
 
 namespace AnyFS.Sources.GitLab;
 
-/// <summary>One entry of a repository folder at a commit, as kept: a blob's size (the LFS object's for a file in LFS).</summary>
+/// <summary>One entry of a repository folder at a commit, as GitLab lists it: a blob's size (the LFS object's for a file in LFS).</summary>
 /// <param name="N">The name in git.</param>
 /// <param name="K">'b' a file, 't' a folder, 'c' a submodule, 'l' a symbolic link.</param>
 /// <param name="S">The blob's or tree's id.</param>
@@ -12,78 +11,42 @@ namespace AnyFS.Sources.GitLab;
 internal sealed record TreeItem(string N, char K, string S, long L, bool F);
 
 /// <summary>
-/// The repository's folders at the commits the source has listed this run (spec 7.8), by <c>project@commit:path</c>. A
-/// commit's tree never changes, so a folder listed once is kept, and a branch and a tag at one commit share it. Kept for the
-/// run alone since 6-Nov-2026: between runs the kept listings hold what the walks saw (the SDK's file, written as a walk
-/// goes), and a repository's folder is stamped by its commit, so one whose commit has not moved is kept whole without this.
-/// Written whole every five minutes and at every stop, the file this was had grown past a hundred megabytes on a big
-/// server, and its write was what kept a stop from ending in time. Bounded: past <see cref="MaxFolders"/> the
-/// oldest-listed go (a million; the SDK's kept listings hold the whole tree, as bytes, since 7-Nov-2026).
+/// What a repository folder's entry keeps for the source beside its name, size and time (<see cref="VfsEntry.Key"/>), so that
+/// a kept listing is enough to find and read what it names, however deep, with nothing asked of GitLab (spec 7.8): a file's
+/// blob id is its entry's ETag already; the key says what else, and only where there is something to say, so most entries
+/// have none. A file in Git LFS is marked (its bytes are the LFS object's, read by another request); a submodule is marked
+/// (an empty folder); and where the name shown is not git's (made safe for Windows, or a twin in case numbered), git's name
+/// follows a slash, which no git name holds. Until 16-Nov-2026 the source kept its own copy of every repository folder read
+/// in a run, in memory and bounded at a million folders: past that the oldest were read from GitLab again, and every
+/// restart read again each folder a file was opened through.
 /// </summary>
-internal sealed class TreeStore
+internal static class GitLabKeys
 {
-    private const int MaxFolders = 1_000_000;
+    /// <summary>The form of the keys: listings kept in another are not read back (the source's SaveKey names it).</summary>
+    public const int Format = 1;
 
-    private readonly ConcurrentDictionary<string, (List<TreeItem> Items, long Order)> _folders = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, Task<List<TreeItem>>> _listing = new(StringComparer.Ordinal);
-    private long _order;
+    private const char InLfs = 'L';
+    private const char IsSubmodule = 'S';
+    private const char NameFollows = '/';
 
-    public int Count => _folders.Count;
-
-    /// <summary>The folder's entries, kept or listed now (once, however many ask).</summary>
-    public async Task<List<TreeItem>> GetAsync(string key, Func<CancellationToken, Task<List<TreeItem>>> list, CancellationToken ct)
+    /// <summary>The key of a repository entry; null where the entry says it all (git's name shown, a plain file or folder).</summary>
+    public static string? Of(string gitName, string shown, bool lfs = false, bool submodule = false)
     {
-        if (_folders.TryGetValue(key, out var kept))
-        {
-            return kept.Items;
-        }
-
-        var task = _listing.GetOrAdd(key, _ => ListAsync(key, list));
-        return await task.WaitAsync(ct).ConfigureAwait(false);
+        var flags = lfs ? InLfs.ToString() : submodule ? IsSubmodule.ToString() : "";
+        var key = string.Equals(gitName, shown, StringComparison.Ordinal) ? flags : flags + NameFollows + gitName;
+        return key.Length == 0 ? null : key;
     }
 
-    /// <summary>The folder's entries when they are kept.</summary>
-    public bool TryGet(string key, [MaybeNullWhen(false)] out List<TreeItem> items)
+    /// <summary>What a repository entry's key says: git's name for it, whether it is a file in LFS, whether a submodule.</summary>
+    public static (string GitName, bool Lfs, bool Submodule) Read(VfsEntry entry)
     {
-        items = _folders.TryGetValue(key, out var kept) ? kept.Items : null;
-        return items is not null;
-    }
-
-    /// <summary>Keeps folders listed otherwise than one by one (a commit's whole tree at once), as a folder listed alone is kept.</summary>
-    public void Keep(IEnumerable<(string Key, List<TreeItem> Items)> folders)
-    {
-        foreach (var (key, items) in folders)
+        if (entry.Key is not { } key)
         {
-            _folders[key] = (items, Interlocked.Increment(ref _order));
+            return (entry.Name, false, false);
         }
 
-        Trim();
-    }
-
-    private async Task<List<TreeItem>> ListAsync(string key, Func<CancellationToken, Task<List<TreeItem>>> list)
-    {
-        try
-        {
-            await Task.Yield();
-            var items = await list(CancellationToken.None).ConfigureAwait(false);
-            _folders[key] = (items, Interlocked.Increment(ref _order));
-            Trim();
-            return items;
-        }
-        finally
-        {
-            _listing.TryRemove(key, out _);
-        }
-    }
-
-    private void Trim()
-    {
-        if (_folders.Count > MaxFolders)
-        {
-            foreach (var old in _folders.OrderBy(f => f.Value.Order).Take(MaxFolders / 10).ToList())
-            {
-                _folders.TryRemove(old);
-            }
-        }
+        var slash = key.IndexOf(NameFollows, StringComparison.Ordinal);
+        var flags = slash < 0 ? key : key[..slash];
+        return (slash < 0 ? entry.Name : key[(slash + 1)..], flags.Contains(InLfs, StringComparison.Ordinal), flags.Contains(IsSubmodule, StringComparison.Ordinal));
     }
 }

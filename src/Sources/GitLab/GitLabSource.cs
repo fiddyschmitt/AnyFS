@@ -34,7 +34,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     private GitLabSession? _session;
     private GitLabApi? _api;
     private RequestCache? _listings;
-    private TreeStore? _trees;
     private KeptListings? _kept;
     private SpoolCache? _spool;
     private GlFolder? _root;
@@ -68,8 +67,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
     internal SpoolCache Spool => _spool ?? throw VfsException.Unavailable("GitLab is not signed in to yet");
 
-    private TreeStore Trees => _trees ?? throw VfsException.Unavailable("GitLab is not signed in to yet");
-
     private KeptListings Kept => _kept ?? throw VfsException.Unavailable("GitLab is not signed in to yet");
 
     internal TimeSpan Refresh => _settings.Refresh;
@@ -81,7 +78,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         _api = new GitLabApi(_session, Requests, Logger);
         _api.Held += (wait, why) => Volatile.Read(ref _counted)?.Waiting(wait, why);
         _listings = new RequestCache(_stopping.Token);
-        _trees = new TreeStore();
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
         var path = _session.Address.Path;
@@ -139,9 +135,10 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             Name = "gitlab",
 
             // the listings last run saw open at once at the next start: for the same server, account and scope, the same
-            // settings that shape the tree, and the same files (a file's size is a fact about how it is written)
+            // settings that shape the tree, the same files (a file's size is a fact about how it is written), and what a
+            // repository's entries keep in the same form (they are what a file is found and read by)
             SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
-            SaveKey = $"{_session.Address.Server}|{_session.User?.Username}|{path}|{_settings.Shape}|md{GitLabDocuments.Format}",
+            SaveKey = $"{_session.Address.Server}|{_session.User?.Username}|{path}|{_settings.Shape}|md{GitLabDocuments.Format}|keys{GitLabKeys.Format}",
         });
 
         _kept.StartWalksOfHeld();
@@ -217,8 +214,9 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     /// <summary>
     /// The node at <paramref name="path"/>, found a listing at a time from the root: with listings kept, on the way down to a
     /// project, from what each folder last listed where that names it, so that a folder deep in a big group does not ask for
-    /// the group's thousands of projects again each time the refresh interval has passed; else through the caches. A listing
-    /// that took longer to read than the interval was stale as it arrived, and a walk through such a group hardly moved.
+    /// the group's thousands of projects again each time the refresh interval has passed; inside a repository, from the
+    /// listings kept of its folders (<see cref="KeptChild"/>); else through the caches. A listing that took longer to read
+    /// than the interval was stale as it arrived, and a walk through such a group hardly moved.
     /// </summary>
     internal async Task<GlNode> ResolveAsync(string path, CancellationToken ct)
     {
@@ -237,13 +235,56 @@ public sealed partial class GitLabSource : SourceBase, ICountable
                 throw VfsException.NotADirectory(path);
             }
 
-            var known = _settings.Keeps && _lastListed.TryGetValue(at, out var last) ? Child(last, segment) : null;
+            GlNode? known = null;
+            if (_settings.Keeps)
+            {
+                known = _lastListed.TryGetValue(at, out var last) ? Child(last, segment) : KeptChild(folder, at, segment);
+            }
+
             node = known ?? Child(await ListedAsync(folder, at, ct).ConfigureAwait(false), segment) ?? throw VfsException.NotFound(path);
             at = VfsPath.Join(at, segment);
+            if (node is ProjectFolder project)
+            {
+                IsRoot(project.Project, VfsPath.Join(at, "files"));
+            }
         }
 
         return node;
     }
+
+    /// <summary>
+    /// A repository folder's child from the listing kept of the folder, nothing asked (spec 7.8): a repository's entries carry
+    /// what finding and reading them takes (<see cref="GitLabKeys"/>), and their commit is the one the repository's listings
+    /// were made at, kept as its root's stamp, so a file opens as its folder shows it. Null outside a repository, where its
+    /// folder's listing is not kept, or where the listing does not name the child.
+    /// </summary>
+    private GlNode? KeptChild(GlFolder folder, string path, string name)
+    {
+        (GlProject Project, string? Commit, string RepoPath)? at = folder switch
+        {
+            FilesFolder files => (files.Project, _kept?.Cache.StampHeld(path), ""),
+            TreeFolder { RepoPath.Length: 0 } root => (root.Project, _kept?.Cache.StampHeld(path), ""),
+            TreeFolder tree => (tree.Project, tree.Commit, tree.RepoPath),
+            _ => null,
+        };
+        if (at is not { Commit: { Length: > 0 } commit } repository || commit == NoRepository || _kept?.Cache.Held(path) is not { } listing)
+        {
+            return null;
+        }
+
+        foreach (var entry in listing)
+        {
+            if (entry.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return TreeFolder.FromKept(repository.Project, commit, repository.RepoPath, entry);
+            }
+        }
+
+        return null;
+    }
+
+    // a project's files folder's stamp where it has no repository, or nothing in it
+    private const string NoRepository = "none";
 
     private static GlNode? Child(IReadOnlyList<GlNode> children, string name)
         => children.FirstOrDefault(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
@@ -444,9 +485,13 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             return refs;
         }, ct);
 
-    /// <summary>A repository folder at a commit: the tree's entries, each file with its size (one GraphQL query per hundred files).</summary>
+    /// <summary>
+    /// A repository folder at a commit: the tree's entries, each file with its size (one GraphQL query per hundred files), asked
+    /// once however many ask at once and kept the refresh interval; with listings kept, what holds it from then on is the
+    /// folder's listing (<see cref="KeptChild"/>).
+    /// </summary>
     internal Task<List<TreeItem>> TreeAsync(GlProject project, string commit, string path, CancellationToken ct)
-        => Trees.GetAsync(TreeKey(project, commit, path), async c =>
+        => Cache.GetAsync($"tree:{TreeKey(project, commit, path)}", Refresh, async c =>
         {
             var query = $"projects/{project.Id}/repository/tree?ref={Uri.EscapeDataString(commit)}&per_page=100&pagination=keyset"
                 + (path.Length == 0 ? "" : "&path=" + Uri.EscapeDataString(path));
@@ -704,8 +749,10 @@ public sealed partial class GitLabSource : SourceBase, ICountable
                 var head = project.Project.Repository ? await HeadAsync(project.Project, ct).ConfigureAwait(false) : null;
                 return $"{project.Project.LastActivity?.UtcTicks ?? 0}|{head?.Commit}";
             case FilesFolder files:
-                return files.Project.Repository && await HeadAsync(files.Project, ct).ConfigureAwait(false) is { } at ? at.Commit : "none";
+                IsRoot(files.Project, path);
+                return files.Project.Repository && await HeadAsync(files.Project, ct).ConfigureAwait(false) is { } at ? at.Commit : NoRepository;
             case TreeFolder { RepoPath.Length: 0 } tree:
+                IsRoot(tree.Project, path);
                 return tree.Commit;
             case TicketFolder ticket:
                 return (ticket.Ticket.Updated?.UtcTicks ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -730,21 +777,20 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     }
 
     /// <summary>
-    /// For a walk: a repository whole, every folder's listing at a commit by path, from the repository kept whole first
-    /// (<see cref="FillTreeAsync"/>): a project's <c>files</c> (its default branch at its head) or a branch's or tag's folder (at
-    /// its commit); null for any other folder, which the walk lists alone.
+    /// For a walk: a repository whole, every folder's listing at a commit by path: a project's <c>files</c> (its default branch
+    /// at its head) or a branch's or tag's folder (at its commit); null for any other folder, which the walk lists alone. The
+    /// same repository at the same commit kept under another folder (a branch at the default branch's head, a tag at a
+    /// branch's) is copied from there (<see cref="KeptElsewhere"/>), else read whole (<see cref="FillTreeAsync"/>), once.
     /// </summary>
     private async Task<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?> ListTreeAsync(string path, CancellationToken ct)
     {
-        var listings = new Dictionary<string, IReadOnlyList<VfsEntry>>(StringComparer.Ordinal);
         TreeFolder root;
         switch (await ResolveAsync(path, ct).ConfigureAwait(false))
         {
             case FilesFolder files:
                 if (await Guard(() => HeadAsync(files.Project, ct)).ConfigureAwait(false) is not { } head)
                 {
-                    listings[path] = [];
-                    return listings;
+                    return new Dictionary<string, IReadOnlyList<VfsEntry>>(StringComparer.Ordinal) { [path] = [] };
                 }
 
                 root = files.At(head);
@@ -756,57 +802,156 @@ public sealed partial class GitLabSource : SourceBase, ICountable
                 return null;
         }
 
-        await Guard(() => FillTreeAsync(root.Project, root.Commit, ct)).ConfigureAwait(false);
-        var pending = new Queue<(GlFolder Folder, string Path)>();
-        pending.Enqueue((root, path));
-        while (pending.TryDequeue(out var next))
+        LetGoOfReadsKept();
+        var listings = KeptElsewhere(root, path);
+        if (listings is null)
         {
-            // from what is kept now: no request
-            var children = await next.Folder.ListAsync(this, ct).ConfigureAwait(false);
-            listings[next.Path] = children.Select(c => c.Entry).ToList();
-            foreach (var folder in children.OfType<GlFolder>())
+            var folders = await Guard(() => FillTreeAsync(root.Project, root.Commit, ct)).ConfigureAwait(false);
+            if (_settings.Keeps)
             {
-                pending.Enqueue((folder, VfsPath.Join(next.Path, folder.Name)));
+                _readFor[(root.Project.Id, root.Commit)] = VfsPath.Normalize(path);
+            }
+            listings = new Dictionary<string, IReadOnlyList<VfsEntry>>(folders.Count, StringComparer.Ordinal);
+            var pending = new Queue<(string Repo, string Path)>();
+            pending.Enqueue(("", path));
+            while (pending.TryDequeue(out var next))
+            {
+                var children = TreeFolder.Children(root.Project, root.Commit, next.Repo, folders.GetValueOrDefault(next.Repo) ?? [], root.Modified);
+                listings[next.Path] = children.Select(c => c.Entry).ToList();
+                foreach (var child in children)
+                {
+                    switch (child)
+                    {
+                        case TreeFolder folder:
+                            pending.Enqueue((folder.RepoPath, VfsPath.Join(next.Path, folder.Name)));
+                            break;
+                        case EmptyFolder submodule:
+                            listings[VfsPath.Join(next.Path, submodule.Name)] = [];
+                            break;
+                    }
+                }
             }
         }
 
+        IsRoot(root.Project, path);
         return listings;
     }
 
     /// <summary>
-    /// Keeps every folder of the repository at a commit (<see cref="TreeStore"/>) from its recursive tree, a hundred entries
-    /// a request, and its files' sizes a hundred at a time, where folder by folder costs a request or two a folder; nothing
-    /// is asked when the commit's folders are all kept already.
+    /// The repository at the root's commit as kept under another folder, every listing of it moved under <paramref name="path"/>:
+    /// a repository's entries say nothing of where it is shown (<see cref="GitLabKeys"/>), so they are the same under any ref at
+    /// that commit. Null where none is kept whole at that commit. Until 16-Nov-2026 the refs shared a copy the source held of
+    /// every repository folder read in the run, in memory and bounded at a million folders.
     /// </summary>
-    /// <returns>How many folders it kept.</returns>
-    private async Task<int> FillTreeAsync(GlProject project, string commit, CancellationToken ct)
+    private Dictionary<string, IReadOnlyList<VfsEntry>>? KeptElsewhere(TreeFolder root, string path)
     {
-        if (TreeKept(project, commit))
+        if (KeptRoot(root.Project.Id, root.Commit, except: VfsPath.Normalize(path)) is not { } other)
         {
-            return 0;
+            return null;
         }
 
-        // once, however many ask at once: a branch and a tag at the same commit, walked together, read it one time (the
-        // dictionary may make a value for each asker at once, and only the one it keeps may start the read: a task started
-        // in the making ran for each, and the repository was read as many times)
-        var key = $"{project.Id}@{commit}";
-        var filling = _filling.GetOrAdd(key, _ => new Lazy<Task<int>>(() => Task.Run(() => FillTreeNowAsync(project, commit, _stopping.Token))));
+        var held = Kept.Cache.Under(other);
+        if (!held.ContainsKey(other))
+        {
+            return null;
+        }
+
+        var copied = new Dictionary<string, IReadOnlyList<VfsEntry>>(held.Count, StringComparer.Ordinal);
+        foreach (var (at, entries) in held)
+        {
+            // whole: a folder whose listing is not kept (let go since) is read again with the rest
+            foreach (var entry in entries)
+            {
+                if (entry.IsDirectory && !held.ContainsKey(VfsPath.Join(at, entry.Name)))
+                {
+                    return null;
+                }
+            }
+
+            copied[path + at[other.Length..]] = entries;
+        }
+
+        return copied;
+    }
+
+    /// <summary>Notes a folder that is a repository's root (a project's <c>files</c>, a branch's or a tag's folder): one a ref at a commit it is kept at is copied from.</summary>
+    private void IsRoot(GlProject project, string path)
+    {
+        if (_settings.Keeps)
+        {
+            _roots.GetOrAdd(project.Id, _ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal))[VfsPath.Normalize(path)] = 0;
+        }
+    }
+
+    /// <summary>A root of the project's repository (<see cref="IsRoot"/>) whose listings are kept at <paramref name="commit"/>, other than <paramref name="except"/>; null where there is none.</summary>
+    private string? KeptRoot(long project, string commit, string except)
+    {
+        if (!_settings.Keeps || _kept is null || !_roots.TryGetValue(project, out var roots))
+        {
+            return null;
+        }
+
+        foreach (var root in roots.Keys)
+        {
+            if (root != except && _kept.Cache.StampHeld(root) == commit)
+            {
+                return root;
+            }
+        }
+
+        return null;
+    }
+
+    // the folders that are a repository's root, by the project: as many as its refs, whatever their commits (KeptRoot)
+    private readonly ConcurrentDictionary<long, ConcurrentDictionary<string, byte>> _roots = new();
+
+    // a repository's whole tree being read, or read and not yet seen kept (FillTreeAsync), by the project and the commit
+    private readonly ConcurrentDictionary<(long Project, string Commit), Lazy<Task<Dictionary<string, List<TreeItem>>>>> _filling = new();
+
+    // the folder a repository read whole was read for, until it is seen kept there (LetGoOfReadsKept)
+    private readonly ConcurrentDictionary<(long Project, string Commit), string> _readFor = new();
+
+    /// <summary>
+    /// Every folder of the repository at a commit, from its recursive tree, a hundred entries a request, and its files' sizes a
+    /// hundred at a time, where folder by folder costs a request or two a folder; by the folder's path in the repository. Read
+    /// once however many ask: a branch and a tag at the same commit walked together read it one time. With listings kept, a
+    /// read is held until the walk has kept its listings (<see cref="LetGoOfReadsKept"/>), from when a ref at that commit
+    /// copies them (<see cref="KeptElsewhere"/>): let go of at once, a ref that came to it just after the read, before the walk
+    /// had kept what it read, read it all again.
+    /// </summary>
+    private async Task<Dictionary<string, List<TreeItem>>> FillTreeAsync(GlProject project, string commit, CancellationToken ct)
+    {
+        // the dictionary may make a value for each asker at once, and only the one it keeps may start the read: a task started
+        // in the making ran for each, and the repository was read as many times
+        var key = (project.Id, commit);
+        var filling = _filling.GetOrAdd(key, _ => new Lazy<Task<Dictionary<string, List<TreeItem>>>>(() => Task.Run(() => FillTreeNowAsync(project, commit, _stopping.Token))));
         try
         {
             return await filling.Value.WaitAsync(ct).ConfigureAwait(false);
         }
         finally
         {
-            if (filling.Value.IsCompleted)
+            if (filling.Value.IsFaulted || filling.Value.IsCanceled || (filling.Value.IsCompleted && !_settings.Keeps))
             {
-                _filling.TryRemove(new KeyValuePair<string, Lazy<Task<int>>>(key, filling));
+                _filling.TryRemove(new KeyValuePair<(long, string), Lazy<Task<Dictionary<string, List<TreeItem>>>>>(key, filling));
             }
         }
     }
 
-    private readonly ConcurrentDictionary<string, Lazy<Task<int>>> _filling = new(StringComparer.Ordinal);
+    /// <summary>Lets go of each repository read whose listings the walk has kept since (<see cref="FillTreeAsync"/>): a ref at its commit copies them from then on.</summary>
+    private void LetGoOfReadsKept()
+    {
+        foreach (var (key, filling) in _filling)
+        {
+            if (filling.IsValueCreated && filling.Value.IsCompletedSuccessfully && _readFor.TryGetValue(key, out var path) && _kept?.Cache.StampHeld(path) == key.Commit)
+            {
+                _filling.TryRemove(new KeyValuePair<(long, string), Lazy<Task<Dictionary<string, List<TreeItem>>>>>(key, filling));
+                _readFor.TryRemove(new KeyValuePair<(long, string), string>(key, path));
+            }
+        }
+    }
 
-    private async Task<int> FillTreeNowAsync(GlProject project, string commit, CancellationToken ct)
+    private async Task<Dictionary<string, List<TreeItem>>> FillTreeNowAsync(GlProject project, string commit, CancellationToken ct)
     {
         var folders = new Dictionary<string, List<GlTreeEntry>>(StringComparer.Ordinal) { [""] = [] };
         List<GlTreeEntry> In(string folder) => folders.TryGetValue(folder, out var entries) ? entries : folders[folder] = [];
@@ -825,30 +970,8 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
         var blobs = folders.SelectMany(f => f.Value.Where(e => e.IsBlob).Select(e => RepoPath(f.Key, e.Name))).ToList();
         var sizes = await SizesAsync(project, commit, blobs, ct).ConfigureAwait(false);
-        Trees.Keep(folders.Select(f => (TreeKey(project, commit, f.Key), f.Value.Select(e => ItemOf(e, RepoPath(f.Key, e.Name), sizes)).ToList())));
-        Logger.LogDebug("gitlab: kept {Project} at {Commit} whole: {Folders:N0} folders, {Files:N0} files", project.FullPath, commit, folders.Count, blobs.Count);
-        return folders.Count;
-    }
-
-    /// <summary>Whether every folder of the repository at the commit is kept, the root down.</summary>
-    private bool TreeKept(GlProject project, string commit)
-    {
-        var pending = new Stack<string>();
-        pending.Push("");
-        while (pending.TryPop(out var folder))
-        {
-            if (!Trees.TryGet(TreeKey(project, commit, folder), out var items))
-            {
-                return false;
-            }
-
-            foreach (var item in items.Where(i => i.K == 't'))
-            {
-                pending.Push(RepoPath(folder, item.N));
-            }
-        }
-
-        return true;
+        Logger.LogDebug("gitlab: read {Project} at {Commit} whole: {Folders:N0} folders, {Files:N0} files", project.FullPath, commit, folders.Count, blobs.Count);
+        return folders.ToDictionary(f => f.Key, f => f.Value.Select(e => ItemOf(e, RepoPath(f.Key, e.Name), sizes)).ToList(), StringComparer.Ordinal);
     }
 
     // --- stopping ------------------------------------------------------------------------------------------------------

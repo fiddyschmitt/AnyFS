@@ -48,9 +48,11 @@ internal abstract class GlFile(string name, long length, DateTimeOffset? modifie
     public abstract Task<IVfsFile> OpenAsync(GitLabSource source, CancellationToken ct);
 }
 
-/// <summary>A folder with nothing in it: a submodule (git keeps only the commit it points at), an empty repository's files.</summary>
-internal sealed class EmptyFolder(string name, DateTimeOffset? modified = null) : GlFolder(name, modified)
+/// <summary>A folder with nothing in it: a submodule (git keeps only the commit it points at), its entry saying so (<see cref="GitLabKeys"/>).</summary>
+internal sealed class EmptyFolder(string name, DateTimeOffset? modified = null, string? key = null) : GlFolder(name, modified)
 {
+    public override VfsEntry Entry => key is null ? base.Entry : base.Entry with { Key = key };
+
     public override Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct) => Task.FromResult<IReadOnlyList<GlNode>>([]);
 }
 
@@ -338,9 +340,10 @@ internal sealed class RefsFolder(GlProject project, RefKind kind, string prefix,
 }
 
 /// <summary>
-/// A folder of the repository at a commit: never changes, so kept for good (<see cref="TreeStore"/>). Its folders first,
-/// then the rest, each in the order of their names, however GitLab sent them (a folder listed alone, or the whole tree at
-/// once), so twins in case are numbered the same either way.
+/// A folder of the repository at a commit: never changes, so its listing is kept as long as the commit is where the folder
+/// stands. Its folders first, then the rest, each in the order of their names, however GitLab sent them (a folder listed
+/// alone, or the whole tree at once), so twins in case are numbered the same either way. Each entry carries what finding
+/// it again takes (<see cref="GitLabKeys"/>), so a kept listing is enough to go on from (<see cref="FromKept"/>).
 /// </summary>
 internal sealed class TreeFolder(GlProject project, string commit, string path, string name, DateTimeOffset? time) : GlFolder(name, time, time)
 {
@@ -351,10 +354,16 @@ internal sealed class TreeFolder(GlProject project, string commit, string path, 
     /// <summary>The folder's path in the repository; empty for its root (<c>files</c>, or a branch's or tag's folder).</summary>
     public string RepoPath => path;
 
+    /// <summary>A folder in the repository says git's name for it where the name shown is another; its root, a ref's folder, nothing.</summary>
+    public override VfsEntry Entry => path.Length == 0 ? base.Entry : base.Entry with { Key = GitLabKeys.Of(path[(path.LastIndexOf('/') + 1)..], Name) };
+
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
+        => Children(project, commit, path, await source.TreeAsync(project, commit, path, ct).ConfigureAwait(false), Modified);
+
+    /// <summary>The folder at <paramref name="path"/>'s children, from its entries as GitLab lists them, each with the time given.</summary>
+    public static List<GlNode> Children(GlProject project, string commit, string path, IReadOnlyList<TreeItem> listed, DateTimeOffset? time)
     {
-        var items = (await source.TreeAsync(project, commit, path, ct).ConfigureAwait(false))
-            .OrderBy(i => i.K == 't' ? 0 : 1).ThenBy(i => i.N, StringComparer.Ordinal).ToList();
+        var items = listed.OrderBy(i => i.K == 't' ? 0 : 1).ThenBy(i => i.N, StringComparer.Ordinal).ToList();
         var names = GitLabNames.Unique(items.Select(i => i.N).ToList());
         var children = new List<GlNode>(items.Count);
         for (var i = 0; i < items.Count; i++)
@@ -363,13 +372,32 @@ internal sealed class TreeFolder(GlProject project, string commit, string path, 
             var full = path.Length == 0 ? item.N : path + "/" + item.N;
             children.Add(item.K switch
             {
-                't' => new TreeFolder(project, commit, full, names[i], Modified),
-                'c' => new EmptyFolder(names[i], Modified),
-                _ => new BlobFile(project, commit, full, item, names[i], Modified),
+                't' => new TreeFolder(project, commit, full, names[i], time),
+                'c' => new EmptyFolder(names[i], time, GitLabKeys.Of(item.N, names[i], submodule: true)),
+                _ => new BlobFile(project, commit, full, item, names[i], time),
             });
         }
 
         return children;
+    }
+
+    /// <summary>
+    /// What an entry of a kept listing of the repository folder at <paramref name="path"/> names, made from the entry alone:
+    /// a folder, a submodule, or a file with its blob id (the entry's ETag), size and LFS mark. Null for a file entry with no
+    /// blob id, which only GitLab's listing can say.
+    /// </summary>
+    public static GlNode? FromKept(GlProject project, string commit, string path, VfsEntry entry)
+    {
+        var (gitName, lfs, submodule) = GitLabKeys.Read(entry);
+        var full = path.Length == 0 ? gitName : path + "/" + gitName;
+        if (entry.IsDirectory)
+        {
+            return submodule ? new EmptyFolder(entry.Name, entry.Modified, entry.Key) : new TreeFolder(project, commit, full, entry.Name, entry.Modified);
+        }
+
+        return entry.ETag is { Length: > 0 } blob
+            ? new BlobFile(project, commit, full, new TreeItem(gitName, 'b', blob, entry.Length, lfs), entry.Name, entry.Modified)
+            : null;
     }
 }
 
@@ -377,5 +405,8 @@ internal sealed class TreeFolder(GlProject project, string commit, string path, 
 internal sealed class BlobFile(GlProject project, string commit, string path, TreeItem item, string name, DateTimeOffset? time)
     : GlFile(name, item.L, time, time, item.S)
 {
+    /// <summary>With git's name where it shows another, and its LFS mark (<see cref="GitLabKeys"/>).</summary>
+    public override VfsEntry Entry => base.Entry with { Key = GitLabKeys.Of(item.N, Name, lfs: item.F) };
+
     public override Task<IVfsFile> OpenAsync(GitLabSource source, CancellationToken ct) => source.OpenBlobAsync(project, commit, path, item, ct);
 }
