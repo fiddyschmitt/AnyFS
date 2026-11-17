@@ -12,9 +12,34 @@ public sealed class PriorityGate(int slots)
     private readonly Queue<Waiter> _urgent = new();
     private readonly Queue<Waiter> _others = new();
     private int _free = slots;
+    private int _slots = slots;
+
+    // slots given up (Shrink) while in use: each goes as it comes back
+    private int _retiring;
 
     /// <summary>How many may go at once.</summary>
-    public int Slots { get; } = slots;
+    public int Slots => Volatile.Read(ref _slots);
+
+    /// <summary>
+    /// Fewer slots from now on (one at the least), for a service that says it takes no more at once than that: free slots go
+    /// at once, those in use as they come back. Never more: a gate does not grow again.
+    /// </summary>
+    public void Shrink(int slots)
+    {
+        lock (_gate)
+        {
+            var cut = _slots - Math.Max(1, slots);
+            if (cut <= 0)
+            {
+                return;
+            }
+
+            _slots -= cut;
+            var free = Math.Min(_free, cut);
+            _free -= free;
+            _retiring += cut - free;
+        }
+    }
 
     /// <summary>Waits for a slot: an <paramref name="urgent"/> request takes the next one free ahead of those that are not.</summary>
     public Task WaitAsync(bool urgent, CancellationToken ct)
@@ -48,6 +73,12 @@ public sealed class PriorityGate(int slots)
             Waiter? next;
             lock (_gate)
             {
+                if (_retiring > 0)
+                {
+                    _retiring--;
+                    return;
+                }
+
                 next = _urgent.Count > 0 ? _urgent.Dequeue() : _others.Count > 0 ? _others.Dequeue() : null;
                 if (next is null)
                 {

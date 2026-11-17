@@ -44,4 +44,33 @@ public class PriorityGateTests
         await next.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.IsTrue(next.IsCompletedSuccessfully, "the slot passed the one that gave up");
     }
+
+    [TestMethod]
+    public async Task AGateMadeSmallerGivesUpFreeSlotsAtOnceAndThoseInUseAsTheyComeBack()
+    {
+        // for a service that says it takes fewer at once than were sent (Artifactory's queries)
+        var gate = new PriorityGate(4);
+        await gate.WaitAsync(urgent: false, CancellationToken.None);
+        await gate.WaitAsync(urgent: false, CancellationToken.None);
+        await gate.WaitAsync(urgent: false, CancellationToken.None);
+        gate.Shrink(1);
+        Assert.AreEqual(1, gate.Slots);
+        var waiting = gate.WaitAsync(urgent: true, CancellationToken.None);
+        Assert.IsFalse(waiting.IsCompleted, "the free slot went with the cut");
+
+        gate.Release();
+        gate.Release();
+        Assert.IsFalse(waiting.IsCompleted, "two of the three in use were over what is left: they go as they come back");
+        gate.Release();
+        await waiting.WaitAsync(TimeSpan.FromSeconds(5));
+
+        gate.Shrink(3);
+        Assert.AreEqual(1, gate.Slots, "never more");
+        gate.Shrink(0);
+        Assert.AreEqual(1, gate.Slots, "one at the least");
+        var next = gate.WaitAsync(urgent: false, CancellationToken.None);
+        Assert.IsFalse(next.IsCompleted);
+        gate.Release();
+        await next.WaitAsync(TimeSpan.FromSeconds(5));
+    }
 }
