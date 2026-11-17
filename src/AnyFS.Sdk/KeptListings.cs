@@ -708,7 +708,7 @@ public sealed class KeptListings : IAsyncDisposable
                         if (tree is not null)
                         {
                             // the folder and everything below it at once: all kept and counted, nothing left to go into
-                            Cache.KeepTree(folder, tree, stamp);
+                            Cache.KeepTree(folder, tree, stamp, _options.StampWholeTree);
                             foreach (var listing in tree.Values)
                             {
                                 walk.Counters.Add(listing.Count(e => !e.IsDirectory), listing.Count(e => e.IsDirectory));
@@ -1105,6 +1105,15 @@ public sealed record KeptListingsOptions
     /// are. Null (the default) stamps nothing: every walk lists every folder.
     /// </summary>
     public Func<string, string?, CancellationToken, ValueTask<string?>>? StampOf { get; init; }
+
+    /// <summary>
+    /// With <see cref="ListTree"/> and <see cref="StampOf"/>: whether every folder of a tree read at once is kept with the
+    /// stamp read for the tree's root, for a source whose stamp says of a folder what it says of all below it (Artifactory's:
+    /// the time its listings are as of), so that a later walk keeps or lists again each folder of the tree by its own stamp.
+    /// Off (the default), the root alone is stamped, and a root whose stamp has moved is read whole again (GitLab's: a
+    /// repository at a commit).
+    /// </summary>
+    public bool StampWholeTree { get; init; }
 
     /// <summary>
     /// With <see cref="StampOf"/>: how often a walk lists every folder whatever its stamp, so what a stamp does not cover

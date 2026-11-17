@@ -514,6 +514,13 @@ public class ListingCacheTests
         cache.KeepTree("docs", tree, "s1");
         Assert.AreEqual(kept, cache.Version, "the same tree again moves nothing");
         Assert.AreEqual(0, _calls, "nothing asked of the lister");
+        Assert.IsNull(cache.StampHeld("docs/sub"), "the root alone is stamped");
+
+        // for a source whose stamp says of a folder what it says of all below it: on every folder of the tree
+        cache.KeepTree("docs", tree, "s2", everyFolder: true);
+        Assert.AreEqual("s2", cache.StampHeld("docs"));
+        Assert.AreEqual("s2", cache.StampHeld("docs/sub"));
+        Assert.AreEqual("s2", cache.StampHeld("docs/new"));
     }
 
 

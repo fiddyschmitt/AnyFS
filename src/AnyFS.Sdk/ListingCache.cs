@@ -312,7 +312,13 @@ public sealed class ListingCache
     /// is held, as <see cref="Keep"/> would, and whatever was held below the root that the tree does not name let go. What is
     /// held below the root is read once, in order, not folder by folder, and only what differs is stored.
     /// </summary>
-    public void KeepTree(string root, IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>> tree, string? stamp = null)
+    public void KeepTree(string root, IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>> tree, string? stamp = null) => KeepTree(root, tree, stamp, everyFolder: false);
+
+    /// <summary>
+    /// As above; with <paramref name="everyFolder"/>, the stamp goes on every folder's listing, not the root's alone
+    /// (<see cref="KeptListingsOptions.StampWholeTree"/>).
+    /// </summary>
+    public void KeepTree(string root, IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>> tree, string? stamp, bool everyFolder)
     {
         ArgumentNullException.ThrowIfNull(tree);
 
@@ -320,7 +326,7 @@ public sealed class ListingCache
         var made = new List<(string Path, StoredListing Listing)>(tree.Count);
         foreach (var (path, listing) in tree)
         {
-            made.Add((path, Make(listing, path == root ? stamp : null)));
+            made.Add((path, Make(listing, everyFolder || path == root ? stamp : null)));
         }
 
         lock (_gate)

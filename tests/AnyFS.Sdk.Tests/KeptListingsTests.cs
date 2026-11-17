@@ -518,6 +518,61 @@ public class KeptListingsTests
     }
 
     [TestMethod]
+    public async Task ATreeReadAtOnceCanStampEveryFolderSoALaterWalkListsOnlyTheOnesThatChanged()
+    {
+        // a source whose stamp says of a folder what it says of all below it (Artifactory's: the time its listings are as of)
+        var stamps = new ConcurrentDictionary<string, string>(StringComparer.Ordinal);
+        var reads = 0;
+        var whole = true;
+        var options = new KeptListingsOptions
+        {
+            WalkEvery = TimeSpan.Zero,
+            Parallelism = 1,
+            MaxInFlight = 1,
+            StampWholeTree = true,
+            StampOf = (path, held, _) => ValueTask.FromResult(path.Length == 0 ? null : stamps.GetValueOrDefault(path) ?? held ?? "t1"),
+            ListTree = (folder, _) =>
+            {
+                if (folder != "docs" || !whole)
+                {
+                    return Task.FromResult<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>(null);
+                }
+
+                reads++;
+                return Task.FromResult<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>(new Dictionary<string, IReadOnlyList<VfsEntry>>
+                {
+                    ["docs"] = [VfsEntry.Directory("sub"), VfsEntry.Directory("other"), VfsEntry.File("a.txt", 1)],
+                    ["docs/sub"] = _tree["docs/sub"],
+                    ["docs/other"] = [VfsEntry.File("o.txt", 4)],
+                });
+            },
+        };
+        _tree["docs"] = [VfsEntry.Directory("sub"), VfsEntry.Directory("other"), VfsEntry.File("a.txt", 1)];
+        _tree["docs/other"] = [VfsEntry.File("o.txt", 4)];
+        await using var kept = Kept(new SourceCounters(), options);
+        await kept.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+        Assert.AreEqual(1, reads);
+        Assert.AreEqual("t1", kept.Cache.StampHeld("docs"));
+        Assert.AreEqual("t1", kept.Cache.StampHeld("docs/sub"), "every folder of the tree has the stamp read for its root");
+        Assert.AreEqual("t1", kept.Cache.StampHeld("docs/other"));
+
+        // something changed in docs/sub: the source says so of it and of the folder above, and lists each alone
+        _tree["docs/sub"] = [VfsEntry.File("c.txt", 3), VfsEntry.File("new.txt", 9)];
+        stamps["docs"] = "t2";
+        stamps["docs/sub"] = "t2";
+        whole = false;
+        var watcher = new RecordingFolderWatcher();
+        await kept.WalkAsync(new SourceCounters { FolderWatcher = watcher }, full: false, CancellationToken.None);
+        Assert.AreEqual(1, Listed("docs"));
+        Assert.AreEqual(1, Listed("docs/sub"));
+        Assert.AreEqual(0, Listed("docs/other"), "kept by its own stamp: " + string.Join("; ", watcher.Lines));
+        CollectionAssert.Contains(watcher.Lines.ToList(), "kept docs/other");
+        Assert.AreEqual(2, kept.Cache.Held("docs/sub")!.Count);
+        Assert.AreEqual("t2", kept.Cache.StampHeld("docs/sub"));
+        Assert.AreEqual("t1", kept.Cache.StampHeld("docs/other"));
+    }
+
+    [TestMethod]
     public async Task AFolderThatCannotBeListedIsLeftOutAndTheRestCounted()
     {
         _tree["docs"] = [VfsEntry.Directory("gone"), VfsEntry.File("a.txt", 1)];
