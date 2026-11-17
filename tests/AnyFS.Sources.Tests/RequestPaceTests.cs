@@ -109,13 +109,17 @@ public class RequestPaceTests
         await Task.Delay(100);
         Assert.IsFalse(third.IsCompleted, "nothing left for a third while two are in flight");
 
-        // one answered with one left: the third goes
-        first.Answered();
+        // one answered, saying one is left: with the other in flight, still none for the third. The answer goes to Hold
+        // before its turn is given back, as a source does (TakeAsync): given back first, the turn it wakes could go on
+        // the figure before the answer's
         Assert.IsNull(pace.Hold(Counted("throttle_authenticated_api", 1, reset), "GET projects/*/issues"));
+        first.Answered();
         await Task.Delay(100);
         Assert.IsFalse(third.IsCompleted, "one left and one in flight: still none to spare");
-        second.Answered();
+
+        // the other answered with one left and nothing in flight: the third goes
         Assert.IsNull(pace.Hold(Counted("throttle_authenticated_api", 1, reset), "GET projects/*/wikis"));
+        second.Answered();
         using var went = await third.WaitAsync(TimeSpan.FromSeconds(1));
     }
 
