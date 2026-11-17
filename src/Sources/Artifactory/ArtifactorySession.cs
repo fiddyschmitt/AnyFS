@@ -199,19 +199,25 @@ internal sealed class ArtifactorySession : IDisposable
     /// <summary>Whether an answer is JSON that <paramref name="holds"/> what was asked for.</summary>
     private static async Task<bool> IsJsonOfAsync(HttpResponseMessage response, Func<JsonElement, bool> holds, CancellationToken ct)
     {
+        using var doc = await JsonOfAsync(response, ct).ConfigureAwait(false);
+        return doc is not null && holds(doc.RootElement);
+    }
+
+    /// <summary>A successful answer's JSON; null where the answer failed or is not JSON.</summary>
+    private static async Task<JsonDocument?> JsonOfAsync(HttpResponseMessage response, CancellationToken ct)
+    {
         if (!response.IsSuccessStatusCode || response.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) != true)
         {
-            return false;
+            return null;
         }
 
         try
         {
-            using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false), cancellationToken: ct).ConfigureAwait(false);
-            return holds(doc.RootElement);
+            return await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false), cancellationToken: ct).ConfigureAwait(false);
         }
         catch (JsonException)
         {
-            return false;
+            return null;
         }
     }
 
@@ -304,12 +310,29 @@ internal sealed class ArtifactorySession : IDisposable
                 throw new SourceFailedException($"Artifactory ({Url.Host}) refused {refused}{(said is null ? "" : $" ({said})")}.", permanent: true);
             }
 
-            if (!await IsJsonOfAsync(response, e => e.ValueKind == JsonValueKind.Array, ct).ConfigureAwait(false))
+            using var doc = await JsonOfAsync(response, ct).ConfigureAwait(false);
+            if (doc?.RootElement.ValueKind != JsonValueKind.Array)
             {
                 throw new SourceFailedException($"{Address.Base} did not answer as Artifactory does ({(int)response.StatusCode}): give the server's address as the browser shows it, like https://artifactory.example.com/artifactory.", permanent: (int)response.StatusCode is 404 or 200);
             }
+
+            // what a start asks for next, and the Test: kept for the first to ask (TakeRepositories)
+            Volatile.Write(ref _checked, new Checked(ArtRepository.ListOf(doc.RootElement), Environment.TickCount64));
         }
     }
+
+    // the repositories the sign-in's check read, and when, until someone takes them
+    private sealed record Checked(List<ArtRepository> Repositories, long At);
+
+    private Checked? _checked;
+
+    /// <summary>
+    /// The repositories the sign-in's check read (<c>api/repositories</c>, every one the account may see), for the first to
+    /// ask for them within <paramref name="fresh"/> of then: a start, and the Test, ask nothing more for their first list.
+    /// Null once taken, past that time, or where the sign-in read none (a web session's).
+    /// </summary>
+    public List<ArtRepository>? TakeRepositories(TimeSpan fresh)
+        => Interlocked.Exchange(ref _checked, null) is { } taken && Environment.TickCount64 - taken.At <= fresh.TotalMilliseconds ? taken.Repositories : null;
 
     /// <summary>The account a signed token names (its subject, <c>…/users/name</c>); null for a token that says nothing (a reference token, an API key).</summary>
     internal static string? NameIn(string token)

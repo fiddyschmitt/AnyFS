@@ -141,10 +141,12 @@ public sealed class ArtifactoryPlugin : ISourcePlugin, IValidatable, ITestable, 
                 ? $"Reached {session.Address.Base.Host}{version} {session.How}."
                 : $"Signed in to {session.Address.Base.Host}{version}{(session.User is null ? "" : $" as {session.User}")} {session.How}.";
             progress.Report("Signed in; asking Artifactory what the address holds");
-            List<ArtRepository> repositories;
-            using (var doc = await api.GetAsync("repositories", ct).ConfigureAwait(false))
+            // the sign-in's check has just read them, but for a web session's
+            var repositories = session.TakeRepositories(TimeSpan.FromMinutes(1));
+            if (repositories is null)
             {
-                repositories = doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Array ? doc.RootElement.EnumerateArray().Select(ArtRepository.Parse).Where(r => r.Key.Length > 0).ToList() : [];
+                using var doc = await api.GetAsync("repositories", ct).ConfigureAwait(false);
+                repositories = ArtRepository.ListOf(doc.RootElement);
             }
 
             var address = session.Address;

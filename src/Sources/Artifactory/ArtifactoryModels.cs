@@ -28,6 +28,12 @@ internal sealed record ArtRepository(string Key, string Type, string PackageType
     public static ArtRepository Parse(JsonElement e)
         => new(e.Str("key") ?? "", (e.Str("type") ?? "LOCAL").ToUpperInvariant(), e.Str("packageType") ?? "", e.Str("description"));
 
+    /// <summary>The repositories of an answer to <c>api/repositories</c>, by key; none where the answer is no list.</summary>
+    public static List<ArtRepository> ListOf(JsonElement answer)
+        => answer.ValueKind == JsonValueKind.Array
+            ? answer.EnumerateArray().Select(Parse).Where(r => r.Key.Length > 0).OrderBy(r => r.Key, StringComparer.OrdinalIgnoreCase).ThenBy(r => r.Key, StringComparer.Ordinal).ToList()
+            : [];
+
     /// <summary>
     /// The repository's folder in a server's root, under <paramref name="name"/>: its key carries the repository's kind and
     /// key (<c>REMOTE:npm-remote</c>), so a path below it is found from the kept listing alone, nothing asked.

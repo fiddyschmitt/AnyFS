@@ -229,6 +229,33 @@ public class ArtifactoryTests
     }
 
     [TestMethod]
+    public async Task AStartAsksForTheRepositoriesOnceAndSoDoesTheTest()
+    {
+        // the sign-in's check reads them, and the source's first list is that one
+        var fake = ArtifactorySeed.Lab();
+        await using (var server = await StartAsync(fake, ArtifactorySeed.Settings(fake)))
+        {
+            CollectionAssert.Contains(await NamesAsync(server, ""), "generic-local");
+        }
+
+        Assert.AreEqual(1, fake.Count("/api/repositories"), string.Join("\n", fake.Requests));
+
+        // a repository's source finds its repository in it
+        fake = ArtifactorySeed.Lab();
+        await using (var repository = await StartAsync(fake, ArtifactorySeed.Settings(fake, "/generic-local")))
+        {
+            CollectionAssert.Contains(await NamesAsync(repository, ""), "docs");
+        }
+
+        Assert.AreEqual(1, fake.Count("/api/repositories"), string.Join("\n", fake.Requests));
+
+        fake = ArtifactorySeed.Lab();
+        var result = await ArtifactoryPlugin.TestAsync(ArtifactorySeed.Settings(fake), new Progress<string>(), fake.StandIn(), CancellationToken.None);
+        Assert.IsTrue(result.Success, result.Message);
+        Assert.AreEqual(1, fake.Count("/api/repositories"), string.Join("\n", fake.Requests));
+    }
+
+    [TestMethod]
     public async Task AReferenceTokenSignsInWithoutNamingItsAccount()
     {
         var fake = ArtifactorySeed.Lab();

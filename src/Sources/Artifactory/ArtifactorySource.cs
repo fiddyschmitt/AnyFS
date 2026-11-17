@@ -330,14 +330,20 @@ public sealed partial class ArtifactorySource : SourceBase, ICountable
 
     // --- what the folders ask for ----------------------------------------------------------------------------------------
 
-    /// <summary>Every repository the account can see, by key, asked again once the refresh interval has passed.</summary>
+    /// <summary>
+    /// Every repository the account can see, by key, asked again once the refresh interval has passed; the first time, what
+    /// the sign-in's check has just read, where it is that fresh.
+    /// </summary>
     internal Task<List<ArtRepository>> RepositoriesAsync(CancellationToken ct)
         => Cache.GetAsync("repositories", Refresh, async c =>
         {
-            using var doc = await Api.GetAsync("repositories", c).ConfigureAwait(false);
-            var repositories = doc.RootElement.ValueKind == JsonValueKind.Array
-                ? doc.RootElement.EnumerateArray().Select(ArtRepository.Parse).Where(r => r.Key.Length > 0).OrderBy(r => r.Key, StringComparer.OrdinalIgnoreCase).ThenBy(r => r.Key, StringComparer.Ordinal).ToList()
-                : [];
+            var repositories = Session.TakeRepositories(Refresh);
+            if (repositories is null)
+            {
+                using var doc = await Api.GetAsync("repositories", c).ConfigureAwait(false);
+                repositories = ArtRepository.ListOf(doc.RootElement);
+            }
+
             Logger.LogInformation("artifactory: {User} can see {Count:N0} repositories", Session.Who, repositories.Count);
             return repositories;
         }, ct);
