@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>AnyFS.Sources.Artifactory</AssemblyName>
+    <RootNamespace>AnyFS.Sources.Artifactory</RootNamespace>
+  </PropertyGroup>
+  <!-- The Artifactory source (spec 7.13): JFrog Artifactory's REST API and its query language (AQL) over HttpClient and
+       System.Text.Json directly, no SDK. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
+    <!-- the request cache, the gate that lets a client's request go ahead of a walk's, the web session (with its Selenium
+         WebDriver fallback), the cookie jar, ResponseStream, MemoryFile -->
+    <ProjectReference Include="..\Common\AnyFS.Sources.Common.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Using Include="AnyFS.Sources.Common" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- the type's icon (OpenIcon): Artifactory's mark, given by the user on 17-Nov-2026 -->
+    <EmbeddedResource Include="Assets\artifactory.png" LogicalName="artifactory.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AnyFS.Sources.Tests" />
+  </ItemGroup>
+</Project>

@@ -5,6 +5,7 @@ using AnyFS.Mounts.Http;
 using AnyFS.Mounts.Smb;
 using AnyFS.Mounts.WebDav;
 using AnyFS.Mounts.WinFsp;
+using AnyFS.Sources.Artifactory;
 using AnyFS.Sources.Atlassian.Bamboo;
 using AnyFS.Sources.Atlassian.Bitbucket;
 using AnyFS.Sources.Atlassian.Confluence;
@@ -36,6 +37,7 @@ public static class BuiltIns
         registry.AddBuiltIn(new ConfluencePlugin());
         registry.AddBuiltIn(new BitbucketPlugin());
         registry.AddBuiltIn(new BambooPlugin());
+        registry.AddBuiltIn(new ArtifactoryPlugin());
         registry.AddBuiltIn(new WinFspMountProvider());
         registry.AddBuiltIn(new FuseMountProvider());
         registry.AddBuiltIn(new SmbMountProvider());

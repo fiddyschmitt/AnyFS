@@ -147,6 +147,7 @@
     <ProjectReference Include="..\Sources\GitLab\AnyFS.Sources.GitLab.csproj" />
     <ProjectReference Include="..\Sources\Teams\AnyFS.Sources.Teams.csproj" />
     <ProjectReference Include="..\Sources\Atlassian\AnyFS.Sources.Atlassian.csproj" />
+    <ProjectReference Include="..\Sources\Artifactory\AnyFS.Sources.Artifactory.csproj" />
     <ProjectReference Include="..\Mounts\Http\AnyFS.Mounts.Http.csproj" />
     <ProjectReference Include="..\Mounts\WebDav\AnyFS.Mounts.WebDav.csproj" />
     <ProjectReference Include="..\Mounts\Ftp\AnyFS.Mounts.Ftp.csproj" />
