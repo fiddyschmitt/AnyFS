@@ -706,15 +706,17 @@ public class ArtifactoryTests
         Assert.AreEqual(1, queries.Count(q => q.StartsWith("stream ", StringComparison.Ordinal) && q.Contains("org/acme/app/1.2/*", StringComparison.Ordinal)), "the new folder, with what is below it");
         Assert.IsTrue(queries.All(q => q.Contains("\"repo\":\"libs-release-local\"", StringComparison.Ordinal)), "nothing in the other repositories");
 
-        // the walk after: from the time of the one that found it, and nothing to list
+        // the walk after: from the time of the one that found it, and nothing to list; a repository nothing changed in is
+        // asked from the same time as before (each repository's time is its own: the count came to each at its own moment)
         var since = Since(fake.Queries, "libs-release-local");
+        var quiet = Since(fake.Queries, "generic-local");
         await LaterAsync(fake, source, TimeSpan.FromMinutes(30));
         asked = fake.Queries.Count;
         await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
         queries = QueriesSince(fake, asked);
         Assert.IsTrue(queries.All(IsChanges), string.Join("\n", queries));
         Assert.IsTrue(string.CompareOrdinal(Since(queries, "libs-release-local"), since) > 0, "the time moved on");
-        Assert.AreEqual(since, Since(queries, "generic-local"), "where nothing changed it is as it was");
+        Assert.AreEqual(quiet, Since(queries, "generic-local"), "where nothing changed it is as it was");
     }
 
     [TestMethod]
