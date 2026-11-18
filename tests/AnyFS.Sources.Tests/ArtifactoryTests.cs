@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.RegularExpressions;
 using AnyFS.Sdk;
@@ -550,8 +551,79 @@ public class ArtifactoryTests
         var fake = ArtifactorySeed.Lab();
         var source = new ArtifactorySource(WebSession(fake), fake.StandIn((_, _, _) => Task.CompletedTask, useKept: false));
         var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => source.InitialiseAsync(new TestSourceContext(), CancellationToken.None));
-        StringAssert.Contains(ex.Message, "Artifactory gave AnyFS no token for the sign-in");
+        StringAssert.Contains(ex.Message, "the browser window was closed before the sign-in to artifactory.fake.test finished; Retry to sign in");
+        Assert.IsTrue(ex.Permanent, "the source waits for its Retry rather than opening the window again");
         await source.DisposeAsync();
+    }
+
+    [TestMethod]
+    public async Task APersonWhoClosesTheWindowJustAfterGivingTheCodeIsSignedIn()
+    {
+        // the code given and the window closed before AnyFS asks the platform for the token again: it still asks once more
+        var fake = ArtifactorySeed.Lab();
+        await using var source = await StartAsync(fake, WebSession(fake), standIn: fake.StandIn(async (_, page, ct) =>
+        {
+            await Task.Delay(500, ct);
+            fake.SignInAt(page, "tester");
+        }, useKept: false));
+        Assert.AreEqual("tester", source.Session.User);
+        Assert.AreEqual("with the browser", source.Session.How);
+    }
+
+    [TestMethod]
+    [Timeout(60_000)]
+    public async Task ASignInNotFinishedWhileThePlatformHoldsItClosesItsWindowAndWaitsForARetry()
+    {
+        // the platform forgets a client sign-in's session a while after it was asked for (five minutes on a real one); a
+        // person slower than that has nothing to give the code to, so the window closes then, as JFrog's own tool gives up
+        var fake = ArtifactorySeed.Lab();
+        fake.ClientSessionsLast = TimeSpan.FromSeconds(2);
+        var said = new ConcurrentQueue<string>();
+        var source = new ArtifactorySource(WebSession(fake), fake.StandIn(fake.PersonTaking(TimeSpan.FromSeconds(6), "tester", said), useKept: false));
+        using var context = new TestSourceContext();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        try
+        {
+            var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => source.InitialiseAsync(context, stop.Token));
+            StringAssert.Contains(ex.Message, "the sign-in to artifactory.fake.test was not finished within the 2 seconds Artifactory holds it for; Retry to sign in again");
+            Assert.IsTrue(ex.Permanent, "the source waits for its Retry, which signs in with a new code");
+            CollectionAssert.AreEqual(new[] { "closed before the code was given" }, said.ToArray(), "the window closed when the platform forgot the session, not left open for a code that could go nowhere");
+            Assert.AreEqual(0, fake.ClientTokens.Count);
+        }
+        finally
+        {
+            await source.DisposeAsync();
+        }
+    }
+
+    [TestMethod]
+    [Timeout(60_000)]
+    public async Task TwoSourcesOfOneServerSigningInAtOnceEachHaveThePlatformsWholeTimeOnceTheirWindowOpens()
+    {
+        // both start at once, as at AnyFS's start: one window at a time on the server's profile, so the second's waits for
+        // the first's; each person gives the code a while after their window opens, within the time the platform holds a
+        // session for, which runs for each from its own window
+        var fake = ArtifactorySeed.Lab(root: "/both");
+        fake.ClientSessionsLast = TimeSpan.FromSeconds(5);
+        var said = new ConcurrentQueue<string>();
+        var person = fake.PersonTaking(TimeSpan.FromSeconds(3), "tester", said);
+        var first = new ArtifactorySource(WebSession(fake), fake.StandIn(person, useKept: false));
+        var second = new ArtifactorySource(WebSession(fake, "/generic-local/docs"), fake.StandIn(person, useKept: false));
+        using var firstContext = new TestSourceContext();
+        using var secondContext = new TestSourceContext();
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        try
+        {
+            await Task.WhenAll(first.InitialiseAsync(firstContext, stop.Token), second.InitialiseAsync(secondContext, stop.Token));
+            CollectionAssert.AreEqual(new[] { "code given", "code given" }, said.ToArray());
+            Assert.AreEqual(2, fake.ClientTokens.Count, "each its own token");
+            Assert.AreEqual(2, fake.SessionsAsked.Count, "a session for each window");
+        }
+        finally
+        {
+            await first.DisposeAsync();
+            await second.DisposeAsync();
+        }
     }
 
     [TestMethod]

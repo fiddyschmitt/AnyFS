@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Security.Cryptography;
@@ -17,8 +18,9 @@ namespace AnyFS.Sources.Tests;
 /// list of the paid editions), the query language (<c>items.find</c> with the criteria the source writes, for signed-in
 /// accounts only, a limit applied before what the account may not read is left out), downloads with ranges, checksums and
 /// a redirect to a storage service's signed address; bearer tokens (signed ones that name their account, reference tokens
-/// that do not), API keys, Basic, nobody; and JFrog's client sign-in, as the lab's 7.161 answered it: a session asked for,
-/// the person signing in on the platform's page for it and giving the code (<see cref="SignInAt"/>), the token handed over
+/// that do not), API keys, Basic, nobody; and JFrog's client sign-in, as the lab's 7.161 answered it: a session asked for
+/// and held a while (<see cref="ClientSessionsLast"/>), the person signing in on the platform's page for it and giving the
+/// code (<see cref="SignInAt"/>), the token handed over
 /// once, a year's, renewed with its refresh token (each taken once) with the access token as the bearer, even one that has
 /// run out, and the renewed one revoked. In-process, through <see cref="Handler"/>.
 /// </summary>
@@ -109,6 +111,17 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
 
     /// <summary>How long a token the client sign-in or a renewal gives lasts: a year, as the lab's 7.161 gave them.</summary>
     public TimeSpan ClientTokenLasts { get; set; } = TimeSpan.FromDays(365);
+
+    /// <summary>
+    /// How long the platform holds a client sign-in's session from when it was asked for: its access service forgets one
+    /// then (its <c>jfrog-client-login</c> cache's <c>expire-after-write-seconds</c>, 300 unless an administrator changed
+    /// it), after which the page cannot approve it ("Session is not exist", as the lab answered one gone stale) and no token
+    /// is handed over for it. On this computer's clock, not <see cref="Now"/>: the person at the window takes real time.
+    /// </summary>
+    public TimeSpan ClientSessionsLast { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>The client sign-in's sessions asked for, oldest first.</summary>
+    public ConcurrentQueue<string> SessionsAsked { get; } = new();
 
     /// <summary>The sign-in pages the person was at (<see cref="SignInAt"/>), oldest first.</summary>
     public ConcurrentQueue<Uri> SignInPages { get; } = new();
@@ -299,16 +312,22 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
 
     private sealed class ClientSession
     {
+        public long Asked { get; } = Stopwatch.GetTimestamp();
+
         public string? Name { get; set; }
 
         public bool Taken { get; set; }
     }
 
+    /// <summary>Whether the platform still holds a session: until <see cref="ClientSessionsLast"/> after it was asked for.</summary>
+    private bool Holds(ClientSession session) => Stopwatch.GetElapsedTime(session.Asked) < ClientSessionsLast;
+
     /// <summary>
     /// What the person does on the platform's sign-in page for a client's session (the page's address names it): signs in
     /// as <paramref name="name"/> and gives the code the page asks for, after which the platform hands the session's token
     /// over. As on the real page, one opened without the code asked for (<c>jfClientCode</c>) says the client is out of date
-    /// and lets nothing through, and a session the platform was not asked for is not there.
+    /// and lets nothing through, and a session the platform was not asked for, or has forgotten
+    /// (<see cref="ClientSessionsLast"/>), is not there.
     /// </summary>
     public void SignInAt(Uri page, string name)
     {
@@ -325,7 +344,7 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
             throw new InvalidOperationException("the page says the client is out of date, and asks for no code");
         }
 
-        if (!_sessions.TryGetValue(session, out var asked))
+        if (!_sessions.TryGetValue(session, out var asked) || !Holds(asked))
         {
             throw new InvalidOperationException("Session is not exist");
         }
@@ -343,6 +362,37 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
         }
 
         return Task.CompletedTask;
+    };
+
+    /// <summary>
+    /// A person who signs in as <paramref name="name"/> and gives the code <paramref name="after"/> their window opened,
+    /// then leaves the window open until AnyFS closes it, even when the page could not approve the session (its time up).
+    /// What they came to is noted in <paramref name="said"/>: "code given", "the page: …" for the page's refusal, or
+    /// "closed before the code was given" for a window AnyFS closed first.
+    /// </summary>
+    public Func<bool, Uri, CancellationToken, Task> PersonTaking(TimeSpan after, string name, ConcurrentQueue<string> said) => async (_, page, ct) =>
+    {
+        try
+        {
+            await Task.Delay(after, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            said.Enqueue("closed before the code was given");
+            throw;
+        }
+
+        try
+        {
+            SignInAt(page, name);
+            said.Enqueue("code given");
+        }
+        catch (InvalidOperationException ex)
+        {
+            said.Enqueue("the page: " + ex.Message);
+        }
+
+        await Task.Delay(Timeout.Infinite, ct);
     };
 
     /// <summary>Revokes every token the client sign-in or a renewal gave, and their refresh tokens: only a new sign-in gets in.</summary>
@@ -371,7 +421,8 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
     public HttpMessageHandler Handler() => new InProcessHandler(this);
 
     /// <summary>A stand-in for the source: its requests come here, and <paramref name="browser"/> stands in for the person at the browser (<see cref="Person"/>).</summary>
-    public ArtifactoryStandIn StandIn(Func<bool, Uri, CancellationToken, Task>? browser = null, bool useKept = true) => new(Handler, browser, useKept);
+    /// <summary>The stand-in a source of this server is made with; AnyFS takes a client sign-in's session to be held as long as this platform holds one (<see cref="ClientSessionsLast"/>).</summary>
+    public ArtifactoryStandIn StandIn(Func<bool, Uri, CancellationToken, Task>? browser = null, bool useKept = true) => new(Handler, browser, useKept, ClientSessionsLast);
 
     // --- answering -------------------------------------------------------------------------------------------------------
 
@@ -558,13 +609,14 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
                 }
 
                 _sessions[session] = new ClientSession();
+                SessionsAsked.Enqueue(session);
                 return new Response(200, [], null);
             }
 
             if (full.StartsWith(login + "token/", StringComparison.Ordinal) && request.Method == "GET")
             {
                 var session = full[(login.Length + "token/".Length)..];
-                if (_sessions.TryGetValue(session, out var asked) && asked.Name is { } name && !asked.Taken)
+                if (_sessions.TryGetValue(session, out var asked) && Holds(asked) && asked.Name is { } name && !asked.Taken)
                 {
                     asked.Taken = true;
                     return ClientToken(name);

@@ -12,9 +12,11 @@ namespace AnyFS.Sources.Artifactory;
 /// <summary>
 /// What a test (or the Test button) changes about an Artifactory session: what sends its requests; for the web session,
 /// what stands in for the person at the browser (given the platform's sign-in page for the session, whether a window may be
-/// shown: signs in there and gives the code, or does not); and whether a sign-in kept from before is used.
+/// shown, and what ends when AnyFS closes the window: signs in there and gives the code, or does not, or closes the
+/// window by finishing), and how long the platform holds a session for them (null for the real platform's five minutes);
+/// and whether a sign-in kept from before is used.
 /// </summary>
-internal sealed record ArtifactoryStandIn(Func<HttpMessageHandler> Handler, Func<bool, Uri, CancellationToken, Task>? Browser = null, bool UseKept = true);
+internal sealed record ArtifactoryStandIn(Func<HttpMessageHandler> Handler, Func<bool, Uri, CancellationToken, Task>? Browser = null, bool UseKept = true, TimeSpan? SessionHeld = null);
 
 /// <summary>
 /// A token JFrog's client sign-in gave: its access token, which the whole platform takes, the refresh token that renews it
@@ -57,10 +59,10 @@ internal sealed record ArtifactoryClientToken(string Access, string? Refresh, st
 /// signs in the way the settings say. A token goes on every request as a bearer token, an API key in the header
 /// Artifactory reads one from, a user name and password as Basic; a refusal of any of them is final. The web session signs
 /// in through JFrog's client sign-in (<see cref="ArtifactorySignInTarget"/>), the one JFrog's own <c>jf login</c> makes:
-/// the person signs in on the platform's own page in a browser of AnyFS's own and gives it the code AnyFS shows, and the
-/// platform hands AnyFS a token of its own, which goes on every request as a bearer token and is renewed with the refresh
-/// token that came with it, before it runs out and when it is refused. Kept in the source's secret store, it signs in at
-/// the next start with nobody at the browser. The client follows no redirects itself: a file's download sent on to a
+/// the person signs in on the platform's own page in a browser of AnyFS's own and gives it the code AnyFS shows, within the
+/// five minutes the platform holds the sign-in for, and the platform hands AnyFS a token of its own, which goes on every
+/// request as a bearer token and is renewed with the refresh token that came with it, before it runs out and when it is
+/// refused. Kept in the source's secret store, it signs in at the next start with nobody at the browser. The client follows no redirects itself: a file's download sent on to a
 /// storage service's address goes there without the sign-in.
 /// </summary>
 internal sealed class ArtifactorySession : IDisposable
@@ -490,9 +492,11 @@ internal sealed class ArtifactorySession : IDisposable
     }
 
     /// <summary>
-    /// JFrog's client sign-in: a session of AnyFS's own asked of the platform, the platform's sign-in page for it opened in a
-    /// browser of AnyFS's own for the person (who signs in and gives the code AnyFS shows them), then the token the platform
-    /// hands over for the session.
+    /// JFrog's client sign-in: as a browser window of AnyFS's own opens for the person, a session of AnyFS's own asked of the
+    /// platform and its sign-in page opened there (the person signs in and gives the code AnyFS shows them), then the token
+    /// the platform hands over for the session. The platform holds the session for five minutes from when it was asked
+    /// for, so it is asked for only once the window's turn has come (another sign-in of the server may have its window
+    /// open), and the window closes when the five minutes are up.
     /// </summary>
     private async Task ClientSignInAsync(bool interactive, Action<string> progress, CancellationToken ct)
     {
@@ -501,17 +505,13 @@ internal sealed class ArtifactorySession : IDisposable
             throw new SignInRequiredException($"the Artifactory sign-in for {Url.Host} has lapsed, and only you can sign in again (the sign-in page asks you for a code): open the source, or its Retry");
         }
 
-        var session = Guid.NewGuid().ToString("D");
-        await AskForSessionAsync(session, ct).ConfigureAwait(false);
-        var target = new ArtifactorySignInTarget(Platform, session, c => SessionTokenAsync(session, c));
+        var target = new ArtifactorySignInTarget(Platform, AskForSessionAsync, SessionTokenAsync, _standIn?.SessionHeld);
         ArtifactoryClientToken? token;
         string browserName;
-        if (_standIn?.Browser is { } browser)
+        if (_standIn?.Browser is { } person)
         {
             browserName = "the browser";
-            progress(target.Prompt(browserName));
-            await browser(interactive, target.Page, ct).ConfigureAwait(false);
-            token = await SessionTokenAsync(session, ct).ConfigureAwait(false);
+            token = await StandInWindowAsync(person, target, progress, ct).ConfigureAwait(false);
         }
         else
         {
@@ -530,6 +530,77 @@ internal sealed class ArtifactorySession : IDisposable
         User = token.User ?? NameIn(token.Access);
         How = $"with {browserName}";
         _logger.LogInformation("artifactory: signed in to {Host} with {Browser} through JFrog's client sign-in; the token runs to {Until}", Url.Host, browserName, token.Until?.ToString("u") ?? "no end");
+    }
+
+    /// <summary>
+    /// The stand-in's window (tests), kept as <see cref="BrowserSession"/> keeps the person's: one window at a time on the
+    /// server's profile, the session asked for and the person told its code as it opens, then the target checked until it
+    /// has the token or says the sign-in cannot end in one, which closes the window; a person who closes the window first
+    /// (whose stand-in finishes) ends the sign-in. A stand-in that fails is a test's own failure, and is thrown as it is.
+    /// </summary>
+    private static async Task<ArtifactoryClientToken?> StandInWindowAsync(Func<bool, Uri, CancellationToken, Task> person, ArtifactorySignInTarget target, Action<string> progress, CancellationToken ct)
+    {
+        var turn = ProfileLocks.For(target.ProfileDir);
+        await turn.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await target.OpeningWindowAsync(ct).ConfigureAwait(false);
+            progress(target.Prompt("the browser"));
+            using var window = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            var at = person(true, target.Page, window.Token);
+            try
+            {
+                DateTime? closedSince = null;
+                while (true)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (at.IsFaulted)
+                    {
+                        await at.ConfigureAwait(false);
+                    }
+
+                    // a window gone for three seconds is a closed one, as BrowserSession tells it; the target is checked
+                    // meanwhile, for a code given just before
+                    closedSince = at.IsCompleted ? closedSince ?? DateTime.UtcNow : null;
+                    var check = await target.CheckAsync([], [], ct).ConfigureAwait(false);
+                    if (check.Done)
+                    {
+                        return target.Token;
+                    }
+
+                    if (check.Failure is { } failure)
+                    {
+                        throw new SignInRequiredException(failure, permanent: true);
+                    }
+
+                    if (DateTime.UtcNow - closedSince > TimeSpan.FromSeconds(3))
+                    {
+                        throw new SignInRequiredException($"the browser window was closed before the sign-in to {target.Page.Host} finished; Retry to sign in", permanent: true);
+                    }
+
+                    var pace = Task.Delay(TimeSpan.FromMilliseconds(25), ct);
+                    await (at.IsCompleted ? pace : Task.WhenAny(at, pace)).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                // the window closes, and the person's stand-in ends with it before the sign-in goes on, as BrowserSession
+                // closes the browser before it returns
+                await window.CancelAsync().ConfigureAwait(false);
+                try
+                {
+                    await at.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or TimeoutException || at.IsFaulted)
+                {
+                    // its ending, or its own failure, which the loop has thrown already where it came first
+                }
+            }
+        }
+        finally
+        {
+            turn.Release();
+        }
     }
 
     /// <summary>
