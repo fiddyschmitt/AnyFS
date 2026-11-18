@@ -192,8 +192,9 @@ answered: repositories (local, remote with what they have cached under `<key>-ca
 accounts that read all of a repository, a folder of one, or nothing (`Reads`); the repositories list, the storage calls
 (folder info, file info, the file list unless `FileList` is off), downloads with ranges and, with `Redirects`, a
 redirect to a signed address that refuses a request carrying Artifactory's sign-in; bearer tokens (`TokenFor` makes a
-signed one that names its account), API keys, Basic, the anonymous user where `Anonymous`, and the platform's who-am-I
-call with its session cookies (`SessionFor`, `EndSessions`). It answers the queries the source writes (`Queries`
+signed one that names its account), API keys, Basic, the anonymous user where `Anonymous`, and JFrog's client sign-in
+as the lab's 7.161 answered it (`SignInAt` and `Person` stand in for the person at the sign-in page, `ClientSignIn` off
+for a server without it, `Revoke` and `EndSessions` refuse tokens). It answers the queries the source writes (`Queries`
 records them, with `stream ` before one that asked for a streamed answer): a limit applied before what the account may
 not read is left out, as the real one does; `Queryable` off for an edition without the query language, `HardLimit` for
 a server that cuts its answers, `QueriesAtOnce` for one that refuses queries past so many at a time. Its clock is

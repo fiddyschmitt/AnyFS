@@ -1,20 +1,27 @@
 using System.Diagnostics;
-using System.Net;
-using System.Text.Json;
 
 namespace AnyFS.Sources.Artifactory;
 
 /// <summary>
-/// The web session's sign-in to Artifactory in a browser (spec 7.13): the platform's own page opened in a browser of
-/// AnyFS's own, one profile per server (<see cref="DefaultProfile"/>), whatever its sign-in (SAML or OpenID Connect to the
-/// organisation's identity provider, a password and a second factor). The person counts as signed in once a page of the
-/// platform is open, the browser holds the platform's access token, and the platform tells AnyFS, with the browser's
-/// cookies, who that is. Every cookie of the profile is kept: the identity provider's among them let a later headless
-/// launch sign in again without anyone.
+/// The web session's sign-in to Artifactory in a browser (spec 7.13): JFrog's client sign-in, the one its own command-line
+/// tool's <c>jf login</c> makes. AnyFS asks the platform for a sign-in under a session of its own, then opens the platform's
+/// sign-in page for that session in a browser of AnyFS's own, one profile per server (<see cref="DefaultProfile"/>), whatever
+/// its sign-in (SAML or OpenID Connect to the organisation's identity provider, a password and a second factor). Once
+/// signed in, the page asks the person for the code AnyFS shows them (<see cref="Code"/>, the session's last four
+/// characters) and, given it, lets the session have a token: an access token the whole platform takes, and what renews
+/// it. The person counts as signed in once the platform hands that token over (<see cref="Token"/>). The token the
+/// page's own sign-in leaves in its cookies is no use: it is the platform's pages', and Artifactory's REST API refuses it
+/// ("Token failed verification: audience").
 /// </summary>
-internal sealed class ArtifactorySignInTarget(Uri platform, bool trustAnyCertificate, string? profileDir = null)
-    : WebSignInTarget(new Uri(platform.AbsoluteUri.TrimEnd('/') + "/ui/"), profileDir ?? DefaultProfile(platform.Host))
+/// <param name="platform">The platform's address (its pages at <c>ui/</c>, its access service at <c>access/</c>).</param>
+/// <param name="session">The sign-in's session, which AnyFS has asked the platform for.</param>
+/// <param name="poll">Asks the platform for the session's token: null until the person has given the code.</param>
+internal sealed class ArtifactorySignInTarget(Uri platform, string session, Func<CancellationToken, Task<ArtifactoryClientToken?>> poll, string? profileDir = null)
+    : WebSignInTarget(PageFor(platform, session), profileDir ?? DefaultProfile(platform.Host))
 {
+    /// <summary>The name the platform's page gives AnyFS ("enter the code that you received from AnyFS").</summary>
+    public const string ClientName = "AnyFS";
+
     private static readonly TimeSpan CheckEvery = TimeSpan.FromSeconds(2);
 
     private long _lastCheck;
@@ -25,69 +32,37 @@ internal sealed class ArtifactorySignInTarget(Uri platform, bool trustAnyCertifi
 
     public override string OtherWayIn => ", or choose Access token under Sign in with";
 
-    /// <summary>The browser profile that keeps the web session's sign-in to an Artifactory server; <c>ANYFS_ARTIFACTORY_PROFILES</c> moves the root (tests).</summary>
+    /// <summary>The page asks for a code every time: there is no sign-in to read without a window.</summary>
+    public override bool NeedsAPerson => true;
+
+    /// <summary>What the person types into the page when it asks: the session's last four characters, as JFrog's own tool shows them.</summary>
+    public string Code => session[^4..];
+
+    /// <summary>The token the platform gave for the session, once the person has signed in and given the code.</summary>
+    public ArtifactoryClientToken? Token { get; private set; }
+
+    /// <summary>The browser profile that keeps the sign-in to an Artifactory server's platform; <c>ANYFS_ARTIFACTORY_PROFILES</c> moves the root (tests).</summary>
     public static string DefaultProfile(string host) => ProfileFor("artifactory-browser", host, "ANYFS_ARTIFACTORY_PROFILES");
 
-    /// <summary>The profile is AnyFS's own, for this server only: every cookie in it belongs to the sign-in (an identity provider's too).</summary>
-    public override bool Keeps(SessionCookie cookie) => true;
+    /// <summary>The platform's sign-in page for a client's session, as JFrog's own tool opens it: with the code asked for.</summary>
+    public static Uri PageFor(Uri platform, string session)
+        => new(platform, $"ui/login?jfClientSession={Uri.EscapeDataString(session)}&jfClientName={ClientName}&jfClientCode=1");
+
+    public override string Prompt(string browserName)
+        => $"Sign in to {Page.Host} in the {browserName} window that opened; when the page asks for the code that you received from {ClientName}, enter {Code}";
+
+    /// <summary>None of the browser's cookies: the session is the token the platform hands over, not the page's own.</summary>
+    public override bool Keeps(SessionCookie cookie) => false;
 
     public override async ValueTask<SignInCheck> CheckAsync(IReadOnlyList<Uri> pages, IReadOnlyList<SessionCookie> cookies, CancellationToken ct)
     {
-        if (!pages.Any(IsPlatformPage) || !cookies.Any(c => c.Name == ArtifactorySession.AccessCookie))
-        {
-            return SignInCheck.NotYet;
-        }
-
-        // the platform gives the anonymous user a token too, where it lets anyone read: ask it who this one is, now and then
         if (_lastCheck != 0 && Stopwatch.GetElapsedTime(_lastCheck) < CheckEvery)
         {
             return SignInCheck.NotYet;
         }
 
         _lastCheck = Stopwatch.GetTimestamp();
-        return await SignedInAsync(cookies, ct).ConfigureAwait(false) ? SignInCheck.SignedIn : SignInCheck.NotYet;
-    }
-
-    private bool IsPlatformPage(Uri page) => page.Host.Equals(Page.Host, StringComparison.OrdinalIgnoreCase) && page.Port == Page.Port;
-
-    /// <summary>Whether the platform takes the browser's cookies as a signed-in session of someone's.</summary>
-    internal async Task<bool> SignedInAsync(IReadOnlyList<SessionCookie> cookies, CancellationToken ct)
-    {
-        var jar = new CookieContainer();
-        foreach (var c in cookies)
-        {
-            try
-            {
-                jar.Add(new Cookie(c.Name, c.Value, string.IsNullOrEmpty(c.Path) ? "/" : c.Path, c.Domain) { Secure = c.Secure, HttpOnly = c.HttpOnly });
-            }
-            catch (CookieException)
-            {
-            }
-        }
-
-        using var handler = new SocketsHttpHandler { CookieContainer = jar, UseCookies = true, AllowAutoRedirect = false, AutomaticDecompression = DecompressionMethods.All };
-        if (trustAnyCertificate)
-        {
-            handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
-        }
-
-        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(20) };
-        try
-        {
-            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Page, "api/v1/ui/auth/current"));
-            request.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
-            using var response = await http.SendAsync(request, ct).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) != true)
-            {
-                return false;
-            }
-
-            using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false), cancellationToken: ct).ConfigureAwait(false);
-            return doc.RootElement.Str("name") is { Length: > 0 } name && !name.Equals("anonymous", StringComparison.OrdinalIgnoreCase);
-        }
-        catch (Exception ex) when (ex is HttpRequestException or JsonException || ex is TaskCanceledException && !ct.IsCancellationRequested)
-        {
-            return false;
-        }
+        Token ??= await poll(ct).ConfigureAwait(false);
+        return Token is null ? SignInCheck.NotYet : SignInCheck.SignedIn;
     }
 }

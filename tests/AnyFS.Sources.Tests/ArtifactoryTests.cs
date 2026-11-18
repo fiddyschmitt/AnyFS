@@ -343,62 +343,195 @@ public class ArtifactoryTests
         await source.DisposeAsync();
     }
 
-    [TestMethod]
-    public async Task AWebSessionsCookiesSignInAndItsAccessTokenIsRenewedAsItRunsOut()
-    {
-        var fake = ArtifactorySeed.Lab();
-        var windows = 0;
-        var standIn = fake.StandIn((_, _) =>
-        {
-            windows++;
-            return Task.FromResult(fake.SessionFor("tester", TimeSpan.FromHours(1)));
-        }, useKept: false);
-        var settings = new ArtifactorySettings { Address = fake.Server + "/generic-local", SignInMethod = ArtifactorySettings.WebSessionChoice };
-        await using var source = await StartAsync(fake, settings, standIn: standIn);
-        Assert.AreEqual("tester", source.Session.User);
-        Assert.AreEqual("with the browser", source.Session.How);
-        CollectionAssert.Contains(await NamesAsync(source, ""), "README.md");
-
-        // two hours on, the access token has run out: what renews it is still good, and the platform makes another
-        fake.Now += TimeSpan.FromHours(2);
-        var before = fake.Count("/ui/api/v1/ui/auth/current");
-        Assert.AreEqual("# Guide\n\nStep one.\n", await TextAsync(source, "docs/guide.md"));
-        Assert.AreEqual(before + 1, fake.Count("/ui/api/v1/ui/auth/current"));
-        Assert.AreEqual(1, windows, "no browser for it");
-    }
+    private static ArtifactorySettings WebSession(FakeArtifactory fake, string path = "/generic-local")
+        => new() { Address = fake.Server + path, SignInMethod = ArtifactorySettings.WebSessionChoice };
 
     [TestMethod]
-    public async Task AWebSessionThatHasEndedSignsInAgainThroughTheBrowserWithoutAWindow()
+    public async Task AWebSessionSignsInThroughJFrogsClientSignInWithTheCodeItShowsAndReadsWithTheTokenItGets()
     {
         var fake = ArtifactorySeed.Lab();
         var asked = new List<bool>();
-        var standIn = fake.StandIn((interactive, _) =>
-        {
-            asked.Add(interactive);
-            return Task.FromResult(fake.SessionFor("tester", TimeSpan.FromHours(1)));
-        }, useKept: false);
-        var settings = new ArtifactorySettings { Address = fake.Server + "/generic-local", SignInMethod = ArtifactorySettings.WebSessionChoice };
-        await using var source = await StartAsync(fake, settings, standIn: standIn);
-        fake.EndSessions();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, WebSession(fake), context, fake.StandIn(fake.Person("tester", asked), useKept: false));
+        Assert.AreEqual("tester", source.Session.User, "the token names its account");
+        Assert.AreEqual("with the browser", source.Session.How);
+        CollectionAssert.AreEqual(new[] { true }, asked);
         Assert.AreEqual("# Guide\n\nStep one.\n", await TextAsync(source, "docs/guide.md"));
-        CollectionAssert.AreEqual(new[] { true, false }, asked, "a window at the start, none for the renewal");
+
+        // the platform's page for a session of AnyFS's own, asking for the code, as JFrog's own tool opens it
+        var page = fake.SignInPages.Single();
+        Assert.AreEqual("https://artifactory.fake.test/ui/login", page.GetLeftPart(UriPartial.Path));
+        var query = page.Query.TrimStart('?').Split('&').Select(p => p.Split('=')).ToDictionary(p => p[0], p => p[1]);
+        Assert.IsTrue(Guid.TryParse(query["jfClientSession"], out _), query["jfClientSession"]);
+        Assert.AreEqual("AnyFS", query["jfClientName"]);
+        Assert.AreEqual("1", query["jfClientCode"]);
+
+        // the person is told the code: the session's last four characters
+        string[] said;
+        lock (context.Progress)
+        {
+            said = context.Progress.Select(p => p.Message).ToArray();
+        }
+
+        var code = query["jfClientSession"][^4..];
+        Assert.IsTrue(said.Any(m => m.Contains($"enter {code}", StringComparison.Ordinal) && m.Contains("the code that you received from AnyFS", StringComparison.Ordinal)), string.Join(" | ", said));
+
+        // the token went on the requests, the page's own sign-in nowhere
+        Assert.AreEqual(1, fake.ClientTokens.Count);
+        Assert.AreEqual(0, fake.Count("/ui/api/v1/ui/auth/current"));
     }
 
     [TestMethod]
-    public async Task ASessionKeptFromBeforeSignsInAtTheNextStart()
+    public async Task AWebSessionsTokenIsRenewedBeforeItRunsOutWithNoWindow()
+    {
+        var fake = ArtifactorySeed.Lab();
+        var asked = new List<bool>();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, WebSession(fake), context, fake.StandIn(fake.Person("tester", asked), useKept: false));
+        CollectionAssert.Contains(await NamesAsync(source, ""), "README.md");
+
+        // within a week of the year's end (a tenth of its life, at most a week, as JFrog's own tool has it): renewed
+        // before a request, once, with the refresh token, and the renewal kept for the next start
+        fake.Now += TimeSpan.FromDays(365 - 6);
+        Assert.AreEqual("# Guide\n\nStep one.\n", await TextAsync(source, "docs/guide.md"));
+        Assert.IsTrue((await NamesAsync(source, "docs/images")).Count > 0);
+        Assert.AreEqual(1, fake.Count("POST /access/api/v1/tokens"), "renewed once");
+        Assert.AreEqual(2, fake.ClientTokens.Count);
+        StringAssert.Contains(context.Secrets.Get(ArtifactorySession.TokenSecret), fake.ClientTokens[^1]);
+        CollectionAssert.AreEqual(new[] { true }, asked, "no window for it");
+    }
+
+    [TestMethod]
+    public async Task AWebSessionThatHasEndedWaitsForTheSourcesRetryInsteadOfOpeningAWindow()
+    {
+        var fake = ArtifactorySeed.Lab();
+        var asked = new List<bool>();
+        await using var source = await StartAsync(fake, WebSession(fake), standIn: fake.StandIn(fake.Person("tester", asked), useKept: false));
+        fake.EndSessions();
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => TextAsync(source, "docs/guide.md"));
+        StringAssert.Contains(ex.Message, "only you can sign in again");
+        StringAssert.Contains(ex.Message, "Retry the source to sign in");
+        CollectionAssert.AreEqual(new[] { true }, asked, "the page asks the person for a code: no browser without them");
+
+        // the renewal Artifactory refused is not asked for again
+        var again = await Assert.ThrowsExactlyAsync<VfsException>(() => TextAsync(source, "docs/large.bin"));
+        StringAssert.Contains(again.Message, "only you can sign in again");
+        Assert.AreEqual(1, fake.Count("POST /access/api/v1/tokens"));
+    }
+
+    [TestMethod]
+    public async Task TwoSourcesOfOneServerEachSignInAndRenewATokenOfTheirOwn()
+    {
+        var fake = ArtifactorySeed.Lab(root: "/two");
+        var asked = new List<bool>();
+        using var firstContext = new TestSourceContext();
+        using var secondContext = new TestSourceContext();
+        await using var first = await StartAsync(fake, WebSession(fake), firstContext, fake.StandIn(fake.Person("tester", asked)));
+        await using var second = await StartAsync(fake, WebSession(fake, "/generic-local/docs"), secondContext, fake.StandIn(fake.Person("tester", asked)));
+        CollectionAssert.AreEqual(new[] { true, true }, asked, "each its own sign-in: a refresh token renews once, so two sessions cannot share one");
+        Assert.AreEqual(2, fake.ClientTokens.Count);
+
+        // near the year's end both are renewed, each with its own refresh token
+        fake.Now += TimeSpan.FromDays(360);
+        foreach (var (source, path) in new[] { (first, "docs/"), (second, "") })
+        {
+            Assert.AreEqual("# Guide\n\nStep one.\n", await TextAsync(source, path + "guide.md"));
+            Assert.IsTrue((await NamesAsync(source, path + "images")).Count > 0);
+        }
+
+        Assert.AreEqual(2, fake.Count("POST /access/api/v1/tokens"));
+        Assert.AreEqual(4, fake.ClientTokens.Count);
+        Assert.AreNotEqual(firstContext.Secrets.Get(ArtifactorySession.TokenSecret), secondContext.Secrets.Get(ArtifactorySession.TokenSecret));
+    }
+
+    [TestMethod]
+    public async Task ASignInKeptFromBeforeSignsInAtTheNextStartAndIsRenewedNearItsEnd()
     {
         var fake = ArtifactorySeed.Lab(root: "/kept");
         using var context = new TestSourceContext();
-        var settings = new ArtifactorySettings { Address = fake.Server, SignInMethod = ArtifactorySettings.WebSessionChoice };
-        await using (var first = await StartAsync(fake, settings, context, fake.StandIn((_, _) => Task.FromResult(fake.SessionFor("tester", TimeSpan.FromHours(1))), useKept: false)))
+        var settings = WebSession(fake, "");
+        await using (var first = await StartAsync(fake, settings, context, fake.StandIn(fake.Person("tester"), useKept: false)))
         {
             Assert.AreEqual("tester", first.Session.User);
         }
 
-        Assert.IsNotNull(context.Secrets.Get(ArtifactorySession.CookiesSecret));
-        await using var second = await StartAsync(fake, settings, context, fake.StandIn((_, _) => throw new InvalidOperationException("no browser should be needed")));
-        Assert.AreEqual("with the session kept from before", second.Session.How);
-        Assert.AreEqual("tester", second.Session.User);
+        var kept = context.Secrets.Get(ArtifactorySession.TokenSecret);
+        Assert.IsNotNull(kept);
+        StringAssert.Contains(kept, fake.ClientTokens.Single());
+        var nobody = fake.StandIn((_, _, _) => throw new InvalidOperationException("no browser should be needed"));
+        await using (var second = await StartAsync(fake, settings, context, nobody))
+        {
+            Assert.AreEqual("with the sign-in kept from before", second.Session.How);
+            Assert.AreEqual("tester", second.Session.User);
+        }
+
+        // started again near the year's end: the kept token signs in, and the first request after renews it
+        fake.Now += TimeSpan.FromDays(360);
+        await using (var third = await StartAsync(fake, settings, context, nobody))
+        {
+            Assert.AreEqual("with the sign-in kept from before", third.Session.How);
+            CollectionAssert.Contains(await NamesAsync(third, "generic-local"), "README.md");
+            Assert.AreEqual(2, fake.ClientTokens.Count);
+        }
+
+        StringAssert.Contains(context.Secrets.Get(ArtifactorySession.TokenSecret), fake.ClientTokens[^1]);
+        Assert.AreEqual(1, fake.Count("POST /access/api/v1/tokens"));
+    }
+
+    [TestMethod]
+    public async Task AKeptSignInNothingRenewsAnyMoreAsksThePersonAgain()
+    {
+        var fake = ArtifactorySeed.Lab();
+        using var context = new TestSourceContext();
+        await using (await StartAsync(fake, WebSession(fake), context, fake.StandIn(fake.Person("tester"), useKept: false)))
+        {
+        }
+
+        fake.EndSessions();
+        var asked = new List<bool>();
+        await using var again = await StartAsync(fake, WebSession(fake), context, fake.StandIn(fake.Person("tester", asked)));
+        Assert.AreEqual("with the browser", again.Session.How);
+        CollectionAssert.AreEqual(new[] { true }, asked);
+        StringAssert.Contains(context.Secrets.Get(ArtifactorySession.TokenSecret), fake.ClientTokens[^1], "the new sign-in kept in place of the old");
+    }
+
+    [TestMethod]
+    public async Task AServerWithoutTheClientSignInSaysToUseAnAccessToken()
+    {
+        var fake = ArtifactorySeed.Lab();
+        fake.ClientSignIn = false;
+        var asked = new List<bool>();
+        var source = new ArtifactorySource(WebSession(fake), fake.StandIn(fake.Person("tester", asked), useKept: false));
+        var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => source.InitialiseAsync(new TestSourceContext(), CancellationToken.None));
+        Assert.IsTrue(ex.Permanent, "trying again will not give the server one");
+        StringAssert.Contains(ex.Message, "has no client sign-in");
+        StringAssert.Contains(ex.Message, "choose Access token");
+        Assert.AreEqual(0, asked.Count, "no browser for a sign-in that cannot end in a token");
+        await source.DisposeAsync();
+    }
+
+    [TestMethod]
+    public async Task APersonWhoClosesTheWindowLeavesTheSourceWaitingForARetry()
+    {
+        var fake = ArtifactorySeed.Lab();
+        var source = new ArtifactorySource(WebSession(fake), fake.StandIn((_, _, _) => Task.CompletedTask, useKept: false));
+        var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => source.InitialiseAsync(new TestSourceContext(), CancellationToken.None));
+        StringAssert.Contains(ex.Message, "Artifactory gave AnyFS no token for the sign-in");
+        await source.DisposeAsync();
+    }
+
+    [TestMethod]
+    public async Task TheTestButtonSignsInTheWebSessionAndTheSourceStartedFromItAsksNoMore()
+    {
+        var fake = ArtifactorySeed.Lab(root: "/tested");
+        var asked = new List<bool>();
+        var settings = WebSession(fake, "");
+        var result = await ArtifactoryPlugin.TestAsync(settings, new Progress<string>(), fake.StandIn(fake.Person("tester", asked), useKept: false), CancellationToken.None);
+        Assert.IsTrue(result.Success, result.Message);
+        StringAssert.Contains(result.Message, "as tester with the browser");
+        await using var started = await StartAsync(fake, settings, standIn: fake.StandIn((_, _, _) => throw new InvalidOperationException("signed in by the Test")));
+        Assert.AreEqual("with the sign-in kept from before", started.Session.How);
+        CollectionAssert.AreEqual(new[] { true }, asked);
     }
 
     // --- the tree ------------------------------------------------------------------------------------------------------

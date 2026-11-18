@@ -8,7 +8,7 @@ internal enum ArtifactorySignIn
     /// <summary>An identity token, an access token or an API key, sent with every request.</summary>
     Token,
 
-    /// <summary>A browser of AnyFS's own, on the server's own sign-in page (whatever single sign-on it has); AnyFS keeps the session.</summary>
+    /// <summary>A browser of AnyFS's own, on the server's own sign-in page (whatever single sign-on it has), which then asks for the code AnyFS shows: JFrog's client sign-in, whose token AnyFS keeps and renews.</summary>
     WebSession,
 
     /// <summary>A user name and password, sent with every request (Basic).</summary>
@@ -30,7 +30,7 @@ public sealed class ArtifactorySettings
     public string Address { get; set; } = "";
 
     [Setting("Sign in with", Order = 1, Group = "Sign-in", Kind = SettingKind.Choice, Choices = [TokenChoice, WebSessionChoice, PasswordChoice, AnonymousChoice],
-        Hint = "Access token: an identity token (Artifactory: your profile, Generate an Identity Token), an access token, or an API key. Web session: AnyFS opens the server's own sign-in page in a browser of its own for you to sign in, single sign-on and all, and keeps that session; it renews it without a window while the server lets it, and shows the window again only when it does not. User name and password: sent with every request, where the server takes them (one that signs people in through single sign-on alone does not). No sign-in: what the server lets anyone read.")]
+        Hint = "Access token: an identity token (Artifactory: your profile, Generate an Identity Token), an access token, or an API key. Web session: AnyFS opens the server's own sign-in page in a browser of its own for you to sign in, single sign-on and all, and then to enter the code AnyFS shows you, as JFrog's own command-line tool has you do (Artifactory 7.64 and later). The server gives AnyFS a token of its own, which AnyFS keeps and renews; the window opens again only when the server stops taking it. User name and password: sent with every request, where the server takes them (one that signs people in through single sign-on alone does not). No sign-in: what the server lets anyone read.")]
     public string SignInMethod { get; set; } = TokenChoice;
 
     [Setting("Access token", Secret = true, Order = 2, Group = "Sign-in", Kind = SettingKind.Password, Hint = "An identity token, an access token or an API key.")]

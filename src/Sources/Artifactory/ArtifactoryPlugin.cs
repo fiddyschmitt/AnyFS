@@ -141,7 +141,7 @@ public sealed class ArtifactoryPlugin : ISourcePlugin, IValidatable, ITestable, 
                 ? $"Reached {session.Address.Base.Host}{version} {session.How}."
                 : $"Signed in to {session.Address.Base.Host}{version}{(session.User is null ? "" : $" as {session.User}")} {session.How}.";
             progress.Report("Signed in; asking Artifactory what the address holds");
-            // the sign-in's check has just read them, but for a web session's
+            // the sign-in's check has just read them
             var repositories = session.TakeRepositories(TimeSpan.FromMinutes(1));
             if (repositories is null)
             {

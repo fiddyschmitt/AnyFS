@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 
@@ -10,52 +11,85 @@ namespace AnyFS.Sources.Artifactory;
 
 /// <summary>
 /// What a test (or the Test button) changes about an Artifactory session: what sends its requests; for the web session,
-/// what stands in for the browser (the cookies a sign-in in it would give; interactive or not); and whether a session kept
-/// from before is used.
+/// what stands in for the person at the browser (given the platform's sign-in page for the session, whether a window may be
+/// shown: signs in there and gives the code, or does not); and whether a sign-in kept from before is used.
 /// </summary>
-internal sealed record ArtifactoryStandIn(Func<HttpMessageHandler> Handler, Func<bool, CancellationToken, Task<IReadOnlyList<SessionCookie>>>? Browser = null, bool UseKept = true);
+internal sealed record ArtifactoryStandIn(Func<HttpMessageHandler> Handler, Func<bool, Uri, CancellationToken, Task>? Browser = null, bool UseKept = true);
+
+/// <summary>
+/// A token JFrog's client sign-in gave: its access token, which the whole platform takes, the refresh token that renews it
+/// (once: a renewal gives the next), and the account it names, where the platform said.
+/// </summary>
+internal sealed record ArtifactoryClientToken(string Access, string? Refresh, string? User)
+{
+    /// <summary>When the access token runs out (its <c>exp</c>); null for one that does not say.</summary>
+    public DateTimeOffset? Until => ArtifactorySession.ExpiryOf(Access);
+
+    /// <summary>When the access token was made (its <c>iat</c>); null for one that does not say.</summary>
+    public DateTimeOffset? Issued => ArtifactorySession.IssuedOf(Access);
+
+    /// <summary>The token in an answer of the platform's (the client sign-in's, a renewal's); null for one that holds none.</summary>
+    public static ArtifactoryClientToken? From(JsonElement answer)
+        => answer.ValueKind == JsonValueKind.Object && answer.Str("access_token") is { Length: > 0 } access
+            ? new ArtifactoryClientToken(access, answer.Str("refresh_token"), answer.Str("username"))
+            : null;
+
+    /// <summary>A token kept as <see cref="ToJson"/> wrote it; null for anything else.</summary>
+    public static ArtifactoryClientToken? Parse(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return From(doc.RootElement);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    public string ToJson() => new JsonObject { ["access_token"] = Access, ["refresh_token"] = Refresh, ["username"] = User }.ToJsonString();
+}
 
 /// <summary>
 /// An Artifactory source's sign-in and the client its requests go through (spec 7.13). First it finds Artifactory behind
 /// the address (where its ping answers: <c>/artifactory</c> on the host, the host's root, or a path of its own); then it
-/// signs in the way the settings say. A token goes on every request as a bearer token, an API key
-/// in the header Artifactory reads one from, a user name and password as Basic; a refusal of any of them is final. The web
-/// session takes the cookies of a browser of AnyFS's own signed in on the platform's own page
-/// (<see cref="ArtifactorySignInTarget"/>): the platform keeps the session in two of them, a short-lived access token,
-/// which Artifactory's REST API takes as any bearer token, and what renews it, which the platform's own page calls do for
-/// AnyFS as for the page. They are kept in the source's secret store for the next start. The client follows no redirects
-/// itself: a file's download sent on to a storage service's address goes there without the sign-in.
+/// signs in the way the settings say. A token goes on every request as a bearer token, an API key in the header
+/// Artifactory reads one from, a user name and password as Basic; a refusal of any of them is final. The web session signs
+/// in through JFrog's client sign-in (<see cref="ArtifactorySignInTarget"/>), the one JFrog's own <c>jf login</c> makes:
+/// the person signs in on the platform's own page in a browser of AnyFS's own and gives it the code AnyFS shows, and the
+/// platform hands AnyFS a token of its own, which goes on every request as a bearer token and is renewed with the refresh
+/// token that came with it, before it runs out and when it is refused. Kept in the source's secret store, it signs in at
+/// the next start with nobody at the browser. The client follows no redirects itself: a file's download sent on to a
+/// storage service's address goes there without the sign-in.
 /// </summary>
 internal sealed class ArtifactorySession : IDisposable
 {
-    public const string CookiesSecret = "artifactory-cookies";
-
-    /// <summary>The cookie the platform's pages keep the signed-in account's access token in.</summary>
-    public const string AccessCookie = "ACCESSTOKEN";
-
-    /// <summary>The cookie that renews it.</summary>
-    public const string RefreshCookie = "REFRESHTOKEN";
+    /// <summary>The secret the web session's token is kept in for the next start.</summary>
+    public const string TokenSecret = "artifactory-client-token";
 
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan RecentFor = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan MinRenewalInterval = TimeSpan.FromSeconds(30);
 
-    // the cookies of a sign-in just made, by installation: the Test's, for the source started from the same dialog
-    private static readonly ConcurrentDictionary<string, (string Cookies, DateTime At)> Recent = new(StringComparer.OrdinalIgnoreCase);
+    // the token of a sign-in the Test just made, by installation, for the source started from the same dialog: taken once,
+    // since a refresh token renews once, and two sessions holding one would leave the second with one already spent
+    private static readonly ConcurrentDictionary<string, (string Token, DateTime At)> Recent = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly ILogger _logger;
     private readonly ISecretStore? _secrets;
     private readonly ArtifactoryStandIn? _standIn;
     private readonly HttpMessageHandler _handler;
     private readonly SemaphoreSlim _renewGate = new(1, 1);
-    private BrowserSession? _browser;
     private DateTime _renewedAt;
     private int _generation;
     private bool _signedIn;
 
-    // the web session's access token as it stands (the cookie's value), and when it runs out
-    private string? _bearer;
-    private DateTimeOffset _bearerUntil;
+    // why the web session cannot be renewed any more, once Artifactory has refused a renewal
+    private string? _lapsed;
+
+    // the web session's token as it stands
+    private ArtifactoryClientToken? _client;
 
     // how far the server's clock is ahead of this computer's, from the Date of its answers
     private long _clockAheadTicks;
@@ -69,7 +103,6 @@ internal sealed class ArtifactorySession : IDisposable
         _standIn = standIn;
         Url = settings.Url ?? throw new SourceFailedException("The address is not an http or https address.", permanent: true);
         Method = settings.EffectiveSignIn;
-        Cookies = CookieJar.New();
         HttpMessageHandler inner;
         if (standIn is not null)
         {
@@ -120,9 +153,6 @@ internal sealed class ArtifactorySession : IDisposable
     /// <summary>For every request: no redirects followed.</summary>
     public HttpClient Http { get; }
 
-    /// <summary>The web session's cookies.</summary>
-    public CookieContainer Cookies { get; }
-
     /// <summary>How the source signed in, for messages ("with an access token", "with Microsoft Edge").</summary>
     public string How { get; private set; } = "";
 
@@ -141,7 +171,7 @@ internal sealed class ArtifactorySession : IDisposable
     /// <summary>How many times the sign-in has been renewed: a request remembers it, so one renewal serves every request that lapsed with it.</summary>
     public int Generation => Volatile.Read(ref _generation);
 
-    /// <summary>Whether a refused request may be signed in again: only the web session, whose access token lasts an hour or so.</summary>
+    /// <summary>Whether a refused request may be signed in again: only the web session's, whose token renews.</summary>
     public bool CanRenew => Method == ArtifactorySignIn.WebSession;
 
     /// <summary>The time on the server's clock now, as its answers' dates tell it: what its files' times are compared with.</summary>
@@ -180,7 +210,7 @@ internal sealed class ArtifactorySession : IDisposable
                 }
             }
         }
-        catch (Exception ex) when (ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested)
+        catch (Exception ex) when (IsNoAnswer(ex, ct))
         {
             throw new SourceFailedException($"Artifactory ({Url.Host}) did not answer: {ex.Message}", inner: ex);
         }
@@ -195,6 +225,9 @@ internal sealed class ArtifactorySession : IDisposable
         _logger.LogInformation("artifactory: Artifactory {Version} at {Base}, {Scope}", Version ?? "(version not told)", address.Base,
             address.Scope == ArtifactoryScope.Server ? "the whole server" : address.Repository + (address.Path.Length == 0 ? "" : "/" + address.Path));
     }
+
+    /// <summary>A request the server never answered: the network's failure, or a time out that was not the caller's.</summary>
+    private static bool IsNoAnswer(Exception ex, CancellationToken ct) => ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested;
 
     /// <summary>Whether an answer is JSON that <paramref name="holds"/> what was asked for.</summary>
     private static async Task<bool> IsJsonOfAsync(HttpResponseMessage response, Func<JsonElement, bool> holds, CancellationToken ct)
@@ -222,10 +255,10 @@ internal sealed class ArtifactorySession : IDisposable
     }
 
     /// <summary>
-    /// Signs in for the source's start or the Test: the way the settings say; a web session's cookies kept from before (or
-    /// just made by the Test) while the platform takes them, else a browser, with a window only when
-    /// <paramref name="interactive"/>. Throws <see cref="SourceFailedException"/> (permanent for a refusal only new settings
-    /// can change) when no sign-in can be had.
+    /// Signs in for the source's start or the Test: the way the settings say; a web session's token kept from before (or
+    /// just made by the Test) while Artifactory takes it, renewed where it must be, else JFrog's client sign-in in a browser,
+    /// which needs the person at its window and so is tried only when <paramref name="interactive"/>. Throws
+    /// <see cref="SourceFailedException"/> (permanent for a refusal only new settings can change) when no sign-in can be had.
     /// </summary>
     public async Task SignInAsync(bool interactive, Action<string> progress, CancellationToken ct)
     {
@@ -261,21 +294,26 @@ internal sealed class ArtifactorySession : IDisposable
                 break;
 
             default:
-                if (await KeptAsync(ct).ConfigureAwait(false))
-                {
-                    How = "with the session kept from before";
-                    break;
-                }
-
                 try
                 {
-                    await BrowserSignInAsync(interactive, progress, ct).ConfigureAwait(false);
+                    if (await KeptAsync(ct).ConfigureAwait(false))
+                    {
+                        How = "with the sign-in kept from before";
+                        break;
+                    }
+
+                    await ClientSignInAsync(interactive, progress, ct).ConfigureAwait(false);
                 }
                 catch (SignInRequiredException ex)
                 {
                     throw new SourceFailedException(ex.Message, ex.Permanent, ex);
                 }
+                catch (Exception ex) when (IsNoAnswer(ex, ct))
+                {
+                    throw new SourceFailedException($"Artifactory ({Url.Host}) did not answer: {ex.Message}", inner: ex);
+                }
 
+                await CheckAsync("the token its sign-in gave", ct).ConfigureAwait(false);
                 break;
         }
 
@@ -297,7 +335,7 @@ internal sealed class ArtifactorySession : IDisposable
             await AuthorizeAsync(request, ct).ConfigureAwait(false);
             response = await Http.SendAsync(request, ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested)
+        catch (Exception ex) when (IsNoAnswer(ex, ct))
         {
             throw new SourceFailedException($"Artifactory ({Url.Host}) did not answer: {ex.Message}", inner: ex);
         }
@@ -310,15 +348,25 @@ internal sealed class ArtifactorySession : IDisposable
                 throw new SourceFailedException($"Artifactory ({Url.Host}) refused {refused}{(said is null ? "" : $" ({said})")}.", permanent: true);
             }
 
-            using var doc = await JsonOfAsync(response, ct).ConfigureAwait(false);
-            if (doc?.RootElement.ValueKind != JsonValueKind.Array)
+            if (!await TookRepositoriesAsync(response, ct).ConfigureAwait(false))
             {
                 throw new SourceFailedException($"{Address.Base} did not answer as Artifactory does ({(int)response.StatusCode}): give the server's address as the browser shows it, like https://artifactory.example.com/artifactory.", permanent: (int)response.StatusCode is 404 or 200);
             }
-
-            // what a start asks for next, and the Test: kept for the first to ask (TakeRepositories)
-            Volatile.Write(ref _checked, new Checked(ArtRepository.ListOf(doc.RootElement), Environment.TickCount64));
         }
+    }
+
+    /// <summary>Keeps the repositories an answer to <c>api/repositories</c> lists for the first to ask (<see cref="TakeRepositories"/>); false for an answer that lists none.</summary>
+    private async Task<bool> TookRepositoriesAsync(HttpResponseMessage response, CancellationToken ct)
+    {
+        using var doc = await JsonOfAsync(response, ct).ConfigureAwait(false);
+        if (doc?.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        // what a start asks for next, and the Test: kept for the first to ask (TakeRepositories)
+        Volatile.Write(ref _checked, new Checked(ArtRepository.ListOf(doc.RootElement), Environment.TickCount64));
+        return true;
     }
 
     // the repositories the sign-in's check read, and when, until someone takes them
@@ -329,42 +377,28 @@ internal sealed class ArtifactorySession : IDisposable
     /// <summary>
     /// The repositories the sign-in's check read (<c>api/repositories</c>, every one the account may see), for the first to
     /// ask for them within <paramref name="fresh"/> of then: a start, and the Test, ask nothing more for their first list.
-    /// Null once taken, past that time, or where the sign-in read none (a web session's).
+    /// Null once taken, or past that time.
     /// </summary>
     public List<ArtRepository>? TakeRepositories(TimeSpan fresh)
         => Interlocked.Exchange(ref _checked, null) is { } taken && Environment.TickCount64 - taken.At <= fresh.TotalMilliseconds ? taken.Repositories : null;
 
     /// <summary>The account a signed token names (its subject, <c>…/users/name</c>); null for a token that says nothing (a reference token, an API key).</summary>
     internal static string? NameIn(string token)
-    {
-        var parts = token.Split('.');
-        if (parts.Length != 3)
-        {
-            return null;
-        }
-
-        try
-        {
-            var payload = parts[1].Replace('-', '+').Replace('_', '/');
-            payload = payload.PadRight(payload.Length + ((4 - (payload.Length % 4)) % 4), '=');
-            using var doc = JsonDocument.Parse(Convert.FromBase64String(payload));
-            var subject = doc.RootElement.Str("sub") ?? "";
-            var users = subject.LastIndexOf("/users/", StringComparison.Ordinal);
-            return users >= 0 && subject.Length > users + 7 ? subject[(users + 7)..] : null;
-        }
-        catch (Exception ex) when (ex is FormatException or JsonException)
-        {
-            return null;
-        }
-    }
+        => Claims(token, c => c.Str("sub") is { } subject && subject.LastIndexOf("/users/", StringComparison.Ordinal) is var users and >= 0 && subject.Length > users + 7 ? subject[(users + 7)..] : null);
 
     /// <summary>When a signed token runs out (its <c>exp</c>); null for one that does not say, or does not run out.</summary>
-    internal static DateTimeOffset? ExpiryOf(string token)
+    internal static DateTimeOffset? ExpiryOf(string token) => Claims(token, c => c.Long("exp") is > 0 and var exp ? DateTimeOffset.FromUnixTimeSeconds(exp) : (DateTimeOffset?)null);
+
+    /// <summary>When a signed token was made (its <c>iat</c>); null for one that does not say.</summary>
+    internal static DateTimeOffset? IssuedOf(string token) => Claims(token, c => c.Long("iat") is > 0 and var iat ? DateTimeOffset.FromUnixTimeSeconds(iat) : (DateTimeOffset?)null);
+
+    /// <summary>What a signed token's claims say, read by <paramref name="read"/>; default for a token that is not one (a reference token, an API key).</summary>
+    private static T? Claims<T>(string token, Func<JsonElement, T?> read)
     {
         var parts = token.Split('.');
         if (parts.Length != 3)
         {
-            return null;
+            return default;
         }
 
         try
@@ -372,12 +406,11 @@ internal sealed class ArtifactorySession : IDisposable
             var payload = parts[1].Replace('-', '+').Replace('_', '/');
             payload = payload.PadRight(payload.Length + ((4 - (payload.Length % 4)) % 4), '=');
             using var doc = JsonDocument.Parse(Convert.FromBase64String(payload));
-            var exp = doc.RootElement.Long("exp");
-            return exp > 0 ? DateTimeOffset.FromUnixTimeSeconds(exp) : null;
+            return doc.RootElement.ValueKind == JsonValueKind.Object ? read(doc.RootElement) : default;
         }
         catch (Exception ex) when (ex is FormatException or JsonException)
         {
-            return null;
+            return default;
         }
     }
 
@@ -405,15 +438,18 @@ internal sealed class ArtifactorySession : IDisposable
             using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false), cancellationToken: ct).ConfigureAwait(false);
             return doc.RootElement.Str("name") is { Length: > 0 } name && !name.Equals("anonymous", StringComparison.OrdinalIgnoreCase) ? name : null;
         }
-        catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException || ex is TaskCanceledException && !ct.IsCancellationRequested)
+        catch (Exception ex) when (ex is JsonException || IsNoAnswer(ex, ct))
         {
             return null;
         }
     }
 
-    // --- the web session -----------------------------------------------------------------------------------------------
+    // --- the web session: JFrog's client sign-in -----------------------------------------------------------------------
 
-    /// <summary>The cookies of a sign-in just made, or kept from the last run, while the platform takes them.</summary>
+    /// <summary>
+    /// A token of a sign-in just made (the Test's) or kept from the last run, while Artifactory takes it: renewed first where
+    /// it has run out, or Artifactory refuses it.
+    /// </summary>
     private async Task<bool> KeptAsync(CancellationToken ct)
     {
         if (_standIn is { UseKept: false })
@@ -421,124 +457,176 @@ internal sealed class ArtifactorySession : IDisposable
             return false;
         }
 
-        // a sign-in just made (the Test's) first, then the one kept from the last run
-        var recent = Recent.TryGetValue(Address.Base.AbsoluteUri, out var r) && DateTime.UtcNow - r.At < RecentFor ? r.Cookies : null;
-        foreach (var kept in new[] { recent, _secrets?.Get(CookiesSecret) }.OfType<string>().Distinct(StringComparer.Ordinal))
+        // a sign-in the Test just made first (this session's alone from now on), then the one kept from the last run
+        var recent = Recent.TryRemove(Address.Base.AbsoluteUri, out var r) && DateTime.UtcNow - r.At < RecentFor ? r.Token : null;
+        foreach (var kept in new[] { recent, _secrets?.Get(TokenSecret) }.OfType<string>().Distinct(StringComparer.Ordinal))
         {
-            CookieJar.Clear(Cookies);
-            if (CookieJar.Import(Cookies, kept, Address.Base.Host) <= 0)
+            if (ArtifactoryClientToken.Parse(kept) is not { } token)
             {
                 continue;
             }
 
-            if (await SessionAsync(ct).ConfigureAwait(false) is { } user)
+            _client = token;
+            var runOut = token.Until is { } until && until <= ServerNow;
+            if (!runOut && await TakesTokenAsync(ct).ConfigureAwait(false) || await RefreshAsync(ct).ConfigureAwait(false) && await TakesTokenAsync(ct).ConfigureAwait(false))
             {
-                User = user;
+                User = _client.User ?? NameIn(_client.Access);
                 return true;
             }
         }
 
-        _logger.LogInformation("artifactory: no session kept from before for {Host} that the platform still takes", Url.Host);
-        CookieJar.Clear(Cookies);
+        _logger.LogInformation("artifactory: no sign-in kept from before for {Host} that Artifactory still takes", Url.Host);
+        _client = null;
         return false;
     }
 
-    /// <summary>The web session's sign-in in a browser of AnyFS's own: its cookies, then the platform asked who they are.</summary>
-    private async Task BrowserSignInAsync(bool interactive, Action<string> progress, CancellationToken ct)
+    /// <summary>Whether Artifactory takes the web session's token: its repositories, asked with it (and kept for the start, as the sign-in's check keeps them).</summary>
+    private async Task<bool> TakesTokenAsync(CancellationToken ct)
     {
-        var cookies = await BrowserCookiesAsync(interactive, progress, ct).ConfigureAwait(false);
-        CookieJar.Clear(Cookies);
-        CookieJar.Add(Cookies, cookies);
-        User = await SessionAsync(ct).ConfigureAwait(false)
-            ?? throw new SignInRequiredException($"{BrowserName} signed in to {Url.Host}, but the platform does not take its session from AnyFS");
-        How = $"with {BrowserName}";
-        _logger.LogInformation("artifactory: signed in to {Host} with {Browser} ({Count} cookies)", Url.Host, BrowserName, cookies.Count);
+        using var request = new HttpRequestMessage(HttpMethod.Get, Address.Api("repositories"));
+        await AuthorizeAsync(request, ct).ConfigureAwait(false);
+        using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+        return await TookRepositoriesAsync(response, ct).ConfigureAwait(false);
     }
-
-    private Task<IReadOnlyList<SessionCookie>> BrowserCookiesAsync(bool interactive, Action<string> progress, CancellationToken ct)
-    {
-        if (_standIn?.Browser is { } browser)
-        {
-            return browser(interactive, ct);
-        }
-
-        var session = Browser();
-        if (!session.CanSignIn)
-        {
-            throw new SignInRequiredException("No Edge, Chrome, Chromium or Firefox was found for the web session's sign-in. Install one, set the Browser path under Advanced, or sign in with an access token.", permanent: true);
-        }
-
-        return session.SignInAsync(interactive, progress, ct);
-    }
-
-    private string BrowserName => _standIn?.Browser is not null ? "the browser" : Browser().BrowserName;
-
-    private BrowserSession Browser()
-        => _browser ??= new BrowserSession(BrowserLocator.Find(Settings.Browser, "ANYFS_ARTIFACTORY_BROWSER"), new ArtifactorySignInTarget(Platform, Settings.TrustAnyCertificate), _logger, Settings.Browser);
 
     /// <summary>
-    /// The session the jar's cookies are, asked of the platform as its own pages ask (<c>ui/api/v1/ui/auth/current</c>): who
-    /// is signed in, with the access token the answer leaves in the jar (the platform renews one that has run out while what
-    /// renews it holds). Null where they are nobody's.
+    /// JFrog's client sign-in: a session of AnyFS's own asked of the platform, the platform's sign-in page for it opened in a
+    /// browser of AnyFS's own for the person (who signs in and gives the code AnyFS shows them), then the token the platform
+    /// hands over for the session.
     /// </summary>
-    private async Task<string?> SessionAsync(CancellationToken ct)
+    private async Task ClientSignInAsync(bool interactive, Action<string> progress, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Platform, "ui/api/v1/ui/auth/current"));
-        request.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
-        AddCookies(request);
+        if (!interactive)
+        {
+            throw new SignInRequiredException($"the Artifactory sign-in for {Url.Host} has lapsed, and only you can sign in again (the sign-in page asks you for a code): open the source, or its Retry");
+        }
+
+        var session = Guid.NewGuid().ToString("D");
+        await AskForSessionAsync(session, ct).ConfigureAwait(false);
+        var target = new ArtifactorySignInTarget(Platform, session, c => SessionTokenAsync(session, c));
+        ArtifactoryClientToken? token;
+        string browserName;
+        if (_standIn?.Browser is { } browser)
+        {
+            browserName = "the browser";
+            progress(target.Prompt(browserName));
+            await browser(interactive, target.Page, ct).ConfigureAwait(false);
+            token = await SessionTokenAsync(session, ct).ConfigureAwait(false);
+        }
+        else
+        {
+            var signIn = new BrowserSession(BrowserLocator.Find(Settings.Browser, "ANYFS_ARTIFACTORY_BROWSER"), target, _logger, Settings.Browser);
+            if (!signIn.CanSignIn)
+            {
+                throw new SignInRequiredException("No Edge, Chrome, Chromium or Firefox was found for the web session's sign-in. Install one, set the Browser path under Advanced, or sign in with an access token.", permanent: true);
+            }
+
+            await signIn.SignInAsync(interactive, progress, ct).ConfigureAwait(false);
+            browserName = signIn.BrowserName;
+            token = target.Token;
+        }
+
+        _client = token ?? throw new SignInRequiredException($"{browserName} signed in to {Url.Host}, but Artifactory gave AnyFS no token for the sign-in; Retry to sign in again");
+        User = token.User ?? NameIn(token.Access);
+        How = $"with {browserName}";
+        _logger.LogInformation("artifactory: signed in to {Host} with {Browser} through JFrog's client sign-in; the token runs to {Until}", Url.Host, browserName, token.Until?.ToString("u") ?? "no end");
+    }
+
+    /// <summary>
+    /// Asks the platform for a client sign-in under <paramref name="session"/>. A platform without one (an Artifactory older
+    /// than 7.64, or no platform before it) cannot have a web session: an access token can sign in instead.
+    /// </summary>
+    private async Task AskForSessionAsync(string session, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(Platform, "access/api/v2/authentication/jfrog_client_login/request"))
+        {
+            Content = new StringContent(new JsonObject { ["session"] = session }.ToJsonString(), Encoding.UTF8, "application/json"),
+        };
         using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
-        TakeCookies(request.RequestUri!, response);
-        if (!response.IsSuccessStatusCode || response.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) != true)
-        {
-            return null;
-        }
-
-        using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false), cancellationToken: ct).ConfigureAwait(false);
-        var name = doc.RootElement.Str("name");
-        if (string.IsNullOrEmpty(name) || name.Equals("anonymous", StringComparison.OrdinalIgnoreCase))
-        {
-            return null;
-        }
-
-        var token = Cookies.GetCookies(new Uri(Platform, "ui/"))[AccessCookie]?.Value;
-        if (string.IsNullOrEmpty(token))
-        {
-            return null;
-        }
-
-        _bearer = token;
-        _bearerUntil = ExpiryOf(token) ?? DateTimeOffset.MaxValue;
-        return name;
-    }
-
-    private void AddCookies(HttpRequestMessage request)
-    {
-        var header = Cookies.GetCookieHeader(request.RequestUri!);
-        if (header.Length > 0)
-        {
-            request.Headers.Remove("Cookie");
-            request.Headers.TryAddWithoutValidation("Cookie", header);
-        }
-    }
-
-    private void TakeCookies(Uri url, HttpResponseMessage response)
-    {
-        if (!response.Headers.TryGetValues("Set-Cookie", out var set))
+        if (response.IsSuccessStatusCode)
         {
             return;
         }
 
-        foreach (var cookie in set)
+        var said = ArtifactoryApi.Message(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
+        _logger.LogInformation("artifactory: {Host} would not start a client sign-in: {Status} {Said}", Url.Host, (int)response.StatusCode, said);
+        throw response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed
+            ? new SignInRequiredException($"Artifactory ({Url.Host}) has no client sign-in, which the web session signs in through (JFrog's web login, in Artifactory 7.64 and later): choose Access token under Sign in with, and give an identity token from your profile there", permanent: true)
+            : new SignInRequiredException($"Artifactory ({Url.Host}) would not start a sign-in ({(int)response.StatusCode}{(said is null ? "" : ": " + said)})");
+    }
+
+    /// <summary>
+    /// The token the platform holds for a client sign-in's session, once the person has signed in and given the code; null
+    /// until then (the platform answers 400), and where it does not answer. The platform hands it over once.
+    /// </summary>
+    private async Task<ArtifactoryClientToken?> SessionTokenAsync(string session, CancellationToken ct)
+    {
+        try
         {
-            try
-            {
-                Cookies.SetCookies(url, cookie);
-            }
-            catch (CookieException)
-            {
-                // a cookie .NET will not hold: the session goes without it
-            }
+            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Platform, $"access/api/v2/authentication/jfrog_client_login/token/{Uri.EscapeDataString(session)}"));
+            using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+            using var doc = await JsonOfAsync(response, ct).ConfigureAwait(false);
+            return doc is null ? null : ArtifactoryClientToken.From(doc.RootElement);
         }
+        catch (Exception ex) when (IsNoAnswer(ex, ct))
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Renews the web session's token as JFrog's own tool does: the refresh token, which the platform takes once, with the
+    /// access token it came with, as the bearer and beside it; the answer holds the next of each. False where the platform
+    /// will not (the refresh token spent or revoked, the account gone): only the person can sign in again. A server that
+    /// failed throws, as one that did not answer does: it has refused nothing.
+    /// </summary>
+    private async Task<bool> RefreshAsync(CancellationToken ct)
+    {
+        if (_client is not { Refresh: { Length: > 0 } refresh } token)
+        {
+            return false;
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(Platform, "access/api/v1/tokens"))
+        {
+            Content = new StringContent(new JsonObject { ["grant_type"] = "refresh_token", ["refresh_token"] = refresh, ["access_token"] = token.Access }.ToJsonString(), Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token.Access);
+        using var response = await Http.SendAsync(request, ct).ConfigureAwait(false);
+        using var doc = await JsonOfAsync(response, ct).ConfigureAwait(false);
+        if (doc is not null && ArtifactoryClientToken.From(doc.RootElement) is { } renewed)
+        {
+            _client = renewed with { User = renewed.User ?? token.User };
+            _logger.LogInformation("artifactory: renewed the sign-in for {Host}; its token runs to {Until}", Url.Host, _client.Until?.ToString("u") ?? "no end");
+            Save();
+            return true;
+        }
+
+        // a server that failed (5xx) or holds requests back (429) has refused nothing: the renewal is tried again later
+        if ((int)response.StatusCode >= 500 || response.StatusCode == HttpStatusCode.TooManyRequests)
+        {
+            throw new HttpRequestException($"the renewal of the sign-in was answered {(int)response.StatusCode}", null, response.StatusCode);
+        }
+
+        _logger.LogInformation("artifactory: {Host} would not renew the sign-in ({Status})", Url.Host, (int)response.StatusCode);
+        return false;
+    }
+
+    /// <summary>
+    /// Whether the web session's token is near enough its end to be renewed before a request, as JFrog's own tool does it:
+    /// when a tenth of its life is left, at least half an hour and at most a week before the end (and never more than half
+    /// its life).
+    /// </summary>
+    private bool RenewalDue(ArtifactoryClientToken token)
+    {
+        if (token.Until is not { } until)
+        {
+            return false;
+        }
+
+        var life = token.Issued is { } issued && until > issued ? until - issued : TimeSpan.FromHours(1);
+        var ahead = TimeSpan.FromTicks(Math.Min(Math.Clamp(life.Ticks / 10, TimeSpan.FromMinutes(30).Ticks, TimeSpan.FromDays(7).Ticks), life.Ticks / 2));
+        return ServerNow >= until - ahead;
     }
 
     /// <summary>Adds what the sign-in needs to a request to the server itself; nothing to one sent on elsewhere (a file's address in a storage service).</summary>
@@ -568,8 +656,8 @@ internal sealed class ArtifactorySession : IDisposable
                 request.Headers.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{Settings.Password}")));
                 break;
             case ArtifactorySignIn.WebSession:
-                // an access token about to run out is renewed first, as the platform's pages have theirs renewed
-                if (_signedIn && _bearer is not null && ServerNow > _bearerUntil - TimeSpan.FromMinutes(1))
+                // a token near its end is renewed first, as JFrog's own tool renews its own
+                if (_signedIn && _lapsed is null && _client is { } due && RenewalDue(due))
                 {
                     try
                     {
@@ -581,9 +669,9 @@ internal sealed class ArtifactorySession : IDisposable
                     }
                 }
 
-                if (_bearer is { } bearer)
+                if (_client is { } client)
                 {
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearer);
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", client.Access);
                 }
 
                 break;
@@ -595,11 +683,10 @@ internal sealed class ArtifactorySession : IDisposable
         => url.Scheme.Equals(Address.Base.Scheme, StringComparison.OrdinalIgnoreCase) && url.Authority.Equals(Address.Base.Authority, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// After a request seen at <paramref name="seen"/> (its <see cref="Generation"/>) was refused, or as the access token
-    /// runs out: the platform asked again with the session's cookies, which renews the token while it lets it; else the
-    /// browser, headless, on the profile that keeps the person's sign-in. Once for every request refused with it. Any other
-    /// sign-in cannot be renewed; a renewal that needs a person throws a <see cref="VfsException"/> saying so (the source
-    /// shows Degraded; Retry signs in with a window).
+    /// After a request seen at <paramref name="seen"/> (its <see cref="Generation"/>) was refused, or as the web session's
+    /// token nears its end: the token renewed with its refresh token, once for every request refused with it. Any other
+    /// sign-in cannot be renewed; a renewal the platform refuses needs the person at the sign-in page again, and throws a
+    /// <see cref="VfsException"/> saying so (the source shows Degraded; Retry signs in with a window).
     /// </summary>
     public async Task RenewAsync(int seen, CancellationToken ct)
     {
@@ -616,42 +703,36 @@ internal sealed class ArtifactorySession : IDisposable
                 return;
             }
 
+            // a renewal Artifactory has refused is not asked for again: only the person can sign in now
+            if (_lapsed is { } lapsed)
+            {
+                throw new VfsException(VfsError.Unavailable, lapsed);
+            }
+
             if (DateTime.UtcNow - _renewedAt < MinRenewalInterval)
             {
-                throw new VfsException(VfsError.Unavailable, $"Artifactory ({Url.Host}) refused the session again just after it was renewed; Retry the source to sign in again.");
+                throw new VfsException(VfsError.Unavailable, $"Artifactory ({Url.Host}) refused the sign-in again just after it was renewed; Retry the source to sign in again.");
             }
 
             _renewedAt = DateTime.UtcNow;
-            string? user = null;
+            bool renewed;
             try
             {
-                user = await SessionAsync(ct).ConfigureAwait(false);
+                renewed = await RefreshAsync(ct).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is HttpRequestException or IOException or JsonException || ex is TaskCanceledException && !ct.IsCancellationRequested)
+            catch (Exception ex) when (IsNoAnswer(ex, ct))
             {
                 throw new VfsException(VfsError.Unavailable, $"Artifactory ({Url.Host}) did not answer: {ex.Message}", ex);
             }
 
-            if (user is null)
+            if (!renewed)
             {
-                _logger.LogInformation("artifactory: the session for {Host} has run out; signing in again without a window", Url.Host);
-                try
-                {
-                    await BrowserSignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false);
-                }
-                catch (SignInRequiredException ex)
-                {
-                    throw new VfsException(VfsError.Unavailable, $"The Artifactory sign-in has lapsed and AnyFS could not sign in again without you ({ex.Message}); Retry the source to sign in.", ex);
-                }
-            }
-            else
-            {
-                User = user;
+                _lapsed = $"The Artifactory sign-in for {Url.Host} has lapsed, and only you can sign in again (the sign-in page asks you for a code): Retry the source to sign in.";
+                throw new VfsException(VfsError.Unavailable, _lapsed);
             }
 
             Interlocked.Increment(ref _generation);
             Renewed?.Invoke();
-            Save();
         }
         finally
         {
@@ -663,26 +744,32 @@ internal sealed class ArtifactorySession : IDisposable
     public event Action? Renewed;
 
     /// <summary>
-    /// Keeps a signed-in web session's cookies: in the secret store for the next start, and for a source started from the
-    /// dialog whose Test made them. A session that never signed in keeps nothing: a start that failed or was stopped before
-    /// its sign-in holds no cookies, and those would take the place of a session the platform still takes.
+    /// Keeps a signed-in web session's token: a source's in its secret store for the next start; the Test's, which has no
+    /// store, for the source started from the same dialog. A session that never signed in keeps nothing: a start that
+    /// failed or was stopped before its sign-in holds no token, and keeping that would take the place of one Artifactory
+    /// still takes.
     /// </summary>
     public void Save()
     {
-        if (Method != ArtifactorySignIn.WebSession || !_signedIn)
+        if (Method != ArtifactorySignIn.WebSession || !_signedIn || _client is not { } client)
         {
             return;
         }
 
-        var json = CookieJar.Export(Cookies);
-        Recent[Address.Base.AbsoluteUri] = (json, DateTime.UtcNow);
+        var json = client.ToJson();
+        if (_secrets is null)
+        {
+            Recent[Address.Base.AbsoluteUri] = (json, DateTime.UtcNow);
+            return;
+        }
+
         try
         {
-            _secrets?.Set(CookiesSecret, json);
+            _secrets.Set(TokenSecret, json);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
         {
-            _logger.LogWarning("artifactory: the session could not be kept for the next start: {Error}", ex.Message);
+            _logger.LogWarning("artifactory: the sign-in could not be kept for the next start: {Error}", ex.Message);
         }
     }
 

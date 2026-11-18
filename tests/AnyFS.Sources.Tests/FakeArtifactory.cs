@@ -17,8 +17,10 @@ namespace AnyFS.Sources.Tests;
 /// list of the paid editions), the query language (<c>items.find</c> with the criteria the source writes, for signed-in
 /// accounts only, a limit applied before what the account may not read is left out), downloads with ranges, checksums and
 /// a redirect to a storage service's signed address; bearer tokens (signed ones that name their account, reference tokens
-/// that do not), API keys, Basic, nobody; the platform's own who-am-I call with its session cookies. In-process, through
-/// <see cref="Handler"/>.
+/// that do not), API keys, Basic, nobody; and JFrog's client sign-in, as the lab's 7.161 answered it: a session asked for,
+/// the person signing in on the platform's page for it and giving the code (<see cref="SignInAt"/>), the token handed over
+/// once, a year's, renewed with its refresh token (each taken once) with the access token as the bearer. In-process,
+/// through <see cref="Handler"/>.
 /// </summary>
 internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.test", string root = "/artifactory")
 {
@@ -27,6 +29,11 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
 
     private readonly object _gate = new();
     private readonly ConcurrentDictionary<string, (string Name, DateTimeOffset Until)> _access = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, byte> _revoked = new(StringComparer.Ordinal);
+
+    // the client sign-in's sessions (asked for; signed in as whom once the person gave the code; handed over), and the
+    // refresh tokens it gave, each with the account it renews
+    private readonly ConcurrentDictionary<string, ClientSession> _sessions = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _refresh = new(StringComparer.Ordinal);
     private int _next;
     private int _queriesNow;
@@ -96,6 +103,15 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
 
     /// <summary>How many API requests to answer 429 with Retry-After: 1 before answering again.</summary>
     public int ThrottleNext { get; set; }
+
+    /// <summary>Whether the platform has JFrog's client sign-in (an Artifactory before 7.64 has not: its calls are not there).</summary>
+    public bool ClientSignIn { get; set; } = true;
+
+    /// <summary>How long a token the client sign-in or a renewal gives lasts: a year, as the lab's 7.161 gave them.</summary>
+    public TimeSpan ClientTokenLasts { get; set; } = TimeSpan.FromDays(365);
+
+    /// <summary>The sign-in pages the person was at (<see cref="SignInAt"/>), oldest first.</summary>
+    public ConcurrentQueue<Uri> SignInPages { get; } = new();
 
     // --- the model -------------------------------------------------------------------------------------------------------
 
@@ -266,11 +282,11 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
         }
     }
 
-    /// <summary>A signed token for an account, as the access service makes them: its subject names the account, and it may run out.</summary>
+    /// <summary>A signed token for an account, as the access service makes them: its subject names the account, it says when it was made, and it may run out.</summary>
     public string TokenFor(string name, DateTimeOffset? until = null)
     {
         static string Part(string json) => Convert.ToBase64String(Encoding.UTF8.GetBytes(json)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
-        var payload = new JsonObject { ["sub"] = $"jfac@01fake/users/{name}", ["scp"] = "applied-permissions/user", ["iss"] = "jfac@01fake", ["jti"] = Interlocked.Increment(ref _next) };
+        var payload = new JsonObject { ["sub"] = $"jfac@01fake/users/{name}", ["scp"] = "applied-permissions/user", ["aud"] = "*@*", ["iss"] = "jfac@01fake", ["iat"] = Now.ToUnixTimeSeconds(), ["jti"] = Interlocked.Increment(ref _next) };
         if (until is { } exp)
         {
             payload["exp"] = exp.ToUnixTimeSeconds();
@@ -281,36 +297,81 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
         return token;
     }
 
-    /// <summary>The cookies a browser signed in on the platform's page holds: the access token, good for a while, and what renews it.</summary>
-    public IReadOnlyList<SessionCookie> SessionFor(string name, TimeSpan? lasts = null)
+    private sealed class ClientSession
     {
-        var refresh = "refresh-" + Interlocked.Increment(ref _next).ToString(CultureInfo.InvariantCulture);
-        _refresh[refresh] = name;
-        var host = new Uri(Origin).Host;
-        return
-        [
-            new SessionCookie(ArtifactorySession.AccessCookie, TokenFor(name, Now + (lasts ?? TimeSpan.FromHours(1))), host, "/", false, true),
-            new SessionCookie(ArtifactorySession.RefreshCookie, refresh, host, "/", false, true),
-        ];
+        public string? Name { get; set; }
+
+        public bool Taken { get; set; }
     }
 
-    /// <summary>Ends every browser session: nothing renews an access token any more, and those there are refused.</summary>
+    /// <summary>
+    /// What the person does on the platform's sign-in page for a client's session (the page's address names it): signs in
+    /// as <paramref name="name"/> and gives the code the page asks for, after which the platform hands the session's token
+    /// over. As on the real page, one opened without the code asked for (<c>jfClientCode</c>) says the client is out of date
+    /// and lets nothing through, and a session the platform was not asked for is not there.
+    /// </summary>
+    public void SignInAt(Uri page, string name)
+    {
+        SignInPages.Enqueue(page);
+        var query = page.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Split('=', 2)).ToDictionary(p => p[0], p => p.Length > 1 ? Uri.UnescapeDataString(p[1]) : "", StringComparer.Ordinal);
+        if (!page.AbsolutePath.EndsWith("/ui/login", StringComparison.Ordinal) || !query.TryGetValue("jfClientSession", out var session))
+        {
+            throw new InvalidOperationException($"not the platform's sign-in page for a client: {page}");
+        }
+
+        if (!query.ContainsKey("jfClientCode"))
+        {
+            throw new InvalidOperationException("the page says the client is out of date, and asks for no code");
+        }
+
+        if (!_sessions.TryGetValue(session, out var asked))
+        {
+            throw new InvalidOperationException("Session is not exist");
+        }
+
+        asked.Name = name;
+    }
+
+    /// <summary>A person at the browser who signs in as <paramref name="name"/> wherever a window may be shown; each sign-in asked of them is noted in <paramref name="asked"/> (whether a window could be shown).</summary>
+    public Func<bool, Uri, CancellationToken, Task> Person(string name, List<bool>? asked = null) => (interactive, page, _) =>
+    {
+        asked?.Add(interactive);
+        if (interactive)
+        {
+            SignInAt(page, name);
+        }
+
+        return Task.CompletedTask;
+    };
+
+    /// <summary>Revokes every token the client sign-in or a renewal gave, and their refresh tokens: only a new sign-in gets in.</summary>
     public void EndSessions()
     {
         _refresh.Clear();
         foreach (var token in _access.Where(t => t.Value.Until != DateTimeOffset.MaxValue).Select(t => t.Key).ToList())
         {
-            _access.TryRemove(token, out _);
+            Revoke(token);
         }
     }
+
+    /// <summary>Revokes one access token: refused from now on, though the refresh token that came with it still renews it.</summary>
+    public void Revoke(string token)
+    {
+        _access.TryRemove(token, out _);
+        _revoked[token] = 0;
+    }
+
+    /// <summary>The access tokens the client sign-in and its renewals have given, oldest first.</summary>
+    public List<string> ClientTokens { get; } = [];
 
     public int Count(string what) => Requests.Count(r => r.Contains(what, StringComparison.Ordinal));
 
     /// <summary>A handler that answers in-process, without a socket.</summary>
     public HttpMessageHandler Handler() => new InProcessHandler(this);
 
-    /// <summary>A stand-in for the source: its requests come here.</summary>
-    public ArtifactoryStandIn StandIn(Func<bool, CancellationToken, Task<IReadOnlyList<SessionCookie>>>? browser = null, bool useKept = true) => new(Handler, browser, useKept);
+    /// <summary>A stand-in for the source: its requests come here, and <paramref name="browser"/> stands in for the person at the browser (<see cref="Person"/>).</summary>
+    public ArtifactoryStandIn StandIn(Func<bool, Uri, CancellationToken, Task>? browser = null, bool useKept = true) => new(Handler, browser, useKept);
 
     // --- answering -------------------------------------------------------------------------------------------------------
 
@@ -343,7 +404,12 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
 
         if (full == "/ui/api/v1/ui/auth/current")
         {
-            return Current(request);
+            return Current();
+        }
+
+        if (full.StartsWith("/access/", StringComparison.Ordinal))
+        {
+            return Access(request, full);
         }
 
         if (Root.Length > 0 && !full.StartsWith(Root + "/", StringComparison.Ordinal) && full != Root)
@@ -430,6 +496,11 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
                     return signed.Until > Now ? (Accounts.First(a => a.Name == signed.Name), null) : (null, Response.Error(401, "Token failed verification: expired", Realm));
                 }
 
+                if (_revoked.ContainsKey(token))
+                {
+                    return (null, Response.Error(401, "Token failed verification: revoked", Realm));
+                }
+
                 var holder = Accounts.FirstOrDefault(a => a.Tokens.Contains(token));
                 return holder is null ? (null, Response.Error(401, "Token failed verification: parse", Realm)) : (holder, null);
             }
@@ -454,43 +525,100 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
     }
 
     /// <summary>
-    /// The platform's who-am-I, as its pages ask it: the account of the session's cookies, nobody without. An access token
-    /// that has run out is made anew while what renews it holds, and comes back as a cookie. A sign-in sent the way the REST
-    /// API takes one says nothing here: the call is the pages'.
+    /// The platform's who-am-I, as its pages ask it with their own session: nobody here, since nothing of AnyFS's signs in
+    /// as the pages do (a sign-in sent the way the REST API takes one says nothing to it).
     /// </summary>
-    private Response Current(Request request)
+    private Response Current() => Response.Json(new JsonObject { ["name"] = "anonymous", ["admin"] = false, ["anonAccessEnabled"] = Anonymous, ["realm"] = "internal" });
+
+    /// <summary>An error as the access service writes one.</summary>
+    private static Response AccessError(int status, string code, string message)
+        => Response.Json(new JsonObject { ["errors"] = new JsonArray((JsonNode)new JsonObject { ["code"] = code, ["message"] = message }) }, status);
+
+    /// <summary>
+    /// The access service's calls the source makes: JFrog's client sign-in (a session asked for; its token, once the person
+    /// has signed in at the page and given the code, handed over once and 400 before and after) and a token's renewal (the
+    /// refresh token, taken once, with the access token it came with as the bearer), answered as the lab's 7.161 answered.
+    /// </summary>
+    private Response Access(Request request, string full)
     {
-        string? access = null;
-        string? refresh = null;
-        if (request.Headers.TryGetValue("Cookie", out var cookies))
+        const string login = "/access/api/v2/authentication/jfrog_client_login/";
+        if (full.StartsWith(login, StringComparison.Ordinal))
         {
-            foreach (var part in cookies.Split(';', StringSplitOptions.TrimEntries))
+            if (!ClientSignIn)
             {
-                if (part.StartsWith(ArtifactorySession.AccessCookie + "=", StringComparison.Ordinal))
-                {
-                    access = part[(ArtifactorySession.AccessCookie.Length + 1)..];
-                }
-                else if (part.StartsWith(ArtifactorySession.RefreshCookie + "=", StringComparison.Ordinal))
-                {
-                    refresh = part[(ArtifactorySession.RefreshCookie.Length + 1)..];
-                }
+                return Response.Text("404 page not found", 404);
             }
+
+            if (full == login + "request" && request.Method == "POST")
+            {
+                var session = JsonNode.Parse(request.Body)?["session"]?.GetValue<string>();
+                if (string.IsNullOrEmpty(session))
+                {
+                    return AccessError(400, "BAD_REQUEST", "session is required");
+                }
+
+                _sessions[session] = new ClientSession();
+                return new Response(200, [], null);
+            }
+
+            if (full.StartsWith(login + "token/", StringComparison.Ordinal) && request.Method == "GET")
+            {
+                var session = full[(login.Length + "token/".Length)..];
+                if (_sessions.TryGetValue(session, out var asked) && asked.Name is { } name && !asked.Taken)
+                {
+                    asked.Taken = true;
+                    return ClientToken(name);
+                }
+
+                return AccessError(400, "BAD_REQUEST", "Failed to generate token");
+            }
+
+            return AccessError(404, "NOT_FOUND", "Not Found");
         }
 
-        string? name = null;
-        Dictionary<string, string>? headers = null;
-        if (access is not null && _access.TryGetValue(access, out var signed) && signed.Until > Now)
+        if (full == "/access/api/v1/tokens" && request.Method == "POST")
         {
-            name = signed.Name;
-        }
-        else if (refresh is not null && _refresh.TryGetValue(refresh, out var renewed))
-        {
-            name = renewed;
-            headers = new Dictionary<string, string> { ["Set-Cookie"] = $"{ArtifactorySession.AccessCookie}={TokenFor(renewed, Now + TimeSpan.FromHours(1))}; Path=/; HttpOnly" };
+            var bearer = request.Headers.TryGetValue("Authorization", out var authorization) && authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? authorization[7..].Trim() : null;
+            if (bearer is null || !_access.TryGetValue(bearer, out var signed) || signed.Until <= Now)
+            {
+                return AccessError(401, "UNAUTHORIZED", "Authentication required");
+            }
+
+            var body = JsonNode.Parse(request.Body);
+            if (body?["grant_type"]?.GetValue<string>() != "refresh_token" || body["refresh_token"]?.GetValue<string>() is not { } refresh)
+            {
+                return AccessError(400, "BAD_REQUEST", "only a renewal is answered here");
+            }
+
+            return _refresh.TryRemove(refresh, out var renews)
+                ? ClientToken(renews)
+                : AccessError(404, "NOT_FOUND", "Token matching the provided refresh token was not found.");
         }
 
-        var account = name is null ? null : Accounts.FirstOrDefault(a => a.Name == name);
-        return Response.Json(new JsonObject { ["name"] = account?.Name ?? "anonymous", ["admin"] = account?.Admin ?? false, ["anonAccessEnabled"] = Anonymous, ["realm"] = "internal" }, 200, headers);
+        return AccessError(404, "NOT_FOUND", "Not Found");
+    }
+
+    /// <summary>A token as the client sign-in and a renewal hand one over: an access token for the year, and the refresh token that renews it once.</summary>
+    private Response ClientToken(string name)
+    {
+        var access = TokenFor(name, Now + ClientTokenLasts);
+        var refresh = Guid.NewGuid().ToString("D");
+        _refresh[refresh] = name;
+        lock (ClientTokens)
+        {
+            ClientTokens.Add(access);
+        }
+
+        return Response.Json(new JsonObject
+        {
+            ["token_id"] = Guid.NewGuid().ToString("D"),
+            ["access_token"] = access,
+            ["refresh_token"] = refresh,
+            ["expires_in"] = (long)ClientTokenLasts.TotalSeconds,
+            ["scope"] = "applied-permissions/user",
+            ["token_type"] = "Bearer",
+            ["username"] = name,
+        });
     }
 
     // --- what an account may see -------------------------------------------------------------------------------------------

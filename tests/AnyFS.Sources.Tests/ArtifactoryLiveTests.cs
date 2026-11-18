@@ -13,7 +13,9 @@ namespace AnyFS.Sources.Tests;
 /// and <c>ANYFS_TEST_ARTIFACTORY_TOKEN</c> (the tester's access token, which the setup writes to
 /// <c>provisioning/artifactory/secrets/tester.token</c>) are set. <c>ANYFS_TEST_ARTIFACTORY_REFERENCE_TOKEN</c> adds the
 /// reference token's sign-in, and <c>ANYFS_TEST_ARTIFACTORY_USER</c> with <c>_PASSWORD</c> (the tester, <c>art_user</c>, and
-/// its password in settings.yml) the password's.
+/// its password in settings.yml) the password's. The web session's test needs the address with the user name and password
+/// alone (any account, and no seed): it signs in through JFrog's client sign-in, approving the session at the page as the
+/// page's own script does.
 /// </summary>
 [TestClass]
 public class ArtifactoryLiveTests
@@ -281,6 +283,67 @@ public class ArtifactoryLiveTests
         CollectionAssert.AreEqual(new[] { "pub", "public.txt" }, open.Select(e => e.Name).ToArray());
         Assert.AreEqual(7, open.Single(e => e.Name == "public.txt").Length);
         Assert.AreEqual("# Docs\n\nRead me.\n", Encoding.UTF8.GetString(await ReadAsync(anyone, "anyfs-public-local/pub/README.md")));
+    }
+
+    /// <summary>
+    /// What the person does at the platform's sign-in page for a client's session, over HTTP as the page's own script does
+    /// it: signs in with a user name and password (the page's own sign-in), then, the code given, approves the session
+    /// with the page's own call, which the pages' service hands on to the access service with the page's session.
+    /// </summary>
+    private static Func<bool, Uri, CancellationToken, Task> AtThePage(string user, string password) => async (interactive, page, ct) =>
+    {
+        Assert.IsTrue(interactive, "the page asks the person for a code: never without a window");
+        var session = page.Query.TrimStart('?').Split('&').Select(p => p.Split('=', 2)).Single(p => p[0] == "jfClientSession")[1];
+        var platform = new Uri(page, "../");
+        using var handler = new SocketsHttpHandler { CookieContainer = new System.Net.CookieContainer(), UseCookies = true };
+        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromMinutes(4) };
+        http.DefaultRequestHeaders.Add("X-Requested-With", "XMLHttpRequest");
+        using (var signedIn = await http.PostAsync(new Uri(platform, "ui/api/v1/ui/auth/login"), JsonOf(new System.Text.Json.Nodes.JsonObject { ["user"] = user, ["password"] = password, ["type"] = "login" }), ct))
+        {
+            Assert.IsTrue(signedIn.IsSuccessStatusCode, $"the page's sign-in: {(int)signedIn.StatusCode}");
+        }
+
+        using var approved = await http.PostAsync(new Uri(platform, "ui/api/v1/access/api/v2/authentication/jfrog_client_login/response"), JsonOf(new System.Text.Json.Nodes.JsonObject { ["session"] = session }), ct);
+        Assert.IsTrue(approved.IsSuccessStatusCode, $"the page's approval of the session: {(int)approved.StatusCode} {await approved.Content.ReadAsStringAsync(ct)}");
+    };
+
+    private static StringContent JsonOf(System.Text.Json.Nodes.JsonObject body) => new(body.ToJsonString(), Encoding.UTF8, "application/json");
+
+    [TestMethod]
+    [Timeout(600_000)]
+    public async Task AWebSessionSignsInThroughJFrogsClientSignInAndItsTokenRenewsAndSignsInTheNextStart()
+    {
+        var url = Environment.GetEnvironmentVariable("ANYFS_TEST_ARTIFACTORY_URL");
+        var user = Environment.GetEnvironmentVariable("ANYFS_TEST_ARTIFACTORY_USER");
+        var password = Environment.GetEnvironmentVariable("ANYFS_TEST_ARTIFACTORY_PASSWORD");
+        if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(user) || string.IsNullOrWhiteSpace(password))
+        {
+            Assert.Inconclusive("set ANYFS_TEST_ARTIFACTORY_URL, ANYFS_TEST_ARTIFACTORY_USER and ANYFS_TEST_ARTIFACTORY_PASSWORD for the web session");
+        }
+
+        static HttpMessageHandler Network() => new SocketsHttpHandler { UseCookies = false, AllowAutoRedirect = false, AutomaticDecompression = System.Net.DecompressionMethods.All };
+        var settings = new ArtifactorySettings { Address = url.TrimEnd('/'), SignInMethod = ArtifactorySettings.WebSessionChoice };
+        using var context = new TestSourceContext();
+        await using (var source = new ArtifactorySource(settings, new ArtifactoryStandIn(Network, AtThePage(user, password), UseKept: false)))
+        {
+            await source.InitialiseAsync(context, CancellationToken.None);
+            Assert.AreEqual(user, source.Session.User, "the token names its account");
+            Assert.AreEqual("with the browser", source.Session.How);
+            var repositories = await ListAsync(source, "");
+            Assert.IsTrue(repositories.Count > 0, "the server's root, read with the token the sign-in gave");
+
+            // a renewal, as one near the token's end makes it: the refresh token, once, and the next token read with
+            var kept = context.Secrets.Get(ArtifactorySession.TokenSecret);
+            await source.Session.RenewAsync(source.Session.Generation, CancellationToken.None);
+            Assert.AreNotEqual(kept, context.Secrets.Get(ArtifactorySession.TokenSecret), "the renewal kept in place of the first");
+            await ListAsync(source, repositories[0].Name);
+        }
+
+        // the next start: the kept sign-in, with nobody at the browser
+        await using var again = new ArtifactorySource(settings, new ArtifactoryStandIn(Network, (_, _, _) => throw new InvalidOperationException("no browser should be needed")));
+        await again.InitialiseAsync(context, CancellationToken.None);
+        Assert.AreEqual("with the sign-in kept from before", again.Session.How);
+        Assert.AreEqual(user, again.Session.User);
     }
 
     [TestMethod]
