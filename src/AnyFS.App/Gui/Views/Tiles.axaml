@@ -55,9 +55,11 @@
               </Button.Flyout>
             </Button>
           </StackPanel>
+          <!-- what a source says wraps, so all of it can be read: a sign-in's ends with what the person is to enter (the
+               code Artifactory's page asks for); the circle stays beside the first line -->
           <Grid Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" ColumnDefinitions="Auto,Auto" Margin="0,2,0,0" ToolTip.Tip="{Binding FullStatus}">
-            <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" />
-            <TextBlock Grid.Column="1" Classes="muted" Text="{Binding StatusText}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+            <Ellipse Classes="status" Fill="{Binding Colour, Converter={x:Static g:Converters.StatusBrush}}" VerticalAlignment="Top" Margin="0,3,6,0" />
+            <TextBlock Grid.Column="1" Classes="muted" Text="{Binding StatusText}" TextWrapping="Wrap" VerticalAlignment="Top"
                        MaxWidth="{Binding $parent[Grid].Bounds.Width, Converter={x:Static g:Converters.Minus}, ConverterParameter=18}" />
           </Grid>
           <!-- the bar that fills, on a line of its own: beside the file count and a narrow tile's button there is room for little of it, and less the more files there are -->

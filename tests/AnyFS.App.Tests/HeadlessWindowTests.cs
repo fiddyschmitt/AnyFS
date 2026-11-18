@@ -782,6 +782,91 @@ public class HeadlessWindowTests
         }
     }
 
+    /// <summary>
+    /// What a source says while it starts reads whole on its tile, however long: the user, 18-Nov-2026, of Artifactory's
+    /// sign-in, which ends with the code to enter: "even at full screen it's cut off". A source that says that much and
+    /// waits, in a full-HD window.
+    /// </summary>
+    [TestMethod]
+    public async Task ALongStatusWrapsOnItsTileSoItsEndCanBeRead()
+    {
+        const string said = "Sign in to artifactory.example.com in the Microsoft Edge window that opened; when the page asks for the code that you received from AnyFS, enter 9f3c";
+        var root = Path.Combine(Path.GetTempPath(), "anyfs-tests", "window-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            await Session.Dispatch(async () =>
+            {
+                var registry = new PluginRegistry();
+                registry.AddBuiltIn(new MemoryPlugin());
+                registry.AddBuiltIn(new FakeMountProvider());
+                registry.AddBuiltIn(new SayingPlugin(said));
+                var host = GuiHost.Create(new GuiOptions(Path.Combine(root, "settings")), registry);
+                host.Start();
+                await Task.Delay(300);
+                var collection = host.Engine.Settings.Collections.Single();
+                var source = await host.Engine.AddSourceAsync("signing", "saying", true, false, new MemoryPluginSettings());
+                await host.Engine.AddMembershipAsync(collection.Id, source.Id, "signing", false);
+                var window = new MainWindow(host) { Width = 1920, Height = 1080 };
+                window.Show();
+                await Task.Delay(500);
+                window.ViewModel.Refresh();
+                await Task.Delay(300);
+
+                var statuses = window.GetVisualDescendants().OfType<TextBlock>().Where(t => t.Text == said).ToList();
+                Assert.IsTrue(statuses.Count > 0, "the source's tile shows what it said");
+                foreach (var status in statuses)
+                {
+                    var lines = status.TextLayout.TextLines;
+                    Assert.IsFalse(lines.Any(l => l.HasCollapsed), $"cut off at {status.Bounds.Width:F0} px: {lines.Count} line(s)");
+                    var tile = status.GetVisualAncestors().OfType<Border>().First(b => b.Classes.Contains("tile"));
+                    var right = status.TranslatePoint(new Point(status.Bounds.Width, 0), tile)!.Value.X;
+                    Assert.IsTrue(right <= tile.Bounds.Width, $"inside its tile: {right:F0} of {tile.Bounds.Width:F0} px");
+                }
+
+                await host.ShutdownAsync();
+                window.Close();
+                return true;
+            }, CancellationToken.None);
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    /// <summary>A source that says something at its start and waits there, as one waiting for a sign-in does.</summary>
+    private sealed class SayingPlugin(string said) : ISourcePlugin
+    {
+        public string TypeId => "saying";
+
+        public string DisplayName => "Saying";
+
+        public string Description => "";
+
+        public string TypeFolder => "saying";
+
+        public Stream? OpenIcon() => null;
+
+        public Type SettingsType => typeof(MemoryPluginSettings);
+
+        public object CreateDefaultSettings() => new MemoryPluginSettings();
+
+        public ISource CreateSource(object settings) => new MemorySource
+        {
+            OnInitialise = async (ctx, ct) =>
+            {
+                ctx.ReportProgress(said);
+                await Task.Delay(Timeout.Infinite, ct);
+            },
+        };
+    }
+
     /// <summary>A Memory source whose type has an icon (a one-pixel PNG).</summary>
     private sealed class IconPlugin : ISourcePlugin
     {
