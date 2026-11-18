@@ -19,8 +19,8 @@ namespace AnyFS.Sources.Tests;
 /// a redirect to a storage service's signed address; bearer tokens (signed ones that name their account, reference tokens
 /// that do not), API keys, Basic, nobody; and JFrog's client sign-in, as the lab's 7.161 answered it: a session asked for,
 /// the person signing in on the platform's page for it and giving the code (<see cref="SignInAt"/>), the token handed over
-/// once, a year's, renewed with its refresh token (each taken once) with the access token as the bearer. In-process,
-/// through <see cref="Handler"/>.
+/// once, a year's, renewed with its refresh token (each taken once) with the access token as the bearer, even one that has
+/// run out, and the renewed one revoked. In-process, through <see cref="Handler"/>.
 /// </summary>
 internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.test", string root = "/artifactory")
 {
@@ -32,9 +32,9 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
     private readonly ConcurrentDictionary<string, byte> _revoked = new(StringComparer.Ordinal);
 
     // the client sign-in's sessions (asked for; signed in as whom once the person gave the code; handed over), and the
-    // refresh tokens it gave, each with the account it renews
+    // refresh tokens it gave, each with the account it renews and the access token it came with
     private readonly ConcurrentDictionary<string, ClientSession> _sessions = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, string> _refresh = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, (string Name, string Access)> _refresh = new(StringComparer.Ordinal);
     private int _next;
     private int _queriesNow;
     private int _queriesRefused;
@@ -355,7 +355,7 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
         }
     }
 
-    /// <summary>Revokes one access token: refused from now on, though the refresh token that came with it still renews it.</summary>
+    /// <summary>Revokes one access token: refused from now on, by the REST API and as the bearer of its renewal.</summary>
     public void Revoke(string token)
     {
         _access.TryRemove(token, out _);
@@ -578,10 +578,11 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
 
         if (full == "/access/api/v1/tokens" && request.Method == "POST")
         {
+            // the bearer may have run out (the lab's 7.161 renews such a one all the same); one revoked is refused
             var bearer = request.Headers.TryGetValue("Authorization", out var authorization) && authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? authorization[7..].Trim() : null;
-            if (bearer is null || !_access.TryGetValue(bearer, out var signed) || signed.Until <= Now)
+            if (bearer is null || !_access.ContainsKey(bearer))
             {
-                return AccessError(401, "UNAUTHORIZED", "Authentication required");
+                return AccessError(401, "UNAUTHORIZED", bearer is not null && _revoked.ContainsKey(bearer) ? "Invalid token, revoked" : "Authentication required");
             }
 
             var body = JsonNode.Parse(request.Body);
@@ -590,9 +591,14 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
                 return AccessError(400, "BAD_REQUEST", "only a renewal is answered here");
             }
 
-            return _refresh.TryRemove(refresh, out var renews)
-                ? ClientToken(renews)
-                : AccessError(404, "NOT_FOUND", "Token matching the provided refresh token was not found.");
+            if (!_refresh.TryRemove(refresh, out var renews))
+            {
+                return AccessError(404, "NOT_FOUND", "Token matching the provided refresh token was not found.");
+            }
+
+            // the access token it came with is revoked (on the lab some minutes after; here at once)
+            Revoke(renews.Access);
+            return ClientToken(renews.Name);
         }
 
         return AccessError(404, "NOT_FOUND", "Not Found");
@@ -603,7 +609,7 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
     {
         var access = TokenFor(name, Now + ClientTokenLasts);
         var refresh = Guid.NewGuid().ToString("D");
-        _refresh[refresh] = name;
+        _refresh[refresh] = (name, access);
         lock (ClientTokens)
         {
             ClientTokens.Add(access);

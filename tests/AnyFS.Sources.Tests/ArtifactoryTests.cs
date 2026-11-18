@@ -479,6 +479,40 @@ public class ArtifactoryTests
     }
 
     [TestMethod]
+    public async Task ATokenRefusedAsRunOutIsRenewedAndTheRequestAskedAgain()
+    {
+        var fake = ArtifactorySeed.Lab();
+        var asked = new List<bool>();
+        await using var source = await StartAsync(fake, WebSession(fake), standIn: fake.StandIn(fake.Person("tester", asked), useKept: false));
+        CollectionAssert.Contains(await NamesAsync(source, ""), "README.md");
+
+        // past the year with nothing asked in its last week (a computer asleep): refused as run out, renewed with the
+        // token that ran out as the bearer, which the platform takes for that, and asked again
+        fake.Now += TimeSpan.FromDays(400);
+        Assert.AreEqual("# Guide\n\nStep one.\n", await TextAsync(source, "docs/guide.md"));
+        Assert.AreEqual(1, fake.Count("POST /access/api/v1/tokens"));
+        CollectionAssert.AreEqual(new[] { true }, asked, "no window for it");
+    }
+
+    [TestMethod]
+    public async Task AKeptSignInThatRanOutWhileAnyFSWasOffIsRenewedAtTheStartWithNoWindow()
+    {
+        var fake = ArtifactorySeed.Lab(root: "/ran-out");
+        using var context = new TestSourceContext();
+        var settings = WebSession(fake, "");
+        await using (await StartAsync(fake, settings, context, fake.StandIn(fake.Person("tester"), useKept: false)))
+        {
+        }
+
+        fake.Now += TimeSpan.FromDays(400);
+        await using var again = await StartAsync(fake, settings, context, fake.StandIn((_, _, _) => throw new InvalidOperationException("no browser should be needed")));
+        Assert.AreEqual("with the sign-in kept from before", again.Session.How);
+        Assert.AreEqual(1, fake.Count("POST /access/api/v1/tokens"));
+        Assert.AreEqual(2, fake.Count($"GET {fake.Root}/api/repositories"), "once at each start: the token that ran out was renewed before anything was asked with it");
+        StringAssert.Contains(context.Secrets.Get(ArtifactorySession.TokenSecret), fake.ClientTokens[^1]);
+    }
+
+    [TestMethod]
     public async Task AKeptSignInNothingRenewsAnyMoreAsksThePersonAgain()
     {
         var fake = ArtifactorySeed.Lab();
