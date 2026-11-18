@@ -70,13 +70,27 @@ public class BrowserChoiceTests
     [DataRow(null, null)]
     public void TheForcedBrowserIsReadFromItsName(string? value, string? kind) => Assert.AreEqual(kind, WebDriverSession.ForcedKind(value)?.ToString());
 
-    private sealed class NoTarget(string profile, string? variable = null) : WebSignInTarget(new Uri("https://example.test/"), profile)
+    private sealed class NoTarget(string profile, string? variable = null, bool needsAPerson = false) : WebSignInTarget(new Uri("https://example.test/"), profile)
     {
         public override string LogPrefix => "test";
 
         public override string? WebDriverVariable => variable;
 
+        public override bool NeedsAPerson => needsAPerson;
+
         public override ValueTask<SignInCheck> CheckAsync(IReadOnlyList<Uri> pages, IReadOnlyList<SessionCookie> cookies, CancellationToken ct) => ValueTask.FromResult(SignInCheck.NotYet);
+    }
+
+    [TestMethod]
+    public async Task ASignInThatAsksThePersonEachTimeLaunchesNothingWhereNoWindowMayBeShown()
+    {
+        // a browser that is not there: a launch would fail otherwise than this does
+        var chrome = Path.Combine(Path.GetTempPath(), "anyfs-tests", "no such folder", "chrome.exe");
+        var session = new BrowserSession(chrome, new NoTarget("profile", needsAPerson: true), NullLogger.Instance);
+        var ex = await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => session.SignInAsync(interactive: false, _ => { }, CancellationToken.None));
+        Assert.IsFalse(ex.Permanent, "the person can sign in again with the source's Retry");
+        StringAssert.Contains(ex.Message, "the browser sign-in for example.test has lapsed");
+        Assert.AreEqual("Sign in to example.test in the Edge window that opened", new NoTarget("profile").Prompt("Edge"));
     }
 
     [TestMethod]

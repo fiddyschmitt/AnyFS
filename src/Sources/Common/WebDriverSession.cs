@@ -112,11 +112,17 @@ internal sealed class WebDriverSession
 
     /// <summary>
     /// The session's cookies, as <see cref="BrowserSession.SignInAsync"/> gets them over DevTools: headless first, then, only
-    /// when <paramref name="interactive"/>, a window for the person; each browser in turn until one starts.
+    /// when <paramref name="interactive"/>, a window for the person (at once, for a target that asks the person each time);
+    /// each browser in turn until one starts.
     /// </summary>
     public async Task<IReadOnlyList<SessionCookie>> SignInAsync(bool interactive, Action<string> progress, CancellationToken ct)
     {
         LogBridge.Instance.Use(_logger, Prefix);
+        if (_target.NeedsAPerson && !interactive)
+        {
+            throw new SignInRequiredException(Lapsed());
+        }
+
         var failures = new List<string>();
         var browsers = _working is null ? _browsers : [_working, .. _browsers.Where(b => b != _working)];
         foreach (var browser in browsers)
@@ -126,31 +132,36 @@ internal sealed class WebDriverSession
             await gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                var silent = await CaptureAsync(browser, profile, headless: true, SilentDeadline, ct).ConfigureAwait(false);
-                if (silent.Unstartable)
+                // a sign-in that asks the person each time has nothing to read without a window: the window at once
+                if (!_target.NeedsAPerson)
                 {
-                    failures.Add($"{browser.Name}: {silent.Failure}");
-                    continue;
+                    var silent = await CaptureAsync(browser, profile, headless: true, SilentDeadline, ct).ConfigureAwait(false);
+                    if (silent.Unstartable)
+                    {
+                        failures.Add($"{browser.Name}: {silent.Failure}");
+                        continue;
+                    }
+
+                    if (silent.Cookies is { } cookies)
+                    {
+                        _working = browser;
+                        return cookies;
+                    }
+
+                    if (silent.Final)
+                    {
+                        throw new SignInRequiredException(silent.Failure!, permanent: true);
+                    }
+
+                    if (!interactive)
+                    {
+                        throw new SignInRequiredException(Lapsed());
+                    }
+
+                    _logger.LogInformation("{Prefix}: no sign-in to read for {Host} in {Browser} without a window ({Why}); opening it for the person to sign in", Prefix, Site.Host, browser.Name, silent.Failure);
                 }
 
-                if (silent.Cookies is { } cookies)
-                {
-                    _working = browser;
-                    return cookies;
-                }
-
-                if (silent.Final)
-                {
-                    throw new SignInRequiredException(silent.Failure!, permanent: true);
-                }
-
-                if (!interactive)
-                {
-                    throw new SignInRequiredException($"the browser sign-in for {Site.Host} has lapsed; sign in again (open the source, or its Retry)");
-                }
-
-                _logger.LogInformation("{Prefix}: no sign-in to read for {Host} in {Browser} without a window ({Why}); opening it for the person to sign in", Prefix, Site.Host, browser.Name, silent.Failure);
-                progress($"Sign in to {Site.Host} in the {browser.Name} window that opened");
+                progress(_target.Prompt(browser.Name));
                 var shown = await CaptureAsync(browser, profile, headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
                 if (shown.Unstartable)
                 {
@@ -171,6 +182,8 @@ internal sealed class WebDriverSession
             ? "WebDriver has no browser to sign in with: install Firefox, Chrome or Edge"
             : $"WebDriver could not start a browser to sign in with ({string.Join("; ", failures)})", permanent: true);
     }
+
+    private string Lapsed() => $"the browser sign-in for {Site.Host} has lapsed; sign in again (open the source, or its Retry)";
 
     /// <summary>What one browser session came to: the session's cookies, or why not; whether trying again can help; whether the browser did not start at all.</summary>
     private sealed record Capture(IReadOnlyList<SessionCookie>? Cookies, string? Failure = null, bool Final = false, bool Unstartable = false);

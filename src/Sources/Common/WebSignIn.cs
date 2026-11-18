@@ -66,6 +66,16 @@ public abstract class WebSignInTarget(Uri page, string profileDir)
     /// </summary>
     public virtual IReadOnlyList<string> NegotiateHosts => [];
 
+    /// <summary>
+    /// Whether every sign-in asks the person for something a launch without a window cannot give (a code AnyFS shows them,
+    /// typed into the page): the window then opens at once, and a sign-in that may not show one fails at once rather than
+    /// waiting for nobody. False by default: while the profile is still signed in, a launch without a window signs in.
+    /// </summary>
+    public virtual bool NeedsAPerson => false;
+
+    /// <summary>What the person is told while the window is open: by default, to sign in there.</summary>
+    public virtual string Prompt(string browserName) => $"Sign in to {Page.Host} in the {browserName} window that opened";
+
     /// <summary>Whether a cookie the browser holds is part of the session: by default those that go to the page's host.</summary>
     public virtual bool Keeps(SessionCookie cookie) => SessionCookie.DomainMatches(cookie.Domain, Page.Host);
 

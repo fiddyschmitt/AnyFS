@@ -103,7 +103,8 @@ public sealed class BrowserSession
     /// <summary>
     /// The session's cookies: first a headless launch, which succeeds without a window while the profile's sign-in is still
     /// good (a restart, or a silent renewal); failing that, and only when <paramref name="interactive"/>, a window for the
-    /// person to sign in. Throws <see cref="SignInRequiredException"/> when no sign-in can be had: permanent when waiting
+    /// person to sign in (at once, for a target that asks the person each time: <see cref="WebSignInTarget.NeedsAPerson"/>).
+    /// Throws <see cref="SignInRequiredException"/> when no sign-in can be had: permanent when waiting
     /// cannot help (remote debugging turned off, the window closed, nobody signing in), so the source waits for a Retry
     /// instead of opening windows every few minutes.
     /// </summary>
@@ -114,6 +115,11 @@ public sealed class BrowserSession
             throw new SignInRequiredException(missing, permanent: true);
         }
 
+        if (_target.NeedsAPerson && !interactive)
+        {
+            throw new SignInRequiredException(Lapsed(), permanent: false);
+        }
+
         if (_webDriver is not null)
         {
             return await _webDriver.SignInAsync(interactive, progress, ct).ConfigureAwait(false);
@@ -122,6 +128,11 @@ public sealed class BrowserSession
         if (WebDriverFromTheStart() is { } why)
         {
             return await FallBackAsync(why, interactive, progress, ct).ConfigureAwait(false);
+        }
+
+        if (_target.NeedsAPerson)
+        {
+            return await AskThePersonAsync(progress, ct).ConfigureAwait(false);
         }
 
         Capture silent;
@@ -159,14 +170,48 @@ public sealed class BrowserSession
     {
         if (!interactive)
         {
-            throw new SignInRequiredException($"the browser sign-in for {Site.Host} has lapsed; sign in again (open the source, or its Retry)", permanent: false);
+            throw new SignInRequiredException(Lapsed(), permanent: false);
         }
 
         _logger.LogInformation("{Prefix}: no sign-in to read for {Host} without a window ({Why}); opening {Browser} for the person to sign in", Prefix, Site.Host, silent.Failure, BrowserName);
-        progress($"Sign in to {Site.Host} in the {BrowserName} window that opened");
+        progress(_target.Prompt(BrowserName));
         var shown = await CaptureAsync(headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
         return shown.Cookies ?? throw new SignInRequiredException(shown.Failure!, permanent: true);
     }
+
+    /// <summary>
+    /// A sign-in that asks the person for something every time (<see cref="WebSignInTarget.NeedsAPerson"/>): the window
+    /// at once, with no launch without one first; WebDriver instead where the browser keeps AnyFS from its DevTools port.
+    /// </summary>
+    private async Task<IReadOnlyList<SessionCookie>> AskThePersonAsync(Action<string> progress, CancellationToken ct)
+    {
+        Capture shown;
+        var gate = ProfileLocks.For(_profileDir);
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            _logger.LogInformation("{Prefix}: opening {Browser} for the person to sign in to {Host}, which asks them each time", Prefix, BrowserName, Site.Host);
+            progress(_target.Prompt(BrowserName));
+            shown = await CaptureAsync(headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
+            if (shown.Cookies is { } cookies)
+            {
+                return cookies;
+            }
+
+            if (!shown.DevToolsUnreachable)
+            {
+                throw new SignInRequiredException(shown.Failure!, permanent: true);
+            }
+        }
+        finally
+        {
+            gate.Release();
+        }
+
+        return await FallBackAsync(shown.Failure!, interactive: true, progress, ct).ConfigureAwait(false);
+    }
+
+    private string Lapsed() => $"the browser sign-in for {Site.Host} has lapsed; sign in again (open the source, or its Retry)";
 
     /// <summary>
     /// What one launch of the browser came to: the session's cookies, or why not; whether trying again can help; whether the
