@@ -43,7 +43,8 @@ public readonly record struct SignInCheck
 /// <param name="profileDir">AnyFS's own browser profile for it (<see cref="ProfileFor"/>); the WebDriver fallback keeps its own beside it.</param>
 public abstract class WebSignInTarget(Uri page, string profileDir)
 {
-    public Uri Page { get; } = page;
+    /// <summary>The page to open; a target may change it as its window opens (<see cref="OpeningWindowAsync"/>).</summary>
+    public virtual Uri Page { get; } = page;
 
     public string ProfileDir { get; } = profileDir;
 
@@ -72,6 +73,16 @@ public abstract class WebSignInTarget(Uri page, string profileDir)
     /// waiting for nobody. False by default: while the profile is still signed in, a launch without a window signs in.
     /// </summary>
     public virtual bool NeedsAPerson => false;
+
+    /// <summary>
+    /// Called as a window is about to open for the person, with the profile's turn taken (no other sign-in of the profile
+    /// has its window open, and none opens until this one is done), before the person is told what to do
+    /// (<see cref="Prompt"/>) and before <see cref="Page"/> is opened. A sign-in that starts with a request of its own,
+    /// which the server holds only for a while (Artifactory's client sign-in: a session the platform keeps for five
+    /// minutes), makes it here, so its time runs from its window and not from the wait for the profile. <see cref="Page"/>
+    /// and <see cref="Prompt"/> may change with it. Nothing by default.
+    /// </summary>
+    public virtual ValueTask OpeningWindowAsync(CancellationToken ct) => ValueTask.CompletedTask;
 
     /// <summary>What the person is told while the window is open: by default, to sign in there.</summary>
     public virtual string Prompt(string browserName) => $"Sign in to {Page.Host} in the {browserName} window that opened";

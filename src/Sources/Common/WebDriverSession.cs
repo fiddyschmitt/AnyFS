@@ -161,6 +161,7 @@ internal sealed class WebDriverSession
                     _logger.LogInformation("{Prefix}: no sign-in to read for {Host} in {Browser} without a window ({Why}); opening it for the person to sign in", Prefix, Site.Host, browser.Name, silent.Failure);
                 }
 
+                await _target.OpeningWindowAsync(ct).ConfigureAwait(false);
                 progress(_target.Prompt(browser.Name));
                 var shown = await CaptureAsync(browser, profile, headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
                 if (shown.Unstartable)

@@ -70,7 +70,7 @@ public class BrowserChoiceTests
     [DataRow(null, null)]
     public void TheForcedBrowserIsReadFromItsName(string? value, string? kind) => Assert.AreEqual(kind, WebDriverSession.ForcedKind(value)?.ToString());
 
-    private sealed class NoTarget(string profile, string? variable = null, bool needsAPerson = false) : WebSignInTarget(new Uri("https://example.test/"), profile)
+    private sealed class NoTarget(string profile, string? variable = null, bool needsAPerson = false, Func<CancellationToken, ValueTask>? opening = null) : WebSignInTarget(new Uri("https://example.test/"), profile)
     {
         public override string LogPrefix => "test";
 
@@ -78,7 +78,38 @@ public class BrowserChoiceTests
 
         public override bool NeedsAPerson => needsAPerson;
 
+        public override ValueTask OpeningWindowAsync(CancellationToken ct) => opening?.Invoke(ct) ?? ValueTask.CompletedTask;
+
         public override ValueTask<SignInCheck> CheckAsync(IReadOnlyList<Uri> pages, IReadOnlyList<SessionCookie> cookies, CancellationToken ct) => ValueTask.FromResult(SignInCheck.NotYet);
+    }
+
+    [TestMethod]
+    public async Task ASignInThatStartsWithARequestOfItsOwnMakesItWithTheProfilesTurnAsItsWindowOpens()
+    {
+        // a browser that is not there, and a request the server refuses, so that no window opens either way
+        var browser = Path.Combine(Path.GetTempPath(), "anyfs-tests", "no such folder", "a-browser.exe");
+        var profile = Path.Combine(Path.GetTempPath(), "anyfs-tests", "opening-" + Guid.NewGuid().ToString("N"));
+        var told = new List<string>();
+        var turnTaken = new List<bool>();
+        ValueTask Refused(string turnOf)
+        {
+            turnTaken.Add(ProfileLocks.For(turnOf).CurrentCount == 0);
+            return ValueTask.FromException(new SignInRequiredException("the server would not start a sign-in", permanent: true));
+        }
+
+        var devTools = new BrowserSession(browser, new NoTarget(profile, needsAPerson: true, opening: _ => Refused(profile)), NullLogger.Instance);
+        var ex = await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => devTools.SignInAsync(interactive: true, told.Add, CancellationToken.None));
+        Assert.AreEqual("the server would not start a sign-in", ex.Message);
+
+        // through WebDriver, whose profile is its own beside it
+        var webDriver = new WebDriverSession([new WebDriverBrowser(BrowserKind.Firefox, browser)], new NoTarget(profile, needsAPerson: true, opening: _ => Refused(profile + "-firefox")), NullLogger.Instance);
+        ex = await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => webDriver.SignInAsync(interactive: true, told.Add, CancellationToken.None));
+        Assert.AreEqual("the server would not start a sign-in", ex.Message);
+
+        CollectionAssert.AreEqual(new[] { true, true }, turnTaken, "made with the profile's turn taken: no other window of the profile is open while the server's time for it runs");
+        Assert.AreEqual(0, told.Count, "made before the person is told what to do, which may depend on it");
+        Assert.AreEqual(1, ProfileLocks.For(profile).CurrentCount, "the turn given back");
+        Assert.AreEqual(1, ProfileLocks.For(profile + "-firefox").CurrentCount);
     }
 
     [TestMethod]

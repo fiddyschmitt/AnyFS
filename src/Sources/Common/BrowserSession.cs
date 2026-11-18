@@ -173,6 +173,7 @@ public sealed class BrowserSession
             throw new SignInRequiredException(Lapsed(), permanent: false);
         }
 
+        await _target.OpeningWindowAsync(ct).ConfigureAwait(false);
         _logger.LogInformation("{Prefix}: no sign-in to read for {Host} without a window ({Why}); opening {Browser} for the person to sign in", Prefix, Site.Host, silent.Failure, BrowserName);
         progress(_target.Prompt(BrowserName));
         var shown = await CaptureAsync(headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
@@ -190,6 +191,7 @@ public sealed class BrowserSession
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            await _target.OpeningWindowAsync(ct).ConfigureAwait(false);
             _logger.LogInformation("{Prefix}: opening {Browser} for the person to sign in to {Host}, which asks them each time", Prefix, BrowserName, Site.Host);
             progress(_target.Prompt(BrowserName));
             shown = await CaptureAsync(headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
