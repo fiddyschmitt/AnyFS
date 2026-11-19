@@ -255,9 +255,10 @@ public class GitLabLiveTests
         var issue = Encoding.UTF8.GetString(await ReadAsync(source, first + "/issue.md"));
         StringAssert.Contains(issue, "**Labels:** bug, install");
         StringAssert.Contains(issue, "(attachments/steps.txt)");
-        var comments = Encoding.UTF8.GetString(await ReadAsync(source, first + "/comments.md"));
-        StringAssert.Contains(comments, "Fixed in the next build.");
-        Assert.IsFalse(comments.Contains("assigned to", StringComparison.Ordinal));
+        StringAssert.Contains(issue, "\n## Comments\n", "the comments at the end of issue.md, as Jira's are");
+        StringAssert.Contains(issue, "Fixed in the next build.");
+        Assert.IsFalse(issue.Contains("assigned to", StringComparison.Ordinal));
+        CollectionAssert.DoesNotContain((await ListAsync(source, first)).Select(e => e.Name).ToList(), "comments.md");
         var attachments = await ListAsync(source, first + "/attachments");
         CollectionAssert.AreEquivalent(new[] { "steps.txt", "diagram.png", "data.bin" }, attachments.Select(e => e.Name).ToArray());
         Assert.AreEqual(102_400, attachments.Single(e => e.Name == "data.bin").Length);

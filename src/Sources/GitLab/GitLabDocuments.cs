@@ -76,16 +76,18 @@ internal sealed record GlUpload(string Secret, string FileName)
 
 /// <summary>
 /// The files the source makes from GitLab's data (spec 7.8), as Outlook makes a message's (7.7): a title, a block of
-/// <c>**Label:** value</c> lines, a rule, then the text as GitLab keeps it, its attachments' links pointing at the folder's
-/// <c>attachments</c> beside it. UTF-8 without a byte order mark.
+/// <c>**Label:** value</c> lines, a rule, then the text as GitLab keeps it, and for an issue or a merge request its
+/// comments after it, oldest first, as Jira's <c>issue.md</c> ends with its own; the attachments' links point at the
+/// folder's <c>attachments</c> beside it. UTF-8 without a byte order mark.
 /// </summary>
 internal static partial class GitLabDocuments
 {
     /// <summary>
     /// Bumped when what the files made here hold, or what the tree's folders are named, changes: the sizes in the listings
-    /// a run before saved would no longer be the files', so they are not read back.
+    /// a run before saved would no longer be the files', so they are not read back. 2 since 19-Nov-2026: an issue's and a
+    /// merge request's comments at the end of its own file, with no <c>comments.md</c> beside it.
     /// </summary>
-    public const int Format = 1;
+    public const int Format = 2;
 
     [GeneratedRegex(@"(?<![\w/])/uploads/(?<secret>[0-9a-f]{32})/(?<name>[^)\s""'\]>]+)", RegexOptions.CultureInvariant)]
     private static partial Regex ProjectUpload();
@@ -103,8 +105,12 @@ internal static partial class GitLabDocuments
             return names.TryGetValue(upload, out var name) ? $"{folder}/{Uri.EscapeDataString(name)}" : m.Value;
         });
 
-    /// <summary>An issue's or merge request's own file: its title, what GitLab says of it, its description.</summary>
-    public static byte[] Ticket(GlTicket t, bool mergeRequest, IReadOnlyDictionary<GlUpload, string> attachments)
+    /// <summary>
+    /// An issue's or merge request's own file: its title, what GitLab says of it, its description, then its comments under
+    /// <c>## Comments</c>, oldest first, each under its author and time, as Jira's <c>issue.md</c> ends; GitLab's own notes
+    /// ("assigned to @x") are left out, and with no comment left there is no such section.
+    /// </summary>
+    public static byte[] Ticket(GlTicket t, bool mergeRequest, IReadOnlyList<GlNote> notes, IReadOnlyDictionary<GlUpload, string> attachments)
     {
         var sb = new StringBuilder();
         sb.Append("# ").Append(mergeRequest ? "!" : "#").Append(t.Iid).Append(' ').Append(OneLine(t.Title)).Append("\n\n");
@@ -123,26 +129,25 @@ internal static partial class GitLabDocuments
         Line(sb, "Updated", Date(t.Updated));
         Line(sb, "Web", t.WebUrl);
         sb.Append("\n---\n\n");
-        sb.Append(LinkUploads(t.Description.ReplaceLineEndings("\n").Trim(), "attachments", attachments));
-        sb.Append('\n');
-        return Encoding.UTF8.GetBytes(sb.ToString());
-    }
-
-    /// <summary>The comments, oldest first, each under its author and time; GitLab's own notes left out.</summary>
-    public static byte[] Comments(string heading, IReadOnlyList<GlNote> notes, IReadOnlyDictionary<GlUpload, string> attachments)
-    {
-        var sb = new StringBuilder();
-        sb.Append("# ").Append(OneLine(heading)).Append("\n\n");
-        var shown = notes.Where(n => !n.System).ToList();
-        if (shown.Count == 0)
+        var description = LinkUploads(t.Description.ReplaceLineEndings("\n").Trim(), "attachments", attachments);
+        if (description.Length > 0)
         {
-            sb.Append("No comments.\n");
+            sb.Append(description).Append("\n\n");
         }
 
-        foreach (var note in shown)
+        var comments = notes.Where(n => !n.System).ToList();
+        if (comments.Count > 0)
         {
-            sb.Append("## ").Append(note.Author?.ToString() ?? "someone").Append(", ").Append(Date(note.Created) ?? "").Append("\n\n");
-            sb.Append(LinkUploads(note.Body.ReplaceLineEndings("\n").Trim(), "attachments", attachments)).Append("\n\n");
+            sb.Append("## Comments\n");
+            foreach (var note in comments)
+            {
+                sb.Append("\n### ").Append(note.Author?.ToString() ?? "someone").Append(", ").Append(Date(note.Created) ?? "").Append("\n\n");
+                var body = LinkUploads(note.Body.ReplaceLineEndings("\n").Trim(), "attachments", attachments);
+                if (body.Length > 0)
+                {
+                    sb.Append(body).Append('\n');
+                }
+            }
         }
 
         return Encoding.UTF8.GetBytes(sb.ToString().TrimEnd('\n') + "\n");

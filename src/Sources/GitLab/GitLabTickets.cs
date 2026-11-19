@@ -14,9 +14,9 @@ internal sealed class TicketsFolder(GlProject project, bool mergeRequests, strin
 }
 
 /// <summary>
-/// One issue or merge request: <c>issue.md</c> or <c>merge_request.md</c> (what GitLab says of it, its description),
-/// <c>comments.md</c>, a merge request's <c>changes.diff</c>, and <c>attachments</c>: the files its text and comments link
-/// to, which the Markdown links point at.
+/// One issue or merge request: <c>issue.md</c> or <c>merge_request.md</c> (what GitLab says of it, its description, then
+/// its comments, as Jira's <c>issue.md</c> ends with its own), a merge request's <c>changes.diff</c>, and
+/// <c>attachments</c>: the files its text and comments link to, which the Markdown links point at.
 /// </summary>
 internal sealed class TicketFolder(GlProject project, GlTicket ticket, bool mergeRequest, string name) : GlFolder(name, ticket.Updated, ticket.Created)
 {
@@ -34,11 +34,9 @@ internal sealed class TicketFolder(GlProject project, GlTicket ticket, bool merg
         var uploads = GitLabDocuments.Uploads(notes.Where(n => !n.System).Select(n => n.Body).Prepend(Ticket.Description));
         var names = GitLabNames.Unique(uploads.Select(u => u.Name).ToList());
         var byUpload = uploads.Select((u, i) => (u, names[i])).ToDictionary(p => p.u, p => p.Item2);
-        var heading = $"{(mergeRequest ? "!" : "#")}{Ticket.Iid} {Ticket.Title}";
         var children = new List<GlNode>
         {
-            new TextFile(mergeRequest ? "merge_request.md" : "issue.md", GitLabDocuments.Ticket(Ticket, mergeRequest, byUpload), Ticket.Updated, Ticket.Created),
-            new TextFile("comments.md", GitLabDocuments.Comments($"Comments on {heading}", notes, byUpload), notes.Count == 0 ? Ticket.Created : notes.Max(n => n.Created) ?? Ticket.Updated, Ticket.Created),
+            new TextFile(mergeRequest ? "merge_request.md" : "issue.md", GitLabDocuments.Ticket(Ticket, mergeRequest, notes, byUpload), Ticket.Updated, Ticket.Created),
         };
         if (mergeRequest)
         {

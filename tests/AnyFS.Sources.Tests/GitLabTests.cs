@@ -1530,7 +1530,7 @@ public class GitLabSourceTests
         Assert.AreEqual(GitLabSeed.Large.Length, (await source.StatAsync("tools/app/files/e2e/large.bin", CancellationToken.None))!.Length, "the LFS object's size");
         CollectionAssert.AreEquivalent(new[] { "home.md", "guides", "notes.asciidoc", "Ünïcödé-résumé.md" }, (await ListAsync(source, "docs/wiki")).Select(e => e.Name).ToArray());
         Assert.AreEqual(4, (await ListAsync(source, "docs/issues")).Count);
-        CollectionAssert.Contains((await ListAsync(source, "docs/issues/#1 Install fails on Debian")).Select(e => e.Name).ToList(), "comments.md");
+        CollectionAssert.AreEqual(new[] { "issue.md", "attachments" }, (await ListAsync(source, "docs/issues/#1 Install fails on Debian")).Select(e => e.Name).ToArray());
         Assert.AreEqual(asked, fake.Requests.Count, "nothing asked");
 
         // a tag's repository too, walked with the rest (until 6-Nov-2026 left out, and listed when opened)
@@ -1793,20 +1793,24 @@ public class GitLabTicketTests
     }
 
     [TestMethod]
-    public async Task AnIssueIsItsMarkdownItsCommentsAndItsAttachments()
+    public async Task AnIssueIsItsMarkdownWithItsCommentsAtTheEndAndItsAttachments()
     {
         var fake = GitLabSeed.Lab();
         await using var source = await StartAsync(fake);
-        CollectionAssert.AreEqual(new[] { "issue.md", "comments.md", "attachments" }, (await ListAsync(source, First)).Select(e => e.Name).ToArray());
+        CollectionAssert.AreEqual(new[] { "issue.md", "attachments" }, (await ListAsync(source, First)).Select(e => e.Name).ToArray(), "the comments in issue.md, as Jira's are: no comments.md");
         var issue = Encoding.UTF8.GetString(await ReadAsync(source, First + "/issue.md"));
         StringAssert.StartsWith(issue, "# #1 Install fails on Debian\n\n**State:** open  \n**Author:** Test Er (@tester)  \n**Assignees:** Test Er (@tester)  \n**Labels:** bug, install  \n**Milestone:** v1  \n");
         StringAssert.Contains(issue, $"**Web:** {fake.Server}/anyfs/docs/-/issues/1");
         StringAssert.Contains(issue, "[steps.txt](attachments/steps.txt)");
         StringAssert.Contains(issue, "![diagram](attachments/diagram.png)");
-        var comments = Encoding.UTF8.GetString(await ReadAsync(source, First + "/comments.md"));
-        StringAssert.Contains(comments, "It works on Debian 12.");
-        StringAssert.Contains(comments, "Fixed in the next build.");
-        Assert.IsFalse(comments.Contains("assigned to", StringComparison.Ordinal), "GitLab's own notes are left out");
+
+        // the description, then the comments under their own heading, oldest first, each under its author and time
+        StringAssert.EndsWith(issue,
+            "The log: [data.bin](attachments/data.bin)\n\n## Comments\n\n"
+            + $"### Test Er (@tester), {GitLabDocuments.Date(GitLabSeed.Opened.AddHours(1))}\n\nIt works on Debian 12.\n\n"
+            + $"### Test Er (@tester), {GitLabDocuments.Date(GitLabSeed.Opened.AddHours(2))}\n\nFixed in the next build.\n");
+        Assert.IsFalse(issue.Contains("assigned to", StringComparison.Ordinal), "GitLab's own notes are left out");
+        Assert.AreEqual(Encoding.UTF8.GetByteCount(issue), (await source.StatAsync(First + "/issue.md", CancellationToken.None))!.Length, "the listing's size is the file's, comments and all");
         var attachments = await ListAsync(source, First + "/attachments");
         CollectionAssert.AreEqual(new[] { "steps.txt", "diagram.png", "data.bin" }, attachments.Select(e => e.Name).ToArray());
         Assert.AreEqual(GitLabSeed.Data.Length, attachments.Single(e => e.Name == "data.bin").Length);
@@ -1840,23 +1844,26 @@ public class GitLabTicketTests
     }
 
     [TestMethod]
-    public async Task AClosedIssueSaysSoAndAnIssueWithoutCommentsSaysThat()
+    public async Task AClosedIssueSaysSoAndAnIssueWithoutCommentsEndsWithItsDescription()
     {
         var fake = GitLabSeed.Lab();
         await using var source = await StartAsync(fake);
-        StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, "issues/#2 An old question/issue.md")), "**State:** closed ");
-        StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, "issues/#2 An old question/comments.md")), "No comments.");
-        CollectionAssert.AreEqual(new[] { "issue.md", "comments.md" }, (await ListAsync(source, "issues/#2 An old question")).Select(e => e.Name).ToArray(), "no attachments, no folder");
+        var issue = Encoding.UTF8.GetString(await ReadAsync(source, "issues/#2 An old question/issue.md"));
+        StringAssert.Contains(issue, "**State:** closed ");
+        StringAssert.EndsWith(issue, "\n---\n\nAnswered long ago.\n", "no comments, no section for them, as Jira's");
+        CollectionAssert.AreEqual(new[] { "issue.md" }, (await ListAsync(source, "issues/#2 An old question")).Select(e => e.Name).ToArray(), "no attachments, no folder");
     }
 
     [TestMethod]
-    public async Task AMergeRequestHasItsChangesAsAPatch()
+    public async Task AMergeRequestIsItsMarkdownWithItsCommentsAndItsChangesAsAPatch()
     {
         var fake = GitLabSeed.Lab();
         await using var source = await StartAsync(fake);
         const string mr = "merge requests/!1 Docs_ say more";
-        CollectionAssert.AreEqual(new[] { "merge_request.md", "comments.md", "changes.diff" }, (await ListAsync(source, mr)).Select(e => e.Name).ToArray());
-        StringAssert.Contains(Encoding.UTF8.GetString(await ReadAsync(source, mr + "/merge_request.md")), "**Branches:** feature/docs into main");
+        CollectionAssert.AreEqual(new[] { "merge_request.md", "changes.diff" }, (await ListAsync(source, mr)).Select(e => e.Name).ToArray());
+        var request = Encoding.UTF8.GetString(await ReadAsync(source, mr + "/merge_request.md"));
+        StringAssert.Contains(request, "**Branches:** feature/docs into main");
+        StringAssert.EndsWith(request, $"Adds a page and changes the README.\n\n## Comments\n\n### Test Er (@tester), {GitLabDocuments.Date(GitLabSeed.Opened.AddDays(1).AddHours(1))}\n\nLooks good to me.\n");
         var patch = Encoding.UTF8.GetString(await ReadAsync(source, mr + "/changes.diff"));
         StringAssert.StartsWith(patch, "diff --git a/docs/more.md b/docs/more.md\nnew file mode 100644\n--- /dev/null\n+++ b/docs/more.md\n@@ -0,0 +1,3 @@\n+# More\n");
         StringAssert.Contains(patch, "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,3 @@\n");
