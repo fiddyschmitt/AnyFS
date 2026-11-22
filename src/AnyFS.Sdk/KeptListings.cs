@@ -703,7 +703,7 @@ public sealed class KeptListings : IAsyncDisposable
                             continue;
                         }
 
-                        tree = heldAlone && (walk.HeldBelow?.GetValueOrDefault(folder) ?? 0) < ReadAtOnceFrom ? null : await TreeOfAsync(folder, walk, ct).ConfigureAwait(false);
+                        tree = heldAlone && (walk.HeldBelow?.GetValueOrDefault(folder) ?? 0) < ReadAtOnceFrom ? null : await TreeOfAsync(folder, ct).ConfigureAwait(false);
                         entries = tree is null ? await Cache.RefreshAsync(folder, stamp, ct).ConfigureAwait(false) : [];
                         if (tree is not null)
                         {
@@ -876,12 +876,16 @@ public sealed class KeptListings : IAsyncDisposable
 
     /// <summary>
     /// The listings of a folder and of every folder below it at once (<see cref="KeptListingsOptions.ListTree"/>); null where there
-    /// is no quicker way than folder by folder. Where that fails (too much at once for the upstream, or one thing in it that it
-    /// cannot give), the rest of this walk goes folder by folder, so what can be listed is.
+    /// is no quicker way than folder by folder. Where that fails (too much at once for the upstream, one thing in it that it
+    /// cannot give, or the folder gone since the one above it was listed), this folder is listed alone and the ones below it as
+    /// the walk comes to them, so what can be listed is; every other folder is still asked for at once. Until 22-Nov-2026
+    /// one such failure sent the rest of the walk folder by folder: on a GitLab of thousands of projects, one folder gone
+    /// since its parent was listed (a pipeline pushed out of the newest hundred) made every project after it cost a request a
+    /// folder in place of a hundred entries a request.
     /// </summary>
-    private async Task<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?> TreeOfAsync(string folder, Walk walk, CancellationToken ct)
+    private async Task<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?> TreeOfAsync(string folder, CancellationToken ct)
     {
-        if (_options.ListTree is not { } listTree || walk.FolderByFolder)
+        if (_options.ListTree is not { } listTree)
         {
             return null;
         }
@@ -890,10 +894,15 @@ public sealed class KeptListings : IAsyncDisposable
         {
             return await listTree(folder, ct).ConfigureAwait(false);
         }
+        catch (VfsException ex) when (ex.Error is VfsError.NotFound or VfsError.NotADirectory)
+        {
+            // gone, most likely: its own listing says so, and that is nothing left out
+            _logger.LogDebug("{Name}: '{Folder}' could not be read at once ({Error}); listed alone", _options.Name, folder, ex.Message);
+            return null;
+        }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            walk.FolderByFolder = true;
-            _logger.LogInformation("{Name}: '{Folder}' could not be read at once ({Error}); the walk goes on folder by folder", _options.Name, folder, ex.Message);
+            _logger.LogInformation("{Name}: '{Folder}' could not be read at once ({Error}); it is listed folder by folder", _options.Name, folder, ex.Message);
             return null;
         }
     }
@@ -1001,8 +1010,6 @@ public sealed class KeptListings : IAsyncDisposable
         public List<Task> Parts { get; } = [];
 
         public volatile bool LeftSomeOut;
-
-        public volatile bool FolderByFolder;
 
         public long Listed;
 

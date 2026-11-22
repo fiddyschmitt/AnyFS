@@ -411,8 +411,37 @@ public class KeptListingsTests
         };
         await using var kept = Kept(counters, options);
         await kept.CountAsync(CancellationToken.None);
-        Assert.AreEqual(1, asked, "not asked again this walk");
+        Assert.AreEqual(2, asked, "each asked for once: one that cannot be read at once says nothing of the next");
         Assert.AreEqual((1, 1, 1), (Listed("docs"), Listed("docs/sub"), Listed("photos")), "each listed alone");
+        Assert.AreEqual((6L, EnumerationState.Complete), (counters.FilesKnown, counters.State), "nothing left out");
+    }
+
+    [TestMethod]
+    public async Task AFolderThatCannotBeReadAtOnceIsListedAloneAndTheRestStillReadAtOnce()
+    {
+        // until 22-Nov-2026 one folder that could not be read at once sent the rest of the walk folder by folder: on a big
+        // GitLab, one folder gone since its parent was listed made every project after it cost a request a folder
+        var asked = new ConcurrentQueue<string>();
+        var counters = new SourceCounters();
+        var options = new KeptListingsOptions
+        {
+            WalkEvery = TimeSpan.Zero,
+            Parallelism = 1,
+            ListTree = (folder, _) =>
+            {
+                asked.Enqueue(folder);
+                return folder switch
+                {
+                    "docs" => throw new VfsException(VfsError.Unavailable, "too much at once"),
+                    "photos" => Task.FromResult<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>(new Dictionary<string, IReadOnlyList<VfsEntry>> { ["photos"] = _tree["photos"] }),
+                    _ => Task.FromResult<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?>(null),
+                };
+            },
+        };
+        await using var kept = Kept(counters, options);
+        await kept.CountAsync(CancellationToken.None);
+        CollectionAssert.Contains(asked.ToArray(), "photos", "asked for at once though docs could not be");
+        Assert.AreEqual((1, 1, 0), (Listed("docs"), Listed("docs/sub"), Listed("photos")), "docs and what is below it listed alone, photos read at once");
         Assert.AreEqual((6L, EnumerationState.Complete), (counters.FilesKnown, counters.State), "nothing left out");
     }
 
