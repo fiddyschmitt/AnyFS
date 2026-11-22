@@ -281,6 +281,24 @@ public class GitLabNamesTests
         Assert.IsTrue(plugin.IsVisible(new GitLabSettings(), nameof(GitLabSettings.AccessToken)));
         Assert.IsFalse(plugin.IsVisible(new GitLabSettings(), nameof(GitLabSettings.Username)));
     }
+
+    [TestMethod]
+    public void AnswersUsedForNoSecondsAreAllowedAsTheSettingsHintSays()
+    {
+        var plugin = new GitLabPlugin();
+        var settings = GitLabSeed.Settings("https://gitlab.example.com");
+        foreach (var seconds in new[] { 0, 1, 60, 86_400 })
+        {
+            settings.RefreshSeconds = seconds;
+            Assert.IsFalse(plugin.Validate(settings).Any(m => m.Property == nameof(GitLabSettings.RefreshSeconds)), $"{seconds} s (0 asks every time)");
+        }
+
+        foreach (var seconds in new[] { -1, 86_401 })
+        {
+            settings.RefreshSeconds = seconds;
+            Assert.IsTrue(plugin.Validate(settings).Any(m => m.IsError && m.Property == nameof(GitLabSettings.RefreshSeconds)), $"{seconds} s");
+        }
+    }
 }
 
 /// <summary>A GitLab source against <see cref="FakeGitLab"/>: what it shows and reads (spec 7.8).</summary>
