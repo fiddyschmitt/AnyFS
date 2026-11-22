@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -619,7 +619,8 @@ internal sealed partial class FakeSharePoint
         {
             if (existing is FolderItem || !overwrite)
             {
-                return Response.Json(500, RestError("-2130575257, Microsoft.SharePoint.SPException", $"A file with the name {existing.ServerRelativeUrl.TrimStart('/')} already exists."));
+                // over a file, as the Subscription Edition farm answered it on 22-Nov-2026: 400, with this code
+                return Response.Json(existing is FolderItem ? 500 : 400, RestError("-2130575257, Microsoft.SharePoint.SPException", $"A file with the name {existing.ServerRelativeUrl.TrimStart('/')} already exists."));
             }
 
             if (((FileItem)existing).Locked)

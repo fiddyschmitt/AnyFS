@@ -1,3 +1,4 @@
+﻿using System.Collections.Concurrent;
 using System.Text.Json;
 using AnyFS.Sdk;
 using AnyFS.Sources.Common;
@@ -20,6 +21,9 @@ internal enum UploadEnd
 
     /// <summary>The file was deleted while its bytes were here.</summary>
     Deleted,
+
+    /// <summary>SharePoint refused it in a way no later try can mend (<see cref="PendingUploadFile.NeverLands"/>): nothing of it is kept.</summary>
+    Refused,
 }
 
 /// <summary>
@@ -34,6 +38,13 @@ internal enum UploadEnd
 /// (<see cref="TryAgainAsync"/>), in this run and, by its note, in the next (<see cref="Recover"/>). It ends when it has
 /// landed, when the file is deleted, or when a later write of the same file takes its place.
 /// </para>
+/// <para>
+/// That is for a failure that may pass (a lock, a throttle, a server that did not answer, a sign-in that lapsed). One
+/// that waiting cannot mend (<see cref="NeverLands"/>: no permission to write there, the folder gone, a name SharePoint
+/// refuses, a file there where a new one was to be made) is told to who closed the file and ends it: nothing is kept,
+/// and nothing is tried again. Kept, such a file was tried every five minutes for good (the review's second pass,
+/// 22-Nov-2026).
+/// </para>
 /// </summary>
 internal sealed class PendingUploadFile : IVfsFile
 {
@@ -41,6 +52,10 @@ internal sealed class PendingUploadFile : IVfsFile
     public const string NoteSuffix = ".json";
 
     private const int NoteVersion = 1;
+
+    // the local files this process has open for writing, whichever source opened them: a source that starts in
+    // another's place leaves them alone (IsOpenHere)
+    private static readonly ConcurrentDictionary<string, byte> OpenHere = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _key;
     private readonly Func<PendingUploadFile, CancellationToken, Task> _upload;
     private readonly ILogger _logger;
@@ -79,6 +94,7 @@ internal sealed class PendingUploadFile : IVfsFile
         _handle = File.OpenHandle(tempPath, keepExisting ? FileMode.Open : FileMode.Create, FileAccess.ReadWrite, FileShare.None, FileOptions.Asynchronous);
         _length = keepExisting ? RandomAccess.GetLength(_handle) : 0;
         _dirty = mustUpload;
+        OpenHere[System.IO.Path.GetFullPath(tempPath)] = 0;
     }
 
     /// <summary>A file whose handle closed in an earlier run and whose upload did not land then.</summary>
@@ -99,6 +115,16 @@ internal sealed class PendingUploadFile : IVfsFile
         Opened = closed;
         _completion.TrySetResult();
     }
+
+    /// <summary>
+    /// Whether a local file is one a client still has open for writing in this process. A source that starts in the
+    /// place of another (its settings edited, a Retry) finds that one's files in the folder, and a file still being
+    /// written has no note yet: by this it is told from what a run that ended left half-written. Windows refuses to
+    /// delete an open file and Linux and macOS do not, so nothing else told the two apart there.
+    /// </summary>
+    public static bool IsOpenHere(string tempPath) => OpenHere.ContainsKey(System.IO.Path.GetFullPath(tempPath));
+
+    private void NoLongerOpen() => OpenHere.TryRemove(System.IO.Path.GetFullPath(TempPath), out _);
 
     /// <summary>The source path.</summary>
     public string Path { get; }
@@ -129,6 +155,19 @@ internal sealed class PendingUploadFile : IVfsFile
 
     /// <summary>There was no file of this name when it was opened: the name is here alone until the upload lands.</summary>
     public bool IsNew { get; init; }
+
+    /// <summary>
+    /// The file was opened as one that must be new (<see cref="VfsOpenMode.CreateNew"/>). That there was none went by the
+    /// listing held here, which may be as old as the last walk: the upload asks SharePoint for a new file only, so a
+    /// file made there since is not replaced.
+    /// </summary>
+    public bool OnlyIfNew { get; init; }
+
+    /// <summary>
+    /// Whether an upload's failure is one no later try can mend. Such a failure ends the file
+    /// (<see cref="UploadEnd.Refused"/>) where any other leaves it waiting. The source's to say; none, and every failure waits.
+    /// </summary>
+    public Func<Exception, bool>? NeverLands { get; set; }
 
     /// <summary>True once the writer's handle has closed; the upload may still be in flight (<see cref="Completion"/>).</summary>
     public bool IsClosed => Volatile.Read(ref _closed);
@@ -388,6 +427,7 @@ internal sealed class PendingUploadFile : IVfsFile
         }
 
         handle?.Dispose();
+        NoLongerOpen();
         End(discarded ? UploadEnd.Deleted : UploadEnd.GivenUp);
         return ValueTask.CompletedTask;
     }
@@ -416,6 +456,7 @@ internal sealed class PendingUploadFile : IVfsFile
         }
 
         handle?.Dispose();
+        NoLongerOpen();
         if (!upload)
         {
             End(discarded ? UploadEnd.Deleted : UploadEnd.Unchanged);
@@ -509,13 +550,15 @@ internal sealed class PendingUploadFile : IVfsFile
             failure = ex;
         }
 
+        // a try that was stopped says nothing of the next one; any other failure may be one that waiting cannot mend
+        var refused = failure is not null and not OperationCanceledException && !stop.IsCancellationRequested && NeverLands?.Invoke(failure) == true;
         bool discarded;
         lock (_gate)
         {
             _attemptStop = null;
             _attempt = null;
             discarded = _discarded;
-            if (failure is not null && !discarded)
+            if (failure is not null && !discarded && !refused)
             {
                 _waiting = true;
                 _tried = DateTimeOffset.UtcNow;
@@ -539,6 +582,13 @@ internal sealed class PendingUploadFile : IVfsFile
         {
             End(UploadEnd.Landed);
             return null;
+        }
+
+        if (refused)
+        {
+            _logger.LogWarning("sharepoint: '{Path}' ({Length:N0} bytes) cannot be uploaded: {Error}. No later try can go better, so it is not kept", Path, Length, failure.Message);
+            End(UploadEnd.Refused);
+            return failure;
         }
 
         if (!stop.IsCancellationRequested)
@@ -579,6 +629,7 @@ internal sealed class PendingUploadFile : IVfsFile
         reading?.Dispose();
         Remove(TempPath);
         Remove(TempPath + NoteSuffix);
+        NoLongerOpen();
         try
         {
             if (tell)

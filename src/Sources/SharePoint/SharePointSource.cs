@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Runtime.CompilerServices;
@@ -466,8 +466,10 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         {
             Supersedes = waiting,
             IsNew = existing is null,
+            OnlyIfNew = existing is null && mode == VfsOpenMode.CreateNew,
             Ended = UploadEnded,
             Waits = UploadWaits,
+            NeverLands = UploadNeverLands,
         };
         _pending[path] = file;
         if (existing is null)
@@ -540,13 +542,26 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         ct = stopping.Token;
         if (await ResolveAsync(path, ct).ConfigureAwait(false) is not { Library: { } library, ItemPath: { Length: > 0 } itemPath })
         {
-            throw VfsException.NotFound(VfsPath.Parent(path));
+            bool sitesLeftOut;
+            lock (_leftOut)
+            {
+                sitesLeftOut = _leftOut.Count > 0;
+            }
+
+            // Its library or site is not among what this source shows. With a site left out at this start that may be
+            // the one, and it may open yet: the file waits. With every site open, the place has gone (deleted, or given
+            // another name), and no later try finds it.
+            throw sitesLeftOut
+                ? VfsException.Unavailable($"'{VfsPath.Parent(path)}' is not there to upload to while some of the sites have not opened")
+                : VfsException.NotFound(VfsPath.Parent(path));
         }
 
         ItemRef item;
         try
         {
-            item = await Run(() => Store.UploadAsync(library, itemPath, file.TempPath, file.Length, ct)).ConfigureAwait(false);
+            // new only on the close's own try: a later one may follow a try that landed and whose answer was lost
+            var onlyIfNew = file.OnlyIfNew && file.Tried.Tries == 0;
+            item = await Run(() => Store.UploadAsync(library, itemPath, file.TempPath, file.Length, onlyIfNew, ct)).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -640,7 +655,32 @@ public abstract partial class SharePointSource : SourceBase, ICountable
     {
         RequireWrite("deleting");
         path = VfsPath.Normalize(path);
-        var (library, itemPath) = await InsideLibraryAsync(path, ct).ConfigureAwait(false);
+        LibraryInfo library;
+        string itemPath;
+        try
+        {
+            (library, itemPath) = await InsideLibraryAsync(path, ct).ConfigureAwait(false);
+        }
+        catch (VfsException ex) when (ex.Error is VfsError.NotFound or VfsError.AccessDenied && _pending.TryGetValue(path, out var unplaced))
+        {
+            // A file written here whose library or site is no longer among what the source shows: there is nothing
+            // upstream to delete, and what is held here goes. (It could not be deleted at all, and came back at each start.)
+            if (unplaced.IsClosed)
+            {
+                await unplaced.Completion.ConfigureAwait(false);
+            }
+
+            if (_pending.TryRemove(new KeyValuePair<string, PendingUploadFile>(path, unplaced)))
+            {
+                await unplaced.DiscardAsync().ConfigureAwait(false);
+                SayWaiting();
+                _items.TryRemove(path, out _);
+                return;
+            }
+
+            throw;
+        }
+
         RequireNotPages(library, path);
         if (_pending.TryGetValue(path, out var pendingFile))
         {

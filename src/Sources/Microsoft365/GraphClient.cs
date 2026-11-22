@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -174,7 +174,9 @@ public sealed class GraphClient : IDisposable
             ("itemNotFound" or "resourceNotFound", _) or (_, HttpStatusCode.NotFound) => VfsException.NotFound(path),
             ("nameAlreadyExists", _) or (_, HttpStatusCode.Conflict) => VfsException.AlreadyExists(path),
             ("resourceLocked", _) or (_, HttpStatusCode.Locked) => new VfsException(VfsError.AccessDenied, $"'{path}' is locked: {message}"),
-            ("accessDenied" or "notAllowed", _) or (_, HttpStatusCode.Forbidden) => new VfsException(VfsError.AccessDenied, $"access to '{path}' was denied: {message}"),
+            // Graph's own refusal of the account, marked as SharePoint's own is: it ran the request and the account may not
+            ("accessDenied", _) => new VfsException(VfsError.AccessDenied, $"access to '{path}' was denied: {message}", new UnauthorizedAccessException(message)),
+            ("notAllowed", _) or (_, HttpStatusCode.Forbidden) => new VfsException(VfsError.AccessDenied, $"access to '{path}' was denied: {message}"),
             ("unauthenticated", _) or (_, HttpStatusCode.Unauthorized) => VfsException.Unavailable($"'{path}': the sign-in is no longer accepted; restart the source to sign in again"),
             ("notSupported", _) => VfsException.NotSupported(message.Length > 0 ? message : "that operation"),
             ("quotaLimitReached", _) or (_, HttpStatusCode.InsufficientStorage) => new VfsException(VfsError.IoError, $"'{path}': {service.Storage} is out of storage ({message})"),

@@ -1,4 +1,4 @@
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using System.Text.Json;
 using AnyFS.Sdk;
 
@@ -434,19 +434,19 @@ internal sealed class GraphDocumentStore : IDocumentStore
         }
     }
 
-    public async Task<ItemRef> UploadAsync(LibraryInfo library, string itemPath, string localPath, long length, CancellationToken ct)
+    public async Task<ItemRef> UploadAsync(LibraryInfo library, string itemPath, string localPath, long length, bool onlyIfNew, CancellationToken ct)
     {
         var address = SharePointPaths.ItemAddress(library.Key, itemPath);
         var path = Display(library, itemPath);
         JsonDocument result;
         if (length <= GraphDrives.SimpleUploadLimit)
         {
-            result = await _graph.PutContentAsync(address, () => OpenLocal(localPath), length, path, ct).ConfigureAwait(false);
+            result = await _graph.PutContentAsync(address, () => OpenLocal(localPath), length, path, ct, onlyIfNew).ConfigureAwait(false);
         }
         else
         {
             await using var content = OpenLocal(localPath);
-            result = await _graph.UploadAsync(address, content, length, path, ct).ConfigureAwait(false);
+            result = await _graph.UploadAsync(address, content, length, path, ct, onlyIfNew).ConfigureAwait(false);
         }
 
         using (result)

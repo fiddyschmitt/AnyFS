@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.CompilerServices;
@@ -471,12 +471,12 @@ internal sealed class RestDocumentStore : IDocumentStore
         return SharePointPages.Response(markdown, offset);
     }
 
-    public async Task<ItemRef> UploadAsync(LibraryInfo library, string itemPath, string localPath, long length, CancellationToken ct)
+    public async Task<ItemRef> UploadAsync(LibraryInfo library, string itemPath, string localPath, long length, bool onlyIfNew, CancellationToken ct)
     {
         var (parent, name) = VfsPath.SplitLast(itemPath);
         var folder = Url(library, parent);
         var path = Display(library, itemPath);
-        var add = $"{SharePointRestClient.FolderApi(folder)}/Files/AddUsingPath(decodedurl='{SharePointRestClient.Encode(name)}',overwrite=true)?$select={FileSelect}";
+        var add = $"{SharePointRestClient.FolderApi(folder)}/Files/AddUsingPath(decodedurl='{SharePointRestClient.Encode(name)}',overwrite={(onlyIfNew ? "false" : "true")})?$select={FileSelect}";
         if (length <= SharePointRestClient.SimpleUploadLimit)
         {
             using var created = await Client(library).PostBinaryAsync(add, () => OpenLocal(localPath), length, path, ct).ConfigureAwait(false);
@@ -490,7 +490,13 @@ internal sealed class RestDocumentStore : IDocumentStore
         var made = false;
         using (var there = await Client(library).TryGetJsonAsync($"{file}?$select=Exists", path, ct).ConfigureAwait(false))
         {
-            if (there is null || there.RootElement.TryGetProperty("Exists", out var exists) && exists.ValueKind == JsonValueKind.False)
+            var none = there is null || there.RootElement.TryGetProperty("Exists", out var exists) && exists.ValueKind == JsonValueKind.False;
+            if (!none && onlyIfNew)
+            {
+                throw VfsException.AlreadyExists(path);
+            }
+
+            if (none)
             {
                 var addNew = $"{SharePointRestClient.FolderApi(folder)}/Files/AddUsingPath(decodedurl='{SharePointRestClient.Encode(name)}',overwrite=false)";
                 using var empty = await Client(library).PostBinaryAsync(addNew, () => Stream.Null, 0, path, ct).ConfigureAwait(false);

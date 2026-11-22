@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using System.Text.Json;
 using AnyFS.Fixtures;
@@ -596,6 +596,10 @@ public class SharePointOnlineLiveTests
     /// <summary>A folder filled since it was listed is not deleted with what it holds (review of 21-Nov-2026, R3).</summary>
     [TestMethod]
     public Task AFolderFilledSinceItWasListedIsNotDeleted() => Target.AFolderFilledSinceItWasListedIsNotDeletedAsync();
+
+    /// <summary>A file made as new does not replace one made there since the folder was listed (the review's second pass, N2).</summary>
+    [TestMethod]
+    public Task ANewFileDoesNotReplaceOneMadeSinceTheFolderWasListed() => Target.ANewFileDoesNotReplaceOneMadeSinceTheFolderWasListedAsync(GraphDrives.SimpleUploadLimit);
 
     /// <summary>Files at the edges of Graph's one-request upload and of an upload session's pieces (the last a single byte).</summary>
     [TestMethod]

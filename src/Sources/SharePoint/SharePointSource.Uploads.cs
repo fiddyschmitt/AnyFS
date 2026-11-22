@@ -1,4 +1,4 @@
-using AnyFS.Sdk;
+﻿using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.SharePoint;
@@ -50,7 +50,12 @@ public abstract partial class SharePointSource
 
             if (!File.Exists(path + PendingUploadFile.NoteSuffix))
             {
-                Remove(path);
+                // half a file from a run that ended; or one a client still writes through the source this one replaced
+                if (!PendingUploadFile.IsOpenHere(path))
+                {
+                    Remove(path);
+                }
+
                 continue;
             }
 
@@ -59,6 +64,7 @@ public abstract partial class SharePointSource
                 case PendingUploadFile.Recovered.Waiting:
                     file!.Ended = UploadEnded;
                     file.Waits = UploadWaits;
+                    file.NeverLands = UploadNeverLands;
                     if (_pending.TryAdd(file.Path, file))
                     {
                         waiting.Add(file);
@@ -151,7 +157,21 @@ public abstract partial class SharePointSource
         }
     }
 
-    /// <summary>A file open for writing has ended: landed, unchanged, given up or deleted.</summary>
+    /// <summary>
+    /// Whether an upload's failure is one that waiting cannot mend: SharePoint ran the request and refused it for what it
+    /// is. The account may not write there (its own refusal of the account, not a sign-in it did not take, and not a
+    /// lock, which both come as AccessDenied too and may pass); the folder, or the library, is not there; the name is one
+    /// it does not take; a file is there where a new one was asked for. Everything else may pass and is tried again: no
+    /// answer, a throttle, a lock, a sign-in that lapsed, a server's own failure, a full quota.
+    /// </summary>
+    internal static bool UploadNeverLands(Exception failure) => failure is VfsException refusal && refusal.Error switch
+    {
+        VfsError.NotFound or VfsError.AlreadyExists or VfsError.InvalidPath or VfsError.NotSupported or VfsError.IsADirectory or VfsError.NotADirectory => true,
+        VfsError.AccessDenied => refusal.InnerException is UnauthorizedAccessException,
+        _ => false,
+    };
+
+    /// <summary>A file open for writing has ended: landed, unchanged, given up, deleted or refused.</summary>
     private void UploadEnded(PendingUploadFile file, UploadEnd how)
     {
         if (how is UploadEnd.Unchanged or UploadEnd.GivenUp && file.Supersedes is { IsWaiting: true } older)
@@ -166,6 +186,13 @@ public abstract partial class SharePointSource
             {
                 // the name it had here while it was open, which SharePoint never had
                 Listings.Update(file.Path, null, StringComparison.OrdinalIgnoreCase);
+            }
+            else if (how == UploadEnd.Refused)
+            {
+                // what the folder holds is SharePoint's to say now: the name this had here, or the file that is there
+                // in its place
+                _items.TryRemove(file.Path, out _);
+                Listings.InvalidateParentOf(file.Path);
             }
         }
 

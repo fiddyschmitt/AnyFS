@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Net;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -809,7 +809,7 @@ internal sealed class MemoryDocumentStore : IDocumentStore
             : new HttpResponseMessage(offset == 0 ? HttpStatusCode.OK : HttpStatusCode.PartialContent) { Content = new ByteArrayContent(data, (int)offset, data.Length - (int)offset) });
     }
 
-    public async Task<ItemRef> UploadAsync(LibraryInfo library, string itemPath, string localPath, long length, CancellationToken ct)
+    public async Task<ItemRef> UploadAsync(LibraryInfo library, string itemPath, string localPath, long length, bool onlyIfNew, CancellationToken ct)
     {
         var data = await File.ReadAllBytesAsync(localPath, ct);
         lock (_gate)
@@ -817,6 +817,11 @@ internal sealed class MemoryDocumentStore : IDocumentStore
             Check(library);
             RequireParent(library, itemPath);
             var old = _items.GetValueOrDefault((library.Key, itemPath));
+            if (old is not null && onlyIfNew)
+            {
+                throw VfsException.AlreadyExists(itemPath);
+            }
+
             var item = new Item(false, data, old?.Created ?? DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, (old?.Version ?? 0) + 1);
             _items[(library.Key, itemPath)] = item;
             return Describe(library, itemPath, item).Item;

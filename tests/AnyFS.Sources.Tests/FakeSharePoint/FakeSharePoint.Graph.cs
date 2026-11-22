@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -438,7 +438,7 @@ internal sealed partial class FakeSharePoint
             case ("content", "PUT"):
                 return PutContent(request, library, item, missingPath);
             case ("createUploadSession", "POST"):
-                return CreateUploadSession(library, item, missingPath);
+                return CreateUploadSession(request, library, item, missingPath);
             case ("", "PATCH"):
                 return item is null ? ItemNotFound() : Patch(request, library, item);
             case ("", "DELETE"):
@@ -523,6 +523,11 @@ internal sealed partial class FakeSharePoint
 
         if (item is FileItem existing)
         {
+            if (request.Query.TryGetValue("@microsoft.graph.conflictBehavior", out var conflict) && conflict == "fail")
+            {
+                return GraphJson(409, GraphError("nameAlreadyExists", "The specified item name already exists."));
+            }
+
             if (existing.Locked)
             {
                 return GraphJson(423, GraphError("resourceLocked", "The resource you are attempting to access is locked"));
@@ -553,11 +558,16 @@ internal sealed partial class FakeSharePoint
         return (parent, slash < 0 ? path : path[(slash + 1)..]);
     }
 
-    private Response CreateUploadSession(Library library, Item? item, string? missingPath)
+    private Response CreateUploadSession(Request request, Library library, Item? item, string? missingPath)
     {
         if (item is FolderItem)
         {
             return GraphJson(409, GraphError("nameAlreadyExists", "A folder has that name."));
+        }
+
+        if (item is FileItem && request.Body.Length > 0 && JsonNode.Parse(request.Body)?["item"]?["@microsoft.graph.conflictBehavior"]?.GetValue<string>() == "fail")
+        {
+            return GraphJson(409, GraphError("nameAlreadyExists", "The specified item name already exists."));
         }
 
         FolderItem? parent;

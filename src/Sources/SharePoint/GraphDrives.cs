@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using AnyFS.Sdk;
@@ -69,15 +69,18 @@ internal static class GraphDrives
 
     // --- uploads -------------------------------------------------------------------------------------------
 
-    /// <summary>PUT a whole small file (at most <see cref="SimpleUploadLimit"/>) to an item address's <c>/content</c>; the created or updated item comes back.</summary>
-    public static async Task<JsonDocument> PutContentAsync(this GraphClient graph, string itemAddress, Func<Stream> openContent, long length, string pathForErrors, CancellationToken ct)
+    /// <summary>
+    /// PUT a whole small file (at most <see cref="SimpleUploadLimit"/>) to an item address's <c>/content</c>; the created
+    /// or updated item comes back. With <paramref name="onlyIfNew"/> a file that is there is not replaced: AlreadyExists.
+    /// </summary>
+    public static async Task<JsonDocument> PutContentAsync(this GraphClient graph, string itemAddress, Func<Stream> openContent, long length, string pathForErrors, CancellationToken ct, bool onlyIfNew = false)
     {
         using var response = await graph.SendAsync(() =>
         {
             var content = new StreamContent(openContent());
             content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
             content.Headers.ContentLength = length;
-            return new HttpRequestMessage(HttpMethod.Put, graph.Absolute($"{itemAddress}/content?@microsoft.graph.conflictBehavior=replace")) { Content = content };
+            return new HttpRequestMessage(HttpMethod.Put, graph.Absolute($"{itemAddress}/content?@microsoft.graph.conflictBehavior={(onlyIfNew ? "fail" : "replace")}")) { Content = content };
         }, HttpCompletionOption.ResponseContentRead, authenticated: true, idempotent: true, ct).ConfigureAwait(false);
         return await graph.ReadJsonAsync(response, pathForErrors, ct).ConfigureAwait(false);
     }
@@ -86,10 +89,10 @@ internal static class GraphDrives
     /// Uploads a file of any size through an upload session: one request to create it, then
     /// <see cref="UploadChunkSize"/> pieces, each retried on its own. The item comes back with the last piece.
     /// </summary>
-    public static async Task<JsonDocument> UploadAsync(this GraphClient graph, string itemAddress, Stream content, long length, string pathForErrors, CancellationToken ct)
+    public static async Task<JsonDocument> UploadAsync(this GraphClient graph, string itemAddress, Stream content, long length, string pathForErrors, CancellationToken ct, bool onlyIfNew = false)
     {
         var session = await graph.SendJsonAsync(HttpMethod.Post, $"{itemAddress}/createUploadSession",
-            """{"item":{"@microsoft.graph.conflictBehavior":"replace"}}""", pathForErrors, ct).ConfigureAwait(false);
+            onlyIfNew ? """{"item":{"@microsoft.graph.conflictBehavior":"fail"}}""" : """{"item":{"@microsoft.graph.conflictBehavior":"replace"}}""", pathForErrors, ct).ConfigureAwait(false);
         string uploadUrl;
         using (session)
         {

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Text.Json.Nodes;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
@@ -587,6 +587,162 @@ public class FakeSharePointTests
         CollectionAssert.DoesNotContain(await SpsTestServer.NamesAsync(source, "Documents/given"), "new.txt");
         Assert.AreEqual(0, Directory.GetFiles(Path.Combine(context.CacheDirectory, "uploads")).Length);
         Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth);
+    }
+
+    private static bool IsUpload(bool tenant, string method, string host, string rawPath) => tenant
+        ? host.StartsWith("graph.microsoft.", StringComparison.OrdinalIgnoreCase) && (method == "PUT" && rawPath.Contains("content", StringComparison.OrdinalIgnoreCase) || rawPath.Contains("createUploadSession", StringComparison.OrdinalIgnoreCase))
+        : method == "POST" && rawPath.Contains("/Files/AddUsingPath", StringComparison.OrdinalIgnoreCase);
+
+    private static int Uploads(FakeSharePoint fake, bool tenant) => fake.Count(s => IsUpload(tenant, s.Method, s.Host, s.RawPath));
+
+    /// <summary>
+    /// An upload SharePoint will never take is not kept. Every failed upload was kept and tried again (22-Nov-2026), so
+    /// one into a library the account may only read was tried every five minutes for good, the source Degraded with it,
+    /// until the person deleted the file through the mount (the review's second pass, N3). Who closes the file is told,
+    /// as before; nothing of it stays here, it is not tried again, and the source is not held Degraded for it.
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
+    [DataRow(true, DisplayName = "tenant, Graph")]
+    public async Task AnUploadThatCanNeverLandIsToldAtTheCloseAndNotKept(bool tenant)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "readonly/there.txt", "x"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode) : FarmSettings(fake), context);
+        source.UploadRetryAfter = _ => TimeSpan.FromMilliseconds(50);
+        var uploads = Path.Combine(context.CacheDirectory, "uploads");
+
+        // the account may read the library and not write to it, as each server words that
+        fake.Fail(r => IsUpload(tenant, r.Method, r.Host, r.RawPath), int.MaxValue, _ => tenant
+            ? FakeSharePoint.Response.Json(403, FakeSharePoint.GraphError("accessDenied", "Access denied"))
+            : FakeSharePoint.Response.Json(403, FakeSharePoint.RestError("-2147024891, System.UnauthorizedAccessException", "Access denied. You do not have permission to perform this action or access this resource.")));
+
+        var file = await source.OpenAsync("Documents/readonly/new.txt", VfsOpenMode.CreateNew, None);
+        await file.WriteAsync(0, "what I wrote"u8.ToArray(), None);
+        var refused = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync());
+        Assert.AreEqual(VfsError.AccessDenied, refused.Error, "who closed the file is told");
+
+        var tried = Uploads(fake, tenant);
+        await Task.Delay(600);
+        Assert.AreEqual(tried, Uploads(fake, tenant), "it is not tried again: no later try can go better");
+        Assert.AreEqual(0, Directory.GetFiles(uploads).Length, "nothing of it is kept");
+        Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth, "nor is it held against the source");
+        Assert.IsNull(await source.StatAsync("Documents/readonly/new.txt", None), "the name it had here while it was open is gone");
+        CollectionAssert.DoesNotContain(await SpsTestServer.NamesAsync(source, "Documents/readonly"), "new.txt");
+    }
+
+    /// <summary>
+    /// A file that waits is given up once its place has gone, and can be deleted meanwhile. With its library renamed
+    /// upstream it was tried every five minutes for good, a delete of it and a write over it both failed NotFound, and
+    /// the next start took it up again: there was no way to be rid of it (the review's second pass, N3).
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "deleted through the mount")]
+    [DataRow(true, DisplayName = "tried again")]
+    public async Task AFileThatWaitsEndsWhenItsPlaceHasGone(bool triedAgain)
+    {
+        using var fake = FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "gone/there.txt", "x"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, FarmSettings(fake), context);
+        source.UploadRetryAfter = _ => triedAgain ? TimeSpan.FromMilliseconds(50) : TimeSpan.FromHours(1);
+        var uploads = Path.Combine(context.CacheDirectory, "uploads");
+        fake.Fail(r => r.Method == "POST" && r.RawPath.Contains("/Files/AddUsingPath", StringComparison.OrdinalIgnoreCase), int.MaxValue,
+            _ => FakeSharePoint.Response.Json(500, FakeSharePoint.RestError("-2147467259, Microsoft.SharePoint.SPException", "The file could not be saved.")));
+
+        var file = await source.OpenAsync("Documents/gone/new.txt", VfsOpenMode.CreateNew, None);
+        await file.WriteAsync(0, "what I wrote"u8.ToArray(), None);
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync());
+        Assert.AreEqual(2, Directory.GetFiles(uploads).Length, "it waits: a failure that may pass");
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+
+        // the library gets another name upstream; the source sees it once its site's libraries are looked up again
+        documents.Title = "Renamed";
+        await Task.Delay(2500);
+        CollectionAssert.DoesNotContain(await SpsTestServer.NamesAsync(source, ""), "Documents");
+
+        if (!triedAgain)
+        {
+            await source.DeleteAsync("Documents/gone/new.txt", None);
+        }
+
+        await UntilAsync(() => Directory.GetFiles(uploads).Length == 0, "nothing of it is left here");
+        await UntilAsync(() => context.LastHealth == ComponentHealth.Ready, "and the source is well again");
+    }
+
+    /// <summary>
+    /// A file made as new does not replace one a colleague has made under that name since the folder was listed. "New"
+    /// went by the listing kept here, which may be as old as the last walk, and the upload replaced whatever was there
+    /// (the review's second pass, N2). The upload now asks SharePoint for a new file only: one that is there stays, who
+    /// closed the file is told it exists, and the folder is listed again.
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, false, DisplayName = "farm, REST")]
+    [DataRow(false, true, DisplayName = "farm, REST, in pieces")]
+    [DataRow(true, false, DisplayName = "tenant, Graph")]
+    [DataRow(true, true, DisplayName = "tenant, Graph, an upload session")]
+    public async Task ANewFileDoesNotReplaceOneMadeUpstreamSinceTheFolderWasListed(bool tenant, bool large)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "shared/there.txt", "x"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode) : FarmSettings(fake), context);
+        source.UploadRetryAfter = _ => TimeSpan.FromMilliseconds(50);
+        CollectionAssert.AreEqual(new[] { "there.txt" }, await SpsTestServer.NamesAsync(source, "Documents/shared"));
+
+        var theirs = "what a colleague saved here a minute ago"u8.ToArray();
+        var colleague = fake.Seed(documents, "shared/report.txt", theirs);
+        Assert.IsNull(await source.StatAsync("Documents/shared/report.txt", None), "the listing held here is older than the colleague's file");
+
+        var mine = new byte[large ? (tenant ? GraphDrives.SimpleUploadLimit : SharePointRestClient.SimpleUploadLimit) + 1 : 11];
+        new Random(5).NextBytes(mine);
+        var file = await source.OpenAsync("Documents/shared/report.txt", VfsOpenMode.CreateNew, None);
+        await file.WriteAsync(0, mine, None);
+        var refused = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync());
+        Assert.AreEqual(VfsError.AlreadyExists, refused.Error, "who closed the file is told there is one");
+
+        CollectionAssert.AreEqual(theirs, colleague.Content, "the colleague's file is as they saved it");
+        Assert.AreEqual(0, Directory.GetFiles(Path.Combine(context.CacheDirectory, "uploads")).Length, "what was written here is not kept to be tried again");
+        Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth);
+        Assert.AreEqual(theirs.Length, (await source.StatAsync("Documents/shared/report.txt", None))!.Length, "the folder is listed again, and shows theirs");
+
+        // a file the person means to replace still replaces
+        var over = await source.OpenAsync("Documents/shared/report.txt", VfsOpenMode.Create, None);
+        await over.WriteAsync(0, mine, None);
+        await over.DisposeAsync();
+        CollectionAssert.AreEqual(mine, colleague.Content);
+    }
+
+    /// <summary>
+    /// A file a source that was replaced still has open is left alone by the source that starts in its place. The new
+    /// start removes what the last run left half-written, and told those apart from a file still open only by Windows
+    /// refusing the delete: on Linux and macOS the open file went (the review's second pass, N4).
+    /// </summary>
+    [TestMethod]
+    public async Task AFileStillOpenInTheSourceBeforeIsNotRemovedByTheOneThatStartsInItsPlace()
+    {
+        using var fake = FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "open/there.txt", "x"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        var uploads = Path.Combine(context.CacheDirectory, "uploads");
+        var first = await StartAsync(fake, FarmSettings(fake), context);
+        var file = await first.OpenAsync("Documents/open/new.txt", VfsOpenMode.CreateNew, None);
+        await file.WriteAsync(0, "half of what I mean to write"u8.ToArray(), None);
+        File.WriteAllBytes(Path.Combine(uploads, Guid.NewGuid().ToString("N") + ".upload"), new byte[10]);
+        Assert.AreEqual(2, Directory.GetFiles(uploads).Length);
+
+        await using (await StartAsync(fake, FarmSettings(fake), context))
+        {
+            Assert.AreEqual(1, Directory.GetFiles(uploads).Length, "what the last run left half-written goes; the file still open stays");
+        }
+
+        await file.AbandonAsync();
+        await first.DisposeAsync();
     }
 
     private static async Task<byte[]> ReadAllAsync(ISource source, string path)

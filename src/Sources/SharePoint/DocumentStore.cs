@@ -1,4 +1,4 @@
-using AnyFS.Sdk;
+﻿using AnyFS.Sdk;
 
 namespace AnyFS.Sources.SharePoint;
 
@@ -203,8 +203,11 @@ internal interface IDocumentStore : IDisposable
     /// </summary>
     Task<HttpResponseMessage> OpenContentAsync(LibraryInfo library, string itemPath, ItemRef item, long offset, CancellationToken ct);
 
-    /// <summary>Creates or replaces the file from a local file; the item as it is afterwards.</summary>
-    Task<ItemRef> UploadAsync(LibraryInfo library, string itemPath, string localPath, long length, CancellationToken ct);
+    /// <summary>
+    /// Creates or replaces the file from a local file; the item as it is afterwards. With <paramref name="onlyIfNew"/>
+    /// it creates only: where a file of that name is there, AlreadyExists, and that file is as it was.
+    /// </summary>
+    Task<ItemRef> UploadAsync(LibraryInfo library, string itemPath, string localPath, long length, bool onlyIfNew, CancellationToken ct);
 
     /// <summary>Creates a folder; AlreadyExists when there is one; NotFound when the parent is missing.</summary>
     Task<ItemRef> CreateFolderAsync(LibraryInfo library, string itemPath, CancellationToken ct);

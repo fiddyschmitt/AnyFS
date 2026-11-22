@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -998,6 +998,10 @@ public abstract class SharePointRestLiveTests
     /// <summary>A folder filled since it was listed is not deleted with what it holds (review of 21-Nov-2026, R3).</summary>
     [TestMethod]
     public Task AFolderFilledSinceItWasListedIsNotDeleted() => Target.AFolderFilledSinceItWasListedIsNotDeletedAsync();
+
+    /// <summary>A file made as new does not replace one made there since the folder was listed (the review's second pass, N2).</summary>
+    [TestMethod]
+    public Task ANewFileDoesNotReplaceOneMadeSinceTheFolderWasListed() => Target.ANewFileDoesNotReplaceOneMadeSinceTheFolderWasListedAsync(SharePointRestClient.SimpleUploadLimit);
 
     /// <summary>
     /// Files at the edges of the one-request upload and of its pieces. One of 8 to 10 MiB was left empty while the limit was
