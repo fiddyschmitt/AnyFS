@@ -10,8 +10,10 @@ namespace AnyFS.Sdk;
 /// </summary>
 public abstract class SourceBase : ISource
 {
+    private readonly object _healthGate = new();
     private ISourceContext? _context;
     private bool _degraded;
+    private string? _held;
 
     public virtual SourceCapabilities Capabilities => SourceCapabilities.ReadOnly;
 
@@ -99,20 +101,78 @@ public abstract class SourceBase : ISource
     /// </summary>
     protected void MarkDegraded(string detail)
     {
-        if (!_degraded && IsInitialised)
+        if (!IsInitialised)
         {
-            _degraded = true;
-            Context.ReportHealth(ComponentHealth.Degraded, detail);
+            return;
+        }
+
+        lock (_healthGate)
+        {
+            if (!_degraded)
+            {
+                _degraded = true;
+                Context.ReportHealth(ComponentHealth.Degraded, _held is null ? detail : $"{detail}; {_held}");
+            }
         }
     }
 
-    /// <summary>Reports the source <see cref="ComponentHealth.Ready"/> again, once, after <see cref="MarkDegraded"/>.</summary>
+    /// <summary>
+    /// Reports the source <see cref="ComponentHealth.Ready"/> again, once, after <see cref="MarkDegraded"/>; or, while
+    /// something is held against it (<see cref="HoldDegraded"/>), Degraded with that alone.
+    /// </summary>
     protected void MarkHealthy()
     {
-        if (_degraded && IsInitialised)
+        if (!IsInitialised)
         {
-            _degraded = false;
-            Context.ReportHealth(ComponentHealth.Ready);
+            return;
+        }
+
+        lock (_healthGate)
+        {
+            if (_degraded)
+            {
+                _degraded = false;
+                if (_held is null)
+                {
+                    Context.ReportHealth(ComponentHealth.Ready);
+                }
+                else
+                {
+                    Context.ReportHealth(ComponentHealth.Degraded, _held);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Holds the source <see cref="ComponentHealth.Degraded"/> with <paramref name="detail"/> until the source itself says
+    /// that is over (null): for what waits on a later try or on the person (a write kept here that the upstream has not
+    /// taken), which a call that succeeds meanwhile does not end as it ends <see cref="MarkDegraded"/>'s. Said again with
+    /// each change of the detail; with null the source is Ready again, unless a call has marked it Degraded meanwhile.
+    /// </summary>
+    protected void HoldDegraded(string? detail)
+    {
+        if (!IsInitialised)
+        {
+            return;
+        }
+
+        lock (_healthGate)
+        {
+            if (string.Equals(_held, detail, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _held = detail;
+            if (detail is not null)
+            {
+                Context.ReportHealth(ComponentHealth.Degraded, detail);
+            }
+            else if (!_degraded)
+            {
+                Context.ReportHealth(ComponentHealth.Ready);
+            }
         }
     }
 

@@ -26,7 +26,7 @@ namespace AnyFS.Sources.SharePoint;
 /// upstream shows as Degraded until a call succeeds again. A flavour supplies the store (after signing in)
 /// and the settings that shape the tree.
 /// </summary>
-public abstract class SharePointSource : SourceBase, ICountable
+public abstract partial class SharePointSource : SourceBase, ICountable
 {
     /// <summary>The folder beside a site's libraries that holds its subsites, one folder each.</summary>
     public const string SubsitesFolder = "Subsites";
@@ -71,8 +71,9 @@ public abstract class SharePointSource : SourceBase, ICountable
     private DateTimeOffset _leftOutTried;
     private Task _retrying = Task.CompletedTask;
 
-    // files open for writing that SharePoint has not got yet (the upload comes when the handle closes): stats,
-    // listings and times are answered here meanwhile, since the upstream knows nothing of them
+    // files written here that SharePoint has not got yet: those open for writing (the upload comes when the handle
+    // closes) and those whose upload failed and is tried again (SharePointSource.Uploads). Stats, listings, reads and
+    // times are answered here meanwhile, since the upstream knows nothing of them
     private readonly ConcurrentDictionary<string, PendingUploadFile> _pending = new(StringComparer.OrdinalIgnoreCase);
     private IDocumentStore? _store;
     private KeptListings? _kept;
@@ -177,16 +178,8 @@ public abstract class SharePointSource : SourceBase, ICountable
         // with listings kept the whole tree is walked from the start, "Count files on start" or not
         _kept.StartWalks();
         _uploadDir = Directory.CreateDirectory(Path.Combine(Context.CacheDirectory, "uploads")).FullName;
-        foreach (var stale in Directory.EnumerateFiles(_uploadDir))
-        {
-            try
-            {
-                File.Delete(stale);
-            }
-            catch (IOException)
-            {
-            }
-        }
+        RecoverUploads();
+        _uploadRetries = Task.Run(() => RetryUploadsAsync(_stopping.Token), CancellationToken.None);
 
         if (site.Sites is { } opened)
         {
@@ -329,9 +322,12 @@ public abstract class SharePointSource : SourceBase, ICountable
                 }
 
                 var (entry, item) = enumerator.Current;
-                _items[VfsPath.Join(path, entry.Name)] = item;
+                var entryPath = VfsPath.Join(path, entry.Name);
+                _items[entryPath] = item;
                 seen.Add(entry.Name);
-                yield return entry;
+
+                // what is written here and not uploaded yet is the file, whatever older one SharePoint lists
+                yield return !entry.IsDirectory && _pending.TryGetValue(entryPath, out var newer) ? PendingEntry(entryPath, newer) : entry;
             }
         }
         finally
@@ -365,6 +361,7 @@ public abstract class SharePointSource : SourceBase, ICountable
             throw VfsException.IsADirectory(path);
         }
 
+        PendingUploadFile? waiting = null;
         if (_pending.TryGetValue(path, out var pendingOpen))
         {
             if (!pendingOpen.IsClosed)
@@ -380,6 +377,17 @@ public abstract class SharePointSource : SourceBase, ICountable
             }
 
             await pendingOpen.Completion.ConfigureAwait(false);   // the close was posted; the upload is landing
+            if (pendingOpen.IsWaiting)
+            {
+                // its upload failed and its bytes wait here: they are the file, to a reader and to a writer that keeps
+                // what is there, and a writer's own bytes take their place once it closes with any
+                if (mode == VfsOpenMode.Read)
+                {
+                    return pendingOpen.OpenReader();
+                }
+
+                waiting = pendingOpen;
+            }
         }
 
         var existing = await StatAsync(path, ct).ConfigureAwait(false);
@@ -437,16 +445,31 @@ public abstract class SharePointSource : SourceBase, ICountable
 
         var tempPath = Path.Combine(_uploadDir, Guid.NewGuid().ToString("N") + ".upload");
         var keepExisting = existing is not null && mode is VfsOpenMode.ReadWrite or VfsOpenMode.OpenOrCreate;
-        if (keepExisting)
+        if (keepExisting && waiting is not null)
+        {
+            try
+            {
+                File.Copy(waiting.TempPath, tempPath);
+            }
+            catch (FileNotFoundException)
+            {
+                waiting = null;   // it landed in this moment: SharePoint has the bytes now
+            }
+        }
+
+        if (keepExisting && waiting is null)
         {
             await DownloadToAsync(path, library, itemPath, existing!, tempPath, ct).ConfigureAwait(false);
         }
 
-        var file = new PendingUploadFile(path, tempPath, keepExisting, mustUpload: existing is null || mode == VfsOpenMode.Create,
-            (temp, length, uploadCt) => UploadAsync(path, library, itemPath, temp, length, uploadCt),
-            (p, ex) => MarkDegraded($"the upload of {p} failed: {ex.Message}"), Logger);
+        var file = new PendingUploadFile(path, tempPath, keepExisting, mustUpload: existing is null || mode == VfsOpenMode.Create, UploadsKey, UploadAsync, Logger)
+        {
+            Supersedes = waiting,
+            IsNew = existing is null,
+            Ended = UploadEnded,
+            Waits = UploadWaits,
+        };
         _pending[path] = file;
-        file.Closed = () => _pending.TryRemove(new KeyValuePair<string, PendingUploadFile>(path, file));
         if (existing is null)
         {
             // to the client the file exists from now on, though SharePoint gets it only when the handle closes
@@ -506,22 +529,41 @@ public abstract class SharePointSource : SourceBase, ICountable
     // The listings are kept current entry by entry (ListingCache.Update) rather than thrown away after each write:
     // a bulk copy into a folder would otherwise list it again, in full, for every file (18-Oct-2026: the E2E
     // fixture's 5,000-file folder went in at under two files a second). A failed call forgets the listing instead.
-    private async Task UploadAsync(string path, LibraryInfo library, string itemPath, string tempPath, long length, CancellationToken ct)
+    //
+    // An upload runs for as long as it takes: each of its requests has the client's own time, and the whole has none (it
+    // had thirty minutes, which a big file on a slow line outran, to start again from nothing). The source's stop ends
+    // one under way, and the file waits by its note for the next start.
+    private async Task UploadAsync(PendingUploadFile file, CancellationToken ct)
     {
+        var path = file.Path;
+        using var stopping = CancellationTokenSource.CreateLinkedTokenSource(ct, _stopping.Token);
+        ct = stopping.Token;
+        if (await ResolveAsync(path, ct).ConfigureAwait(false) is not { Library: { } library, ItemPath: { Length: > 0 } itemPath })
+        {
+            throw VfsException.NotFound(VfsPath.Parent(path));
+        }
+
         ItemRef item;
         try
         {
-            item = await Run(() => Store.UploadAsync(library, itemPath, tempPath, length, ct)).ConfigureAwait(false);
+            item = await Run(() => Store.UploadAsync(library, itemPath, file.TempPath, file.Length, ct)).ConfigureAwait(false);
         }
-        catch
+        catch (Exception ex)
         {
-            Listings.InvalidateParentOf(path);
+            if (file.Tried.Tries == 0 && ex is not (VfsException { Error: VfsError.Unavailable } or OperationCanceledException))
+            {
+                // Once, with the close's own try, and for a failure the server answered, which may have left something
+                // there. A try that never reached it changed nothing: the listing stays, and with listings kept the
+                // folder still opens while the server is away.
+                Listings.InvalidateParentOf(path);
+            }
+
             throw;
         }
 
         _items[path] = item;
         var now = DateTimeOffset.UtcNow;
-        var (created, modified) = _pending.TryGetValue(path, out var pending) ? pending.RequestedTimes : (null, null);
+        var (created, modified) = file.RequestedTimes;
         if (created is not null || modified is not null)
         {
             // times a client set while the file was pending (Explorer and robocopy do, right after the write)
@@ -606,16 +648,24 @@ public abstract class SharePointSource : SourceBase, ICountable
             {
                 await pendingFile.Completion.ConfigureAwait(false);
             }
-            else if (_pending.TryRemove(new KeyValuePair<string, PendingUploadFile>(path, pendingFile)))
+
+            if ((!pendingFile.IsClosed || pendingFile.IsWaiting) && _pending.TryRemove(new KeyValuePair<string, PendingUploadFile>(path, pendingFile)))
             {
-                // deleted while still being written: nothing goes up when the handle closes; upstream may hold an older version
-                pendingFile.Discard();
+                // deleted while still being written, or while its upload waits to be tried again: nothing of it goes up
+                // any more; upstream may hold an older version, or what an upload that failed left
+                await pendingFile.DiscardAsync().ConfigureAwait(false);
+                SayWaiting();
                 try
                 {
                     await Run(() => Store.DeleteAsync(library, itemPath, false, ct)).ConfigureAwait(false);
                 }
                 catch (VfsException ex) when (ex.Error == VfsError.NotFound)
                 {
+                }
+                catch
+                {
+                    Listings.InvalidateParentOf(path);
+                    throw;
                 }
 
                 Forget(path, false);
@@ -682,14 +732,20 @@ public abstract class SharePointSource : SourceBase, ICountable
         }
 
         SharePointNames.Require(toPath);
-        await SettlePendingAsync(fromPath, "renaming").ConfigureAwait(false);
-        await SettlePendingAsync(toPath, "renaming over").ConfigureAwait(false);
+        await SettlePendingAsync(fromPath, "renaming", orUploaded: true).ConfigureAwait(false);
+        await SettlePendingAsync(toPath, "renaming over", orUploaded: false).ConfigureAwait(false);
         if (!string.Equals(fromLibrary.Key, toLibrary.Key, StringComparison.Ordinal))
         {
             throw VfsException.NotSupported("moving between document libraries");
         }
 
         var from = await Listings.StatAsync(fromPath, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false) ?? throw VfsException.NotFound(fromPath);
+        if (from.IsDirectory && _pending.Keys.FirstOrDefault(k => VfsPath.IsUnder(k, fromPath)) is { } inside)
+        {
+            // what is written here goes to SharePoint by its path: the folder keeps its name until that has landed
+            throw new VfsException(VfsError.AccessDenied, $"'{fromPath}' holds a file that is not uploaded yet ({inside}); renaming it must wait for that");
+        }
+
         var sameName = string.Equals(fromPath, toPath, StringComparison.OrdinalIgnoreCase);
         var to = sameName ? null : await Listings.StatAsync(toPath, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false);
         if (to is not null)
@@ -751,6 +807,12 @@ public abstract class SharePointSource : SourceBase, ICountable
             }
 
             await pending.Completion.ConfigureAwait(false);
+            if (pending.IsWaiting)
+            {
+                // its upload waits to be tried again: the times go with it then
+                pending.RequestTimes(created, modified);
+                return;
+            }
         }
 
         try
@@ -780,6 +842,15 @@ public abstract class SharePointSource : SourceBase, ICountable
         }
 
         await retrying.ConfigureAwait(false);
+
+        // the uploads tried again stop where they are, and so does one a close began: each waits by its note for the next start
+        await _uploadRetries.ConfigureAwait(false);
+        var closing = _pending.Values.Where(f => f.IsClosed).Select(f => f.Completion).ToArray();
+        if (closing.Length > 0)
+        {
+            await Task.WhenAny(Task.WhenAll(closing), Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
+        }
+
         if (_kept is { } kept)
         {
             await kept.DisposeAsync().ConfigureAwait(false);
@@ -1523,7 +1594,11 @@ public abstract class SharePointSource : SourceBase, ICountable
     }
 
     /// <summary>A pending file whose handle has closed is waited for (its upload is landing); one still open refuses the operation.</summary>
-    private async Task SettlePendingAsync(string path, string doing)
+    /// <summary>
+    /// With <paramref name="orUploaded"/>, one whose upload failed and waits to be tried again refuses the operation too:
+    /// its bytes go to SharePoint by this path. Without, it is left to what follows (a rename over it replaces it).
+    /// </summary>
+    private async Task SettlePendingAsync(string path, string doing, bool orUploaded)
     {
         if (!_pending.TryGetValue(path, out var pending))
         {
@@ -1536,6 +1611,10 @@ public abstract class SharePointSource : SourceBase, ICountable
         }
 
         await pending.Completion.ConfigureAwait(false);
+        if (orUploaded && pending.IsWaiting)
+        {
+            throw new VfsException(VfsError.AccessDenied, $"'{path}' is not uploaded yet ({pending.LastError}); {doing} it must wait for that");
+        }
     }
 
     private void Forget(string path, bool wasDirectory)

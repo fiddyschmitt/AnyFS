@@ -365,21 +365,18 @@ public class FakeSharePointTests
 
         fake.Fail(r => r.RawPath.Contains("FinishUpload", StringComparison.OrdinalIgnoreCase), 2,
             _ => FakeSharePoint.Response.Json(500, FakeSharePoint.RestError("-2147024864, Microsoft.SharePoint.SPFileLockException", "The file is locked for shared use.")));
-        await using (var file = await source.OpenAsync("Documents/pieces/report.bin", VfsOpenMode.Create, None))
-        {
-            await file.WriteAsync(0, bytes, None);
-        }
-
+        source.UploadRetryAfter = _ => TimeSpan.FromHours(1);
+        var over = await source.OpenAsync("Documents/pieces/report.bin", VfsOpenMode.Create, None);
+        await over.WriteAsync(0, bytes, None);
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await over.DisposeAsync());
         CollectionAssert.AreEqual(old, documents.Root.Folder("pieces")!.File("report.bin")!.Content, "what was there before the upload that failed");
 
-        await using (var file = await source.OpenAsync("Documents/pieces/new.bin", VfsOpenMode.CreateNew, None))
-        {
-            await file.WriteAsync(0, bytes, None);
-        }
-
+        var fresh = await source.OpenAsync("Documents/pieces/new.bin", VfsOpenMode.CreateNew, None);
+        await fresh.WriteAsync(0, bytes, None);
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await fresh.DisposeAsync());
         Assert.IsNull(documents.Root.Folder("pieces")!.File("new.bin"), "no empty file left where the upload failed");
 
-        // and with the server taking the pieces, both land
+        // and with the server taking the pieces, both land (written again, over the ones that wait)
         await using (var file = await source.OpenAsync("Documents/pieces/report.bin", VfsOpenMode.Create, None))
         {
             await file.WriteAsync(0, bytes, None);
@@ -420,5 +417,193 @@ public class FakeSharePointTests
         CollectionAssert.AreEqual(bytes, documents.Root.Folder("copies")!.File("new.bin")!.Content);
         var left = Directory.GetFiles(Path.Combine(context.CacheDirectory, "uploads"));
         Assert.AreEqual(0, left.Length, string.Join(", ", left.Select(Path.GetFileName)));
+    }
+
+    /// <summary>
+    /// An upload runs when the file closes, after the client was told its write was taken. One that failed (a colleague
+    /// has the file open, a sign-in that lapsed, a server that did not answer) threw the bytes away, with "the client's
+    /// write is lost" in the log and a Degraded tile that the next call that went through cleared (review of 21-Nov-2026,
+    /// R3). The bytes are kept now: who closed the file is told, the source says which file waits until it has landed
+    /// whatever its other calls do, the file reads as it was written, and the upload is tried again until it lands.
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
+    [DataRow(true, DisplayName = "tenant, Graph")]
+    public async Task AnUploadThatFailsIsKeptAndTriedAgainUntilItLands(bool tenant)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        var theirs = "the version a colleague has open"u8.ToArray();
+        var upstream = fake.Seed(documents, "kept/report.docx", theirs);
+        upstream.Locked = true;
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode) : FarmSettings(fake), context);
+        source.UploadRetryAfter = _ => TimeSpan.FromMilliseconds(200);
+        var uploads = Path.Combine(context.CacheDirectory, "uploads");
+        var mine = "what I saved over it, which is longer"u8.ToArray();
+
+        var file = await source.OpenAsync("Documents/kept/report.docx", VfsOpenMode.Create, None);
+        await file.WriteAsync(0, mine, None);
+        var refused = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync());
+        StringAssert.Contains(refused.Message, "locked", "who closed the file is told why it did not go");
+
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+        StringAssert.Contains(context.HealthReports[^1].Detail, "Documents/kept/report.docx is not uploaded yet");
+        await source.CreateDirectoryAsync("Documents/kept/meanwhile", None);
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth, "a call that goes through does not end it");
+        Assert.AreEqual(mine.Length, (await source.StatAsync("Documents/kept/report.docx", None))!.Length);
+        CollectionAssert.AreEqual(mine, await ReadAllAsync(source, "Documents/kept/report.docx"), "read from here, as written");
+        CollectionAssert.AreEqual(theirs, upstream.Content, "SharePoint's own is as it was");
+        Assert.AreEqual(2, Directory.GetFiles(uploads).Length, "the bytes and their note");
+
+        upstream.Locked = false;
+        await UntilAsync(() => upstream.Content.AsSpan().SequenceEqual(mine), "the upload lands once the file is free");
+        await UntilAsync(() => context.LastHealth == ComponentHealth.Ready, "and the source is well again");
+        Assert.AreEqual(0, Directory.GetFiles(uploads).Length);
+        CollectionAssert.AreEqual(mine, await ReadAllAsync(source, "Documents/kept/report.docx"), "read from SharePoint now");
+    }
+
+    /// <summary>
+    /// The bytes of an upload that has not landed outlast the run: a note beside them says where they go, and the next
+    /// start tries them at once. (Every start emptied the folder.) A file with no note was still being written when its
+    /// run ended, half a file, and goes as before.
+    /// </summary>
+    [TestMethod]
+    public async Task AnUploadThatHadNotLandedWhenTheSourceStoppedLandsAtTheNextStart()
+    {
+        using var fake = FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "kept/other.txt", "x"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        var uploads = Path.Combine(context.CacheDirectory, "uploads");
+        var mine = new byte[300_000];
+        new Random(11).NextBytes(mine);
+        var written = new DateTimeOffset(2026, 11, 20, 9, 30, 0, TimeSpan.Zero);
+        await using (var source = await StartAsync(fake, FarmSettings(fake), context))
+        {
+            source.UploadRetryAfter = _ => TimeSpan.FromHours(1);
+            fake.Fail(r => r.Method == "POST" && r.RawPath.Contains("/Files/AddUsingPath", StringComparison.OrdinalIgnoreCase), 1,
+                _ => FakeSharePoint.Response.Json(500, FakeSharePoint.RestError("-2147467259, Microsoft.SharePoint.SPException", "The file could not be saved.")));
+            var file = await source.OpenAsync("Documents/kept/new.bin", VfsOpenMode.CreateNew, None);
+            await file.WriteAsync(0, mine, None);
+            await source.SetTimesAsync("Documents/kept/new.bin", null, written, None);
+            await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync());
+            Assert.IsNull(documents.Root.Folder("kept")!.File("new.bin"));
+        }
+
+        Assert.AreEqual(2, Directory.GetFiles(uploads).Length, "the bytes and their note, left by the source that stopped");
+        File.WriteAllBytes(Path.Combine(uploads, Guid.NewGuid().ToString("N") + ".upload"), new byte[10]);
+
+
+        await using var again = await StartAsync(fake, FarmSettings(fake), context);
+        again.UploadRetryAfter = _ => TimeSpan.FromMilliseconds(200);
+        await UntilAsync(() => documents.Root.Folder("kept")!.File("new.bin") is { } landed && landed.Content.AsSpan().SequenceEqual(mine), "the upload lands at the next start");
+        await UntilAsync(() => Directory.GetFiles(uploads).Length == 0, "and nothing is left of it here, nor of the half-written one");
+        await UntilAsync(() => context.LastHealth != ComponentHealth.Degraded, "the source is well");
+        Assert.AreEqual(mine.Length, (await again.StatAsync("Documents/kept/new.bin", None))!.Length);
+    }
+
+    /// <summary>
+    /// A file that waits to be uploaded is the file here: it cannot be made anew or renamed, a later write of it takes
+    /// its place (starting from its bytes where the open keeps what is there), a write given up leaves it waiting, and
+    /// deleting it gives the upload up.
+    /// </summary>
+    [TestMethod]
+    public async Task AFileThatWaitsToBeUploadedIsTheFileUntilItIsWrittenAgainOrDeleted()
+    {
+        using var fake = FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        var upstream = fake.Seed(documents, "kept/notes.txt", "old"u8.ToArray());
+        upstream.Locked = true;
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, FarmSettings(fake), context);
+        source.UploadRetryAfter = _ => TimeSpan.FromHours(1);
+        var uploads = Path.Combine(context.CacheDirectory, "uploads");
+        const string path = "Documents/kept/notes.txt";
+
+        var first = await source.OpenAsync(path, VfsOpenMode.Create, None);
+        await first.WriteAsync(0, "first"u8.ToArray(), None);
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await first.DisposeAsync());
+
+        Assert.AreEqual(VfsError.AlreadyExists, (await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.OpenAsync(path, VfsOpenMode.CreateNew, None))).Error);
+        var rename = await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.RenameAsync(path, "Documents/kept/renamed.txt", false, None));
+        Assert.AreEqual(VfsError.AccessDenied, rename.Error);
+        StringAssert.Contains(rename.Message, "not uploaded yet");
+        Assert.AreEqual(VfsError.AccessDenied, (await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.RenameAsync("Documents/kept", "Documents/moved", false, None))).Error, "nor the folder it is in");
+
+        // written again, keeping what is there: the later bytes begin from the ones that wait, and take their place
+        var second = await source.OpenAsync(path, VfsOpenMode.ReadWrite, None);
+        Assert.AreEqual(5, second.Length);
+        await second.WriteAsync(5, ", second"u8.ToArray(), None);
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await second.DisposeAsync());
+        CollectionAssert.AreEqual("first, second"u8.ToArray(), await ReadAllAsync(source, path));
+        Assert.AreEqual(2, Directory.GetFiles(uploads).Length, "one file waits, with its note: " + string.Join(", ", Directory.GetFiles(uploads).Select(Path.GetFileName)));
+
+        // a write of it that is given up leaves the one that waits
+        var third = await source.OpenAsync(path, VfsOpenMode.Create, None);
+        await third.WriteAsync(0, "half"u8.ToArray(), None);
+        await third.AbandonAsync();
+        CollectionAssert.AreEqual("first, second"u8.ToArray(), await ReadAllAsync(source, path));
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+
+        // deleted: the upload is given up, and SharePoint's own goes as the delete asks
+        upstream.Locked = false;
+        await source.DeleteAsync(path, None);
+        Assert.IsNull(documents.Root.Folder("kept")!.File("notes.txt"));
+        Assert.IsNull(await source.StatAsync(path, None));
+        Assert.AreEqual(0, Directory.GetFiles(uploads).Length);
+        Assert.AreEqual(ComponentHealth.Ready, context.LastHealth);
+    }
+
+    /// <summary>
+    /// A write that is given up (a mount's upload whose body broke off, a file deleted as it closes) is not uploaded: what
+    /// SharePoint had stays, and a file that was new is not there. Closed, the part that came went up as the file.
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
+    [DataRow(true, DisplayName = "tenant, Graph")]
+    public async Task AWriteGivenUpIsNotUploadedAndWhatWasThereStays(bool tenant)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        var old = "what was there"u8.ToArray();
+        var upstream = fake.Seed(documents, "given/old.txt", old);
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode) : FarmSettings(fake), context);
+
+        var over = await source.OpenAsync("Documents/given/old.txt", VfsOpenMode.Create, None);
+        await over.WriteAsync(0, "half of what was to replace it"u8.ToArray(), None);
+        await over.AbandonAsync();
+        CollectionAssert.AreEqual(old, upstream.Content);
+        Assert.AreEqual(old.Length, (await source.StatAsync("Documents/given/old.txt", None))!.Length);
+        CollectionAssert.AreEqual(old, await ReadAllAsync(source, "Documents/given/old.txt"));
+
+        var fresh = await source.OpenAsync("Documents/given/new.txt", VfsOpenMode.CreateNew, None);
+        await fresh.WriteAsync(0, "half a new file"u8.ToArray(), None);
+        Assert.IsNotNull(await source.StatAsync("Documents/given/new.txt", None), "there while it is being written");
+        await fresh.AbandonAsync();
+        Assert.IsNull(documents.Root.Folder("given")!.File("new.txt"));
+        Assert.IsNull(await source.StatAsync("Documents/given/new.txt", None));
+        CollectionAssert.DoesNotContain(await SpsTestServer.NamesAsync(source, "Documents/given"), "new.txt");
+        Assert.AreEqual(0, Directory.GetFiles(Path.Combine(context.CacheDirectory, "uploads")).Length);
+        Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth);
+    }
+
+    private static async Task<byte[]> ReadAllAsync(ISource source, string path)
+    {
+        await using var file = await source.OpenAsync(path, VfsOpenMode.Read, None);
+        var bytes = new byte[file.Length];
+        Assert.AreEqual(bytes.Length, await file.ReadFullyAsync(0, bytes, None));
+        return bytes;
+    }
+
+    private static async Task UntilAsync(Func<bool> met, string what)
+    {
+        var watch = Stopwatch.StartNew();
+        while (!met())
+        {
+            Assert.IsTrue(watch.Elapsed < TimeSpan.FromSeconds(20), what);
+            await Task.Delay(50);
+        }
     }
 }
