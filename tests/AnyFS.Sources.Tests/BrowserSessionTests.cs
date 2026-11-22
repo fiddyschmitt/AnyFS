@@ -70,7 +70,7 @@ public class BrowserChoiceTests
     [DataRow(null, null)]
     public void TheForcedBrowserIsReadFromItsName(string? value, string? kind) => Assert.AreEqual(kind, WebDriverSession.ForcedKind(value)?.ToString());
 
-    private sealed class NoTarget(string profile, string? variable = null, bool needsAPerson = false, Func<CancellationToken, ValueTask>? opening = null) : WebSignInTarget(new Uri("https://example.test/"), profile)
+    private sealed class NoTarget(string profile, string? variable = null, bool needsAPerson = false, Func<CancellationToken, ValueTask>? opening = null, string? unreachable = null) : WebSignInTarget(new Uri("https://example.test/"), profile)
     {
         public override string LogPrefix => "test";
 
@@ -78,9 +78,88 @@ public class BrowserChoiceTests
 
         public override bool NeedsAPerson => needsAPerson;
 
+        // example.test answers nobody: the tests say whether it is taken to
+        public override Task<string?> UnreachableAsync(CancellationToken ct) => Task.FromResult(unreachable);
+
         public override ValueTask OpeningWindowAsync(CancellationToken ct) => opening?.Invoke(ct) ?? ValueTask.CompletedTask;
 
         public override ValueTask<SignInCheck> CheckAsync(IReadOnlyList<Uri> pages, IReadOnlyList<SessionCookie> cookies, CancellationToken ct) => ValueTask.FromResult(SignInCheck.NotYet);
+    }
+
+    [TestMethod]
+    public async Task ASiteThatDoesNotAnswerHasNoBrowserLaunchedForItAndTheSignInMayBeTriedAgain()
+    {
+        // until 22-Nov-2026 the window opened on an error page (the computer awake before its network), and its closing, or
+        // its ten minutes, counted as the person's refusal: the source then waited for a Retry by hand
+        var browser = Path.Combine(Path.GetTempPath(), "anyfs-tests", "no such folder", "a-browser.exe");
+        foreach (var needsAPerson in new[] { true, false })
+        {
+            var opened = 0;
+            var told = new List<string>();
+            var target = new NoTarget("profile", needsAPerson: needsAPerson, opening: _ =>
+            {
+                opened++;
+                return ValueTask.CompletedTask;
+            }, unreachable: "No such host is known.");
+            var ex = await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => new BrowserSession(browser, target, NullLogger.Instance).SignInAsync(interactive: true, told.Add, CancellationToken.None));
+            Assert.AreEqual("example.test did not answer (No such host is known.), so its sign-in was not tried", ex.Message);
+            Assert.IsFalse(ex.Permanent, "a failure that may pass: the host starts the source again by itself");
+            Assert.AreEqual((0, 0), (opened, told.Count), "no window was about to open, and the person was told of none");
+        }
+    }
+
+    private sealed class Answering(Func<HttpResponseMessage> answer) : HttpMessageHandler
+    {
+        public List<string> Asked { get; } = [];
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Asked.Add($"{request.Method} {request.RequestUri}");
+            return Task.FromResult(answer());
+        }
+    }
+
+    [TestMethod]
+    public async Task ASiteAnswersWhateverItSaysAndDoesNotWhereNothingReachesIt()
+    {
+        var site = new Uri("https://server.example.test/some/page?with=a-query");
+        var refusing = new Answering(() => new HttpResponseMessage(System.Net.HttpStatusCode.Forbidden));
+        Assert.IsNull(await SiteProbe.UnreachableAsync(site, CancellationToken.None, refusing), "a refusal is an answer");
+        CollectionAssert.AreEqual(new[] { "HEAD https://server.example.test/" }, refusing.Asked, "one plain question of the site's root, nothing of the page's address sent");
+        Assert.IsNull(await SiteProbe.UnreachableAsync(site, CancellationToken.None, new Answering(() => new HttpResponseMessage(System.Net.HttpStatusCode.BadGateway))), "so is an error page");
+
+        static Answering Failing(HttpRequestError error, string message) => new(() => throw new HttpRequestException(error, message));
+        Assert.AreEqual("No such host is known.", await SiteProbe.UnreachableAsync(site, CancellationToken.None, Failing(HttpRequestError.NameResolutionError, "No such host is known.")));
+        Assert.AreEqual("No connection could be made.", await SiteProbe.UnreachableAsync(site, CancellationToken.None, Failing(HttpRequestError.ConnectionError, "No connection could be made.")));
+        const string noRoute = "The proxy tunnel request to proxy 'http://proxy.example.test:3128/' failed with status code '502'.";
+        Assert.AreEqual(noRoute, await SiteProbe.UnreachableAsync(site, CancellationToken.None, Failing(HttpRequestError.ProxyTunnelError, noRoute)), "the proxy could not reach it");
+
+        // the site is there, though a plain request gets nowhere with it: the browser may
+        Assert.IsNull(await SiteProbe.UnreachableAsync(site, CancellationToken.None, Failing(HttpRequestError.ProxyTunnelError, "The proxy tunnel request to proxy 'http://proxy.example.test:3128/' failed with status code '407'.")), "a proxy that wants a sign-in the browser has");
+        Assert.IsNull(await SiteProbe.UnreachableAsync(site, CancellationToken.None, Failing(HttpRequestError.SecureConnectionError, "The SSL connection could not be established.")), "a site that wants a certificate the browser has");
+        StringAssert.StartsWith(await SiteProbe.UnreachableAsync(site, CancellationToken.None, new Answering(() => throw new TaskCanceledException())), "no answer within");
+    }
+
+    [TestMethod]
+    public void ASignInFoundToNeedThePersonIsNotTriedAgainByEachRequestThatFollows()
+    {
+        var time = new AnyFS.Sdk.Testing.FakeTime();
+        var lapse = new SignInLapse(time: time);
+        lapse.ThrowIfRemembered();
+        var said = lapse.Remember(new SignInRequiredException("the sign-in to teams.example.test has lapsed; sign in again", permanent: false));
+        for (var i = 0; i < 3; i++)
+        {
+            var again = Assert.ThrowsExactly<SignInRequiredException>(lapse.ThrowIfRemembered);
+            Assert.AreEqual((said.Message, said.Permanent), (again.Message, again.Permanent), "told as it was found, with no browser launched to find it again");
+            Assert.AreNotSame(said, again);
+        }
+
+        time.Advance(TimeSpan.FromMinutes(2));
+        lapse.ThrowIfRemembered();
+        lapse.Remember(new SignInRequiredException("no page", permanent: true));
+        Assert.IsTrue(Assert.ThrowsExactly<SignInRequiredException>(lapse.ThrowIfRemembered).Permanent);
+        lapse.Forget();
+        lapse.ThrowIfRemembered();
     }
 
     [TestMethod]

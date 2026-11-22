@@ -84,6 +84,13 @@ public abstract class WebSignInTarget(Uri page, string profileDir)
     /// </summary>
     public virtual ValueTask OpeningWindowAsync(CancellationToken ct) => ValueTask.CompletedTask;
 
+    /// <summary>
+    /// Why the page's site cannot be reached, asked before any browser is launched for it (<see cref="SiteProbe"/>); null
+    /// where it answers. A site that does not answer fails the sign-in as something that may pass, with no window shown
+    /// for the person to sign in on an error page.
+    /// </summary>
+    public virtual Task<string?> UnreachableAsync(CancellationToken ct) => SiteProbe.UnreachableAsync(Page, ct);
+
     /// <summary>What the person is told while the window is open: by default, to sign in there.</summary>
     public virtual string Prompt(string browserName) => $"Sign in to {Page.Host} in the {browserName} window that opened";
 

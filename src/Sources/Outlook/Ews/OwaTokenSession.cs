@@ -53,6 +53,11 @@ internal sealed class OwaTokenSession
             return kept.Value;
         }
 
+        if (!interactive)
+        {
+            _lapse.ThrowIfRemembered();
+        }
+
         var gate = ProfileLocks.For(_profileDir);
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
@@ -62,37 +67,59 @@ internal sealed class OwaTokenSession
                 return again.Value;
             }
 
+            // the one that held the profile before this may have found it out
+            if (!interactive)
+            {
+                _lapse.ThrowIfRemembered();
+            }
+
             if (BrowserLocator.DevToolsBlocked(_browserPath) is { } blocked)
             {
                 throw new SignInRequiredException($"The web session cannot read the sign-in from {BrowserName}: {blocked}.", permanent: true);
             }
 
+            // a site that does not answer has no sign-in to read and no page to sign in on (SiteProbe): no browser for it
+            if (await SiteProbe.UnreachableAsync(_origin, ct).ConfigureAwait(false) is { } unreachable)
+            {
+                throw new SignInRequiredException($"{_origin.Host} did not answer ({unreachable}), so its sign-in was not tried", permanent: false);
+            }
+
             var silent = await CaptureAsync(headless: true, SilentDeadline, ct).ConfigureAwait(false);
             if (silent.Token is { } token)
             {
+                _lapse.Forget();
                 return Keep(token);
             }
 
             if (silent.Final)
             {
-                throw new SignInRequiredException(silent.Failure!, permanent: true);
+                throw _lapse.Remember(new SignInRequiredException(silent.Failure!, permanent: true));
             }
 
             if (!interactive)
             {
-                throw new SignInRequiredException($"the sign-in to {_origin.Host} has lapsed; sign in again (open the source, or its Retry)", permanent: false);
+                throw _lapse.Remember(new SignInRequiredException($"the sign-in to {_origin.Host} has lapsed; sign in again (open the source, or its Retry)", permanent: false));
             }
 
             _logger.LogInformation("outlook: no sign-in to read for {Host} without a window ({Why}); opening {Browser} for the person to sign in", _origin.Host, silent.Failure, BrowserName);
             progress($"Sign in to {_origin.Host} in the {BrowserName} window that opened");
             var shown = await CaptureAsync(headless: false, InteractiveDeadline, ct).ConfigureAwait(false);
-            return shown.Token is { } fresh ? Keep(fresh) : throw new SignInRequiredException(shown.Failure!, permanent: true);
+            if (shown.Token is { } fresh)
+            {
+                _lapse.Forget();
+                return Keep(fresh);
+            }
+
+            throw new SignInRequiredException(shown.Failure!, permanent: true);
         }
         finally
         {
             gate.Release();
         }
     }
+
+    // a renewal found to need the person: the requests that follow are told so at once, each launching no browser of its own
+    private readonly SignInLapse _lapse = new();
 
     /// <summary>Forgets the token in hand (the server refused it): the next ask reads a fresh one.</summary>
     public void Invalidate() => _token = null;

@@ -59,12 +59,20 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
 
     private string StartPage => $"{teamsHost.AbsoluteUri.TrimEnd('/')}/v2/?login_hint={Uri.EscapeDataString(expectedAccount)}";
 
+    // a renewal found to need the person: the requests that follow are told so at once, each launching no browser of its own
+    private readonly SignInLapse _lapse = new();
+
     /// <summary>A bearer for <paramref name="service"/> good for at least ten more minutes; captures a fresh set from the browser when none is in hand.</summary>
     public async Task<string> TokenAsync(TeamsService service, bool interactive, Action<string> progress, CancellationToken ct)
     {
         if (Fresh(service) is { } kept)
         {
             return kept;
+        }
+
+        if (!interactive)
+        {
+            _lapse.ThrowIfRemembered();
         }
 
         var gate = ProfileLocks.For(profileDir);
@@ -76,6 +84,18 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
                 return again;
             }
 
+            // the one that held the profile before this may have found it out
+            if (!interactive)
+            {
+                _lapse.ThrowIfRemembered();
+            }
+
+            // a site that does not answer has no sign-in to read and no page to sign in on (SiteProbe): no browser for it
+            if (await SiteProbe.UnreachableAsync(teamsHost, ct).ConfigureAwait(false) is { } unreachable)
+            {
+                throw new SignInRequiredException($"{teamsHost.Host} did not answer ({unreachable}), so its sign-in was not tried", permanent: false);
+            }
+
             if (!_viaFirefox && BrowserLocator.DevToolsBlocked(browserPath) is { } blocked)
             {
                 UseFirefox(blocked);
@@ -84,11 +104,12 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             var silent = await CaptureAsync(headless: true, SilentDeadline, [service], ct).ConfigureAwait(false);
             if (silent.Final && silent.Failure is { } fatal)
             {
-                throw new SignInRequiredException(fatal, permanent: true);
+                throw _lapse.Remember(new SignInRequiredException(fatal, permanent: true));
             }
 
             if (Fresh(service) is { } fresh)
             {
+                _lapse.Forget();
                 return fresh;
             }
 
@@ -100,13 +121,19 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
 
             if (!interactive)
             {
-                throw new SignInRequiredException($"the sign-in to {teamsHost.Host} has lapsed; sign in again (open the source, or its Retry)", permanent: false);
+                throw _lapse.Remember(new SignInRequiredException($"the sign-in to {teamsHost.Host} has lapsed; sign in again (open the source, or its Retry)", permanent: false));
             }
 
             logger.LogInformation("teams: no sign-in to read for {Host} without a window ({Why}); opening {Browser} for the person to sign in", teamsHost.Host, silent.Failure, BrowserName);
             progress($"Sign in to Teams in the {BrowserName} window that opened");
             var shown = await CaptureAsync(headless: false, InteractiveDeadline, [service], ct).ConfigureAwait(false);
-            return Fresh(service) ?? throw new SignInRequiredException(shown.Failure ?? $"no sign-in to {teamsHost.Host} was read", permanent: shown.Final);
+            if (Fresh(service) is { } read)
+            {
+                _lapse.Forget();
+                return read;
+            }
+
+            throw new SignInRequiredException(shown.Failure ?? $"no sign-in to {teamsHost.Host} was read", permanent: shown.Final);
         }
         finally
         {

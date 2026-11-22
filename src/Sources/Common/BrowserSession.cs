@@ -120,6 +120,14 @@ public sealed class BrowserSession
             throw new SignInRequiredException(Lapsed(), permanent: false);
         }
 
+        // a site that does not answer has no sign-in to read and no page to sign in on: nothing is launched for it, and
+        // the failure is one that may pass (until 22-Nov-2026 the window opened on an error page, and its closing counted
+        // as the person's refusal, for good)
+        if (await _target.UnreachableAsync(ct).ConfigureAwait(false) is { } unreachable)
+        {
+            throw new SignInRequiredException($"{Site.Host} did not answer ({unreachable}), so its sign-in was not tried", permanent: false);
+        }
+
         if (_webDriver is not null)
         {
             return await _webDriver.SignInAsync(interactive, progress, ct).ConfigureAwait(false);
