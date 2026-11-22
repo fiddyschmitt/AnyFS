@@ -473,6 +473,44 @@ public class OutlookItemListingTests
         }
     }
 
+    /// <summary>The items' files kept a while are trimmed, and forgotten at a refresh, as others are kept: a sort or a copy of the dictionary itself threw as it grew.</summary>
+    [TestMethod]
+    public async Task FilesKeptByManyThreadsAtOnceAreTrimmedWithoutAFault()
+    {
+        const int Threads = 4;
+        const int Each = 2_000;
+        static MailItemSummary Summary(string id) => new(id, MailItemKind.Message, "Hello", "Jane", null, null, null, 0, false);
+        var item = new MailItem { Summary = Summary("0"), MessageClass = "IPM.Note", BodyText = "Hi" };
+        var files = await ItemFiles.BuildAsync(item, item.Summary, "x", CancellationToken.None);
+        await using var source = new OutlookSource(new OutlookSettings());
+        var faults = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        using var go = new ManualResetEventSlim();
+        var threads = Enumerable.Range(0, Threads).Select(t => new Thread(() =>
+        {
+            go.Wait();
+            try
+            {
+                for (var n = 1; n <= Each; n++)
+                {
+                    source.KeepFiles(Summary($"{t}-{n}"), files);
+                    if (n % 500 == 0)
+                    {
+                        source.ForgetFiles();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                faults.Enqueue(ex);
+            }
+        })).ToList();
+        threads.ForEach(t => t.Start());
+        go.Set();
+        threads.ForEach(t => t.Join());
+        Assert.AreEqual(0, faults.Count, faults.FirstOrDefault()?.ToString());
+        Assert.IsTrue(source.ItemsWithFilesKept <= OutlookSource.ItemsKept, $"{source.ItemsWithFilesKept:N0} items' files kept");
+    }
+
     private static FakeExchange.Item Attachment(FakeExchange fake, FakeExchange.Folder inbox, int day, string name)
         => fake.AddMessage(inbox, $"Minutes {day}", ("Diego Siciliani", "diegos@fake.test"), new DateTimeOffset(2026, 6, day, 9, 0, 0, TimeSpan.Zero), "<p>Attached.</p>",
             [new FakeExchange.Attachment(name, "application/octet-stream", Encoding.ASCII.GetBytes(name), false, null)]);

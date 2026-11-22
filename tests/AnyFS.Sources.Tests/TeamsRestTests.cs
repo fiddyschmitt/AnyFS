@@ -105,6 +105,23 @@ public class TeamsRestTests
         }
     }
 
+    [TestMethod]
+    public async Task ANumberGivenAsNullReadsAsOneLeftOut()
+    {
+        // the aggregator's numbers of a team and a channel, each there with no value
+        const string Nulls = """{"teams":[{"id":"19:team","displayName":"Lab","memberRole":null,"accessType":null,"membershipSummary":{"totalMemberCount":null,"adminRoleCount":null,"botCount":null},"channels":[{"id":"19:general","displayName":"General","isGeneral":true,"channelType":null}]}],"chats":[]}""";
+        await using var aggregator = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance, new PageService(Nulls));
+        var team = (await aggregator.StructureAsync(CancellationToken.None)).Teams.Single();
+        Assert.AreEqual((false, 0, (int?)null, (int?)null, (int?)null), (team.Owner, team.AccessType, team.Members, team.Owners, team.Bots));
+        Assert.IsFalse(team.Channels.Single().IsPrivate);
+
+        // and a file's size in a library's listing
+        await using var library = new TeamsRest(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency: 2, NullLogger.Instance,
+            new PageService("""{"value":[{"name":"plan.txt","file":{},"size":null},{"name":"notes.txt","file":{},"size":46}]}"""), sharePointHost: () => "t.sharepoint.com", inHand: _ => "token");
+        var files = await library.FolderAsync("https://t.sharepoint.com/sites/lab", "General", CancellationToken.None);
+        CollectionAssert.AreEqual(new[] { ("plan.txt", 0L), ("notes.txt", 46L) }, files.Select(f => (f.Name, f.Length)).ToArray());
+    }
+
     private const string Search = """
         {"PrimaryQueryResult":{"RelevantResults":{"TotalRows":2,"Table":{"Rows":[
           {"Cells":[{"Key":"Title","Value":"Mark 8 Project Team"},{"Key":"Path","Value":"https://t.sharepoint.com/sites/Mark8ProjectTeam"},{"Key":"GroupId","Value":"g-mark8"},{"Key":"Description","Value":"The Mark 8"},{"Key":"Created","Value":"2026-07-28T17:19:47.0000000Z"}]},

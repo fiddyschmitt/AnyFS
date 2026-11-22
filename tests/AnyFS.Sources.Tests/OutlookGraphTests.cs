@@ -5,6 +5,7 @@ using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
 using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.Outlook;
+using AnyFS.Sources.Outlook.Ews;
 
 namespace AnyFS.Sources.Tests;
 
@@ -324,5 +325,19 @@ public class OutlookGraphTests
         }
 
         Assert.IsTrue(read > 0, "the Inbox had no attachment to read");
+    }
+
+    /// <summary>Graph writes null for a number it has not got (a folder's counts, an attachment's size): read as one it left out.</summary>
+    [TestMethod]
+    public void ANumberGivenAsNullReadsAsOneLeftOut()
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse("""{"totalItemCount":null,"size":null,"childFolderCount":3,"displayName":"Inbox"}""");
+        var folder = doc.RootElement;
+        Assert.AreEqual(0, GraphEwsService.Int(folder, "totalItemCount"));
+        Assert.AreEqual(0L, GraphEwsService.Long(folder, "size"));
+        Assert.AreEqual(0, GraphEwsService.Int(folder, "unreadItemCount"), "left out");
+        Assert.AreEqual(3, GraphEwsService.Int(folder, "childFolderCount"));
+        Assert.AreEqual(3L, GraphEwsService.Long(folder, "childFolderCount"));
+        Assert.AreEqual(0, GraphEwsService.Int(folder, "displayName"), "nor is text a number");
     }
 }

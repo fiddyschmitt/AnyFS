@@ -562,9 +562,10 @@ internal sealed class GraphEwsService : IEwsService, IDisposable
             ? list.EnumerateArray().Where(v => v.ValueKind == JsonValueKind.String).Select(v => v.GetString()!).Where(s => s.Length > 0).ToList()
             : [];
 
-    private static int Int(JsonElement e, string property) => e.TryGetProperty(property, out var value) && value.TryGetInt32(out var n) ? n : 0;
+    // a number Graph gives as null reads as one it left out (TryGetInt32 throws for anything that is not a number)
+    internal static int Int(JsonElement e, string property) => e.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var n) ? n : 0;
 
-    private static long Long(JsonElement e, string property) => e.TryGetProperty(property, out var value) && value.TryGetInt64(out var n) ? n : 0;
+    internal static long Long(JsonElement e, string property) => e.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var n) ? n : 0;
 
     private static bool Bool(JsonElement e, string property) => e.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.True;
 

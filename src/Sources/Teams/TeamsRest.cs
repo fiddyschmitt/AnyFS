@@ -79,8 +79,8 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
                 Owner = string.Equals(Str(t, "memberRoleString"), "admin", StringComparison.OrdinalIgnoreCase) || Int(t, "memberRole") == 2,
                 AccessType = Int(t, "accessType"),
                 Members = Int(summary, "totalMemberCount") is > 0 and var count ? count : null,
-                Owners = summary.ValueKind == JsonValueKind.Object && summary.TryGetProperty("adminRoleCount", out _) ? Int(summary, "adminRoleCount") : null,
-                Bots = summary.ValueKind == JsonValueKind.Object && summary.TryGetProperty("botCount", out _) ? Int(summary, "botCount") : null,
+                Owners = summary.ValueKind == JsonValueKind.Object && summary.TryGetProperty("adminRoleCount", out var admins) && admins.ValueKind == JsonValueKind.Number ? Int(summary, "adminRoleCount") : null,
+                Bots = summary.ValueKind == JsonValueKind.Object && summary.TryGetProperty("botCount", out var bots) && bots.ValueKind == JsonValueKind.Number ? Int(summary, "botCount") : null,
                 Description = NullIfEmpty(Str(t, "description")),
                 Mail = NullIfEmpty(Str(t, "smtpAddress")),
                 Classification = NullIfEmpty(Str(t, "classification")),
@@ -681,7 +681,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
 
         var folder = item.ValueKind == JsonValueKind.Object && item.TryGetProperty("folder", out _);
-        var size = item.ValueKind == JsonValueKind.Object && item.TryGetProperty("size", out var s) && s.TryGetInt64(out var bytes) ? bytes : 0;
+        var size = item.ValueKind == JsonValueKind.Object && item.TryGetProperty("size", out var s) && s.ValueKind == JsonValueKind.Number && s.TryGetInt64(out var bytes) ? bytes : 0;
 
         // SharePoint's v2.0 API names the download address one way, Graph another
         return new DriveEntry(name!, folder, folder ? 0 : size, Time(Str(item, "lastModifiedDateTime")), folder ? null : Str(item, "@content.downloadUrl") ?? Str(item, "@microsoft.graph.downloadUrl"));
@@ -1390,7 +1390,8 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
 
     private static bool Bool(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
 
-    private static int Int(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.TryGetInt32(out var n) ? n : 0;
+    // a number given as null reads as one left out (TryGetInt32 throws for anything that is not a number)
+    private static int Int(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n) ? n : 0;
 
     private static string? NullIfEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
 

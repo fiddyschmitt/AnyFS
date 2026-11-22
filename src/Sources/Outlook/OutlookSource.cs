@@ -27,7 +27,7 @@ namespace AnyFS.Sources.Outlook;
 public sealed class OutlookSource : SourceBase, ICountable
 {
     private static readonly TimeSpan ItemsKeptFor = TimeSpan.FromMinutes(3);
-    private const int ItemsKept = 512;
+    internal const int ItemsKept = 512;
 
     /// <summary>What the items' files kept in memory may come to, by their lengths (256 MB): the oldest go first.</summary>
     private const long ItemsKeptBytes = 256L << 20;
@@ -1443,8 +1443,11 @@ public sealed class OutlookSource : SourceBase, ICountable
     private ItemFiles? Kept(MailItemSummary item)
         => _items.TryGetValue(item.Id, out var kept) && DateTime.UtcNow - kept.At < ItemsKeptFor && kept.Stamp == ItemListings.StampOf(item) ? kept.Files : null;
 
+    /// <summary>How many items' files are kept, for tests.</summary>
+    internal int ItemsWithFilesKept => _items.Count;
+
     /// <summary>Keeps an item's files a while: at most <see cref="ItemsKept"/> items and <see cref="ItemsKeptBytes"/> by their lengths, the oldest going first.</summary>
-    private void KeepFiles(MailItemSummary item, ItemFiles files)
+    internal void KeepFiles(MailItemSummary item, ItemFiles files)
     {
         var now = DateTime.UtcNow;
         var bytes = files.Files.Sum(f => f.Length) + files.Attachments.Sum(f => f.Length);
@@ -1473,7 +1476,8 @@ public sealed class OutlookSource : SourceBase, ICountable
 
         lock (_trimGate)
         {
-            foreach (var (id, old) in _items.OrderBy(e => e.Value.At).ToList())
+            // from a copy made whole: others go on keeping, and sorting the dictionary itself as it grows throws
+            foreach (var (id, old) in _items.ToArray().OrderBy(e => e.Value.At))
             {
                 if (now - old.At < ItemsKeptFor && _items.Count <= ItemsKept && Interlocked.Read(ref _itemsBytes) <= ItemsKeptBytes)
                 {
@@ -1489,9 +1493,10 @@ public sealed class OutlookSource : SourceBase, ICountable
     }
 
     /// <summary>Forgets the items' files kept a while (a refresh: they are made again when next asked for).</summary>
-    private void ForgetFiles()
+    internal void ForgetFiles()
     {
-        foreach (var (id, old) in _items.ToList())
+        // the dictionary's own copy, made whole (a list made of it as others keep and trim throws, or holds pairs of nothing)
+        foreach (var (id, old) in _items.ToArray())
         {
             if (_items.TryRemove(new KeyValuePair<string, KeptFiles>(id, old)))
             {
