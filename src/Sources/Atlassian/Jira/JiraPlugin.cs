@@ -142,8 +142,26 @@ public sealed class JiraPlugin : ISourcePlugin, IValidatable, ITestable, ISettin
                             : new TestResult(true, $"{who} The source shows the issues of the filter {filter.RootElement.Str("name")}.");
                     }
 
+                case JiraScopeKind.Board:
+                    return await RunAsync(await JiraSource.BoardJqlAsync(api, scope.Value, ct).ConfigureAwait(false), "board").ConfigureAwait(false);
+
                 default:
-                    return new TestResult(true, $"{who} The source shows the issues the {(scope.Kind == JiraScopeKind.Board ? "board" : "query")} finds.");
+                    return await RunAsync(scope.Value, "query").ConfigureAwait(false);
+            }
+
+            // the query is run as the source's start runs it (one result is enough to hear what Jira makes of it), so one Jira
+            // cannot run is told here, in Jira's words
+            async Task<TestResult> RunAsync(string jql, string what)
+            {
+                try
+                {
+                    using var found = await JiraSource.SearchPageAsync(api, jql, ["summary"], 1, null, validate: true, ct).ConfigureAwait(false);
+                    return new TestResult(true, $"{who} The source shows the issues the {what} finds.");
+                }
+                catch (VfsException ex) when (AtlassianApi.IsRejected(ex))
+                {
+                    return new TestResult(false, $"{who} But {ex.Message}");
+                }
             }
         }
         catch (SourceFailedException ex)

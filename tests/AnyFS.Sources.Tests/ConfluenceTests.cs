@@ -743,6 +743,47 @@ public class ConfluenceTests
         Assert.IsNull(await source.StampAsync("", null, CancellationToken.None), "the list of spaces has none");
     }
 
+    /// <summary>The pages kept whole are trimmed as others are added: a sort of the dictionary itself threw as it grew.</summary>
+    [TestMethod]
+    public async Task PagesRememberedByManyThreadsAtOnceAreTrimmedWithoutAFault()
+    {
+        const int Threads = 4;
+        const int Each = 5_000;
+        using var doc = System.Text.Json.JsonDocument.Parse("""{"id":"0","type":"page","title":"A page","body":{"storage":{"value":"<p>Text.</p>"}}}""");
+        var page = ConfluenceContent.Parse(doc.RootElement);
+        await using var source = new ConfluenceSource(new ConfluenceSettings());
+        var batches = Enumerable.Range(0, Threads).Select(t => Enumerable.Range(1, Each).Select(n => page with { Id = $"{t}-{n}" }).ToArray()).ToArray();
+        var faults = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        using var go = new ManualResetEventSlim();
+        var threads = batches.Select(batch => new Thread(() =>
+        {
+            go.Wait();
+            try
+            {
+                foreach (var content in batch)
+                {
+                    source.Remember(content);
+                }
+            }
+            catch (Exception ex)
+            {
+                faults.Enqueue(ex);
+            }
+        })).ToList();
+        threads.ForEach(t => t.Start());
+        go.Set();
+        threads.ForEach(t => t.Join());
+        Assert.AreEqual(0, faults.Count, faults.FirstOrDefault()?.ToString());
+
+        // a trim under way lets the others add without one of their own, so more may be kept just now: a page more trims again
+        for (var n = 0; source.PagesRemembered > ConfluenceSource.PagesKept && n < Threads * Each; n++)
+        {
+            source.Remember(page with { Id = $"more-{n}" });
+        }
+
+        Assert.IsTrue(source.PagesRemembered <= ConfluenceSource.PagesKept, $"{source.PagesRemembered:N0} pages kept");
+    }
+
     // --- the plugin ----------------------------------------------------------------------------------------------------
 
     [TestMethod]

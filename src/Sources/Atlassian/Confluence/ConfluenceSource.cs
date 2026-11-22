@@ -28,7 +28,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     private const int ItemsPerRequest = 200;
 
     // pages read whole and kept for the listings and opens that follow
-    private const int PagesKept = 2_000;
+    internal const int PagesKept = 2_000;
 
     private const string Summary = "version,history";
     private const string Whole = "body.storage,version,history,metadata.labels,ancestors,space";
@@ -82,7 +82,9 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     {
         _session = new AtlassianSession(AtlassianProduct.Confluence, _settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
         await _session.SignInAsync(interactive: Context.Attended, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
-        _api = new AtlassianApi(_session, _settings.Concurrency, Logger);
+
+        // "Requests at a time" is 1 to 64 (the client itself takes more: Bitbucket's and Bamboo's two settings multiplied)
+        _api = new AtlassianApi(_session, Math.Clamp(_settings.Concurrency, 1, 64), Logger);
         _cache = new RequestCache(_stopping.Token);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
@@ -485,7 +487,10 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     private ConfluenceContent? Fresh(string id, int? version)
         => _pages.TryGetValue(id, out var kept) && Stopwatch.GetElapsedTime(kept.At) < Refresh && (version is null || version == 0 || kept.Content.Version >= version) ? kept.Content : null;
 
-    private void Remember(ConfluenceContent content)
+    /// <summary>How many pages are kept whole, for tests.</summary>
+    internal int PagesRemembered => _pages.Count;
+
+    internal void Remember(ConfluenceContent content)
     {
         if (content.Storage is null)
         {
@@ -493,14 +498,27 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         }
 
         _pages[content.Id] = (content, Stopwatch.GetTimestamp());
-        if (_pages.Count > PagesKept)
+        if (_pages.Count <= PagesKept || Interlocked.Exchange(ref _trimming, 1) != 0)
         {
-            foreach (var old in _pages.OrderBy(p => p.Value.At).Take(PagesKept / 4).ToList())
+            return;
+        }
+
+        try
+        {
+            // from a copy made whole: others go on adding, and sorting the dictionary itself as it grows throws
+            foreach (var old in _pages.ToArray().OrderBy(p => p.Value.At).Take(PagesKept / 4))
             {
                 _pages.TryRemove(old);
             }
         }
+        finally
+        {
+            Volatile.Write(ref _trimming, 0);
+        }
     }
+
+    // 1 while the pages kept whole are being trimmed: a second trim meanwhile would sort them all again for the same ones
+    private int _trimming;
 
     /// <summary>The names of the people a page mentions, each asked of Confluence once (by key, else by user name) and kept for the run.</summary>
     private async Task PeopleAsync(IEnumerable<string> keys, CancellationToken ct)

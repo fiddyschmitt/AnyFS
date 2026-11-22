@@ -31,7 +31,10 @@ internal sealed class AtlassianApi : IDisposable
         // no pace of AnyFS's own (until 5-Nov-2026 a server was asked at most 25 a second whatever the settings said): a server
         // that asks AnyFS to wait (429, 503 with Retry-After) is waited for, by every request of it together
         _pace = RequestPace.Unpaced($"{session.Product}:{session.Address.Base.Authority}");
-        _gate = new SemaphoreSlim(Math.Clamp(concurrency, 1, 64));
+
+        // as many as the settings ask for: Bitbucket's and Bamboo's are two settings of up to 64 multiplied (until 22-Nov-2026
+        // the gate stopped at 64 whatever they came to); the session's connections to the server are not bounded either
+        _gate = new SemaphoreSlim(Math.Clamp(concurrency, 1, 64 * 64));
         _logger = logger;
     }
 
@@ -213,9 +216,18 @@ internal sealed class AtlassianApi : IDisposable
             HttpStatusCode.Forbidden => new VfsException(VfsError.AccessDenied, $"{Name} refused {what}: {message ?? "403 Forbidden"}"),
             HttpStatusCode.Unauthorized => new VfsException(VfsError.Unavailable, $"{Name} ({Address.Base.Host}) no longer takes {_session.Who}: {message ?? "401 Unauthorized"}. Retry the source to sign in again."),
             HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable => new VfsException(VfsError.Unavailable, $"{Name} ({Address.Base.Host}) is busy ({status}){(message is null ? "" : ": " + message)}"),
+
+            // the server's verdict on what was asked (a query it cannot run), told apart by what it carries (IsRejected)
+            HttpStatusCode.BadRequest => new VfsException(VfsError.IoError, $"{Name} answered {status} to {what}{(message is null ? "" : ": " + message)}", new HttpRequestException(message, null, HttpStatusCode.BadRequest)),
             _ => new VfsException(VfsError.IoError, $"{Name} answered {status} to {what}{(message is null ? "" : ": " + message)}"),
         };
     }
+
+    /// <summary>
+    /// Whether a failure is the server's refusal of the request itself (400: a query it cannot run), which asking again does
+    /// not change, rather than trouble answering it.
+    /// </summary>
+    public static bool IsRejected(VfsException ex) => ex.InnerException is HttpRequestException { StatusCode: HttpStatusCode.BadRequest };
 
     /// <summary>
     /// The product's own words for an error: Jira's <c>errorMessages</c> and <c>errors</c>, Confluence's and Bamboo's

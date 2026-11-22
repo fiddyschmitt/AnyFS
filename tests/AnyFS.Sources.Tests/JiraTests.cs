@@ -722,6 +722,51 @@ public class JiraTests
         await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync("ANYFS-99 Nothing/issue.md", VfsOpenMode.Read, CancellationToken.None));
     }
 
+    /// <summary>The issues kept whole are trimmed as others are added: a sort of the dictionary itself threw as it grew.</summary>
+    [TestMethod]
+    public async Task IssuesRememberedByManyThreadsAtOnceAreTrimmedWithoutAFault()
+    {
+        const int Threads = 4;
+        const int Each = 5_000;
+        static JiraIssue Issue(string key)
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(new JsonObject { ["id"] = "1", ["key"] = key, ["fields"] = new JsonObject() }.ToJsonString());
+            return JiraIssue.Parse(doc.RootElement);
+        }
+
+        await using var source = new JiraSource(new JiraSettings());
+        var batches = Enumerable.Range(0, Threads).Select(t => Enumerable.Range(1, Each).Select(n => Issue($"T{t}-{n}")).ToArray()).ToArray();
+        var faults = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+        using var go = new ManualResetEventSlim();
+        var threads = batches.Select(batch => new Thread(() =>
+        {
+            go.Wait();
+            try
+            {
+                foreach (var issue in batch)
+                {
+                    source.Remember(issue);
+                }
+            }
+            catch (Exception ex)
+            {
+                faults.Enqueue(ex);
+            }
+        })).ToList();
+        threads.ForEach(t => t.Start());
+        go.Set();
+        threads.ForEach(t => t.Join());
+        Assert.AreEqual(0, faults.Count, faults.FirstOrDefault()?.ToString());
+
+        // a trim under way lets the others add without one of their own, so more may be kept just now: an issue more trims again
+        for (var n = 0; source.IssuesRemembered > JiraSource.IssuesKept && n < Threads * Each; n++)
+        {
+            source.Remember(Issue($"S-{n}"));
+        }
+
+        Assert.IsTrue(source.IssuesRemembered <= JiraSource.IssuesKept, $"{source.IssuesRemembered:N0} issues kept");
+    }
+
     [TestMethod]
     public async Task IssuesArePagedByIdAHundredAndAThousandAtATime()
     {
@@ -782,6 +827,25 @@ public class JiraTests
         var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => source.InitialiseAsync(new TestSourceContext(), CancellationToken.None));
         StringAssert.Contains(ex.Message, "not one the fake knows");
         await source.DisposeAsync();
+    }
+
+    [TestMethod]
+    public async Task AQueryJiraRejectsFailsTheStartForGoodAndAnAnswerCutShortDoesNot()
+    {
+        // a 400 is Jira's verdict on the query, the same however often it is asked: the host is not to try that start again
+        var fake = JiraSeed.Lab();
+        var rejected = new JiraSource(JiraSeed.Settings(fake, "/issues/?jql=" + Uri.EscapeDataString("nonsense ~ 1")), fake.StandIn());
+        var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => rejected.InitialiseAsync(new TestSourceContext(), CancellationToken.None));
+        await rejected.DisposeAsync();
+        Assert.IsTrue(ex.Permanent, ex.Message);
+        StringAssert.Contains(ex.Message, "not one the fake knows");
+
+        // the same query's answer cut short on its way is worth another try
+        fake.Fault = r => r.Url.AbsolutePath.EndsWith("/search", StringComparison.Ordinal) ? new FakeAtlassian.Response(200, Encoding.UTF8.GetBytes("{\"issues\":[")) : null;
+        var cut = new JiraSource(JiraSeed.Settings(fake, "/issues/?jql=" + Uri.EscapeDataString("project = OPS")), fake.StandIn());
+        ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => cut.InitialiseAsync(new TestSourceContext(), CancellationToken.None));
+        await cut.DisposeAsync();
+        Assert.IsFalse(ex.Permanent, ex.Message);
     }
 
     [TestMethod]
@@ -921,5 +985,34 @@ public class JiraTests
 
         var hidden = await JiraPlugin.TestAsync(JiraSeed.Settings(fake, "/projects/HIDDEN"), new Progress<string>(), fake.StandIn(), CancellationToken.None);
         Assert.IsFalse(hidden.Success);
+    }
+
+    [TestMethod]
+    public async Task TheTestRunsAQuerysAndABoardsQuerySoOneJiraCannotRunIsToldThere()
+    {
+        var fake = JiraSeed.Lab();
+        Task<AnyFS.Sdk.TestResult> TestAsync(string path) => JiraPlugin.TestAsync(JiraSeed.Settings(fake, path), new Progress<string>(), fake.StandIn(), CancellationToken.None);
+
+        var query = await TestAsync("/issues/?jql=" + Uri.EscapeDataString("project = OPS"));
+        Assert.IsTrue(query.Success, query.Message);
+        CollectionAssert.Contains(fake.Searches.ToList(), "project = OPS", "the query was run");
+
+        var nonsense = await TestAsync("/issues/?jql=" + Uri.EscapeDataString("nonsense ~ 1"));
+        Assert.IsFalse(nonsense.Success, nonsense.Message);
+        StringAssert.Contains(nonsense.Message, "as Test Er (tester)");
+        StringAssert.Contains(nonsense.Message, "not one the fake knows", "in Jira's words");
+
+        // a board's query is its filter's
+        var board = await TestAsync("/secure/RapidBoard.jspa?rapidView=7");
+        Assert.IsTrue(board.Success, board.Message);
+        Assert.AreEqual("project = OPS ORDER BY key ASC", fake.Searches.Last());
+
+        fake.Filters[10200] = ("Operations", "nonsense ~ 1");
+        var broken = await TestAsync("/secure/RapidBoard.jspa?rapidView=7");
+        Assert.IsFalse(broken.Success, broken.Message);
+        StringAssert.Contains(broken.Message, "not one the fake knows");
+
+        var none = await TestAsync("/secure/RapidBoard.jspa?rapidView=99");
+        Assert.IsFalse(none.Success, none.Message);
     }
 }

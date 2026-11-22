@@ -26,7 +26,7 @@ public sealed class JiraSource : SourceBase, ICountable
     private const int HeadsPerRequest = 1000;
 
     // issues read whole and kept for the opens and listings that follow (each a few kilobytes as JSON)
-    private const int IssuesKept = 2_000;
+    internal const int IssuesKept = 2_000;
 
     private static readonly string[] AllFields = ["*all"];
     private static readonly string[] HeadFields = ["summary", "created", "updated"];
@@ -82,7 +82,9 @@ public sealed class JiraSource : SourceBase, ICountable
     {
         _session = new AtlassianSession(AtlassianProduct.Jira, _settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
         await _session.SignInAsync(interactive: Context.Attended, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
-        _api = new AtlassianApi(_session, _settings.Concurrency, Logger);
+
+        // "Requests at a time" is 1 to 64 (the client itself takes more: Bitbucket's and Bamboo's two settings multiplied)
+        _api = new AtlassianApi(_session, Math.Clamp(_settings.Concurrency, 1, 64), Logger);
         _cache = new RequestCache(_stopping.Token);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
@@ -94,7 +96,8 @@ public sealed class JiraSource : SourceBase, ICountable
         }
         catch (VfsException ex)
         {
-            throw new SourceFailedException($"Opening the {Scope.Kind.ToString().ToLowerInvariant()} {Scope.Value}: {ex.Message}", permanent: ex.Error is VfsError.AccessDenied or VfsError.NotFound, ex);
+            // a query Jira will not run (400) is as final as an address it refuses: the host is not to sign in again and again for it
+            throw new SourceFailedException($"Opening the {Scope.Kind.ToString().ToLowerInvariant()} {Scope.Value}: {ex.Message}", permanent: ex.Error is VfsError.AccessDenied or VfsError.NotFound || AtlassianApi.IsRejected(ex), ex);
         }
 
         // the walk may have all of "Requests at a time" in flight (until 5-Nov-2026 half, the rest kept back for browsing, which
@@ -136,14 +139,10 @@ public sealed class JiraSource : SourceBase, ICountable
                 }
 
             case JiraScopeKind.Filter:
-                return new JiraQueryRoot(await FilterJqlAsync(scope.Value, ct).ConfigureAwait(false));
+                return new JiraQueryRoot(await FilterJqlAsync(Api, scope.Value, ct).ConfigureAwait(false));
 
             case JiraScopeKind.Board:
-                using (var board = await Api.GetAsync(new Uri(Installation, $"rest/agile/1.0/board/{scope.Value}/configuration"), $"the board {scope.Value}", ct).ConfigureAwait(false))
-                {
-                    var filter = board.RootElement.Obj("filter").Str("id") ?? throw new VfsException(VfsError.NotFound, $"the board {scope.Value} names no filter");
-                    return new JiraQueryRoot(await FilterJqlAsync(filter, ct).ConfigureAwait(false));
-                }
+                return new JiraQueryRoot(await BoardJqlAsync(Api, scope.Value, ct).ConfigureAwait(false));
 
             case JiraScopeKind.Jql:
                 // asked once, so a query Jira cannot run fails here with Jira's own words
@@ -157,9 +156,17 @@ public sealed class JiraSource : SourceBase, ICountable
         }
     }
 
-    private async Task<string> FilterJqlAsync(string id, CancellationToken ct)
+    /// <summary>A board's query, which is its filter's (asked through <paramref name="api"/>: the settings' Test asks before there is a source).</summary>
+    internal static async Task<string> BoardJqlAsync(AtlassianApi api, string id, CancellationToken ct)
     {
-        using var filter = await Api.GetAsync($"filter/{id}", ct).ConfigureAwait(false);
+        using var board = await api.GetAsync(new Uri(api.Address.Base, $"rest/agile/1.0/board/{id}/configuration"), $"the board {id}", ct).ConfigureAwait(false);
+        var filter = board.RootElement.Obj("filter").Str("id") ?? throw new VfsException(VfsError.NotFound, $"the board {id} names no filter");
+        return await FilterJqlAsync(api, filter, ct).ConfigureAwait(false);
+    }
+
+    private static async Task<string> FilterJqlAsync(AtlassianApi api, string id, CancellationToken ct)
+    {
+        using var filter = await api.GetAsync($"filter/{id}", ct).ConfigureAwait(false);
         return filter.RootElement.Str("jql") ?? throw new VfsException(VfsError.NotFound, $"the filter {id} has no query");
     }
 
@@ -342,17 +349,33 @@ public sealed class JiraSource : SourceBase, ICountable
     private JiraIssue? Fresh(string key)
         => _issues.TryGetValue(key, out var kept) && Stopwatch.GetElapsedTime(kept.At) < Refresh ? kept.Issue : null;
 
-    private void Remember(JiraIssue issue)
+    /// <summary>How many issues are kept whole, for tests.</summary>
+    internal int IssuesRemembered => _issues.Count;
+
+    internal void Remember(JiraIssue issue)
     {
         _issues[issue.Key] = (issue, Stopwatch.GetTimestamp());
-        if (_issues.Count > IssuesKept)
+        if (_issues.Count <= IssuesKept || Interlocked.Exchange(ref _trimming, 1) != 0)
         {
-            foreach (var old in _issues.OrderBy(i => i.Value.At).Take(IssuesKept / 4).ToList())
+            return;
+        }
+
+        try
+        {
+            // from a copy made whole: others go on adding, and sorting the dictionary itself as it grows throws
+            foreach (var old in _issues.ToArray().OrderBy(i => i.Value.At).Take(IssuesKept / 4))
             {
                 _issues.TryRemove(old);
             }
         }
+        finally
+        {
+            Volatile.Write(ref _trimming, 0);
+        }
     }
+
+    // 1 while the issues kept whole are being trimmed: a second trim meanwhile would sort them all again for the same ones
+    private int _trimming;
 
     /// <summary>An issue folder's children: its <c>issue.md</c> and, where it has attachments and they are shown, its <c>attachments</c>.</summary>
     internal async Task<IReadOnlyList<JiNode>> IssueChildrenAsync(JiraIssue issue, CancellationToken ct)
@@ -468,6 +491,10 @@ public sealed class JiraSource : SourceBase, ICountable
 
     /// <summary>One search request (POSTed: a query of a hundred keys does not fit an address).</summary>
     private Task<JsonDocument> SearchPageAsync(string jql, string[] fields, int maxResults, string[]? expand, bool validate, CancellationToken ct)
+        => SearchPageAsync(Api, jql, fields, maxResults, expand, validate, ct);
+
+    /// <summary>The same through <paramref name="api"/>: the settings' Test runs a query before there is a source.</summary>
+    internal static Task<JsonDocument> SearchPageAsync(AtlassianApi api, string jql, string[] fields, int maxResults, string[]? expand, bool validate, CancellationToken ct)
     {
         var body = new JsonObject
         {
@@ -482,7 +509,7 @@ public sealed class JiraSource : SourceBase, ICountable
             body["expand"] = new JsonArray(expand.Select(e => (JsonNode)JsonValue.Create(e)!).ToArray());
         }
 
-        return Api.PostAsync("search", body.ToJsonString(), ct);
+        return api.PostAsync("search", body.ToJsonString(), ct);
     }
 
     // --- counting and walking ------------------------------------------------------------------------------------------

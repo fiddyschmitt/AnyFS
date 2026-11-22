@@ -5,6 +5,7 @@ using AnyFS.Sdk.Testing;
 using AnyFS.Sources.Atlassian;
 using AnyFS.Sources.Atlassian.Bitbucket;
 using AnyFS.Sources.Common;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Sources.Tests;
 
@@ -513,6 +514,62 @@ public class BitbucketTests
 
         await source.WalkAsync(new SourceCounters(), full: true, CancellationToken.None);
         CollectionAssert.Contains(await NamesAsync(source, "files/docs"), "guide.md");
+    }
+
+    /// <summary>A server that holds every request it is sent until told to go on, and says how many it held at once.</summary>
+    private sealed class HoldingServer(int wanted) : HttpMessageHandler
+    {
+        private readonly TaskCompletionSource _go = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _held;
+        private int _most;
+
+        /// <summary>Done once as many are held at once as were wanted.</summary>
+        public Task Reached => _reached.Task;
+
+        public int MostAtOnce => Volatile.Read(ref _most);
+
+        public void Go() => _go.TrySetResult();
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var held = Interlocked.Increment(ref _held);
+            int most;
+            while (held > (most = Volatile.Read(ref _most)) && Interlocked.CompareExchange(ref _most, held, most) != most)
+            {
+            }
+
+            if (held >= wanted)
+            {
+                _reached.TrySetResult();
+            }
+
+            await _go.Task.WaitAsync(cancellationToken);
+            Interlocked.Decrement(ref _held);
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent("{}", Encoding.UTF8, "application/json") };
+        }
+    }
+
+    [TestMethod]
+    public async Task AsManyRequestsAreOpenAtOnceAsTheTwoSettingsMultiplyTo()
+    {
+        // ten repositories at a time and ten requests for each: a hundred, where the client's gate stopped at 64 whatever was set
+        var settings = new BitbucketSettings { Address = "https://bitbucket.fake.test", AccessToken = "t", RepositoriesAtATime = 10, RequestsPerRepository = 10 };
+        var server = new HoldingServer(settings.Requests);
+        using var session = new AtlassianSession(AtlassianProduct.Bitbucket, settings, NullLogger.Instance, new AtlassianStandIn(() => server));
+        using var api = new AtlassianApi(session, settings.Requests, NullLogger.Instance);
+        var asked = Enumerable.Range(0, settings.Requests + 50).Select(async n =>
+        {
+            using var answer = await api.GetAsync($"repos?start={n}", CancellationToken.None);
+        }).ToList();
+
+        // a gate that lets fewer through never gets there: the wait is for that alone
+        var reached = await Task.WhenAny(server.Reached, Task.Delay(TimeSpan.FromSeconds(30))) == server.Reached;
+        var open = server.MostAtOnce;
+        server.Go();
+        await Task.WhenAll(asked);
+        Assert.IsTrue(reached, $"{open} requests open at once, of the {settings.Requests} the settings ask for");
+        Assert.AreEqual(settings.Requests, server.MostAtOnce, "and no more than they ask for");
     }
 
     // --- the settings and the Test button -------------------------------------------------------------------------------
