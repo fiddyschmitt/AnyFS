@@ -346,6 +346,55 @@ public class FakeSharePointTests
     }
 
     /// <summary>
+    /// A farm takes a file past ten megabytes in pieces, against a file that is there. An empty one was made for that
+    /// whatever was there, so an upload that failed part way left the file that had been there empty; and a new file's
+    /// stayed behind empty. One that is there now keeps what it holds until the last piece lands, and what was made for
+    /// an upload that failed is taken away (review of 21-Nov-2026, R3).
+    /// </summary>
+    [TestMethod]
+    public async Task AnUploadInPiecesThatFailsPartWayLeavesTheFileAsItWas()
+    {
+        using var fake = FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        var old = "the version that was there"u8.ToArray();
+        fake.Seed(documents, "pieces/report.bin", old);
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, FarmSettings(fake), context);
+        var bytes = new byte[SharePointRestClient.SimpleUploadLimit + 1];
+        new Random(7).NextBytes(bytes);
+
+        fake.Fail(r => r.RawPath.Contains("FinishUpload", StringComparison.OrdinalIgnoreCase), 2,
+            _ => FakeSharePoint.Response.Json(500, FakeSharePoint.RestError("-2147024864, Microsoft.SharePoint.SPFileLockException", "The file is locked for shared use.")));
+        await using (var file = await source.OpenAsync("Documents/pieces/report.bin", VfsOpenMode.Create, None))
+        {
+            await file.WriteAsync(0, bytes, None);
+        }
+
+        CollectionAssert.AreEqual(old, documents.Root.Folder("pieces")!.File("report.bin")!.Content, "what was there before the upload that failed");
+
+        await using (var file = await source.OpenAsync("Documents/pieces/new.bin", VfsOpenMode.CreateNew, None))
+        {
+            await file.WriteAsync(0, bytes, None);
+        }
+
+        Assert.IsNull(documents.Root.Folder("pieces")!.File("new.bin"), "no empty file left where the upload failed");
+
+        // and with the server taking the pieces, both land
+        await using (var file = await source.OpenAsync("Documents/pieces/report.bin", VfsOpenMode.Create, None))
+        {
+            await file.WriteAsync(0, bytes, None);
+        }
+
+        await using (var file = await source.OpenAsync("Documents/pieces/new.bin", VfsOpenMode.Create, None))
+        {
+            await file.WriteAsync(0, bytes, None);
+        }
+
+        CollectionAssert.AreEqual(bytes, documents.Root.Folder("pieces")!.File("report.bin")!.Content);
+        CollectionAssert.AreEqual(bytes, documents.Root.Folder("pieces")!.File("new.bin")!.Content);
+    }
+
+    /// <summary>
     /// The local copy of a file goes once the file has been uploaded. It stayed until the next start: .NET leaves a
     /// request's content open for the collector, the copy could not be deleted while its stream was, and nothing came back
     /// for it. So every file written in a run stayed in the cache for the rest of that run.

@@ -483,33 +483,80 @@ internal sealed class RestDocumentStore : IDocumentStore
             return ParseFile(created.RootElement).Item;
         }
 
-        // an empty file first, then the pieces against it
-        using (var empty = await Client(library).PostBinaryAsync(add, () => Stream.Null, 0, path, ct).ConfigureAwait(false))
-        {
-        }
-
+        // The pieces go against a file that is there. One that is keeps what it holds until the last piece lands
+        // (StartUpload leaves the current content as it is), so an empty one is made only where there is none: made over
+        // a file that was there, an upload that failed part way left that file empty (review of 21-Nov-2026).
         var file = SharePointRestClient.FileApi(Url(library, itemPath));
-        var uploadId = Guid.NewGuid();
-        long offset = 0;
-        while (offset < length)
+        var made = false;
+        using (var there = await Client(library).TryGetJsonAsync($"{file}?$select=Exists", path, ct).ConfigureAwait(false))
         {
-            var chunk = Math.Min(SharePointRestClient.UploadChunkSize, length - offset);
-            var last = offset + chunk >= length;
-            var api = offset == 0
-                ? $"{file}/StartUpload(uploadId=guid'{uploadId}')"
-                : last
-                    ? $"{file}/FinishUpload(uploadId=guid'{uploadId}',fileOffset={offset})?$select={FileSelect}"
-                    : $"{file}/ContinueUpload(uploadId=guid'{uploadId}',fileOffset={offset})";
-            var from = offset;
-            using var result = await Client(library).PostBinaryAsync(api, () => new SliceStream(OpenLocal(localPath), from, chunk), chunk, path, ct).ConfigureAwait(false);
-            offset += chunk;
-            if (last)
+            if (there is null || there.RootElement.TryGetProperty("Exists", out var exists) && exists.ValueKind == JsonValueKind.False)
             {
-                return ParseFile(result.RootElement).Item;
+                var addNew = $"{SharePointRestClient.FolderApi(folder)}/Files/AddUsingPath(decodedurl='{SharePointRestClient.Encode(name)}',overwrite=false)";
+                using var empty = await Client(library).PostBinaryAsync(addNew, () => Stream.Null, 0, path, ct).ConfigureAwait(false);
+                made = true;
             }
         }
 
+        var uploadId = Guid.NewGuid();
+        long offset = 0;
+        try
+        {
+            while (offset < length)
+            {
+                var chunk = Math.Min(SharePointRestClient.UploadChunkSize, length - offset);
+                var last = offset + chunk >= length;
+                var api = offset == 0
+                    ? $"{file}/StartUpload(uploadId=guid'{uploadId}')"
+                    : last
+                        ? $"{file}/FinishUpload(uploadId=guid'{uploadId}',fileOffset={offset})?$select={FileSelect}"
+                        : $"{file}/ContinueUpload(uploadId=guid'{uploadId}',fileOffset={offset})";
+                var from = offset;
+                using var result = await Client(library).PostBinaryAsync(api, () => new SliceStream(OpenLocal(localPath), from, chunk), chunk, path, ct).ConfigureAwait(false);
+                offset += chunk;
+                if (last)
+                {
+                    return ParseFile(result.RootElement).Item;
+                }
+            }
+        }
+        catch
+        {
+            await GiveUpUploadAsync(library, file, uploadId, made, path).ConfigureAwait(false);
+            throw;
+        }
+
         throw new VfsException(VfsError.IoError, $"'{path}': the upload ended without the file");
+    }
+
+    /// <summary>
+    /// After an upload in pieces that failed: the pieces the server holds are let go, and the empty file made for them is
+    /// deleted, so no file of nothing stands where the upload was to land. As far as the server lets it, in a time of its
+    /// own (the upload's may be what ended it), and without a word where it does not: the upload's own failure is what is told.
+    /// </summary>
+    private async Task GiveUpUploadAsync(LibraryInfo library, string file, Guid uploadId, bool made, string path)
+    {
+        using var brief = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        try
+        {
+            using var cancelled = await Client(library).PostJsonAsync($"{file}/CancelUpload(uploadId=guid'{uploadId}')", null, path, brief.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is VfsException or HttpRequestException or IOException or OperationCanceledException or SignInRequiredException or ObjectDisposedException)
+        {
+        }
+
+        if (!made)
+        {
+            return;
+        }
+
+        try
+        {
+            await Client(library).DeleteAsync(file, path, brief.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is VfsException or HttpRequestException or IOException or OperationCanceledException or SignInRequiredException or ObjectDisposedException)
+        {
+        }
     }
 
     public async Task<ItemRef> CreateFolderAsync(LibraryInfo library, string itemPath, CancellationToken ct)

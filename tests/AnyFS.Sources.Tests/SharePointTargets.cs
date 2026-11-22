@@ -139,7 +139,11 @@ internal sealed class SharePointTarget
         return StartAsync(settings, context);
     }
 
-    /// <summary>A file of each size written into the fixture's scratch folder, its length and its end read back from SharePoint, and deleted.</summary>
+    /// <summary>
+    /// A file of each size written into the fixture's scratch folder, its length and its end read back from SharePoint,
+    /// written again over itself with other bytes and read back again, and deleted. The second write is the one over a
+    /// file that is there, which a farm takes in pieces without an empty file made first.
+    /// </summary>
     public async Task UploadsRoundTripAsync(params long[] sizes)
     {
         Require();
@@ -157,15 +161,27 @@ internal sealed class SharePointTarget
 
             try
             {
-                Assert.AreEqual(size, (await source.StatAsync(path, CancellationToken.None))?.Length, $"{size:N0} bytes");
-                await using var back = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
-                var tail = new byte[4096];
-                Assert.AreEqual(tail.Length, await back.ReadFullyAsync(size - tail.Length, tail, CancellationToken.None), $"{size:N0} bytes");
-                CollectionAssert.AreEqual(bytes[^tail.Length..], tail, $"the end of {size:N0} bytes");
+                await ReadBackAsync("written");
+                new Random((int)size + 1).NextBytes(bytes);
+                await using (var file = await source.OpenAsync(path, VfsOpenMode.Create, CancellationToken.None))
+                {
+                    await file.WriteAsync(0, bytes, CancellationToken.None);
+                }
+
+                await ReadBackAsync("written over itself");
             }
             finally
             {
                 await source.DeleteAsync(path, CancellationToken.None);
+            }
+
+            async Task ReadBackAsync(string how)
+            {
+                Assert.AreEqual(size, (await source.StatAsync(path, CancellationToken.None))?.Length, $"{size:N0} bytes, {how}");
+                await using var back = await source.OpenAsync(path, VfsOpenMode.Read, CancellationToken.None);
+                var tail = new byte[4096];
+                Assert.AreEqual(tail.Length, await back.ReadFullyAsync(size - tail.Length, tail, CancellationToken.None), $"{size:N0} bytes, {how}");
+                CollectionAssert.AreEqual(bytes[^tail.Length..], tail, $"the end of {size:N0} bytes, {how}");
             }
         }
     }

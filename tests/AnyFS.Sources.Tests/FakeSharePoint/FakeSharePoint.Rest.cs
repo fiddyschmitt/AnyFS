@@ -592,6 +592,10 @@ internal sealed partial class FakeSharePoint
                 return Response.Json(200, FileJson(file));
             }
 
+            case "cancelupload":
+                // the pieces held are let go; the file keeps what it had (one made empty for the upload stays, for its maker to delete)
+                _restUploads.Remove(Guid.Parse(call.Arg("uploadId")));
+                return Response.Json(200, new JsonObject { ["odata.null"] = true });
             case "movetousingpath":
                 return Move(request, web, file, call.Arg("DecodedUrl"), replace: call.Arg("moveOperations") == "1");
             default:
