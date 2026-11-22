@@ -162,7 +162,7 @@ public sealed class SshfsSource : SourceBase, ICountable
             length = known?.Length ?? 0;
         }
 
-        return new SshfsFile(stream, length, access != FileAccess.Read, () => Listings.InvalidateParentOf(path), asked);
+        return new SshfsFile(stream, path, length, access != FileAccess.Read, () => Listings.InvalidateParentOf(path), asked);
     }
 
     public override async Task CreateDirectoryAsync(string path, CancellationToken ct)
@@ -597,13 +597,19 @@ public sealed class SshfsSource : SourceBase, ICountable
 /// <summary>
 /// An open SFTP file: one <see cref="SftpFileStream"/>, positioned per call under a lock (the handle is
 /// positionless to callers, SFTP reads carry offsets anyway). The length is what the listing said at open, kept
-/// up to date by this handle's own writes.
+/// up to date by this handle's own writes. The stream is taken as a <see cref="Stream"/>, which is all that is used of
+/// it, so that a test can hand over one that fails as a server or a lost connection would.
 /// </summary>
-internal sealed class SshfsFile(SftpFileStream stream, long length, bool writable, Action onClose, IWatchedRequest? asked = null) : IVfsFile
+/// <param name="path">The file's path in the source, for what a failed close says.</param>
+internal sealed class SshfsFile(Stream stream, string path, long length, bool writable, Action onClose, IWatchedRequest? asked = null) : IVfsFile
 {
     private readonly SemaphoreSlim _lock = new(1, 1);
     private long _length = length;
     private bool _disposed;
+
+    // a write was taken through this handle that may not be on the server yet, and nothing since has told its writer so:
+    // SSH.NET keeps a write until its buffer fills (about 32 KB with OpenSSH) or the stream is flushed. Under the lock
+    private bool _unsent;
 
     public long Length => Volatile.Read(ref _length);
 
@@ -651,12 +657,16 @@ internal sealed class SshfsFile(SftpFileStream stream, long length, bool writabl
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+
+            // a write that fails tells its caller itself; one that is taken may only be kept, which the close answers for
+            _unsent = false;
             if (stream.Position != offset)
             {
                 stream.Seek(offset, SeekOrigin.Begin);
             }
 
             await stream.WriteAsync(data, ct).ConfigureAwait(false);
+            _unsent = true;
             asked?.AddBytes(data.Length);
             if (offset + data.Length > _length)
             {
@@ -709,6 +719,9 @@ internal sealed class SshfsFile(SftpFileStream stream, long length, bool writabl
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+
+            // sent, or its caller told here that it was not
+            _unsent = false;
             await stream.FlushAsync(ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is SshException or SocketException or IOException)
@@ -721,8 +734,26 @@ internal sealed class SshfsFile(SftpFileStream stream, long length, bool writabl
         }
     }
 
-    public async ValueTask DisposeAsync()
+    /// <summary>
+    /// Closes the file, and fails when what was written through it did not all reach the server: SSH.NET sends what it
+    /// still keeps as its stream closes, so a write the server refuses (a full disk, a quota) is refused only then, and
+    /// with the session gone its close sends nothing and says nothing. Until 22-Nov-2026 the close took both for success:
+    /// a small file saved to a full server was an empty file there, and saved to a mount that flushes only when its
+    /// client asks (WinFsp, SMB). What is kept is sent here first, where a failure can be told from the close's own, and
+    /// the handle is given up either way before it is thrown. A writer already told by a write or a flush that failed is
+    /// not told again: the close after that is the plain one a mount's delete of the half-made file goes on from.
+    /// </summary>
+    public ValueTask DisposeAsync() => CloseAsync(givenUp: false);
+
+    /// <summary>
+    /// The close of a write that was given up, which says nothing of what did not arrive, as none of it was wanted: the
+    /// mounts delete such a file next, and a close that threw would leave it there.
+    /// </summary>
+    public ValueTask AbandonAsync() => CloseAsync(givenUp: true);
+
+    private async ValueTask CloseAsync(bool givenUp)
     {
+        Exception? lost = null;
         await _lock.WaitAsync().ConfigureAwait(false);
         try
         {
@@ -732,6 +763,21 @@ internal sealed class SshfsFile(SftpFileStream stream, long length, bool writabl
             }
 
             _disposed = true;
+            if (_unsent && !givenUp)
+            {
+                try
+                {
+                    await stream.FlushAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is SshException or SocketException or IOException or InvalidOperationException)
+                {
+                    // SSH.NET says "The session is not open." as an InvalidOperationException, and that its client was
+                    // disposed (a connection the pool dropped) as an ObjectDisposedException, which is one too
+                    lost = ex;
+                    asked?.Failed(ex, CancellationToken.None);
+                }
+            }
+
             try
             {
                 await stream.DisposeAsync().ConfigureAwait(false);
@@ -751,6 +797,11 @@ internal sealed class SshfsFile(SftpFileStream stream, long length, bool writabl
         if (writable)
         {
             onClose();
+        }
+
+        if (lost is not null)
+        {
+            throw new VfsException(lost is SftpException ? VfsError.IoError : VfsError.Unavailable, $"what was written to '{path}' did not all reach the server: {lost.Message}", lost);
         }
     }
 

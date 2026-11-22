@@ -2,6 +2,8 @@ using System.Text;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
 using AnyFS.Sources.Sshfs;
+using Renci.SshNet.Common;
+using Renci.SshNet.Sftp;
 
 namespace AnyFS.Sources.Tests;
 
@@ -507,6 +509,256 @@ public class SshfsUnitTests
             }
             catch (IOException)
             {
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task ASaveTheServerRefusesAsTheFileClosesFailsTheClose()
+    {
+        // a small file is all still in SSH.NET's buffer as it closes, and only then does the full disk say no
+        var stream = new SftpLikeStream { Refusal = new SftpException(StatusCode.Failure, "Failure") };
+        var asked = (RecordingUpstreamWatcher.Request)new RecordingUpstreamWatcher().Asked("SFTP open", "/srv/docs/report.txt");
+        var forgotten = 0;
+        var file = new SshfsFile(stream, "docs/report.txt", 0, writable: true, () => forgotten++, asked);
+        await file.WriteAsync(0, "hello"u8.ToArray(), CancellationToken.None);
+
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync());
+        Assert.AreEqual(VfsError.IoError, ex.Error, "a write the server refused");
+        StringAssert.Contains(ex.Message, "docs/report.txt");
+        StringAssert.Contains(ex.Message, "did not all reach the server");
+        Assert.AreEqual(0, stream.OnServer.Count, "nothing of it is on the server");
+        Assert.IsTrue(stream.HandleClosed, "the handle is closed there all the same");
+        Assert.AreEqual(1, forgotten, "the folder's listing is forgotten, as at any close of a file opened for writing");
+        Assert.IsTrue(asked.IsDone, "and the open's request has ended,");
+        Assert.IsInstanceOfType<SftpException>(asked.Error, "as one that failed");
+    }
+
+    [TestMethod]
+    public async Task ASaveCutOffByALostConnectionFailsTheCloseThoughSshNetSaysNothing()
+    {
+        var stream = new SftpLikeStream();
+        var asked = (RecordingUpstreamWatcher.Request)new RecordingUpstreamWatcher().Asked("SFTP open", "/srv/docs/report.txt");
+        var forgotten = 0;
+        var file = new SshfsFile(stream, "docs/report.txt", 0, writable: true, () => forgotten++, asked);
+        await file.WriteAsync(0, "hello"u8.ToArray(), CancellationToken.None);
+        stream.SessionOpen = false;
+
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync());
+        Assert.AreEqual(VfsError.Unavailable, ex.Error, "the server never had the chance to refuse it");
+        StringAssert.Contains(ex.Message, "docs/report.txt");
+        StringAssert.Contains(ex.Message, "did not all reach the server");
+        Assert.AreEqual(0, stream.OnServer.Count);
+        Assert.AreEqual(1, forgotten);
+        Assert.IsTrue(asked.IsDone);
+        Assert.IsNotNull(asked.Error);
+    }
+
+    [TestMethod]
+    public async Task ACloseWithNothingLeftToSendStaysSilent()
+    {
+        // only read, and the server gone by the close: nothing is lost, so the close says nothing (its request does)
+        var read = new SftpLikeStream { CloseFailure = new SshConnectionException("An established connection was aborted by the server.") };
+        read.OnServer.AddRange("hello"u8.ToArray());
+        var asked = (RecordingUpstreamWatcher.Request)new RecordingUpstreamWatcher().Asked("SFTP open", "/srv/a.txt");
+        var file = new SshfsFile(read, "a.txt", 5, writable: false, () => Assert.Fail("a file only read changes no listing"), asked);
+        Assert.AreEqual(5, await file.ReadAsync(0, new byte[5], CancellationToken.None));
+        await file.DisposeAsync();
+        Assert.IsTrue(asked.IsDone);
+        Assert.IsInstanceOfType<SshConnectionException>(asked.Error);
+
+        // opened for writing and never written, the connection lost meanwhile
+        var untouched = new SftpLikeStream { SessionOpen = false };
+        file = new SshfsFile(untouched, "b.txt", 0, writable: true, () => { });
+        await file.DisposeAsync();
+
+        // written, and all of it sent as the file closes
+        var written = new SftpLikeStream();
+        file = new SshfsFile(written, "c.txt", 0, writable: true, () => { });
+        await file.WriteAsync(0, "hello"u8.ToArray(), CancellationToken.None);
+        Assert.AreEqual(0, written.OnServer.Count, "kept until a flush or the close");
+        await file.DisposeAsync();
+        CollectionAssert.AreEqual("hello"u8.ToArray(), written.OnServer);
+        Assert.IsTrue(written.HandleClosed);
+
+        // written and flushed at its writer's word, the connection lost after that: everything had arrived
+        var flushed = new SftpLikeStream();
+        file = new SshfsFile(flushed, "d.txt", 0, writable: true, () => { });
+        await file.WriteAsync(0, "hello"u8.ToArray(), CancellationToken.None);
+        await file.FlushAsync(CancellationToken.None);
+        flushed.SessionOpen = false;
+        await file.DisposeAsync();
+        CollectionAssert.AreEqual("hello"u8.ToArray(), flushed.OnServer);
+    }
+
+    [TestMethod]
+    public async Task AWriteGivenUpClosesSilentlyWhateverWasLeftToSend()
+    {
+        // a copy that was cancelled: the mount gives the write up and deletes the file next, which a close that threw would stop
+        var stream = new SftpLikeStream { Refusal = new SftpException(StatusCode.Failure, "Failure") };
+        var asked = (RecordingUpstreamWatcher.Request)new RecordingUpstreamWatcher().Asked("SFTP open", "/srv/docs/report.txt");
+        var forgotten = 0;
+        IVfsFile file = new SshfsFile(stream, "docs/report.txt", 0, writable: true, () => forgotten++, asked);
+        await file.WriteAsync(0, "hello"u8.ToArray(), CancellationToken.None);
+        await file.AbandonAsync();
+        Assert.IsTrue(stream.HandleClosed);
+        Assert.AreEqual(1, forgotten);
+        Assert.IsTrue(asked.IsDone);
+
+        var gone = new SftpLikeStream();
+        file = new SshfsFile(gone, "docs/report.txt", 0, writable: true, () => { });
+        await file.WriteAsync(0, "hello"u8.ToArray(), CancellationToken.None);
+        gone.SessionOpen = false;
+        await file.AbandonAsync();
+    }
+
+    [TestMethod]
+    public async Task ASaveWhoseWriterWasToldItFailedClosesSilently()
+    {
+        // a write that fills SSH.NET's buffer is sent at once and refused there: the writer has its answer, and a mount
+        // that deletes the half-made file as it closes it (SMB's delete on close) is not stopped by the close failing too
+        var full = new SftpLikeStream { BufferSize = 4, Refusal = new SftpException(StatusCode.Failure, "Failure") };
+        IVfsFile file = new SshfsFile(full, "docs/report.txt", 0, writable: true, () => { });
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.WriteAsync(0, "hello"u8.ToArray(), CancellationToken.None));
+        Assert.AreEqual(VfsError.IoError, ex.Error);
+        await file.DisposeAsync();
+        Assert.IsTrue(full.HandleClosed);
+
+        // the same of a flush at the writer's word
+        var flushed = new SftpLikeStream { Refusal = new SftpException(StatusCode.Failure, "Failure") };
+        file = new SshfsFile(flushed, "docs/report.txt", 0, writable: true, () => { });
+        await file.WriteAsync(0, "hello"u8.ToArray(), CancellationToken.None);
+        ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.FlushAsync(CancellationToken.None));
+        Assert.AreEqual(VfsError.IoError, ex.Error);
+        await file.DisposeAsync();
+
+        // but a write taken after one that failed is the close's to answer for again
+        var again = new SftpLikeStream { BufferSize = 4, Refusal = new SftpException(StatusCode.Failure, "Failure") };
+        file = new SshfsFile(again, "docs/report.txt", 0, writable: true, () => { });
+        await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.WriteAsync(0, "hello"u8.ToArray(), CancellationToken.None));
+        again.BufferSize = 1024;
+        await file.WriteAsync(5, "!"u8.ToArray(), CancellationToken.None);
+        ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync());
+        Assert.AreEqual(VfsError.IoError, ex.Error);
+    }
+
+    /// <summary>
+    /// A stream that keeps and sends as SSH.NET 2026.0.0's SftpFileStream does, by its code: a write stays in its buffer
+    /// until the buffer is full or a flush sends it, a flush with nothing kept asks the server nothing, and the close
+    /// flushes and then closes the handle while the session is open, and does neither once the session has gone, without
+    /// a word.
+    /// </summary>
+    private sealed class SftpLikeStream : Stream
+    {
+        private readonly List<byte> _kept = [];
+        private long _position;
+
+        /// <summary>How much is kept before it is sent unasked (with OpenSSH, about 32 KB).</summary>
+        public int BufferSize { get; set; } = 32 * 1024;
+
+        /// <summary>The file's bytes as the server has them.</summary>
+        public List<byte> OnServer { get; } = [];
+
+        /// <summary>False once the connection has gone: SSH.NET then answers a request with "The session is not open."</summary>
+        public bool SessionOpen { get; set; } = true;
+
+        /// <summary>What the server answers a write with instead of taking it (a full disk, a quota).</summary>
+        public Exception? Refusal { get; set; }
+
+        /// <summary>What the close of the handle fails with.</summary>
+        public Exception? CloseFailure { get; set; }
+
+        public bool HandleClosed { get; private set; }
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => true;
+
+        public override bool CanWrite => true;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => _position;
+            set => Seek(value, SeekOrigin.Begin);
+        }
+
+        public override void Flush()
+        {
+            if (_kept.Count == 0)
+            {
+                return;
+            }
+
+            if (!SessionOpen)
+            {
+                throw new InvalidOperationException("The session is not open.");
+            }
+
+            if (Refusal is not null)
+            {
+                throw Refusal;
+            }
+
+            var at = (int)_position - _kept.Count;
+            OnServer.RemoveRange(at, Math.Min(_kept.Count, OnServer.Count - at));
+            OnServer.InsertRange(at, _kept);
+            _kept.Clear();
+        }
+
+        public override async Task FlushAsync(CancellationToken cancellationToken)
+        {
+            await Task.Yield();
+            Flush();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            Flush();
+            var n = (int)Math.Clamp(OnServer.Count - _position, 0, count);
+            OnServer.CopyTo((int)_position, buffer, offset, n);
+            _position += n;
+            return n;
+        }
+
+        public override void Write(byte[] buffer, int offset, int count)
+        {
+            _kept.AddRange(buffer.AsSpan(offset, count));
+            _position += count;
+            if (_kept.Count >= BufferSize)
+            {
+                Flush();
+            }
+        }
+
+        public override long Seek(long offset, SeekOrigin origin)
+        {
+            Flush();
+            return _position = offset;
+        }
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override async ValueTask DisposeAsync()
+        {
+            if (!SessionOpen)
+            {
+                return;
+            }
+
+            try
+            {
+                await FlushAsync(CancellationToken.None);
+            }
+            finally
+            {
+                HandleClosed = true;
+            }
+
+            if (CloseFailure is not null)
+            {
+                throw CloseFailure;
             }
         }
     }
