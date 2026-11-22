@@ -149,6 +149,7 @@ internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo 
     internal const uint DispatcherThreads = 64;
 
     private FileSystemHost? _host;
+    private WinFspFileSystem? _fileSystem;
 
     public IReadOnlyList<AccessPath> AccessPaths { get; private set; } = [];
 
@@ -180,7 +181,8 @@ internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo 
     {
         var letter = WinFspMountProvider.NormaliseLetter(settings.DriveLetter);
         var prefix = $@"\anyfs\{collection.Name}";
-        var host = new FileSystemHost(new WinFspFileSystem(fs, collection.Name, prefix, context.Logger))
+        var fileSystem = new WinFspFileSystem(fs, collection.Name, prefix, context.Logger);
+        var host = new FileSystemHost(fileSystem)
         {
             Prefix = prefix,
             FileSystemName = "AnyFS",
@@ -223,6 +225,7 @@ internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo 
         }
 
         _host = host;
+        _fileSystem = fileSystem;
         var unc = $@"\\anyfs\{collection.Name}";
         var paths = new List<AccessPath> { new("UNC path", unc) };
         if (letter is not null)
@@ -238,12 +241,20 @@ internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo 
     public Task StopAsync(CancellationToken ct)
     {
         var host = _host;
+        var fileSystem = _fileSystem;
         _host = null;
+        _fileSystem = null;
         if (host is not null)
         {
             return Task.Run(() =>
             {
+                // the volume first, which waits for the callbacks under way; then what it left open, with none to come
                 host.Unmount();
+                if (OperatingSystem.IsWindows())
+                {
+                    fileSystem?.CloseOpenFiles();
+                }
+
                 host.Dispose();
                 AccessPaths = [];
                 OpenAction = null;

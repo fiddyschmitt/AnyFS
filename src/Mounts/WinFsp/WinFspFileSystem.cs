@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
@@ -40,6 +41,9 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
     private const ulong AllocationUnit = 4096;
     private static readonly byte[] Everyone = BuildDescriptor("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)");
     private readonly ulong _mountedAt = (ulong)DateTime.UtcNow.ToFileTimeUtc();
+
+    // the handles that hold a file of the collection's open, for <see cref="CloseOpenFiles"/>
+    private readonly ConcurrentDictionary<Desc, bool> _open = new();
 
     public override int GetVolumeInfo(out VolumeInfo volumeInfo)
     {
@@ -103,7 +107,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             return WriteRefusal();
         }
 
-        var desc = new Desc(path);
+        var desc = new Desc(path, _open);
         var status = Guard(() =>
         {
             if ((createOptions & FILE_DIRECTORY_FILE) != 0)
@@ -165,7 +169,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             return WriteRefusal();
         }
 
-        var desc = new Desc(path) { IsDirectory = entry.IsDirectory };
+        var desc = new Desc(path, _open) { IsDirectory = entry.IsDirectory };
 
         // an open only to look at the file (its attributes, its security), as Explorer and search tools make by the thousand,
         // reaches nothing of its data: the source is not asked for it until a read through this handle wants it, if one does
@@ -205,6 +209,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
                 // a supersede asks for no access to the data, only to replace the file: opened for it now
                 desc.File ??= Wait(fs.OpenAsync(desc.Path, VfsOpenMode.ReadWrite, CancellationToken.None));
                 Wait(desc.File.SetLengthAsync(0, CancellationToken.None).AsTask());
+                desc.Written = true;
                 return STATUS_SUCCESS;
             });
             desc.ForgetReadAhead();
@@ -215,7 +220,9 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
 
     public override void Cleanup(object fileNode, object fileDesc, string fileName, uint flags)
     {
+        // the handle's holder has closed it (WinFsp's own Close of it comes later): what was written through it is whole
         var desc = (Desc)fileDesc;
+        desc.CleanedUp = true;
         if ((flags & CleanupDelete) == 0)
         {
             return;
@@ -223,10 +230,12 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
 
         try
         {
-            if (desc.File is not null)
+            if (desc.File is { } doomed)
             {
-                Wait(desc.File.DisposeAsync().AsTask());
+                // given up, not closed: a file that is kept at its close (a source that uploads then) would be kept
+                // first, to be deleted next, which is how a copy that was cancelled ends
                 desc.File = null;
+                Wait(doomed.AbandonAsync().AsTask());
             }
 
             Wait(fs.DeleteAsync(desc.Path, CancellationToken.None));
@@ -263,6 +272,51 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "winfsp: close of '{Path}' failed", desc.Path);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Closes the files still open once the volume has gone and no callback runs any more. WinFsp sends no Close for
+    /// what is open then, nor the ones it had yet to send: Windows holds a file's last close back while anything still
+    /// refers to it (a mapped view, the cache, a scanner), so a file copied in a moment before could be among them, and
+    /// a source that takes a file at its close (an upload) never had it (review of 21-Nov-2026). A file written through a
+    /// handle its holder had not closed is given up, half a file being no file; every other is closed as Close would have.
+    /// </summary>
+    public void CloseOpenFiles()
+    {
+        foreach (var desc in _open.Keys.ToList())
+        {
+            if (desc.File is not { } file)
+            {
+                continue;
+            }
+
+            desc.File = null;
+            lock (desc.ReadLock)
+            {
+                desc.ReleaseReadAhead();
+            }
+
+            try
+            {
+                if (desc.Written && !desc.CleanedUp)
+                {
+                    logger.LogWarning("winfsp: '{Path}' was still being written as the volume went: what was written of it is not kept", desc.Path);
+                    Wait(file.AbandonAsync().AsTask());
+                }
+                else
+                {
+                    Wait(file.DisposeAsync().AsTask());
+                }
+            }
+            catch (VfsException ex)
+            {
+                logger.LogWarning("winfsp: close of '{Path}' as the volume went: {Error}", desc.Path, ex.Message);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "winfsp: close of '{Path}' as the volume went failed", desc.Path);
             }
         }
     }
@@ -370,6 +424,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
                     Marshal.Copy(buffer, rented, 0, count);
                     Wait(file.WriteAsync(at, rented.AsMemory(0, count), CancellationToken.None).AsTask());
                     written = count;
+                    desc.Written = true;
                     return STATUS_SUCCESS;
                 });
                 desc.ForgetReadAhead();
@@ -461,6 +516,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
                 status = Guard(() =>
                 {
                     Wait(desc.File.SetLengthAsync((long)newSize, CancellationToken.None).AsTask());
+                    desc.Written = true;
                     return STATUS_SUCCESS;
                 });
                 desc.ForgetReadAhead();
@@ -815,13 +871,37 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
     /// One open handle: the path (updated by Rename), the VFS file for files, the listing snapshot for directories, and
     /// the read-ahead state of <see cref="Read"/>.
     /// </summary>
-    private sealed class Desc(string path)
+    private sealed class Desc(string path, ConcurrentDictionary<Desc, bool> open)
     {
+        private IVfsFile? _file;
+
         public string Path { get; set; } = path;
 
         public bool IsDirectory { get; set; }
 
-        public IVfsFile? File { get; set; }
+        /// <summary>The file, while this handle holds it open: the handle is among the open ones for as long.</summary>
+        public IVfsFile? File
+        {
+            get => _file;
+            set
+            {
+                _file = value;
+                if (value is null)
+                {
+                    open.TryRemove(this, out _);
+                }
+                else
+                {
+                    open[this] = true;
+                }
+            }
+        }
+
+        /// <summary>Something was written, cut or replaced through this handle.</summary>
+        public bool Written { get; set; }
+
+        /// <summary>The handle's holder has closed it (Cleanup came), so what it wrote is all it meant to.</summary>
+        public bool CleanedUp { get; set; }
 
         public List<(string Name, FileInfo Info)>? Entries { get; set; }
 

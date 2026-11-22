@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.MemoryMappedFiles;
 using System.Reflection;
 using System.Text;
 using AnyFS.Mounts.WinFsp;
@@ -554,6 +555,109 @@ public class WinFspMountTests
         {
             Directory.Delete(dir, recursive: true);
         }
+    }
+
+    /// <summary>
+    /// WinFsp sends no close for what is open as the volume goes, so nothing closed those files: a source that takes a file
+    /// at its close (SharePoint's upload) never had it, and nothing said so (review of 21-Nov-2026, R3). What is open then is
+    /// closed by the mount: a file still being written is given up, half a file being no file, and the rest are closed.
+    /// </summary>
+    [TestMethod]
+    public async Task WhatIsOpenAsTheVolumeGoesIsClosedAndAFileStillBeingWrittenIsGivenUp()
+    {
+        RequireWinFsp();
+        ClosesTold told = null!;
+        var (mount, unc, _) = await MountAsync(wrap: vfs => told = new ClosesTold(vfs));
+        var writing = new FileStream(Path.Combine(unc, "half.bin"), FileMode.CreateNew, FileAccess.Write, FileShare.ReadWrite, 1, FileOptions.None);
+        var reading = new FileStream(Path.Combine(unc, "readme.txt"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1, FileOptions.None);
+        try
+        {
+            writing.Write(Medium, 0, 50_000);
+            writing.Flush();
+            Assert.AreEqual((int)'h', reading.ReadByte());
+
+            await mount.StopAsync(CancellationToken.None);
+
+            CollectionAssert.AreEqual(new[] { "given up" }, told.Of("half.bin"), "still being written: " + string.Join(", ", told.Of("half.bin")));
+            CollectionAssert.AreEqual(new[] { "closed" }, told.Of("readme.txt"), "open for reading: " + string.Join(", ", told.Of("readme.txt")));
+        }
+        finally
+        {
+            foreach (var stream in new[] { writing, reading })
+            {
+                try
+                {
+                    stream.Dispose();
+                }
+                catch (IOException)
+                {
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// A file its writer has closed is kept though the volume goes before WinFsp's own close of it comes: Windows holds
+    /// that back while anything still refers to the file (here a mapped view, as a virus scanner or the cache does), and
+    /// the volume's end drops it (review of 21-Nov-2026, R3: quitting right after a copy, the copy was never uploaded).
+    /// </summary>
+    [TestMethod]
+    public async Task AFileItsWriterClosedIsKeptThoughTheVolumeGoesBeforeItsLastClose()
+    {
+        RequireWinFsp();
+        ClosesTold told = null!;
+        var (mount, unc, source) = await MountAsync(wrap: vfs => told = new ClosesTold(vfs));
+        var stream = new FileStream(Path.Combine(unc, "copied.bin"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.ReadWrite, 1, FileOptions.None);
+        MemoryMappedFile? map = null;
+        MemoryMappedViewAccessor? view = null;
+        try
+        {
+            stream.Write(Medium, 0, Medium.Length);
+            stream.Flush();
+            map = MemoryMappedFile.CreateFromFile(stream, null, 0, MemoryMappedFileAccess.Read, HandleInheritability.None, leaveOpen: true);
+            view = map.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+            Assert.AreEqual(Medium[10], view.ReadByte(10));
+            stream.Dispose();
+            await Task.Delay(1500);
+            Assert.AreEqual(0, told.Of("copied.bin").Length, "the view holds WinFsp's close back: " + string.Join(", ", told.Of("copied.bin")));
+
+            await mount.StopAsync(CancellationToken.None);
+
+            CollectionAssert.AreEqual(new[] { "closed" }, told.Of("copied.bin"), "closed by its writer, so kept: " + string.Join(", ", told.Of("copied.bin")));
+            CollectionAssert.AreEqual(Medium, source.GetFile("copied.bin"));
+        }
+        finally
+        {
+            view?.Dispose();
+            map?.Dispose();
+            stream.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A file deleted as it closes (a copy that was cancelled, a temporary file) is given up before it is deleted: closed,
+    /// a source that uploads at the close would upload it first, to delete it next.
+    /// </summary>
+    [TestMethod]
+    public async Task AFileDeletedAsItClosesIsGivenUpNotKeptFirst()
+    {
+        RequireWinFsp();
+        ClosesTold told = null!;
+        var (_, unc, source) = await MountAsync(wrap: vfs => told = new ClosesTold(vfs));
+        using (var stream = new FileStream(Path.Combine(unc, "cancelled.bin"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete, 1, FileOptions.DeleteOnClose))
+        {
+            stream.Write(Medium, 0, 50_000);
+        }
+
+        var until = Stopwatch.StartNew();
+        while (told.Of("cancelled.bin").Length == 0 && until.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            await Task.Delay(50);
+        }
+
+        CollectionAssert.AreEqual(new[] { "given up" }, told.Of("cancelled.bin"), string.Join(", ", told.Of("cancelled.bin")));
+        Assert.IsFalse(File.Exists(Path.Combine(unc, "cancelled.bin")));
+        Assert.IsNull(await source.StatAsync("cancelled.bin", CancellationToken.None));
     }
 
     /// <summary>The provider's log lines into the test output.</summary>
