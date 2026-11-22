@@ -94,6 +94,21 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   `ComponentHealth.Ready`. `SourceBase` keeps the book for you: `MarkDegraded(detail)` reports once,
   until `MarkHealthy()` reports Ready again, and `Guard(() => call)` runs a call to the upstream,
   marking the source Degraded while a call fails with `Unavailable` and Ready again when one succeeds.
+  `HoldDegraded(detail)` is for what lasts until you say it is over (a write kept that the upstream
+  has not taken): the source stays Degraded with it whatever its other calls do, until
+  `HoldDegraded(null)`.
+- `Context.Attended` says whether a person asked for this start (the program starting, or a source
+  added, edited, enabled or retried by hand) or the host is trying again by itself after a failure,
+  which it does at 10 s, 30 s, a minute and then every five minutes. Show a sign-in window, or
+  anything else that waits on a person, only when it is true; otherwise sign in from what you hold or
+  fail with what the person is to do, and their Retry starts you attended.
+- A file that holds its writes until it closes (an upload of the whole file) should implement
+  `IVfsFile.AbandonAsync`: the mounts call it instead of `DisposeAsync` for a write that broke off
+  part way (a WebDAV `PUT` or FTP upload cut short, a file deleted as it closes, a file still being
+  written as a WinFsp volume goes), and nothing of that write is to be kept. By default it is the
+  close, which is right for a file whose writes land as they are made. A wrapper passes it on.
+  `DisposeAsync` may throw when the close fails (the upload was refused): the mounts that can tell
+  their client do.
 - Names: what the upstream calls a thing may be no file name. `SafeNames.Safe` makes one Windows takes
   (refused characters as underscores, a refused ending or device name mended, cut to a length),
   `SafeNames.Unique` tells a folder's twins in case apart with a number (`notes (2).pdf`), and
@@ -239,8 +254,9 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   `LeftOut` names folders not worth a walk, listed when opened (GitLab's issues, a request or more
   each), which makes the count a lower bound, and what has been opened of them the walks check like
   the rest; `ListTree` hands it a whole subtree at once where you have a quicker way than folder by
-  folder (GitLab lists a repository a hundred entries a request), and where it fails the rest of that
-  walk goes folder by folder. A folder that could not be listed makes the count a lower bound too.
+  folder (GitLab lists a repository a hundred entries a request), and a folder it fails for is listed
+  alone, the rest of the walk still read at once. A folder that could not be listed makes the count a
+  lower bound too.
   `SaveTo` keeps the listings in your state folder, in a database beside the file it names
   (`listings.db`), written as they change and committed every `SaveEvery`, thirty seconds, after each
   walk and when the source stops, so every folder opens at once from the first moment of the next
@@ -258,8 +274,14 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   count, a project's last activity), given the stamp held, the same string back when nothing changed.
   A walk asks a stamped folder for its stamp first and, where it holds, keeps its listing and
   everything held below it without listing any of it, so a walk over a tree that has not changed,
-  the first after a restart among them, asks for the stamps alone. Once a `FullWalkEvery` (a day), a
-  walk lists every folder whatever its stamp, for what a stamp does not cover. `KeepFailures` keeps a
+  the first after a restart among them, asks for the stamps alone. A folder listed afresh keeps its
+  old stamp until the walk has been through everything it found below it, so a walk that is stopped
+  part way, or cannot list a folder below, leaves no new stamp over what it did not reach, and the
+  next walk goes there again. (A folder that fails walk after walk holds the stamp above it up once
+  only.) Once a `FullWalkEvery` (a day), a walk lists every folder whatever its stamp, for what a
+  stamp does not cover; one in which a folder failed that had not failed in the walk before is still
+  due.
+  `KeepFailures` keeps a
   folder whose listing failed (nothing held for it) answering with that failure at once until the next
   walk, which asks again: a search that lists the tree over and over then pays for a folder the
   upstream refuses once, not on every pass. `ForgetFailures` lets them all go (a sign-in renewed), and

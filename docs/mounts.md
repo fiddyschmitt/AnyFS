@@ -54,7 +54,16 @@ WinFsp hands requests to a pool of threads, and each request holds its thread un
 answers (for SharePoint, a round trip over the network). WinFsp's own default is one thread per
 logical processor, so a search running 24 threads of its own queued behind the few in progress;
 anyfs runs 64. A request that fails fails alone: what goes wrong is answered as an error status and
-logged, and a download that goes quiet for a minute is given up rather than waited on.
+logged, and a download that goes quiet for a minute is given up rather than waited on. A folder
+whose listing fails is an error too ("The device is not ready" for a source that does not answer),
+not an empty folder.
+
+WinFsp sends no close for a file that is open as the volume goes, so when a mount stops anyfs
+closes what is still open itself. A file whose writer had closed it is kept, though Windows had yet
+to pass the last close on (it holds it back while a mapped view, the cache or a scanner still
+refers to the file). A file still being written is given up, with a warning that names it: half a
+file is no file. A file deleted as it closes (a copy that was cancelled) is given up before it is
+deleted, so a source that uploads a file when it closes uploads nothing of it.
 
 The WinFsp driver is a separate install with no reboot. Without it the tile is red ("The WinFsp
 driver is not installed.") and shows **Install WinFsp driver**: the WinFsp 2026 Beta 5 (2.2.26286)
@@ -146,6 +155,9 @@ Our own RFC 4918 server with class 2 locks (held in memory, so a restart forgets
   `davfs2` mounts it too.
 - Any client: the URL, with Basic authentication when a user is set.
 
+A `PUT` whose body breaks off part way changes nothing: the part that came is given up, and the
+file that was there stays.
+
 ## FTP (all OSes)
 
 Each collection is a folder under the server root. Explorer, Finder (read-only) and file managers
@@ -162,6 +174,11 @@ transfer), one listener per bind address and port shared by the collections moun
 every transfer straight through the collection's tree, 1 MiB reads and 256 KiB writes at a time,
 so the read-only layers and the stats apply. `TYPE A` is accepted and transfers bytes as they are
 (every client of note asks for `TYPE I` before a file). There is no TLS.
+
+An upload that is aborted, or whose data connection breaks, changes nothing: the part that came is
+given up. One that comes whole is closed before `226 Transfer complete` is sent, so a source that
+refuses the file at its close (an upload that fails) has its refusal told instead. A data connection
+closed in order part way through reads as the end of the file: FTP has no other word for it.
 
 ## HTTP (all OSes)
 
