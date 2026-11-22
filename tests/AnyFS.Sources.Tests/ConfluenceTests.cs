@@ -793,6 +793,9 @@ public class ConfluenceTests
         Assert.AreEqual("confluence.example.com", plugin.SuggestName(new ConfluenceSettings { Address = "https://confluence.example.com" }));
         Assert.AreEqual("ENG (confluence.example.com)", plugin.SuggestName(new ConfluenceSettings { Address = "https://confluence.example.com/display/ENG" }));
         Assert.AreEqual("Some Page (example.com)", plugin.SuggestName(new ConfluenceSettings { Address = "https://example.com/wiki/display/ENG/Some+Page" }));
+        var dotted = plugin.SuggestName(new ConfluenceSettings { Address = "https://example.com/wiki/display/ENG/.NET+guidelines" })!;
+        Assert.IsTrue(VfsPath.IsValidSegment(dotted, out var refused), $"a source's name is a path segment, and '{dotted}' is none: {refused}");
+        Assert.AreEqual("NET guidelines (example.com)", dotted, "a title's leading dot is no part of the name the dialog is given");
         var s = new ConfluenceSettings { Address = "https://confluence.example.com", SignInMethod = AtlassianSignInChoices.WebSession };
         Assert.IsTrue(plugin.IsVisible(s, nameof(ConfluenceSettings.BrowserPath)));
         Assert.IsFalse(plugin.IsVisible(s, nameof(ConfluenceSettings.Password)));

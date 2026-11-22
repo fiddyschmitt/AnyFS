@@ -8,7 +8,8 @@ namespace AnyFS.Sdk;
 /// Names a client takes for what an upstream calls something (spec 6.2): a character Windows refuses in a name becomes an
 /// underscore, a name it refuses whole (a trailing dot or space, a device name) gets one more, an overlong name is cut on
 /// a character boundary, and names that would then be one in either case are told apart with a number (<c>notes (2).pdf</c>).
-/// The built-in sources name their folders and files with these; a plugin that shows things by their titles can too.
+/// The built-in sources name their folders and files with these; a plugin that shows things by their titles can too. The
+/// name a source suggests for itself is a path segment, which may be less (no dot at its start): <see cref="Suggested"/>.
 /// </summary>
 public static class SafeNames
 {
@@ -53,6 +54,48 @@ public static class SafeNames
 
         var dot = safe.IndexOf('.');
         return Devices.Contains(dot < 0 ? safe : safe[..dot]) ? "_" + safe : safe;
+    }
+
+    /// <summary>
+    /// A name for a source to suggest (<see cref="ISourcePlugin.SuggestName"/>), which is a path segment and may be less
+    /// than a file's name may: refused characters as underscores and a device name mended, as <see cref="Safe(string, int, bool)"/>
+    /// does, but with no dot or white space at either end, taken off (a page titled ".NET guidelines" suggests
+    /// "NET guidelines"), and no longer than a segment's bytes. Empty where nothing is left, for nothing to suggest. Not
+    /// for a folder's or a file's own name, which is listed as it is (".github").
+    /// </summary>
+    public static string Suggested(string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        var safe = WithoutEnds(Replace(name));
+        if (safe.Length > MaxName)
+        {
+            safe = WithoutEnds(Cut(safe, MaxName));
+        }
+
+        while (Encoding.UTF8.GetByteCount(safe) > VfsPath.MaxSegmentBytes)
+        {
+            safe = WithoutEnds(Cut(safe, safe.Length - 1));
+        }
+
+        return safe.Length == 0 ? "" : Safe(safe);
+    }
+
+    /// <summary>A name without the dots and white space at its ends, however they alternate there.</summary>
+    private static string WithoutEnds(string name)
+    {
+        var start = 0;
+        var end = name.Length;
+        while (start < end && (name[start] == '.' || char.IsWhiteSpace(name[start])))
+        {
+            start++;
+        }
+
+        while (end > start && (name[end - 1] == '.' || char.IsWhiteSpace(name[end - 1])))
+        {
+            end--;
+        }
+
+        return name[start..end];
     }
 
     /// <summary>The characters a Windows name cannot hold, and the control characters, as underscores; the same string where there are none.</summary>

@@ -45,7 +45,7 @@ public sealed class ArtifactoryPlugin : ISourcePlugin, IValidatable, ITestable, 
             ArtifactoryScope.Repository => $"{address.Repository} ({url.Host})",
             _ => url.Host,
         };
-        var safe = SafeNames.Safe(name, trim: true);
+        var safe = SafeNames.Suggested(name);
         return safe.Length == 0 ? null : safe;
     }
 

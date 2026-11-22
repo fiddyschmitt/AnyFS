@@ -47,7 +47,7 @@ public sealed class JiraPlugin : ISourcePlugin, IValidatable, ITestable, ISettin
             JiraScopeKind.Jql => $"query ({url.Host})",
             _ => url.Host,
         };
-        var safe = AtlassianNames.Safe(name);
+        var safe = SafeNames.Suggested(name);
         return safe.Length == 0 ? null : safe;
     }
 

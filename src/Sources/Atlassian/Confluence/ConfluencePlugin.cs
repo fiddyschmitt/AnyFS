@@ -45,7 +45,7 @@ public sealed class ConfluencePlugin : ISourcePlugin, IValidatable, ITestable, I
             ConfluenceScopeKind.Page => $"page {scope.PageId} ({url.Host})",
             _ => url.Host,
         };
-        var safe = AtlassianNames.Safe(name);
+        var safe = SafeNames.Suggested(name);
         return safe.Length == 0 ? null : safe;
     }
 

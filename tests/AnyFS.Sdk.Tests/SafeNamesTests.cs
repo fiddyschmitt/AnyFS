@@ -24,6 +24,31 @@ public class SafeNamesTests
     }
 
     [TestMethod]
+    public void ANameSuggestedForASourceIsAPathSegmentAndAnEntrysOwnNameStaysAsItIs()
+    {
+        // a source's name is its default path, a segment: no dot or space at either end (ISourcePlugin.SuggestName), which
+        // a file's name may have at its start. A page titled ".NET guidelines" suggested a name the dialog then refused
+        Assert.AreEqual("NET guidelines (example.com)", SafeNames.Suggested(".NET guidelines (example.com)"));
+        Assert.AreEqual("notes", SafeNames.Suggested(" . .notes. . "), "the dots and spaces at either end, however they alternate");
+        Assert.AreEqual("a_b (host)", SafeNames.Suggested("a/b (host)"));
+        Assert.AreEqual("_CON", SafeNames.Suggested("CON"));
+        Assert.AreEqual("v1.2 notes", SafeNames.Suggested("v1.2 notes"), "a dot inside is no matter");
+        Assert.AreEqual("", SafeNames.Suggested(" .. "), "nothing left: nothing to suggest");
+        Assert.AreEqual("", SafeNames.Suggested(""));
+        foreach (var raw in new[] { ".NET guidelines", "trailing. ", "..", "a\tb", " .hidden", "com1.txt", new string('x', 300), new string('x', 239) + " .tail", new string('界', 200) })
+        {
+            var suggested = SafeNames.Suggested(raw);
+            var valid = VfsPath.IsValidSegment(suggested, out var reason);
+            Assert.IsTrue(valid || suggested.Length == 0, $"'{raw}' suggested '{suggested}': {reason}");
+        }
+
+        // what a source lists is named as before: a repository's .github folder is .github
+        Assert.AreEqual(".github", SafeNames.Safe(".github"));
+        Assert.AreEqual(".NET guidelines", SafeNames.Safe(" .NET guidelines ", trim: true));
+        CollectionAssert.AreEqual(new[] { ".github", ".gitignore", "README.md" }, SafeNames.Unique([".github", ".gitignore", "README.md"]).ToArray());
+    }
+
+    [TestMethod]
     public void TwinsInCaseAreNumberedAfterTheFirstAndCleanNamesKeepTheirs()
     {
         CollectionAssert.AreEqual(

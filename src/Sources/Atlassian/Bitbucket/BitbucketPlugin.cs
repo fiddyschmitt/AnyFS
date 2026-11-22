@@ -46,7 +46,7 @@ public sealed class BitbucketPlugin : ISourcePlugin, IValidatable, ITestable, IS
             BitbucketScopeKind.Project => $"{scope.ProjectKey} ({url.Host})",
             _ => url.Host,
         };
-        var safe = AtlassianNames.Safe(name);
+        var safe = SafeNames.Suggested(name);
         return safe.Length == 0 ? null : safe;
     }
 

@@ -112,7 +112,9 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
 - Names: what the upstream calls a thing may be no file name. `SafeNames.Safe` makes one Windows takes
   (refused characters as underscores, a refused ending or device name mended, cut to a length),
   `SafeNames.Unique` tells a folder's twins in case apart with a number (`notes (2).pdf`), and
-  `SafeNames.Title` puts a title on one line and cuts it with an ellipsis.
+  `SafeNames.Title` puts a title on one line and cuts it with an ellipsis. The name `SuggestName`
+  returns is a path segment, which may be less than a file's name may (no dot at its start):
+  `SafeNames.Suggested` makes one.
 - Everything may be called concurrently from many threads.
 - What you ask of whatever is behind your source, a server, a folder, a file: `Context.UpstreamWatcher`
   hears of it, and the Operations tab shows each as a row, under "Asked of: Source". Over HTTP, put
