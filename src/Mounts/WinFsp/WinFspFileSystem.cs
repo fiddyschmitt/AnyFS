@@ -521,6 +521,59 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         return status;
     }
 
+    /// <summary>
+    /// The folder's listing is read once per handle, here, before any of it is handed over, so that a listing the source
+    /// cannot give is the request's failure (the client is told, and may ask again on the same handle) and never a folder
+    /// with nothing in it: until 22-Nov-2026 it was read in <see cref="ReadDirectoryEntry"/>, which can only say "no more
+    /// entries", and a source that was throttled or did not answer showed as an empty folder.
+    /// </summary>
+    public override int ReadDirectory(object fileNode, object fileDesc, string pattern, string marker, IntPtr buffer, uint length, out uint bytesTransferred)
+    {
+        var desc = (Desc)fileDesc;
+        if (desc.Entries is null)
+        {
+            var status = Guard(() =>
+            {
+                desc.Entries = Snapshot(desc.Path);
+                return STATUS_SUCCESS;
+            });
+            if (status != STATUS_SUCCESS)
+            {
+                logger.LogDebug("winfsp: listing '{Path}': 0x{Status:X8}", desc.Path, status);
+                bytesTransferred = 0;
+                return status;
+            }
+        }
+
+        return base.ReadDirectory(fileNode, fileDesc, pattern, marker, buffer, length, out bytesTransferred);
+    }
+
+    /// <summary>A folder's entries as a directory handle hands them over, in name order, with "." and ".." below the root; a listing that fails throws.</summary>
+    private List<(string Name, FileInfo Info)> Snapshot(string path)
+    {
+        var list = new List<(string Name, FileInfo Info)>();
+        if (path.Length > 0)
+        {
+            if (Stat(path, out _) is { } self)
+            {
+                list.Add((".", Info(self)));
+            }
+
+            if (Stat(VfsPath.Parent(path), out _) is { } parent)
+            {
+                list.Add(("..", Info(parent)));
+            }
+        }
+
+        foreach (var child in Wait(ListAsync(path)))
+        {
+            list.Add((child.Name, Info(child)));
+        }
+
+        list.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+        return list;
+    }
+
     public override bool ReadDirectoryEntry(object fileNode, object fileDesc, string pattern, string marker, ref object context, out string fileName, out FileInfo fileInfo)
     {
         var desc = (Desc)fileDesc;
@@ -528,39 +581,8 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         fileInfo = default;
         if (desc.Entries is null)
         {
-            var list = new List<(string Name, FileInfo Info)>();
-            try
-            {
-                if (desc.Path.Length > 0)
-                {
-                    if (Stat(desc.Path, out _) is { } self)
-                    {
-                        list.Add((".", Info(self)));
-                    }
-
-                    var parentPath = VfsPath.Parent(desc.Path);
-                    if (Stat(parentPath, out _) is { } parent)
-                    {
-                        list.Add(("..", Info(parent)));
-                    }
-                }
-
-                foreach (var child in Wait(ListAsync(desc.Path)))
-                {
-                    list.Add((child.Name, Info(child)));
-                }
-            }
-            catch (VfsException ex)
-            {
-                logger.LogDebug("winfsp: listing '{Path}': {Error}", desc.Path, ex.Message);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "winfsp: listing '{Path}' failed", desc.Path);
-            }
-
-            list.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
-            desc.Entries = list;
+            // ReadDirectory reads the listing first: nothing reaches here without one
+            return false;
         }
 
         int index;

@@ -389,6 +389,64 @@ public class WinFspMountTests
         public Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct) => inner.GetSpaceAsync(path, ct);
     }
 
+    /// <summary>A file system whose listing of one folder fails as given, the rest as the inner one has it.</summary>
+    private sealed class FailingListing(IVirtualFileSystem inner, string folder, Func<Exception> failure) : IVirtualFileSystem
+    {
+        public string CollectionName => inner.CollectionName;
+
+        public bool ReadOnly => inner.ReadOnly;
+
+        public bool CanWrite(string path) => inner.CanWrite(path);
+
+        public Task<VfsEntry?> StatAsync(string path, CancellationToken ct) => inner.StatAsync(path, ct);
+
+        public IAsyncEnumerable<VfsEntry> ListAsync(string path, CancellationToken ct)
+            => string.Equals(VfsPath.Normalize(path), folder, StringComparison.OrdinalIgnoreCase) ? Failing() : inner.ListAsync(path, ct);
+
+        private async IAsyncEnumerable<VfsEntry> Failing()
+        {
+            await Task.Yield();
+            throw failure();
+#pragma warning disable CS0162 // unreachable: an iterator needs a yield
+            yield break;
+#pragma warning restore CS0162
+        }
+
+        public Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct) => inner.OpenAsync(path, mode, ct);
+
+        public Task CreateDirectoryAsync(string path, CancellationToken ct) => inner.CreateDirectoryAsync(path, ct);
+
+        public Task DeleteAsync(string path, CancellationToken ct) => inner.DeleteAsync(path, ct);
+
+        public Task RenameAsync(string fromPath, string toPath, bool replace, CancellationToken ct) => inner.RenameAsync(fromPath, toPath, replace, ct);
+
+        public Task SetTimesAsync(string path, DateTimeOffset? created, DateTimeOffset? modified, CancellationToken ct) => inner.SetTimesAsync(path, created, modified, ct);
+
+        public Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct) => inner.GetSpaceAsync(path, ct);
+    }
+
+    [TestMethod]
+    public async Task AFolderWhoseListingFailsIsAnErrorNotAnEmptyFolder()
+    {
+        // until 22-Nov-2026 a listing that failed (a source throttled, timed out, signed out) was answered as a folder with
+        // nothing in it: "This folder is empty" in Explorer, and a search went past the subtree without a word
+        RequireWinFsp();
+        var (_, unc, _) = await MountAsync(wrap: vfs => new FailingListing(vfs, "docs", () => VfsException.Unavailable("the source did not answer")));
+        Assert.AreEqual(1, Directory.GetFileSystemEntries(Path.Combine(unc, "unicode")).Length, "a folder that lists is listed");
+        var unavailable = Assert.Throws<IOException>(() => Directory.GetFileSystemEntries(Path.Combine(unc, "docs")));
+        Assert.AreEqual(unchecked((int)0x80070015), unavailable.HResult, "ERROR_NOT_READY, as every other call on a source that does not answer: " + unavailable.Message);
+        Assert.AreEqual("aaa", File.ReadAllText(Path.Combine(unc, "docs", "a.txt")), "the folder's files still open by name");
+    }
+
+    [TestMethod]
+    public async Task AFolderWhoseListingBreaksUnexpectedlyIsAnErrorToo()
+    {
+        RequireWinFsp();
+        var (_, unc, _) = await MountAsync(wrap: vfs => new FailingListing(vfs, "docs", () => new InvalidOperationException("a bug in a source")));
+        Assert.Throws<IOException>(() => Directory.GetFileSystemEntries(Path.Combine(unc, "docs")));
+        Assert.AreEqual(1, Directory.GetFileSystemEntries(Path.Combine(unc, "unicode")).Length, "and the volume serves on");
+    }
+
     [TestMethod]
     public async Task UnmountRemovesTheVolume()
     {
