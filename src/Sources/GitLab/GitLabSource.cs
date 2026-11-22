@@ -38,7 +38,10 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     private SpoolCache? _spool;
     private GlFolder? _root;
     private ProjectsCounted? _counted;
+    // GraphQL does not give the files' sizes on this server (an old one, or one that refuses it): told by its first size
+    // query, and for the run. Once one has been answered, a query that fails is that query's alone
     private volatile bool _graphQlRefused;
+    private volatile bool _graphQlAnswered;
 
     public GitLabSource(GitLabSettings settings)
         : this(settings, standIn: null)
@@ -531,17 +534,27 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
     /// <summary>
     /// The files' sizes, by their paths in the repository: from GraphQL a hundred at a time, a few queries at once (an LFS
-    /// file's is its object's, <c>rawSize</c>), or where GraphQL is refused, one HEAD request per file (X-Gitlab-Size).
+    /// file's is its object's, <c>rawSize</c>); the files GraphQL did not give, one HEAD request each (X-Gitlab-Size), a
+    /// project's requests at a time. A server whose first size query is refused has no GraphQL for this (an old one, or one
+    /// that keeps it off) and is not asked again this run. A query that fails after one has been answered (a time limit of
+    /// GitLab's own) costs its own hundred files a HEAD each and says nothing of the next: until 22-Nov-2026 it turned
+    /// GraphQL off for the run, and every repository read after it cost a request a file, one after another.
     /// </summary>
     private async Task<Dictionary<string, (long Size, bool Lfs)>> SizesAsync(GlProject project, string commit, IReadOnlyList<string> paths, CancellationToken ct)
     {
         var sizes = new ConcurrentDictionary<string, (long Size, bool Lfs)>(StringComparer.Ordinal);
+        var each = new ParallelOptions { MaxDegreeOfParallelism = RequestsPerProject, CancellationToken = ct };
         if (!_graphQlRefused && paths.Count > 0)
         {
-            try
+            // GraphQL size queries (a hundred files each) for one folder or one whole tree: a project's requests at a time at once
+            await Parallel.ForEachAsync(paths.Chunk(100), each, async (batch, c) =>
             {
-                // GraphQL size queries (a hundred files each) for one folder or one whole tree: a project's requests at a time at once
-                await Parallel.ForEachAsync(paths.Chunk(100), new ParallelOptions { MaxDegreeOfParallelism = RequestsPerProject, CancellationToken = ct }, async (batch, c) =>
+                if (_graphQlRefused)
+                {
+                    return;
+                }
+
+                try
                 {
                     var variables = new JsonObject
                     {
@@ -555,20 +568,29 @@ public sealed partial class GitLabSource : SourceBase, ICountable
                         var lfs = node.Str("lfsOid") is { Length: > 0 };
                         sizes[node.Str("path") ?? ""] = (lfs ? node.Long("rawSize") : node.Long("size"), lfs);
                     }
-                }).ConfigureAwait(false);
-            }
-            catch (VfsException ex) when (ex.Error is VfsError.IoError or VfsError.NotFound or VfsError.AccessDenied)
-            {
-                _graphQlRefused = true;
-                Logger.LogInformation("gitlab: GraphQL does not give the files' sizes ({Error}); asking for each file's instead", ex.Message);
-            }
+
+                    _graphQlAnswered = true;
+                }
+                catch (VfsException ex) when (ex.Error is VfsError.IoError or VfsError.NotFound or VfsError.AccessDenied)
+                {
+                    if (_graphQlAnswered)
+                    {
+                        Logger.LogInformation("gitlab: a size query for {Count:N0} files of {Project} failed ({Error}); asking for each of those files' instead", batch.Length, project.FullPath, ex.Message);
+                    }
+                    else if (!_graphQlRefused)
+                    {
+                        _graphQlRefused = true;
+                        Logger.LogInformation("gitlab: GraphQL does not give the files' sizes ({Error}); asking for each file's instead", ex.Message);
+                    }
+                }
+            }).ConfigureAwait(false);
         }
 
-        foreach (var path in paths.Where(p => !sizes.ContainsKey(p)))
+        await Parallel.ForEachAsync(paths.Where(p => !sizes.ContainsKey(p)).ToList(), each, async (path, c) =>
         {
-            var headers = await Api.HeadAsync($"projects/{project.Id}/repository/files/{Uri.EscapeDataString(path)}?ref={Uri.EscapeDataString(commit)}", ct).ConfigureAwait(false);
+            var headers = await Api.HeadAsync($"projects/{project.Id}/repository/files/{Uri.EscapeDataString(path)}?ref={Uri.EscapeDataString(commit)}", c).ConfigureAwait(false);
             sizes[path] = (headers.TryGetValue("X-Gitlab-Size", out var size) && long.TryParse(size, out var n) ? n : 0, false);
-        }
+        }).ConfigureAwait(false);
 
         return new Dictionary<string, (long Size, bool Lfs)>(sizes, StringComparer.Ordinal);
     }

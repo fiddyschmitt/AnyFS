@@ -716,11 +716,19 @@ internal sealed partial class FakeGitLab
         return all;
     }
 
+    /// <summary>How many of the next GraphQL queries GitLab cannot answer this once (its own time limit): an <c>errors</c> array in a 200.</summary>
+    public int GraphQlFailsNext;
+
     private Response GraphQlAnswer(User user, Request r)
     {
         if (!GraphQl)
         {
             return Response.NotFound();
+        }
+
+        if (Interlocked.Decrement(ref GraphQlFailsNext) >= 0)
+        {
+            return Response.Json(new JsonObject { ["errors"] = new JsonArray(new JsonObject { ["message"] = "Timeout on validation of query" }) });
         }
 
         using var doc = JsonDocument.Parse(r.Body);

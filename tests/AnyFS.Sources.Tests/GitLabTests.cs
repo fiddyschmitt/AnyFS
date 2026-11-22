@@ -414,6 +414,26 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
+    public async Task ASizeQueryThatFailsOnceCostsItsOwnFilesARequestEachAndNoOthers()
+    {
+        // until 22-Nov-2026 one size query GitLab could not answer (a time limit of its own, in an hour's walk) turned GraphQL
+        // off for the run: every repository read after it cost a request a file, one after another, with LFS files as pointers
+        var fake = GitLabSeed.Lab();
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(App(fake)));
+        await using var _s = source;
+        Assert.IsTrue((await ListAsync(source, "files")).Count > 0);
+        Assert.AreEqual((1, 0), (fake.Count("POST /api/graphql"), fake.Count("HEAD /api/v4/projects/")), "the root's sizes in one query");
+
+        fake.GraphQlFailsNext = 1;
+        var src = await ListAsync(source, "files/src");
+        Assert.AreEqual(29, src.Single(e => e.Name == "main.c").Length, "the files of the query that failed are asked for each");
+        Assert.AreEqual((2, 1), (fake.Count("POST /api/graphql"), fake.Count("HEAD /api/v4/projects/")));
+
+        Assert.AreEqual(250, (await ListAsync(source, "files/many")).Count);
+        Assert.AreEqual((2 + 3, 1), (fake.Count("POST /api/graphql"), fake.Count("HEAD /api/v4/projects/")), "the next folder's a hundred at a time again");
+    }
+
+    [TestMethod]
     public async Task TheServerShowsWhatTheAccountCanSeeAndNoMore()
     {
         var fake = GitLabSeed.Lab();
