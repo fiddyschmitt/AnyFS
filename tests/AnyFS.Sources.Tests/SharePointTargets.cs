@@ -170,6 +170,41 @@ internal sealed class SharePointTarget
         }
     }
 
+    /// <summary>
+    /// A folder the source listed empty, and a file put in it since by someone else (here through the store, past the
+    /// source's listings): the folder is not deleted, the file is still there, and emptied the folder goes. On a real
+    /// server this is also the check that it counts a folder's items as the source reads them.
+    /// </summary>
+    public async Task AFolderFilledSinceItWasListedIsNotDeletedAsync()
+    {
+        Require();
+        await using var source = await StartWithFixtureAsync(Settings());
+        var library = (await source.Store.ListLibrariesAsync(null, CancellationToken.None)).Single(l => l.Name == Library);
+        var name = $"filled-{Guid.NewGuid():N}";
+        var folder = VfsPath.Join(VfsPath.Join(VfsPath.Join(Library, FixtureFolder), "scratch"), name);
+        var inLibrary = $"{FixtureFolder}/scratch/{name}";
+        await source.CreateDirectoryAsync(folder, CancellationToken.None);
+        var local = Path.GetTempFileName();
+        try
+        {
+            Assert.AreEqual(0, (await SpsTestServer.NamesAsync(source, folder)).Count, "listed while empty");
+            File.WriteAllText(local, "a colleague's");
+            await source.Store.UploadAsync(library, inLibrary + "/theirs.txt", local, new FileInfo(local).Length, CancellationToken.None);
+
+            var refused = await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.DeleteAsync(folder, CancellationToken.None));
+            Assert.AreEqual(VfsError.DirectoryNotEmpty, refused.Error, refused.Message);
+            Assert.IsNotNull(await source.Store.GetItemAsync(library, inLibrary + "/theirs.txt", CancellationToken.None), "the file is still there");
+
+            await source.DeleteAsync(VfsPath.Join(folder, "theirs.txt"), CancellationToken.None);
+            await source.DeleteAsync(folder, CancellationToken.None);
+            Assert.IsNull(await source.Store.GetItemAsync(library, inLibrary, CancellationToken.None), "emptied, the folder is deleted");
+        }
+        finally
+        {
+            File.Delete(local);
+        }
+    }
+
     /// <summary>The SDK contract's setup on this target: libraries at the top, or the library pinned and nothing spooled.</summary>
     public async Task<SourceContractSetup> ContractSetupAsync(bool pinned)
     {

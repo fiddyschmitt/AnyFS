@@ -473,6 +473,25 @@ internal sealed class GraphDocumentStore : IDocumentStore
     public Task DeleteAsync(LibraryInfo library, string itemPath, bool isFolder, CancellationToken ct)
         => _graph.DeleteAsync(SharePointPaths.ItemAddress(library.Key, itemPath), Display(library, itemPath), ct);
 
+    public async Task<int> CountChildrenAsync(LibraryInfo library, string itemPath, CancellationToken ct)
+    {
+        var path = Display(library, itemPath);
+        using var item = await _graph.TryGetJsonAsync($"{SharePointPaths.ItemAddress(library.Key, itemPath)}?$select=id,folder", path, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
+        if (item.RootElement.TryGetProperty("folder", out var folder) && folder.ValueKind == JsonValueKind.Object && folder.TryGetProperty("childCount", out var count) && count.TryGetInt32(out var children))
+        {
+            return children;
+        }
+
+        // an answer that does not say: what the folder lists
+        var listed = 0;
+        await foreach (var _ in ListChildrenAsync(library, itemPath, ct).ConfigureAwait(false))
+        {
+            listed++;
+        }
+
+        return listed;
+    }
+
     public async Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, CancellationToken ct)
     {
         var (toParent, toName) = VfsPath.SplitLast(toPath);

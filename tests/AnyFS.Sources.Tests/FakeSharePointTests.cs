@@ -316,6 +316,36 @@ public class FakeSharePointTests
     }
 
     /// <summary>
+    /// A folder is deleted only when empty, and the listing that says it is may be hours old, while SharePoint deletes a
+    /// folder with all it holds: the server is asked for the folder's own count for the delete. Before, a folder a
+    /// colleague had put files in since it was listed went with their files (review of 21-Nov-2026, R3).
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
+    [DataRow(true, DisplayName = "tenant, Graph")]
+    public async Task AFolderFilledSinceItWasListedIsNotDeletedWithWhatItHolds(bool tenant)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "handover/old/gone.txt", "x"u8.ToArray());
+        documents.Root.Folder("handover")!.Folder("old")!.Children.Clear();
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode) : FarmSettings(fake), context);
+        Assert.AreEqual(0, (await SpsTestServer.NamesAsync(source, "Documents/handover/old")).Count, "listed while empty");
+
+        fake.Seed(documents, "handover/old/theirs.docx", "a colleague's"u8.ToArray());
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await source.DeleteAsync("Documents/handover/old", None));
+        Assert.AreEqual(VfsError.DirectoryNotEmpty, ex.Error);
+        Assert.IsNotNull(documents.Root.Folder("handover")?.Folder("old")?.File("theirs.docx"), "the colleague's file is still there");
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, "Documents/handover/old"), "theirs.docx", "and the folder is listed afresh");
+
+        // emptied, it goes as before
+        await source.DeleteAsync("Documents/handover/old/theirs.docx", None);
+        await source.DeleteAsync("Documents/handover/old", None);
+        Assert.IsNull(documents.Root.Folder("handover")!.Folder("old"));
+    }
+
+    /// <summary>
     /// The local copy of a file goes once the file has been uploaded. It stayed until the next start: .NET leaves a
     /// request's content open for the collector, the copy could not be deleted while its stream was, and nothing came back
     /// for it. So every file written in a run stayed in the cache for the rest of that run.

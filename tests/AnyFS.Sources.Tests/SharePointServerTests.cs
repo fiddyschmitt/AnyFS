@@ -995,6 +995,10 @@ public abstract class SharePointRestLiveTests
         Assert.IsNull(await source.StatAsync(path, None));
     }
 
+    /// <summary>A folder filled since it was listed is not deleted with what it holds (review of 21-Nov-2026, R3).</summary>
+    [TestMethod]
+    public Task AFolderFilledSinceItWasListedIsNotDeleted() => Target.AFolderFilledSinceItWasListedIsNotDeletedAsync();
+
     /// <summary>
     /// Files at the edges of the one-request upload and of its pieces. One of 8 to 10 MiB was left empty while the limit was
     /// 8 MiB and the pieces 10: it went as StartUpload alone, which never makes the file (found by the fakes, 24-Oct-2026).

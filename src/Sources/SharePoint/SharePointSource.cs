@@ -632,6 +632,26 @@ public abstract class SharePointSource : SourceBase, ICountable
             {
                 throw VfsException.DirectoryNotEmpty(path);
             }
+
+            // SharePoint deletes a folder with all it holds, and the listing that says this one holds nothing may be as old
+            // as the last walk: the server's own count, asked for this delete (a check for a write, not one behind a listing)
+            int held;
+            try
+            {
+                held = await Run(() => Store.CountChildrenAsync(library, itemPath, ct)).ConfigureAwait(false);
+            }
+            catch
+            {
+                Listings.InvalidateParentOf(path);
+                throw;
+            }
+
+            if (held > 0)
+            {
+                Logger.LogInformation("sharepoint: '{Path}' was listed empty and holds {Count} now: not deleted, and listed again", path, held);
+                Listings.Invalidate(path);
+                throw VfsException.DirectoryNotEmpty(path);
+            }
         }
 
         try

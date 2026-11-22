@@ -840,6 +840,15 @@ internal sealed class MemoryDocumentStore : IDocumentStore
         }
     }
 
+    public Task<int> CountChildrenAsync(LibraryInfo library, string itemPath, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            Check(library);
+            return Task.FromResult(_items.Keys.Count(k => k.Library == library.Key && k.Path.Length > 0 && VfsPath.Parent(k.Path) == itemPath));
+        }
+    }
+
     public Task DeleteAsync(LibraryInfo library, string itemPath, bool isFolder, CancellationToken ct)
     {
         lock (_gate)

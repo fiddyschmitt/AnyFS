@@ -209,7 +209,14 @@ internal interface IDocumentStore : IDisposable
     /// <summary>Creates a folder; AlreadyExists when there is one; NotFound when the parent is missing.</summary>
     Task<ItemRef> CreateFolderAsync(LibraryInfo library, string itemPath, CancellationToken ct);
 
+    /// <summary>Deletes a file, or a folder with all it holds: SharePoint asks nothing about what is in one (see <see cref="CountChildrenAsync"/>).</summary>
     Task DeleteAsync(LibraryInfo library, string itemPath, bool isFolder, CancellationToken ct);
+
+    /// <summary>
+    /// How many items a folder holds now, by the server's own word for this call and never from a listing: what the
+    /// delete of a folder goes by, the server deleting it with all it holds. NotFound when there is no such folder.
+    /// </summary>
+    Task<int> CountChildrenAsync(LibraryInfo library, string itemPath, CancellationToken ct);
 
     /// <summary>Renames or moves within the library; the target must not exist.</summary>
     Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, CancellationToken ct);

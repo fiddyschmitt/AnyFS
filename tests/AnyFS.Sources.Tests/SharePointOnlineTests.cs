@@ -593,6 +593,10 @@ public class SharePointOnlineLiveTests
         Assert.AreEqual(VfsError.InvalidPath, ex.Error);
     }
 
+    /// <summary>A folder filled since it was listed is not deleted with what it holds (review of 21-Nov-2026, R3).</summary>
+    [TestMethod]
+    public Task AFolderFilledSinceItWasListedIsNotDeleted() => Target.AFolderFilledSinceItWasListedIsNotDeletedAsync();
+
     /// <summary>Files at the edges of Graph's one-request upload and of an upload session's pieces (the last a single byte).</summary>
     [TestMethod]
     public Task FilesAtTheUploadLimitsRoundTrip() => Target.UploadsRoundTripAsync(

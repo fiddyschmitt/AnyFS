@@ -531,6 +531,31 @@ internal sealed class RestDocumentStore : IDocumentStore
         return Client(library).DeleteAsync(isFolder ? SharePointRestClient.FolderApi(url) : SharePointRestClient.FileApi(url), Display(library, itemPath), ct);
     }
 
+    public async Task<int> CountChildrenAsync(LibraryInfo library, string itemPath, CancellationToken ct)
+    {
+        var path = Display(library, itemPath);
+        var api = SharePointRestClient.FolderApi(Url(library, itemPath));
+        using var folder = await Client(library).TryGetJsonAsync($"{api}?$select=ItemCount,Exists", path, ct).ConfigureAwait(false);
+        if (folder is null || folder.RootElement.TryGetProperty("Exists", out var exists) && exists.ValueKind == JsonValueKind.False)
+        {
+            throw VfsException.NotFound(path);
+        }
+
+        if (folder.RootElement.TryGetProperty("ItemCount", out var count) && TryLong(count, out var items))
+        {
+            return (int)Math.Min(items, int.MaxValue);
+        }
+
+        // a server that does not say: what the folder lists
+        var listed = 0;
+        await foreach (var _ in ListChildrenAsync(library, itemPath, ct).ConfigureAwait(false))
+        {
+            listed++;
+        }
+
+        return listed;
+    }
+
     public async Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, CancellationToken ct)
     {
         var from = Url(library, fromPath);
