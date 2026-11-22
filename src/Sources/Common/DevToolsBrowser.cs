@@ -120,8 +120,22 @@ public sealed class DevToolsBrowser : IAsyncDisposable
 
         info.ArgumentList.Add(startPage);
 
+        Process browser;
+        try
+        {
+            browser = Process.Start(info) ?? throw new SignInRequiredException($"{BrowserLocator.DisplayName(browserPath)} did not start", permanent: true);
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            // the system would not start it: a file that is no program (the Browser setting takes any file that is there),
+            // or one it may not run. Said as a sign-in that waits for the person: left as the system's own failure, the
+            // host started the source again for ever. The system's words for why are the last of the exception's, after
+            // "An error occurred trying to start process '…' with working directory '…'."
+            var why = ex.Message[(ex.Message.LastIndexOf("'. ", StringComparison.Ordinal) + 1)..].TrimStart('.', ' ').TrimEnd('.');
+            throw new SignInRequiredException($"{browserPath} is not a program that can be started ({why}). If it is the path in the source's Browser setting (under Advanced), correct it, or leave it empty for AnyFS to find one.", ex, permanent: true);
+        }
+
         // the browser's own log lines would otherwise land in AnyFS's terminal (anyfs serve); drained, not kept
-        var browser = Process.Start(info) ?? throw new SignInRequiredException($"{BrowserLocator.DisplayName(browserPath)} did not start", permanent: true);
         browser.OutputDataReceived += (_, _) => { };
         browser.ErrorDataReceived += (_, _) => { };
         browser.BeginOutputReadLine();

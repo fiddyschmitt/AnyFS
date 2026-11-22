@@ -228,6 +228,32 @@ public class BrowserChoiceTests
     }
 
     [TestMethod]
+    public async Task ABrowserTheSettingNamesThatIsNoProgramIsSaidSoAndNotTriedAgain()
+    {
+        // a file that is there, and that the system will not start: its refusal was no sign-in failure the host knew, so it
+        // started the source again for ever, with the system's own words for why
+        var dir = Path.Combine(Path.GetTempPath(), "anyfs-tests", "no-program-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var notes = Path.Combine(dir, "notes.txt");
+        File.WriteAllText(notes, "not a program");
+        try
+        {
+            foreach (var needsAPerson in new[] { false, true })
+            {
+                var session = new BrowserSession(BrowserLocator.Find(notes), new NoTarget(Path.Combine(dir, "profile"), needsAPerson: needsAPerson), NullLogger.Instance, named: notes);
+                var ex = await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => session.SignInAsync(interactive: true, _ => { }, CancellationToken.None));
+                Assert.IsTrue(ex.Permanent, "a Retry would only fail again: the setting must change");
+                StringAssert.Contains(ex.Message, $"{notes} is not a program that can be started");
+                StringAssert.Contains(ex.Message, "the source's Browser setting");
+            }
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [TestMethod]
     public void TheTroubleshootingVariableStillWinsOverTheBrowserSetting()
     {
         const string variable = "ANYFS_TEST_BROWSER_CHOICE_WEBDRIVER";
