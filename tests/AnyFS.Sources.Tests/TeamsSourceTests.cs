@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
 using AnyFS.Sources.Teams;
@@ -100,6 +100,26 @@ public class TeamsSourceTests
         CollectionAssert.AreEqual(plan[^10..], tail);
     }
 
+    /// <summary>
+    /// A library file that changed since its folder was listed is read whole. An open asks SharePoint for the file (its
+    /// download address) and read to the length the listing had, so one made longer since came cut short (review of
+    /// 21-Nov-2026, R4).
+    /// </summary>
+    [TestMethod]
+    public async Task ALibraryFileChangedSinceItWasListedIsReadWhole()
+    {
+        var fake = new FakeTeams();
+        var general = FakeTeams.Channel("General", general: true);
+        var team = fake.AddTeam("AnyFS Lab", general);
+        fake.AddSite(team, Site);
+        fake.AddLibraryFile(Site, "General/plan.txt", Encoding.UTF8.GetBytes("The plan."), When);
+        await using var source = await StartAsync(fake);
+        CollectionAssert.AreEqual(new[] { "plan.txt" }, await NamesAsync(source, "AnyFS Lab/General/files"));
+
+        var longer = "The plan, as a colleague rewrote it since: " + new string('x', 500);
+        fake.AddLibraryFile(Site, "General/plan.txt", Encoding.UTF8.GetBytes(longer), When.AddHours(1));
+        Assert.AreEqual(longer, await TextAsync(source, "AnyFS Lab/General/files/plan.txt"));
+    }
     [TestMethod]
     public async Task ASharedChannelsFilesAreTheFolderItsThreadNames()
     {

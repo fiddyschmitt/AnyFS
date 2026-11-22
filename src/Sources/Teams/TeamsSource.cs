@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Runtime.CompilerServices;
@@ -1344,7 +1344,10 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     {
         var entry = await Api.FileAsync(siteUrl, path, url, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
         var address = entry.DownloadUrl ?? throw VfsException.Unavailable($"SharePoint gave no download address for '{path}'");
-        return new RandomAccessOverStream(length, async (offset, openCt) =>
+
+        // the file as it is now, asked for this open: read at its own length, not the listing's, which may be older
+        // (one made longer since it was listed came cut short)
+        return new RandomAccessOverStream(entry.IsFolder ? length : entry.Length, async (offset, openCt) =>
         {
             HttpResponseMessage response;
             try

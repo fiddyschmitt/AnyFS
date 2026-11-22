@@ -589,6 +589,49 @@ public class FakeSharePointTests
         Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth);
     }
 
+    /// <summary>
+    /// A file that changed upstream since its folder was last listed is read whole, as SharePoint has it now. After a
+    /// start whose walk kept the library by its stamp, an open asks SharePoint for the item (its id and version) and took
+    /// the length from the listing held here: a file a colleague had made longer was downloaded to its old length, and
+    /// that copy was kept under the new version's key, so it went on being served cut short after the walk had put the
+    /// listing right (review of 21-Nov-2026, R4; shown by a run on 22-Nov-2026). The length is the item's own now.
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
+    [DataRow(true, DisplayName = "tenant, Graph")]
+    public async Task AFileChangedSinceItWasListedIsReadWholeNotCutAtTheLengthListed(bool tenant)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        var old = Enumerable.Range(0, 100).Select(i => (byte)('a' + (i % 26))).ToArray();
+        var longer = Enumerable.Range(0, 300).Select(i => (byte)('A' + (i % 26))).ToArray();
+        fake.Seed(documents, "grown/report.txt", old);
+        const string path = "Documents/grown/report.txt";
+        using var context = new TestSourceContext("sharepoint");
+        SharePointSettings Kept()
+        {
+            var settings = tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode) : FarmSettings(fake);
+            settings.KeepListings = true;
+            return settings;
+        }
+
+        await using (var first = await StartAsync(fake, Kept(), context))
+        {
+            await first.CountFilesAsync(None);
+        }
+
+        // the next start holds the listings of the one before, and its walk keeps the library by its stamp
+        await using var source = await StartAsync(fake, Kept(), context);
+        await source.CountFilesAsync(None);
+        Assert.AreEqual(old.Length, (await source.StatAsync(path, None))!.Length);
+
+        fake.Seed(documents, "grown/report.txt", longer);   // a colleague saves a longer version
+        CollectionAssert.AreEqual(longer, await ReadAllAsync(source, path), "read before the next walk: whole, as SharePoint has it now");
+        Assert.AreEqual(longer.Length, (await source.StatAsync(path, None))!.Length, "and listed at the length it has");
+
+        await source.WalkAsync(new SourceCounters(), None);
+        CollectionAssert.AreEqual(longer, await ReadAllAsync(source, path), "and after the walk");
+    }
     private static bool IsUpload(bool tenant, string method, string host, string rawPath) => tenant
         ? host.StartsWith("graph.microsoft.", StringComparison.OrdinalIgnoreCase) && (method == "PUT" && rawPath.Contains("content", StringComparison.OrdinalIgnoreCase) || rawPath.Contains("createUploadSession", StringComparison.OrdinalIgnoreCase))
         : method == "POST" && rawPath.Contains("/Files/AddUsingPath", StringComparison.OrdinalIgnoreCase);

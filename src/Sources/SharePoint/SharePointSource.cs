@@ -484,18 +484,31 @@ public abstract partial class SharePointSource : SourceBase, ICountable
 
     private async Task<IVfsFile> OpenForReadAsync(string path, LibraryInfo library, string itemPath, VfsEntry entry, CancellationToken ct)
     {
+        // An item this run has not listed is asked of SharePoint for this open, and is the file as it is now; the entry
+        // may be from a walk of an earlier run, and the file changed since. It is read at the item's own length then, and
+        // the entry put right: read to the entry's, a file made longer since came cut short. And the length is part of
+        // the spool's key: a copy made to one length is not the file at another (the short copy was kept under the new
+        // version's key, and served after the walk had put the listing right).
+        var asked = !_items.ContainsKey(path);
         var item = await ItemAsync(path, library, itemPath, ct).ConfigureAwait(false);
-        if (entry.Length <= SpoolBelowBytes && _spool is { } spool)
+        var length = entry.Length;
+        if (asked && item.Size != length)
         {
-            var key = $"{item.Id}:{item.Version}";
-            return await spool.OpenAsync(key, entry.Length, async downloadCt =>
+            length = item.Size;
+            Listings.Update(path, entry with { Length = length, ETag = item.Version ?? entry.ETag }, StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (length <= SpoolBelowBytes && _spool is { } spool)
+        {
+            var key = $"{item.Id}:{item.Version}:{length}";
+            return await spool.OpenAsync(key, length, async downloadCt =>
             {
                 var response = await Run(() => Store.OpenContentAsync(library, itemPath, item, 0, downloadCt)).ConfigureAwait(false);
                 return new ResponseStream(response, await response.Content.ReadAsStreamAsync(downloadCt).ConfigureAwait(false));
             }, ct).ConfigureAwait(false);
         }
 
-        return new RandomAccessOverStream(entry.Length, async (offset, openCt) =>
+        return new RandomAccessOverStream(length, async (offset, openCt) =>
         {
             var response = await Run(() => Store.OpenContentAsync(library, itemPath, item, offset, openCt)).ConfigureAwait(false);
             if (response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
