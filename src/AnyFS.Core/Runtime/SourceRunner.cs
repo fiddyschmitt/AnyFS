@@ -250,7 +250,9 @@ public sealed class SourceRunner : IAsyncDisposable
             ISource? source = null;
             try
             {
-                var context = new SourceContextImpl(this, Definition, _paths, _secrets, _prompts, _logger);
+                // the first start of a run of them is the person's (the program started, or they added, edited or retried the
+                // source); the retries after a failure are the host's own, and show no sign-in window
+                var context = new SourceContextImpl(this, Definition, _paths, _secrets, _prompts, _logger) { Attended = attempt == 0 };
                 var created = _plugin!.CreateSource(_settings ?? _plugin.CreateDefaultSettings());
                 var tracked = _operations is null ? null : new TrackedSource(created, Handle, _operations);
                 context.UpstreamWatcher = tracked?.UpstreamRows();
@@ -446,6 +448,8 @@ public sealed class SourceRunner : IAsyncDisposable
         public Task<PromptResult> PromptAsync(PromptRequest request, CancellationToken ct) => _prompts.PromptAsync(_definition.Name, request, ct);
 
         public IUpstreamWatcher? UpstreamWatcher { get; set; }
+
+        public bool Attended { get; init; } = true;
 
         private sealed class VolatileSecrets : ISecretStore
         {

@@ -262,6 +262,15 @@ public interface ISourceContext
     Task<PromptResult> PromptAsync(PromptRequest request, CancellationToken ct);
 
     /// <summary>
+    /// Whether a person asked for this start: the program was just started, or they added, edited, enabled or retried the
+    /// source. Such a start may put a sign-in window in front of them. False for the host's own retries of a start that
+    /// failed, which come minutes or hours later, perhaps with nobody at the computer: those sign in without a window or
+    /// not at all, failing (not permanently) with what the person is to do, so that the next retry tries again without a
+    /// window and the person's own Retry signs in with one. Optional for a host: the default is true.
+    /// </summary>
+    bool Attended => true;
+
+    /// <summary>
     /// Who to tell of what the source asks of whatever is behind it, its server or its folders (a row of the Operations tab
     /// for each), or null when nobody is listening. An HTTP source gives it to <see cref="UpstreamRequestsHandler.Around"/>; any
     /// other says each call (<see cref="IUpstreamWatcher"/>). Optional for a host: the default is null.

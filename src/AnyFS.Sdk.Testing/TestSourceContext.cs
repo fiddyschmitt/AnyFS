@@ -48,6 +48,9 @@ public sealed class TestSourceContext : ISourceContext, IDisposable
 
     public IUpstreamWatcher? UpstreamWatcher => UpstreamRequests;
 
+    /// <summary>Whether a person asked for the start (<see cref="ISourceContext.Attended"/>); false stands in for the host's own retry.</summary>
+    public bool Attended { get; set; } = true;
+
     /// <summary>Recorded under a lock: a source may report from several tasks at once (Outlook's count).</summary>
     public void ReportProgress(string message, double? fraction = null)
     {

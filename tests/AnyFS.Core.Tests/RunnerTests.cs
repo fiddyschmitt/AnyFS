@@ -247,6 +247,52 @@ public class SourceRunnerTests
     }
 
     [TestMethod]
+    public async Task TheFirstStartIsThePersonsAndTheRetriesAfterAFailureAreTheHostsOwn()
+    {
+        // a source shows a sign-in window only on a start a person asked for: the host's own retries come minutes or hours
+        // after a failure, perhaps with nobody there (until 22-Nov-2026 every start could show one)
+        var plugin = new AttendedPlugin();
+        await using var runner = Runner(new MemoryPluginSettings(), plugin: plugin);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Status.State == ComponentState.Ready, what: "ready after two failed starts");
+        CollectionAssert.AreEqual(new[] { true, false, false }, plugin.Attended.ToArray(), "the start asked for, then the host's two retries");
+
+        // the person's Retry (a stop and a start, as the engine does it) is theirs again
+        await runner.StopAsync();
+        runner.Start();
+        await Wait.UntilAsync(() => plugin.Attended.Count == 4 && runner.Handle.Status.State == ComponentState.Ready, what: "ready after the Retry");
+        Assert.IsTrue(plugin.Attended.Last());
+    }
+
+    private sealed class AttendedPlugin : ISourcePlugin
+    {
+        public System.Collections.Concurrent.ConcurrentQueue<bool> Attended { get; } = new();
+
+        public string TypeId => "memory";
+
+        public string DisplayName => "Attended";
+
+        public string Description => "Notes whether each of its starts was a person's";
+
+        public string TypeFolder => "attended";
+
+        public Stream? OpenIcon() => null;
+
+        public Type SettingsType => typeof(MemoryPluginSettings);
+
+        public object CreateDefaultSettings() => new MemoryPluginSettings();
+
+        public ISource CreateSource(object settings) => new MemorySource
+        {
+            OnInitialise = (ctx, _) =>
+            {
+                Attended.Enqueue(ctx.Attended);
+                return Attended.Count is 1 or 2 ? throw new SourceFailedException("not yet") : Task.CompletedTask;
+            },
+        };
+    }
+
+    [TestMethod]
     public void RetryScheduleIsTenThirtySixtyThreeHundred()
     {
         Assert.AreEqual(TimeSpan.FromSeconds(10), RetryPolicy.Delay(0));
