@@ -44,7 +44,7 @@ internal sealed class SqliteListingStore : IListingStore
     private readonly SemaphoreSlim _readerSlots = new(Readers, Readers);
     private readonly Lock _writtenGate = new();
     private readonly Dictionary<string, StoredListing?> _written = new(StringComparer.Ordinal);
-    private readonly SortedSet<string> _writtenOrder = new(StringComparer.Ordinal);
+    private readonly SortedSet<string> _writtenOrder = new(DatabaseOrder.Instance);
     private bool _clearedSinceCommit;
     private long _commits;
     private Checkpointer? _checkpointer;
@@ -451,7 +451,7 @@ internal sealed class SqliteListingStore : IListingStore
         var held = new List<(string, StoredListing)>();
         if (folder.Length == 0)
         {
-            foreach (var row in Range("", "￿￿"))
+            foreach (var row in Range("", null))
             {
                 held.Add(row);
             }
@@ -476,7 +476,7 @@ internal sealed class SqliteListingStore : IListingStore
     public List<string> Paths()
     {
         var paths = new List<string>(Count);
-        foreach (var (path, _) in Range("", "￿￿"))
+        foreach (var (path, _) in Range("", null))
         {
             paths.Add(path);
         }
@@ -484,14 +484,16 @@ internal sealed class SqliteListingStore : IListingStore
         return paths;
     }
 
-    public IEnumerable<(string Path, StoredListing Listing)> All() => Range("", "￿￿");
+    public IEnumerable<(string Path, StoredListing Listing)> All() => Range("", null);
 
     /// <summary>
     /// The rows from <paramref name="from"/> up to <paramref name="to"/> in path order, a page at a time from a reader, the
     /// reader free between pages, with what this run stored since the last commit in its place among them (taken first:
-    /// a read of the database after that sees everything else, the commit landed or not).
+    /// a read of the database after that sees everything else, the commit landed or not). The order is the database's
+    /// (<see cref="DatabaseOrder"/>). With no <paramref name="to"/>, to the end: no path stands for the end, since the
+    /// database has a folder whose name begins with an emoji above any made of characters of one UTF-16 unit.
     /// </summary>
-    private IEnumerable<(string Path, StoredListing Listing)> Range(string from, string to)
+    private IEnumerable<(string Path, StoredListing Listing)> Range(string from, string? to)
     {
         List<(string Path, StoredListing? Listing)> written = [];
         bool cleared;
@@ -500,11 +502,16 @@ internal sealed class SqliteListingStore : IListingStore
             cleared = _clearedSinceCommit;
             if (_writtenOrder.Count > 0)
             {
-                foreach (var path in _writtenOrder.GetViewBetween(from, to))
+                // with no end, as far as the last of them: the set gives no view without an upper bound
+                var last = to ?? _writtenOrder.Max!;
+                if (DatabaseOrder.Instance.Compare(from, last) <= 0)
                 {
-                    if (string.CompareOrdinal(path, to) < 0)
+                    foreach (var path in _writtenOrder.GetViewBetween(from, last))
                     {
-                        written.Add((path, _written[path]));
+                        if (to is null || DatabaseOrder.Instance.Compare(path, to) < 0)
+                        {
+                            written.Add((path, _written[path]));
+                        }
                     }
                 }
             }
@@ -526,7 +533,7 @@ internal sealed class SqliteListingStore : IListingStore
                 foreach (var row in page)
                 {
                     // what was stored before this row's path goes first; the row itself as stored since, where it was
-                    while (at < written.Count && string.CompareOrdinal(written[at].Path, row.Path) < 0)
+                    while (at < written.Count && DatabaseOrder.Instance.Compare(written[at].Path, row.Path) < 0)
                     {
                         if (written[at].Listing is { } before)
                         {
@@ -569,8 +576,8 @@ internal sealed class SqliteListingStore : IListingStore
         }
     }
 
-    /// <summary>One page of the rows from <paramref name="from"/> (after it, with <paramref name="after"/>) up to <paramref name="to"/>, from a reader; null where the database could not be read.</summary>
-    private List<(string Path, StoredListing Listing)>? ReadPage(string from, string to, bool after)
+    /// <summary>One page of the rows from <paramref name="from"/> (after it, with <paramref name="after"/>) up to <paramref name="to"/> (to the end, with none), from a reader; null where the database could not be read.</summary>
+    private List<(string Path, StoredListing Listing)>? ReadPage(string from, string? to, bool after)
     {
         var asked = Stopwatch.GetTimestamp();
         _readerSlots.Wait();
@@ -846,6 +853,33 @@ internal sealed class SqliteListingStore : IListingStore
         }
     }
 
+    /// <summary>
+    /// Paths in the order the database keeps them: by their UTF-8 bytes, which is by code point. Strings compared ordinally
+    /// go by UTF-16 unit, which differs where one path has a character above U+FFFF (most emoji: two units, each below
+    /// U+E000) at the place where the other has one in U+E000 to U+FFFF. What is stored since the last commit is kept in
+    /// this order, so it is put among the database's rows in the one order (<see cref="Range"/>).
+    /// </summary>
+    private sealed class DatabaseOrder : IComparer<string>
+    {
+        public static readonly DatabaseOrder Instance = new();
+
+        public int Compare(string? x, string? y)
+        {
+            var one = x.AsSpan();
+            var other = y.AsSpan();
+            var at = one.CommonPrefixLength(other);
+            if (at == one.Length || at == other.Length)
+            {
+                return one.Length - other.Length;
+            }
+
+            // the first units that differ say which is first, but for half of a character above U+FFFF, which is after any other
+            var a = one[at];
+            var b = other[at];
+            return char.IsSurrogate(a) == char.IsSurrogate(b) ? a - b : char.IsSurrogate(a) ? 1 : -1;
+        }
+    }
+
     /// <summary>A connection of its own for reading, by path and by range, with the statements prepared: used by one caller at a time.</summary>
     private sealed class Reader : IDisposable
     {
@@ -853,6 +887,8 @@ internal sealed class SqliteListingStore : IListingStore
         private readonly SqliteCommand _get;
         private readonly SqliteCommand _range;
         private readonly SqliteCommand _rangeAfter;
+        private readonly SqliteCommand _rest;
+        private readonly SqliteCommand _restAfter;
 
         public Reader(string path)
         {
@@ -870,6 +906,8 @@ internal sealed class SqliteListingStore : IListingStore
             _get = Prepare("SELECT stamp, count, folders, entries FROM listing WHERE path = $path", "$path");
             _range = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path >= $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
             _rangeAfter = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path > $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
+            _rest = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path >= $from ORDER BY path LIMIT $limit", "$from", "$limit");
+            _restAfter = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path > $from ORDER BY path LIMIT $limit", "$from", "$limit");
         }
 
         public StoredListing? Find(string path)
@@ -879,13 +917,17 @@ internal sealed class SqliteListingStore : IListingStore
             return reader.Read() ? Read(reader, 0) : null;
         }
 
-        /// <summary>Up to <paramref name="limit"/> rows from <paramref name="from"/> (after it, with <paramref name="after"/>) up to <paramref name="to"/>, in path order.</summary>
-        public List<(string Path, StoredListing Listing)> Page(string from, string to, bool after, int limit)
+        /// <summary>Up to <paramref name="limit"/> rows from <paramref name="from"/> (after it, with <paramref name="after"/>) up to <paramref name="to"/>, or to the end with none, in path order.</summary>
+        public List<(string Path, StoredListing Listing)> Page(string from, string? to, bool after, int limit)
         {
-            var command = after ? _rangeAfter : _range;
+            var command = to is null ? (after ? _restAfter : _rest) : after ? _rangeAfter : _range;
             command.Parameters[0].Value = from;
-            command.Parameters[1].Value = to;
-            command.Parameters[2].Value = limit;
+            if (to is not null)
+            {
+                command.Parameters[1].Value = to;
+            }
+
+            command.Parameters[^1].Value = limit;
             var page = new List<(string, StoredListing)>(limit);
             using var reader = command.ExecuteReader();
             while (reader.Read())
@@ -913,6 +955,8 @@ internal sealed class SqliteListingStore : IListingStore
             _get.Dispose();
             _range.Dispose();
             _rangeAfter.Dispose();
+            _rest.Dispose();
+            _restAfter.Dispose();
             _db.Dispose();
         }
     }

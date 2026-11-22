@@ -409,6 +409,92 @@ public class KeptListingsOnDiskTests
         Assert.AreEqual(0, kept.Cache.Under("nope").Count);
     }
 
+    // a name that begins above U+FFFF (most emoji: four bytes of UTF-8, two units of UTF-16) and one that begins in U+E000 to
+    // U+FFFF: SQLite orders text by its UTF-8 bytes, which puts the first after the second; UTF-16's units put it before
+    private const string Emoji = "\U0001F4C1 photos";
+    private const string High = " notes";
+
+    /// <summary>A tree of three folders, each with two below it, some named as above; every folder's path.</summary>
+    private string[] ATreeOfNamesTheTwoOrdersDisagreeOn()
+    {
+        var all = new List<string> { "" };
+        _tree[""] = [VfsEntry.Directory("plain"), VfsEntry.Directory(Emoji), VfsEntry.Directory(High), VfsEntry.File("root.txt", 1)];
+        foreach (var top in new[] { "plain", Emoji, High })
+        {
+            _tree[top] = [VfsEntry.Directory(Emoji), VfsEntry.Directory(High), VfsEntry.File("a.txt", 1)];
+            _tree[$"{top}/{Emoji}"] = [VfsEntry.File("x.txt", 7)];
+            _tree[$"{top}/{High}"] = [VfsEntry.File("y.txt", 8)];
+            all.AddRange([top, $"{top}/{Emoji}", $"{top}/{High}"]);
+        }
+
+        return [.. all];
+    }
+
+    /// <summary>
+    /// Everything held is everything. The whole store was read as the paths below two U+FFFF characters, and in SQLite's
+    /// order a folder whose name begins with an emoji is above that: it was held, and found by its path, and was missing,
+    /// with what is below it, from what is held below the root, from the snapshot and from the stamps (review of 21-Nov-2026).
+    /// </summary>
+    [TestMethod]
+    public async Task AFolderNamedWithAnEmojiIsAmongEverythingHeld()
+    {
+        var all = ATreeOfNamesTheTwoOrdersDisagreeOn();
+        var folder = TempFolder();
+        var options = Options(folder) with { StampOf = (path, _, _) => ValueTask.FromResult<string?>(path.Length > 0 && !path.Contains('/') ? "v1" : null) };
+        void Whole(ListingCache cache, string when)
+        {
+            Assert.AreEqual(all.Length, cache.Count, when);
+            Assert.AreEqual(cache.Count, cache.Under("").Count, when);
+            CollectionAssert.AreEquivalent(all, cache.Under("").Keys.ToArray(), when);
+            CollectionAssert.AreEquivalent(all, cache.Snapshot().Keys.ToArray(), when);
+            CollectionAssert.AreEquivalent(new[] { "plain", Emoji, High }, cache.Stamps().Keys.ToArray(), when);
+            CollectionAssert.AreEquivalent(new[] { Emoji, $"{Emoji}/{Emoji}", $"{Emoji}/{High}" }, cache.Under(Emoji).Keys.ToArray(), when);
+        }
+
+        await using (var kept = Kept(options))
+        {
+            await kept.CountAsync(CancellationToken.None);
+            Whole(kept.Cache, "as the walk left it");
+        }
+
+        await using var next = Kept(options);
+        Whole(next.Cache, "at the next start");
+    }
+
+    /// <summary>
+    /// What this run stored since the last commit is put in its place among the rows the database gives, which works only
+    /// where both come in the one order. The database's is its own (UTF-8 bytes); the paths kept beside were in UTF-16's,
+    /// and where the two disagree a folder stored since came twice, as stored and then as the database still had it.
+    /// </summary>
+    [TestMethod]
+    public async Task WhatIsStoredBeforeTheCommitIsInItsPlaceWhereSQLitesOrderIsNotThatOfUtf16()
+    {
+        var all = ATreeOfNamesTheTwoOrdersDisagreeOn();
+        var folder = TempFolder();
+        await using var kept = Kept(Options(folder));
+        await kept.CountAsync(CancellationToken.None);
+        var committed = kept.DiskStatistics!.Commits.Count;
+
+        // the same folders with a file more in each: stored, and not committed
+        string[] changed = [Emoji, High, $"plain/{Emoji}", $"plain/{High}"];
+        foreach (var path in changed)
+        {
+            kept.Cache.Keep(path, [.. _tree[path], VfsEntry.File("more.txt", 2)]);
+        }
+
+        var below = kept.Cache.Under("plain");
+        var whole = kept.Cache.Under("");
+        Assert.AreEqual(committed, kept.DiskStatistics!.Commits.Count, "none of it committed yet");
+        CollectionAssert.AreEquivalent(new[] { "plain", $"plain/{Emoji}", $"plain/{High}" }, below.Keys.ToArray());
+        Assert.AreEqual(2, below[$"plain/{Emoji}"].Count, "below a folder: as stored since, not as the database has it");
+        Assert.AreEqual(2, below[$"plain/{High}"].Count);
+        CollectionAssert.AreEquivalent(all, whole.Keys.ToArray());
+        foreach (var path in changed)
+        {
+            Assert.AreEqual(_tree[path].Count + 1, whole[path].Count, $"{path}, among everything held");
+        }
+    }
+
     [TestMethod]
     public async Task WhatWalksLeaveOutAndWhenEveryFolderWasListedAreKeptToo()
     {

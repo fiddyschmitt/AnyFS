@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 
 namespace AnyFS.Sdk;
 
@@ -304,9 +304,22 @@ public sealed class ListingCache
             _store.Replace(path, listing);
         }
 
+        Changed(path);
+    }
+
+    /// <summary>
+    /// The store has just taken a change to what is held for <paramref name="path"/> (under the gate): the version moves,
+    /// and then what was made of the listing held before is let go, in that order. A reader that made its entries from the
+    /// listing before read the version first (<see cref="Hot"/>): where it holds them before they are let go here, they go
+    /// here; where after, it finds the version moved and lets go of them itself. Let go before the version moved, they
+    /// stayed where a reader held them between the two, and were the folder's answer from then on: a walk that finds a
+    /// folder as it is stored does not come this way.
+    /// </summary>
+    private void Changed(string path)
+    {
+        Interlocked.Increment(ref _version);
         _hot.TryRemove(path, out _);
         _changes?.Add(path);
-        Interlocked.Increment(ref _version);
     }
 
     /// <summary>
@@ -358,9 +371,7 @@ public sealed class ListingCache
                     _store.Set(path, listing);
                 }
 
-                _hot.TryRemove(path, out _);
-                _changes?.Add(path);
-                Interlocked.Increment(ref _version);
+                Changed(path);
             }
 
             // held below the root, and not in the tree: gone, with nothing to reach it by
@@ -381,9 +392,7 @@ public sealed class ListingCache
             return false;
         }
 
-        _hot.TryRemove(path, out _);
-        _changes?.Add(path);
-        Interlocked.Increment(ref _version);
+        Changed(path);
         return true;
     }
 
@@ -669,10 +678,12 @@ public sealed class ListingCache
         lock (_gate)
         {
             _store.Clear();
+
+            // the version before the letting go, as where one folder's listing changes (Changed)
+            Interlocked.Increment(ref _version);
             _hot.Clear();
             _hotOrder.Clear();
             Volatile.Write(ref _hotCount, 0);
-            Interlocked.Increment(ref _version);
             if (_changes is not null)
             {
                 _changes.Clear();
