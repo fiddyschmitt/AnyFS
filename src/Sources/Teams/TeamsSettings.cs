@@ -153,7 +153,7 @@ public sealed class TeamsSettings
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 16,
-        Hint = "With folder listings kept: how long after one walk the next begins. The walks are what checks kept folders for changes, so this is how long a new message can take to show. 0 walks once, at the start. A walk goes through the teams, channels and chats and reads the conversations that have changed since the last (Teams says which), taking half the requests so browsing meanwhile has the rest; once a day it reads everything, so edits and reactions on older messages show by then.")]
+        Hint = "With folder listings kept: how long after one walk the next begins. The walks are what checks kept folders for changes, so this is how long a new message can take to show. 0 walks once, at the start. A walk goes through the teams, channels and chats and reads the conversations that have changed since the last (Teams says which); it may have all of 'Requests at a time' (below) open at once, and any browsing meanwhile shares them. Once a day it reads everything, so edits and reactions on older messages show by then.")]
     public int WalkMinutes { get; set; } = 30;
 
     [Setting("Requests at a time", Advanced = true, Order = 17, Hint = "How many requests AnyFS has open with Teams at once.")]

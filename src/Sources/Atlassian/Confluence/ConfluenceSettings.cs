@@ -54,7 +54,7 @@ public sealed class ConfluenceSettings : IAtlassianSettings
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 14,
-        Hint = "With folder listings kept: how long after one walk the next begins. The walks are what checks kept folders for changes, so this is how long a change can take to show. 0 walks once, at the start. Without 'Count files on start' a walk goes only through the folders that have been opened; with it, through every space, its pages, attachments and comments in bulk. A space whose newest change and content count have not moved since the last walk is kept as it was, so a walk over a quiet server asks a request per space; once a day everything is read again. The walk takes half the requests, so browsing meanwhile has the rest.")]
+        Hint = "With folder listings kept: how long after one walk the next begins. The walks are what checks kept folders for changes, so this is how long a change can take to show. 0 walks once, at the start. Without 'Count files on start' a walk goes only through the folders that have been opened; with it, through every space, its pages, attachments and comments in bulk. A space whose newest change and content count have not moved since the last walk is kept as it was, so a walk over a quiet server asks a request per space; once a day everything is read again. The walk may have all of 'Requests at a time' (below) open at once, and any browsing meanwhile shares them.")]
     public int WalkMinutes { get; set; } = 30;
 
     [Setting("Requests at a time", Advanced = true, Order = 15, Hint = "How many requests AnyFS has open with the server at once.")]

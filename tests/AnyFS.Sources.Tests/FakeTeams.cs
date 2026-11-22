@@ -29,7 +29,7 @@ internal sealed class FakeTeams : ITeamsApi
     /// <summary>How many conversation-message pages have been asked for: tests check a folder that is not re-read has not been fetched.</summary>
     public int MessageCalls { get; private set; }
 
-    /// <summary>The most conversation-message pages in flight at once (a walk takes half the requests).</summary>
+    /// <summary>The most conversation-message pages in flight at once (a walk may use all the requests).</summary>
     public int MostMessageCallsAtOnce => _mostAtOnce;
 
     private int _inFlight;
