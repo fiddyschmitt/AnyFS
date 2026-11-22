@@ -71,7 +71,7 @@ public sealed class BambooSource : SourceBase, ICountable
     protected override async Task OnInitialiseAsync(CancellationToken ct)
     {
         _session = new AtlassianSession(AtlassianProduct.Bamboo, _settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
-        await _session.SignInAsync(interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
+        await _session.SignInAsync(interactive: Context.Attended, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
         _api = new AtlassianApi(_session, _settings.Requests, Logger);
         _cache = new RequestCache(_stopping.Token);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);

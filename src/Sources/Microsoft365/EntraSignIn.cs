@@ -28,6 +28,10 @@ public enum SignInMethod
 /// <param name="OpenBrowser">Shows the sign-in page: false when it could not (the device code is used instead). Null: the system browser.</param>
 /// <param name="ForceLogin">The browser sign-in asks for credentials rather than offering the browser's signed-in accounts (for signing in as exactly the named account).</param>
 /// <param name="Cloud">The Microsoft cloud to sign in to and whose Graph the scopes are for; null: the global cloud.</param>
+/// <param name="Attended">
+/// Whether a person asked for this sign-in (<see cref="AnyFS.Sdk.ISourceContext.Attended"/>): false for the host's own retry
+/// of a start, which signs in from the saved sign-in or not at all, opening no browser and showing no code.
+/// </param>
 public sealed record SignInOptions(
     Microsoft365Service Service,
     string ClientId,
@@ -41,7 +45,8 @@ public sealed record SignInOptions(
     Action<byte[]> SaveCache,
     Func<Uri, bool>? OpenBrowser = null,
     bool ForceLogin = false,
-    MicrosoftCloud? Cloud = null);
+    MicrosoftCloud? Cloud = null,
+    bool Attended = true);
 
 /// <summary>
 /// The Microsoft identity platform sign-in behind the Microsoft 365 sources' app sign-ins (SharePoint Online and
@@ -150,6 +155,13 @@ public sealed class EntraSignIn
             }
         }
 
+        if (!_options.Attended)
+        {
+            // nobody asked for this start (the host's own retry, minutes or hours after one that failed): no browser is
+            // opened and no code shown for whoever is not there. The person's Retry signs in
+            throw new SignInRequiredException($"the sign-in to {_options.Service.Name}{(_options.LoginHint is { Length: > 0 } who ? $" for {who}" : "")} needs you: Retry the source to sign in");
+        }
+
         AuthenticationResult result;
         if (_options.Method == SignInMethod.DeviceCode)
         {
@@ -247,7 +259,8 @@ public sealed class EntraSignIn
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            throw new SignInRequiredException($"nobody finished the browser sign-in within {InteractiveTimeout.TotalMinutes:F0} minutes");
+            // for the person's Retry: starting again by itself would only open the browser again for nobody
+            throw new SignInRequiredException($"nobody finished the browser sign-in within {InteractiveTimeout.TotalMinutes:F0} minutes; Retry to sign in", permanent: true);
         }
         catch (MsalServiceException ex)
         {
@@ -285,12 +298,14 @@ public sealed class EntraSignIn
     }
 
     /// <summary>
-    /// Whether a refusal is about the settings or the organisation's policy (the codes <see cref="Describe"/> explains,
-    /// except declines and expiries): starting the source again unchanged would be refused the same way, after
-    /// opening the browser again, so it waits for the user's Retry instead.
+    /// Whether a refusal is about the settings or the organisation's policy (the codes <see cref="Describe"/> explains), or
+    /// the person's own (the sign-in declined, the device code left to run out): starting the source again unchanged would
+    /// be refused the same way, after opening the browser or showing a code again, so it waits for the user's Retry
+    /// instead. Until 22-Nov-2026 a decline and a code nobody used were retried, with a new prompt each time.
     /// </summary>
     internal static bool IsPermanent(MsalServiceException ex)
-        => AadstsCode(ex.Message) is 53000 or 53003 or 530035 or 50059 or 700016 or 50194 or 90002 or 900023 or 65001 or 90094 or 50011 or 7000218;
+        => ex.ErrorCode is "authorization_declined" or "access_denied" or "expired_token" or "code_expired"
+            || AadstsCode(ex.Message) is 53000 or 53003 or 530035 or 50059 or 700016 or 50194 or 90002 or 900023 or 65001 or 90094 or 50011 or 7000218;
 
     /// <summary>
     /// What a refused sign-in means, in the settings' terms. The identity platform's AADSTS codes say which setting

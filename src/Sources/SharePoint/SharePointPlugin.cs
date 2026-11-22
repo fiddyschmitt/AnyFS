@@ -839,8 +839,9 @@ public sealed class SharePointPlugin : ISourcePlugin, IValidatable, ITestable, I
     }
 
     /// <summary>The Microsoft sign-in for an app sign-in, as the settings describe it.</summary>
-    internal static EntraSignIn MicrosoftSignIn(SharePointSettings s, IReadOnlyList<string> scopes, Action<string> progress, Func<string, string, Task>? prompt, Func<byte[]?> loadCache, Action<byte[]> saveCache, Microsoft.Extensions.Logging.ILogger? logger = null)
-        => new(new SignInOptions(Service, s.EffectiveClientId, s.EffectiveTenant, s.LoginHint, s.Method, scopes, progress, prompt, loadCache, saveCache, Cloud: s.EffectiveCloud), logger ?? NullLogger.Instance);
+    /// <param name="attended">Whether a person asked for the sign-in; false (the host's own retry of a start) opens no browser and shows no code.</param>
+    internal static EntraSignIn MicrosoftSignIn(SharePointSettings s, IReadOnlyList<string> scopes, Action<string> progress, Func<string, string, Task>? prompt, Func<byte[]?> loadCache, Action<byte[]> saveCache, Microsoft.Extensions.Logging.ILogger? logger = null, bool attended = true)
+        => new(new SignInOptions(Service, s.EffectiveClientId, s.EffectiveTenant, s.LoginHint, s.Method, scopes, progress, prompt, loadCache, saveCache, Cloud: s.EffectiveCloud, Attended: attended), logger ?? NullLogger.Instance);
 }
 
 /// <summary>A SharePoint source of whichever kind its address is, signed in as its settings say (<see cref="SharePointPlugin"/>).</summary>
@@ -927,7 +928,8 @@ public sealed class SharePointSiteSource : SharePointSource
             prompt: (title, message) => Context.PromptAsync(new PromptRequest(PromptKind.YesNo, title, message), ct),
             loadCache: () => secrets.Get("msal-cache") is { } saved ? Convert.FromBase64String(saved) : null,
             saveCache: bytes => secrets.Set("msal-cache", Convert.ToBase64String(bytes)),
-            Logger);
+            Logger,
+            attended: Context.Attended);
     }
 
     /// <summary>The app sign-in: MSAL's, its cache in the source's secret store, or the test's stand-in's account.</summary>
@@ -1103,7 +1105,8 @@ public sealed class SharePointSiteSource : SharePointSource
         IReadOnlyList<SessionCookie> cookies;
         try
         {
-            cookies = await signIn(true, ct).ConfigureAwait(false);
+            // with a window where a person asked for the start; the host's own retry signs in without one, or not at all
+            cookies = await signIn(Context.Attended, ct).ConfigureAwait(false);
         }
         catch (SignInRequiredException ex)
         {

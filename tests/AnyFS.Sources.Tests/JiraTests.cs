@@ -298,6 +298,31 @@ public class JiraTests
     }
 
     [TestMethod]
+    public async Task AStartTheHostRetriesByItselfShowsNoSignInWindow()
+    {
+        var fake = JiraSeed.Lab(root: "/unattended");
+        var asked = new List<bool>();
+        var standIn = fake.StandIn((interactive, _) =>
+        {
+            asked.Add(interactive);
+            return interactive
+                ? Task.FromResult<IReadOnlyList<SessionCookie>>([fake.SessionFor("tester")])
+                : throw new SignInRequiredException("the browser sign-in for the server has lapsed; sign in again", permanent: false);
+        });
+        var settings = new JiraSettings { Address = fake.Server, SignInMethod = AtlassianSignInChoices.WebSession };
+        using var context = new TestSourceContext { Attended = false };
+        var source = new JiraSource(settings, standIn);
+        var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => source.InitialiseAsync(context, CancellationToken.None));
+        await source.DisposeAsync();
+        CollectionAssert.AreEqual(new[] { false }, asked, "asked without a window");
+        Assert.IsFalse(ex.Permanent);
+
+        context.Attended = true;
+        await using var retried = await StartAsync(fake, settings, context, standIn);
+        CollectionAssert.AreEqual(new[] { false, true }, asked, "the person's Retry may show one");
+    }
+
+    [TestMethod]
     public async Task ASessionTheServerEndedIsSignedInAfreshAndTheLogSaysHowTheServerAnswered()
     {
         var fake = JiraSeed.Lab();

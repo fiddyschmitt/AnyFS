@@ -150,7 +150,8 @@ public sealed class OutlookSource : SourceBase, ICountable
                         () => secrets.Get("msal-cache") is { } saved ? Convert.FromBase64String(saved) : null,
                         bytes => secrets.Set("msal-cache", Convert.ToBase64String(bytes)),
                         (title, message) => Context.PromptAsync(new PromptRequest(PromptKind.YesNo, title, message), ct));
-                    var (service, directory, account, how) = await ConnectAsync(_settings, _standIn, Logger, interactive: true, message => Context.ReportProgress(message), hooks, ct, Context.UpstreamWatcher).ConfigureAwait(false);
+                    // with a sign-in window where a person asked for the start; the host's own retry signs in without one
+                    var (service, directory, account, how) = await ConnectAsync(_settings, _standIn, Logger, interactive: Context.Attended, message => Context.ReportProgress(message), hooks, ct, Context.UpstreamWatcher).ConfigureAwait(false);
                     _store = new EwsMailStore(service, _settings.Kind == OutlookKind.Server ? $"{account} on {_settings.ServerUrl!.Host}" : account, _settings.ShowHidden, _settings.CalendarMonthsBack, _settings.CalendarMonthsAhead, Logger);
                     if (directory is not null)
                     {
@@ -359,7 +360,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                 throw new SourceFailedException($"An app sign-in needs the mailbox's address in place of {s.WebHost}; with Outlook on the web's address, sign in with the web session.", permanent: true);
             }
 
-            return await ConnectGraphAsync(s, address, standIn, logger, progress, hooks, ct, watcher).ConfigureAwait(false);
+            return await ConnectGraphAsync(s, address, standIn, logger, interactive, progress, hooks, ct, watcher).ConfigureAwait(false);
         }
 
         if (standIn is not null)
@@ -384,7 +385,19 @@ public sealed class OutlookSource : SourceBase, ICountable
         var origin = cloud.OutlookOrigin;
         var session = new OwaTokenSession(origin, browser, OutlookPlugin.ProfileDir(address ?? cloud.OutlookHost), logger);
         progress($"Reading the sign-in to {origin.Host} from {session.BrowserName}");
-        var first = await session.TokenAsync(interactive, progress, ct).ConfigureAwait(false);
+        string first;
+        try
+        {
+            first = await session.TokenAsync(interactive, progress, ct).ConfigureAwait(false);
+        }
+        catch (SignInRequiredException ex)
+        {
+            // as the app sign-in's below: one that waiting cannot help (the window closed, nobody signing in, the browser's
+            // port kept from AnyFS) waits for the person's Retry. Until 22-Nov-2026 it left here as it was, the host took it
+            // for a failure that may pass, and the window opened again at every retry
+            throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
+        }
+
         var account = session.Account ?? address ?? cloud.OutlookHost;
         if (address is not null && !string.Equals(account, address, StringComparison.OrdinalIgnoreCase))
         {
@@ -410,7 +423,7 @@ public sealed class OutlookSource : SourceBase, ICountable
     /// the organisation's own signed in to there (silently from the saved sign-in when it can, else the browser or a
     /// device code), then Microsoft Graph at the mailbox's pace.
     /// </summary>
-    private static async Task<(IEwsService Service, IAddressBookService? Directory, string Account, string How)> ConnectGraphAsync(OutlookSettings s, string address, OutlookStandIn? standIn, ILogger logger, Action<string> progress, SignInHooks? hooks, CancellationToken ct, IUpstreamWatcher? watcher)
+    private static async Task<(IEwsService Service, IAddressBookService? Directory, string Account, string How)> ConnectGraphAsync(OutlookSettings s, string address, OutlookStandIn? standIn, ILogger logger, bool interactive, Action<string> progress, SignInHooks? hooks, CancellationToken ct, IUpstreamWatcher? watcher)
     {
         var cloud = s.KnownCloud;
         if (cloud is null)
@@ -438,7 +451,7 @@ public sealed class OutlookSource : SourceBase, ICountable
         {
             var tenant = s.TenantIn(cloud);
             var entra = new EntraSignIn(new SignInOptions(OutlookPlugin.Service, s.EffectiveClientId, tenant, address, s.Method, OutlookPlugin.MailScopes, progress,
-                hooks?.Prompt, hooks?.LoadCache ?? (() => EntraSignIn.RecentCache(s.EffectiveClientId, tenant, address)), hooks?.SaveCache ?? (_ => { }), Cloud: cloud), logger);
+                hooks?.Prompt, hooks?.LoadCache ?? (() => EntraSignIn.RecentCache(s.EffectiveClientId, tenant, address)), hooks?.SaveCache ?? (_ => { }), Cloud: cloud, Attended: interactive), logger);
             progress(cloud.IsGlobal ? "Signing in to Exchange Online" : $"Signing in to Exchange Online in the {cloud.Name} cloud");
             try
             {

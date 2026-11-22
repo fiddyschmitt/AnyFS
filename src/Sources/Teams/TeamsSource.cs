@@ -117,7 +117,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         var session = new TeamsWebSession(new Uri(cloud.TeamsHost), browser, profile, _settings.AccountHint, Logger);
         try
         {
-            await session.TokenAsync(TeamsService.Aggregator, interactive: true, m => Context.ReportProgress(m), ct).ConfigureAwait(false);
+            await session.TokenAsync(TeamsService.Aggregator, interactive: Context.Attended, m => Context.ReportProgress(m), ct).ConfigureAwait(false);
         }
         catch (SignInRequiredException ex)
         {

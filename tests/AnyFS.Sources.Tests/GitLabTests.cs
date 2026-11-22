@@ -2242,6 +2242,26 @@ public class GitLabWebSessionTests
     }
 
     [TestMethod]
+    public async Task AStartTheHostRetriesByItselfShowsNoSignInWindow()
+    {
+        // until 22-Nov-2026 every start could open the browser's window: the host's retry of a failed start, minutes or
+        // hours on, as much as the one a person asked for
+        var fake = Lab();
+        var browser = new Browser(fake) { NeedsAPerson = true };
+        using var context = new TestSourceContext { Attended = false };
+        var source = Source(fake, browser);
+        var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => source.InitialiseAsync(context, CancellationToken.None));
+        await source.DisposeAsync();
+        CollectionAssert.AreEqual(new[] { false }, browser.Calls, "asked without a window");
+        Assert.IsFalse(ex.Permanent, "the next retry may find the browser signed in again; the person's Retry signs in with a window");
+        StringAssert.Contains(ex.Message, "sign in again");
+
+        context.Attended = true;
+        await using var retried = await StartAsync(fake, browser, context);
+        CollectionAssert.AreEqual(new[] { false, true }, browser.Calls, "the person's Retry may show one");
+    }
+
+    [TestMethod]
     public async Task AStartThatCannotReachGitLabLeavesTheKeptSessionForTheRetry()
     {
         var fake = Lab();

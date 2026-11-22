@@ -531,6 +531,26 @@ public class ArtifactoryTests
     }
 
     [TestMethod]
+    public async Task AStartTheHostRetriesByItselfShowsNoSignInWindow()
+    {
+        var fake = ArtifactorySeed.Lab(root: "/unattended");
+        var asked = new List<bool>();
+        var standIn = fake.StandIn(fake.Person("tester", asked), useKept: false);
+        using var context = new TestSourceContext { Attended = false };
+        var source = new ArtifactorySource(WebSession(fake), standIn);
+        var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => source.InitialiseAsync(context, CancellationToken.None));
+        await source.DisposeAsync();
+        Assert.AreEqual(0, asked.Count, "no window for nobody: the page asks a person for a code");
+        Assert.AreEqual(0, fake.SessionsAsked.Count, "and no sign-in asked of the platform for it");
+        Assert.IsFalse(ex.Permanent);
+        StringAssert.Contains(ex.Message, "only you can sign in again");
+
+        context.Attended = true;
+        await using var retried = await StartAsync(fake, WebSession(fake), context, standIn);
+        CollectionAssert.AreEqual(new[] { true }, asked, "the person's Retry signs in with the window");
+    }
+
+    [TestMethod]
     public async Task AServerWithoutTheClientSignInSaysToUseAnAccessToken()
     {
         var fake = ArtifactorySeed.Lab();

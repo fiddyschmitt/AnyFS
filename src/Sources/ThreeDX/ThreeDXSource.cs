@@ -83,7 +83,7 @@ public sealed class ThreeDXSource : SourceBase, ICountable
         _session = new ThreeDXSession(_settings, Logger, Context.Secrets, _options, Context.UpstreamWatcher);
         try
         {
-            await _session.SignInAsync(interactive: true, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
+            await _session.SignInAsync(interactive: Context.Attended, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
         }
         catch (SignInRequiredException ex)
         {

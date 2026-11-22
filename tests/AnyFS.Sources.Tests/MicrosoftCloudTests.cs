@@ -2,6 +2,7 @@ using System.Net;
 using System.Reflection;
 using System.Text;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.SharePoint;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -145,7 +146,32 @@ public class MicrosoftCloudTests
         var other = Refusal("AADSTS12345: Something new.\nmore detail");
         Assert.AreEqual("the sign-in failed: AADSTS12345: Something new.", EntraSignIn.Describe(other, gov, own, "organizations"));
         Assert.IsFalse(EntraSignIn.IsPermanent(other));
-        Assert.IsFalse(EntraSignIn.IsPermanent(new MsalServiceException("authorization_declined", "The user declined.")), "a decline is the user's, not the settings'");
+
+        // the person's own answer waits for their Retry as the settings' faults do, as a closed browser window does: until
+        // 22-Nov-2026 a decline and a code nobody used were started again by the host, with a new prompt each time
+        Assert.IsTrue(EntraSignIn.IsPermanent(new MsalServiceException("authorization_declined", "The user declined.")));
+        Assert.IsTrue(EntraSignIn.IsPermanent(new MsalServiceException("access_denied", "The user declined.")));
+        Assert.IsTrue(EntraSignIn.IsPermanent(new MsalServiceException("expired_token", "The code has expired.")));
+        Assert.IsTrue(EntraSignIn.IsPermanent(new MsalServiceException("code_expired", "The code has expired.")));
+    }
+
+    [TestMethod]
+    public async Task ASignInNobodyAskedForOpensNoBrowserAndShowsNoCode()
+    {
+        // the host's own retry of a start: with no saved sign-in to use, it says the person is needed and asks nothing of anyone
+        var opened = 0;
+        var prompted = 0;
+        var options = new SignInOptions(SharePointPlugin.Service, EntraSignIn.DefaultClientId, "organizations", "nobody@example.test", SignInMethod.Browser, SharePointPlugin.SiteScopes,
+            _ => { }, (_, _) => { prompted++; return Task.CompletedTask; }, () => null, _ => { }, OpenBrowser: _ => { opened++; return true; }, Attended: false);
+        var ex = await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => new EntraSignIn(options, NullLogger.Instance).SignInAsync(CancellationToken.None));
+        Assert.IsFalse(ex.Permanent, "the next retry may find a sign-in saved meanwhile; the person's Retry signs in");
+        StringAssert.Contains(ex.Message, "needs you: Retry the source to sign in");
+        StringAssert.Contains(ex.Message, "nobody@example.test");
+        Assert.AreEqual((0, 0), (opened, prompted));
+
+        var code = options with { Method = SignInMethod.DeviceCode };
+        await Assert.ThrowsExactlyAsync<SignInRequiredException>(() => new EntraSignIn(code, NullLogger.Instance).SignInAsync(CancellationToken.None));
+        Assert.AreEqual((0, 0), (opened, prompted), "nor a device code");
     }
 
     [TestMethod]
