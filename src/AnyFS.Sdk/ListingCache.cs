@@ -90,6 +90,9 @@ public sealed class ListingCache
     /// <summary>The listing held of <paramref name="path"/> as it is, nothing asked of the upstream; null where none is held.</summary>
     public IReadOnlyList<VfsEntry>? Held(string path) => Hot(path)?.List;
 
+    /// <summary>Whether a listing of <paramref name="path"/> is held, nothing made of it.</summary>
+    internal bool Holds(string path) => _store.Get(path) is { } held && !IsExpired(held);
+
     /// <summary>Whether <paramref name="path"/> has been asked for: a listing of it is held, or its listing failed and that is kept (<see cref="FailureKeptFor"/>).</summary>
     public bool Asked(string path) => Held(path) is not null || _failures.ContainsKey(path);
 
@@ -450,6 +453,8 @@ public sealed class ListingCache
                 fetch.Unstamped = true;
             }
 
+            // nor does a walk on its way below the folder stamp it when it has been through
+            _unsettled.TryRemove(path, out _);
             if (_store.Get(path) is { Stamp: not null } held)
             {
                 StoreLocked(path, held.WithStamp(null));
@@ -502,6 +507,61 @@ public sealed class ListingCache
 
     /// <summary>The same, keeping <paramref name="stamp"/> with the listing: the folder's stamp as the caller read it before asking (<see cref="StampOf"/> is not asked again).</summary>
     public ValueTask<IReadOnlyList<VfsEntry>> RefreshAsync(string path, string? stamp, CancellationToken ct) => FetchAsync(path, ct, (true, stamp), "a walk");
+
+    // the stamps a walk read for folders it has listed afresh and has not yet been through everything below (by path): each is
+    // kept with its folder's listing only then (Settle). Held here, in memory: a run that ends meanwhile leaves the stamp the
+    // listings below were kept under, so the next walk finds it moved and goes below again
+    private readonly ConcurrentDictionary<string, string> _unsettled = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// As <see cref="RefreshAsync(string, string?, CancellationToken)"/>, for a walk that goes on into the folders below: the
+    /// listing is kept with the stamp held before (what is held below it is still as of then), and <paramref name="stamp"/>
+    /// takes its place when the walk says it has been through everything below (<see cref="Settle"/>). A stamp kept at
+    /// once said of every listing held below the folder what was true of the folder's own alone: a walk stopped there, or
+    /// one that could not list a folder below, left those as they were, and the next walk kept them by the stamp.
+    /// </summary>
+    internal ValueTask<IReadOnlyList<VfsEntry>> RefreshUnsettledAsync(string path, string? stamp, CancellationToken ct) => FetchAsync(path, ct, (true, stamp), "a walk", unsettled: true);
+
+    /// <summary>The walk has been through everything below <paramref name="path"/>: the stamp it read before listing the folder is kept with the listing held now (none where it was let go meanwhile).</summary>
+    internal void Settle(string path)
+    {
+        if (!_unsettled.TryRemove(path, out var stamp))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_store.Get(path) is { } held && !IsExpired(held) && held.Stamp != stamp)
+            {
+                StoreLocked(path, held.WithStamp(stamp));
+            }
+        }
+    }
+
+    /// <summary>
+    /// The walk could not go through everything below <paramref name="path"/>: the stamp it read is not kept, and where the
+    /// one held says the same (a walk that lists whatever the stamps say), that is taken off, so the next walk lists the
+    /// folder and goes below it again.
+    /// </summary>
+    internal void Unsettle(string path)
+    {
+        if (!_unsettled.TryRemove(path, out var stamp))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (_store.Get(path) is { } held && held.Stamp == stamp)
+            {
+                StoreLocked(path, held.WithStamp(null));
+            }
+        }
+    }
+
+    /// <summary>A walk has ended: the stamps of the folders it did not settle are let go, the ones held staying as they are.</summary>
+    internal void ForgetUnsettled() => _unsettled.Clear();
 
     /// <summary>Finds <paramref name="path"/> in its parent's cached listing; null when absent.</summary>
     public async ValueTask<VfsEntry?> StatAsync(string path, CancellationToken ct, StringComparison comparison = StringComparison.Ordinal)
@@ -632,7 +692,7 @@ public sealed class ListingCache
     /// <summary>The listing from the upstream: the one on its way when there is one, else a new one, shared by every caller until it lands.</summary>
     /// <param name="stamp">The folder's stamp as the caller read it, to keep with the listing; null to read it here (<see cref="StampOf"/>).</param>
     /// <param name="why">Why the upstream is asked: told to <see cref="OnListing"/> if this starts a listing.</param>
-    private ValueTask<IReadOnlyList<VfsEntry>> FetchAsync(string path, CancellationToken ct, (bool Read, string? Value)? stamp, string why)
+    private ValueTask<IReadOnlyList<VfsEntry>> FetchAsync(string path, CancellationToken ct, (bool Read, string? Value)? stamp, string why, bool unsettled = false)
     {
         Fetch fetch;
         var started = false;
@@ -643,6 +703,12 @@ public sealed class ListingCache
                 fetch = new Fetch { Stamp = stamp };
                 _fetches[path] = fetch;
                 started = true;
+            }
+
+            // a walk's: also where it joins a listing a client's asking began, which would keep the stamp it reads itself at once
+            if (unsettled && stamp?.Value is { } read)
+            {
+                fetch.Settles = read;
             }
         }
 
@@ -688,9 +754,33 @@ public sealed class ListingCache
                 result = fetch.Changes.Count == 0 ? list : Apply(list, fetch.Changes);
                 if (!fetch.Invalidated)
                 {
+                    var kept = fetch.Unstamped ? null : stamp;
+                    if (fetch.Settles is { } walked && !fetch.Unstamped)
+                    {
+                        // a walk's, which goes on below: the stamp held stays until it has been through (Settle). With no
+                        // folder in it there is nothing below (StoreLocked lets go of what was held there), and the stamp
+                        // read is kept now, in the one write
+                        var below = false;
+                        foreach (var entry in result)
+                        {
+                            if (entry.IsDirectory)
+                            {
+                                below = true;
+                                break;
+                            }
+                        }
+
+                        kept = walked;
+                        if (below)
+                        {
+                            kept = _store.Get(path)?.Stamp;
+                            _unsettled[path] = walked;
+                        }
+                    }
+
                     // good for its time from when it arrived: a folder slower to list than that would otherwise be stale
                     // on arrival, and every stat in it would list it again
-                    StoreLocked(path, Make(result, fetch.Unstamped ? null : stamp));
+                    StoreLocked(path, Make(result, kept));
                     _failures.TryRemove(path, out _);
                     TrimIfNeededLocked();
                 }
@@ -852,5 +942,8 @@ public sealed class ListingCache
         public (bool Read, string? Value)? Stamp { get; set; }
 
         public bool Unstamped { get; set; }
+
+        /// <summary>The stamp a walk read for the folder, to keep once it has been through everything below (<see cref="RefreshUnsettledAsync"/>); null for any other listing.</summary>
+        public string? Settles { get; set; }
     }
 }

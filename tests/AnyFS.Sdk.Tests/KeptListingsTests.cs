@@ -1060,6 +1060,152 @@ public class KeptListingsTests
         }
     }
 
+    // --- a stamp is kept once everything below it has been walked (22-Nov-2026) -----------------------------------------
+
+    /// <summary>The first run's count of the usual tree with docs stamped v1, saved to <paramref name="file"/>.</summary>
+    private async Task<KeptListingsOptions> CountedOnceAsync(string file, TimeSpan? walkEvery = null, TimeProvider? time = null)
+    {
+        _stamps["docs"] = "v1";
+        var options = new KeptListingsOptions { WalkEvery = walkEvery ?? TimeSpan.Zero, SaveTo = file, OnDisk = false, SaveKey = "jane@contoso.com", StampOf = StampOf };
+        await using (var first = Kept(new SourceCounters(), options, time))
+        {
+            await first.CountAsync(CancellationToken.None);
+        }
+
+        _listed.Clear();
+        return options;
+    }
+
+    [TestMethod]
+    public async Task AStampedFolderIsKeptByItsNewStampOnlyOnceEverythingBelowItWasListed()
+    {
+        // until 22-Nov-2026 a folder's new stamp was kept as the folder was listed, before anything below it was: a folder
+        // below that then could not be listed kept its old listing, and the next walk, finding the stamp held, kept that too
+        var file = TempFile();
+        try
+        {
+            var options = await CountedOnceAsync(file);
+            _tree["docs/sub"].Add(VfsEntry.File("d.txt", 4));
+            _stamps["docs"] = "v2";
+            _failing["docs/sub"] = new VfsException(VfsError.Unavailable, "no answer");
+            var counters = new SourceCounters();
+            await using (var second = Kept(counters, options))
+            {
+                await second.CountAsync(CancellationToken.None);
+                Assert.AreEqual((1, 1), (Listed("docs"), Listed("docs/sub")), "docs listed afresh, docs/sub asked for");
+                Assert.AreEqual(EnumerationState.Unknown, counters.State);
+                Assert.AreEqual(1, second.Cache.Held("docs/sub")!.Count, "what was held of it answers meanwhile");
+                Assert.AreEqual("v1", second.Cache.StampHeld("docs"), "the stamp read for docs is not kept: not everything below it was listed");
+            }
+
+            // the next run, the folder answering again: docs is walked again, though its stamp has not moved since
+            _failing.Clear();
+            _listed.Clear();
+            await using var third = Kept(counters = new SourceCounters(), options);
+            await third.CountAsync(CancellationToken.None);
+            Assert.AreEqual(1, Listed("docs/sub"), "listed by the walk after the one that could not");
+            CollectionAssert.AreEqual(new[] { "c.txt", "d.txt" }, third.Cache.Held("docs/sub")!.Select(e => e.Name).ToArray());
+            Assert.AreEqual("v2", third.Cache.StampHeld("docs"), "kept now that everything below was listed");
+            Assert.AreEqual(EnumerationState.Complete, counters.State);
+
+            // and from then on by its stamp
+            _listed.Clear();
+            await third.DisposeAsync();
+            await using var fourth = Kept(new SourceCounters(), options);
+            await fourth.CountAsync(CancellationToken.None);
+            Assert.AreEqual((0, 0), (Listed("docs"), Listed("docs/sub")));
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [TestMethod]
+    public async Task AWalkStoppedPartWayLeavesNoStampOverWhatItDidNotReach()
+    {
+        var file = TempFile();
+        try
+        {
+            var options = await CountedOnceAsync(file);
+            _tree["docs/sub"].Add(VfsEntry.File("d.txt", 4));
+            _stamps["docs"] = "v2";
+            var stuck = _held["docs/sub"] = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var second = Kept(new SourceCounters(), options);
+            var counting = second.CountAsync(CancellationToken.None);
+            await UntilAsync(() => Listed("docs") == 1 && Listed("docs/sub") == 1, "the walk listed docs and is at docs/sub");
+
+            // the program is closed with docs listed afresh and docs/sub not yet
+            await second.DisposeAsync();
+            await counting;
+            stuck.TrySetException(new VfsException(VfsError.Unavailable, "closed"));
+            _held.Clear();
+            _listed.Clear();
+
+            await using var third = Kept(new SourceCounters(), options);
+            await third.CountAsync(CancellationToken.None);
+            Assert.AreEqual(1, Listed("docs/sub"), "the next run's walk goes below docs again");
+            CollectionAssert.AreEqual(new[] { "c.txt", "d.txt" }, third.Cache.Held("docs/sub")!.Select(e => e.Name).ToArray());
+            Assert.AreEqual("v2", third.Cache.StampHeld("docs"));
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [TestMethod]
+    public async Task AFolderThatFailsWalkAfterWalkHoldsUpTheStampAboveItOnce()
+    {
+        // a folder that will not list any more (refused for good, or a fault of the upstream's) would otherwise have
+        // everything unstamped below the stamped folder above it listed again at every walk, for ever
+        var file = TempFile();
+        try
+        {
+            var options = await CountedOnceAsync(file, TimeSpan.FromMilliseconds(40));
+            _stamps["docs"] = "v2";
+            _failing["docs/sub"] = new VfsException(VfsError.AccessDenied, "refused");
+            await using var kept = Kept(new SourceCounters(), options);
+            await kept.CountAsync(CancellationToken.None);
+            await UntilAsync(() => Listed("photos") >= 6, "five walks after the count");
+            Assert.AreEqual(2, Listed("docs"), "listed by the walk that found its stamp moved and by the one after; then kept by its stamp");
+            Assert.AreEqual(2, Listed("docs/sub"), "asked for by those two");
+            Assert.AreEqual("v2", kept.Cache.StampHeld("docs"));
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [TestMethod]
+    public async Task ADaysFullWalkThatCouldNotListIsStillDue()
+    {
+        // until 22-Nov-2026 the day's walk of every folder counted as done however it ended: one that failed at the root
+        // (the computer awake before its network) put the next off a day
+        var file = TempFile();
+        try
+        {
+            var time = new FakeTime();
+            var options = await CountedOnceAsync(file, TimeSpan.FromMilliseconds(40), time);
+            time.Advance(TimeSpan.FromDays(1));
+            _failing[""] = new VfsException(VfsError.Unavailable, "no network yet");
+            await using var kept = Kept(new SourceCounters(), options, time);
+            await kept.CountAsync(CancellationToken.None);
+            Assert.AreEqual(0, Listed("docs"), "the day's walk got nowhere");
+
+            _failing.Clear();
+            await UntilAsync(() => Listed("docs") >= 1, "the next walk is the day's, listing docs whatever its stamp");
+            var photos = Listed("photos");
+            await UntilAsync(() => Listed("photos") >= photos + 3, "walks after it");
+            Assert.AreEqual(1, Listed("docs"), "and once it has been through, docs is kept by its stamp again");
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
     /// <summary>A source that only lists, for the host's generic walk.</summary>
     private sealed class ListingSource(Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> list) : IVfsOperations
     {

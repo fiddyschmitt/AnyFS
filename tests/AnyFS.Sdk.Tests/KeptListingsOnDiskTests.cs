@@ -158,7 +158,7 @@ public class KeptListingsOnDiskTests
             await kept.CountAsync(CancellationToken.None);
             var walked = kept.DiskStatistics!;
             Assert.AreEqual(41, walked.Inserts.Count, "a row a folder");
-            Assert.AreEqual(0, walked.Updates.Count);
+            Assert.AreEqual(20, walked.Updates.Count, "each stamped folder with folders below it, once the walk has been through them: its stamp is kept then");
             Assert.AreEqual(0, walked.Deletes.Count);
             Assert.IsTrue(walked.Reads.Count >= 41, $"each folder is looked for before it is stored: {walked.Reads.Count} reads");
             Assert.AreEqual(1, walked.Commits.Count, "the walk's end commits everything stored since");

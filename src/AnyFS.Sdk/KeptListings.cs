@@ -373,43 +373,51 @@ public sealed class KeptListings : IAsyncDisposable
         using var inFlight = new SemaphoreSlim(_options.MaxInFlight, _options.MaxInFlight);
         using var partSlots = _options.PartsAtOnce > 0 ? new SemaphoreSlim(_options.PartsAtOnce, _options.PartsAtOnce) : null;
         var walk = new Walk(counters, inFlight, full) { HeldBelow = heldAlone && _options.ListTree is not null ? CountHeldBelow() : null, PartSlots = partSlots };
-        void StartPart(string path, bool held)
+        void StartPart(string path, bool held, Unsettled? within)
         {
             // a part below the first takes its turn now, in the order the parts are found, and walks when it comes
             var turn = path.Length > 0 ? partSlots?.WaitAsync(ct) : null;
             lock (walk.Parts)
             {
-                walk.Parts.Add(Task.Run(() => WalkPartAsync(path, held, turn, walk, StartPart, ct), CancellationToken.None));
+                walk.Parts.Add(Task.Run(() => WalkPartAsync(path, held, within, turn, walk, StartPart, ct), CancellationToken.None));
             }
         }
 
-        StartPart("", heldAlone);
+        StartPart("", heldAlone, null);
         Exception? failure = null;
-        while (true)
+        try
         {
-            // every part's walk ends before this does, those started while waiting too: none outlives the semaphore
-            Task[] started;
-            lock (walk.Parts)
+            while (true)
             {
-                started = [.. walk.Parts];
-            }
-
-            try
-            {
-                await Task.WhenAll(started).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                failure ??= ex;
-            }
-
-            lock (walk.Parts)
-            {
-                if (walk.Parts.Count == started.Length)
+                // every part's walk ends before this does, those started while waiting too: none outlives the semaphore
+                Task[] started;
+                lock (walk.Parts)
                 {
-                    break;
+                    started = [.. walk.Parts];
+                }
+
+                try
+                {
+                    await Task.WhenAll(started).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    failure ??= ex;
+                }
+
+                lock (walk.Parts)
+                {
+                    if (walk.Parts.Count == started.Length)
+                    {
+                        break;
+                    }
                 }
             }
+        }
+        finally
+        {
+            // the stamps read for folders the walk did not get through everything below are not kept
+            Cache.ForgetUnsettled();
         }
 
         if (failure is not null)
@@ -417,9 +425,14 @@ public sealed class KeptListings : IAsyncDisposable
             ExceptionDispatchInfo.Throw(failure);
         }
 
-        _lastWalk = (walk.Listed, walk.Kept, walk.Failed);
+        _failedBefore = walk.FailedNow;
+        _lastWalk = (walk.Listed, walk.Kept, walk.Failed, walk.FailedAfresh);
         return !walk.LeftSomeOut && walk.Failed == 0;
     }
+
+    // the folders the last walk that ran to its end could not list: one that fails again is the upstream's lasting answer, not
+    // something the next walk puts right, and no longer holds up the stamps above it nor the day's walk of every folder
+    private ConcurrentDictionary<string, byte> _failedBefore = new(StringComparer.Ordinal);
 
     /// <summary>How many folders are held at each folder and below it.</summary>
     private Dictionary<string, int> CountHeldBelow()
@@ -440,8 +453,9 @@ public sealed class KeptListings : IAsyncDisposable
         return below;
     }
 
-    // how many folders the last walk listed afresh, how many it kept as they were by their stamps, and how many it could not list (for the log)
-    private (long Listed, long Kept, long Failed) _lastWalk;
+    // how many folders the last walk listed afresh, how many it kept as they were by their stamps, how many it could not list
+    // (for the log), and how many of those the walk before could
+    private (long Listed, long Kept, long Failed, long FailedAfresh) _lastWalk;
 
     /// <summary>
     /// Whether a walk now lists every folder whatever its stamp: one each <see cref="KeptListingsOptions.FullWalkEvery"/>
@@ -551,16 +565,23 @@ public sealed class KeptListings : IAsyncDisposable
                         givesWay.Dispose();
                     }
                 }
-                if (full || _fullWalkAt is null)
+                // the walk of every folder whatever its stamp is done once it met no folder it could not list that the walk
+                // before could: one that got nowhere (the computer awake before its network) is due again at the next walk,
+                // not a day on; a folder that fails walk after walk does not make every walk such a walk
+                var (listed, kept, failed, failedAfresh) = _lastWalk;
+                if (full ? failedAfresh == 0 : _fullWalkAt is null)
                 {
                     _fullWalkAt = _time.GetUtcNow();
                     _fullWalkChanged = true;
+                }
+                else if (full)
+                {
+                    _logger.LogInformation("{Name}: the walk of every folder whatever its stamp could not list {Failed:N0} folders; the next walk goes through every folder again", _options.Name, failedAfresh);
                 }
 
                 // what this walk could not list stays as it is until the next one, which begins a WalkEvery from now
                 Cache.RenewFailures();
                 var seconds = _time.GetElapsedTime(started).TotalSeconds;
-                var (listed, kept, failed) = _lastWalk;
                 var how = kept > 0 ? $"listed {listed:N0} folders afresh and kept {kept:N0} whose stamps hold" : failed > 0 ? $"listed {listed:N0} folders" : "listed every folder";
                 if (!everyFolder)
                 {
@@ -648,7 +669,7 @@ public sealed class KeptListings : IAsyncDisposable
     /// <see cref="KeptListingsOptions.Parallelism"/> at a time; the parts below it start walks of their own, each waiting its turn
     /// where <see cref="KeptListingsOptions.PartsAtOnce"/> gives turns.
     /// </summary>
-    private async Task WalkPartAsync(string root, bool rootHeldAlone, Task? turn, Walk walk, Action<string, bool> startPart, CancellationToken ct)
+    private async Task WalkPartAsync(string root, bool rootHeldAlone, Unsettled? within, Task? turn, Walk walk, Action<string, bool, Unsettled?> startPart, CancellationToken ct)
     {
         if (turn is not null)
         {
@@ -657,7 +678,7 @@ public sealed class KeptListings : IAsyncDisposable
 
         try
         {
-            await WalkPartCoreAsync(root, rootHeldAlone, walk, startPart, ct).ConfigureAwait(false);
+            await WalkPartCoreAsync(root, rootHeldAlone, within, walk, startPart, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -668,17 +689,20 @@ public sealed class KeptListings : IAsyncDisposable
         }
     }
 
-    private async Task WalkPartCoreAsync(string root, bool rootHeldAlone, Walk walk, Action<string, bool> startPart, CancellationToken ct)
+    private async Task WalkPartCoreAsync(string root, bool rootHeldAlone, Unsettled? rootWithin, Walk walk, Action<string, bool, Unsettled?> startPart, CancellationToken ct)
     {
         using var pending = new PendingFolders(_options.Parallelism);
-        pending.Add(root, rootHeldAlone);
+        pending.Add(root, rootHeldAlone, rootWithin);
 
         async Task WorkerAsync()
         {
             while (await pending.NextAsync(ct).ConfigureAwait(false) is { } next)
             {
-                var (folder, heldAlone) = next;
+                var (folder, heldAlone, within) = next;
                 CountedFolder? at = null;
+
+                // the folder's own, where it is stamped and listed afresh here: its stamp is kept once everything found below is done
+                Unsettled? mine = null;
                 try
                 {
                     // nobody has asked for it, and nothing says to read what nobody asked for
@@ -699,12 +723,31 @@ public sealed class KeptListings : IAsyncDisposable
                         if (!walk.Full && read && held is not null && stamp == held)
                         {
                             at.Kept();
-                            await KeepHeldAsync(folder, heldAlone, walk, pending.Add, ct).ConfigureAwait(false);
+                            await KeepHeldAsync(folder, heldAlone, walk, (child, alone) =>
+                            {
+                                within?.Found(1);
+                                pending.Add(child, alone, within);
+                            }, ct).ConfigureAwait(false);
                             continue;
                         }
 
                         tree = heldAlone && (walk.HeldBelow?.GetValueOrDefault(folder) ?? 0) < ReadAtOnceFrom ? null : await TreeOfAsync(folder, ct).ConfigureAwait(false);
-                        entries = tree is null ? await Cache.RefreshAsync(folder, stamp, ct).ConfigureAwait(false) : [];
+                        if (tree is not null)
+                        {
+                            entries = [];
+                        }
+                        else if (read && stamp is not null)
+                        {
+                            // the stamp read is kept when the walk has been through everything below, not now: until then it
+                            // says of the listings held below what is true of this one alone
+                            entries = await Cache.RefreshUnsettledAsync(folder, stamp, ct).ConfigureAwait(false);
+                            mine = new Unsettled(folder, within);
+                        }
+                        else
+                        {
+                            entries = await Cache.RefreshAsync(folder, stamp, ct).ConfigureAwait(false);
+                        }
+
                         if (tree is not null)
                         {
                             // the folder and everything below it at once: all kept and counted, nothing left to go into
@@ -749,7 +792,8 @@ public sealed class KeptListings : IAsyncDisposable
 
                     long files = 0;
                     var folders = 0;
-                    var below = new List<(string Folder, bool HeldAlone)>();
+                    var below = new List<(string Folder, bool HeldAlone, Unsettled? Within)>();
+                    var over = mine ?? within;
                     foreach (var entry in entries)
                     {
                         if (!entry.IsDirectory)
@@ -773,14 +817,16 @@ public sealed class KeptListings : IAsyncDisposable
 
                         if (partsBelow)
                         {
-                            startPart(child, heldAlone || isLeftOut);
+                            over?.Found(1);
+                            startPart(child, heldAlone || isLeftOut, over);
                         }
                         else
                         {
-                            below.Add((child, heldAlone || isLeftOut));
+                            below.Add((child, heldAlone || isLeftOut, over));
                         }
                     }
 
+                    over?.Found(below.Count);
                     pending.AddAll(below);
                     walk.Counters.Add(files, folders);
                 }
@@ -795,6 +841,19 @@ public sealed class KeptListings : IAsyncDisposable
                     if (ex is not VfsException { Error: VfsError.NotFound or VfsError.NotADirectory })
                     {
                         Interlocked.Increment(ref walk.Failed);
+                        walk.FailedNow[folder] = 0;
+
+                        // what is held of the folder, and below it, stays as it was: the stamps read above it are not kept over
+                        // that, so the next walk comes here again. Not for one that failed the walk before too, which the next
+                        // walk would not put right either; nor for one with nothing held, which every walk asks for anyway
+                        if (!_failedBefore.ContainsKey(folder))
+                        {
+                            Interlocked.Increment(ref walk.FailedAfresh);
+                            if (mine is not null || Cache.Holds(folder))
+                            {
+                                (mine ?? within)?.NotThrough();
+                            }
+                        }
                     }
 
                     at?.Failed(ex, ct);
@@ -803,6 +862,7 @@ public sealed class KeptListings : IAsyncDisposable
                 finally
                 {
                     at?.Dispose();
+                    Done(mine ?? within, ct);
                     pending.Done();
                 }
             }
@@ -812,28 +872,91 @@ public sealed class KeptListings : IAsyncDisposable
     }
 
     /// <summary>
+    /// A folder the walk has done with, under the stamped folder it was found below (<paramref name="over"/>; its own, for
+    /// one listed afresh with a stamp): where that was the last of what was found below it, its stamp is kept with its
+    /// listing, unless something below could not be listed (<see cref="Unsettled.NotThrough"/>), and it is done in its
+    /// turn under the one above. A walk that is stopping keeps no stamp: it has not been through what it did not reach.
+    /// </summary>
+    private void Done(Unsettled? over, CancellationToken ct)
+    {
+        for (var at = over; at is not null && at.Done(); at = at.Above)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                continue;
+            }
+
+            if (at.Through)
+            {
+                Cache.Settle(at.Folder);
+            }
+            else
+            {
+                Cache.Unsettle(at.Folder);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A stamped folder a walk has listed afresh, until the walk has done with every folder it found below it: the stamp read
+    /// for it before it was listed says something of every listing held below it, so it is kept with the folder's listing
+    /// only once they have all been listed afresh (or kept by stamps of their own). Until 22-Nov-2026 it was kept as the
+    /// folder was listed: a walk stopped there (the program closed), or one that could not list a folder below, left those
+    /// listings as they were, and the next walk, finding the stamp held, kept them so until the stamp next moved.
+    /// </summary>
+    private sealed class Unsettled(string folder, Unsettled? above)
+    {
+        // the folder itself, and each folder found below it that the walk has not done with (one that is unsettled itself counts until it settles)
+        private int _outstanding = 1;
+        private volatile bool _notThrough;
+
+        public string Folder { get; } = folder;
+
+        /// <summary>The stamped folder above that is being walked afresh too, which this one is one of the folders found below.</summary>
+        public Unsettled? Above { get; } = above;
+
+        /// <summary>Whether everything found below was listed (or had nothing held to go stale).</summary>
+        public bool Through => !_notThrough;
+
+        public void Found(int folders) => Interlocked.Add(ref _outstanding, folders);
+
+        /// <summary>One of them is done; true when it was the last.</summary>
+        public bool Done() => Interlocked.Decrement(ref _outstanding) == 0;
+
+        /// <summary>A folder below kept a listing the walk could not list afresh: neither this stamp nor any above it is kept.</summary>
+        public void NotThrough()
+        {
+            for (var at = this; at is not null; at = at.Above)
+            {
+                at._notThrough = true;
+            }
+        }
+    }
+
+    /// <summary>
     /// The folders one part of a walk has still to go into: the last found first, those of one folder in the order it listed them,
     /// so the walk has done with a folder and all that is below it before it goes on to the next. Level by level, a big tree's
     /// walk came back to each folder long after what it had asked about it had aged out, and asked it all again.
     /// </summary>
     private sealed class PendingFolders(int workers) : IDisposable
     {
-        private readonly Stack<(string Folder, bool HeldAlone)> _folders = new();
+        private readonly Stack<(string Folder, bool HeldAlone, Unsettled? Within)> _folders = new();
         private readonly SemaphoreSlim _ready = new(0);
         private int _outstanding;
 
-        public void Add(string folder, bool heldAlone)
+        /// <param name="within">The stamped folder above being walked afresh, which the folder was found below (already counted there); null for none.</param>
+        public void Add(string folder, bool heldAlone, Unsettled? within)
         {
             Interlocked.Increment(ref _outstanding);
             lock (_folders)
             {
-                _folders.Push((folder, heldAlone));
+                _folders.Push((folder, heldAlone, within));
             }
 
             _ready.Release();
         }
 
-        public void AddAll(List<(string Folder, bool HeldAlone)> folders)
+        public void AddAll(List<(string Folder, bool HeldAlone, Unsettled? Within)> folders)
         {
             if (folders.Count == 0)
             {
@@ -853,7 +976,7 @@ public sealed class KeptListings : IAsyncDisposable
         }
 
         /// <summary>The next folder to go into; null once every folder is done, which is when no more can be found.</summary>
-        public async ValueTask<(string Folder, bool HeldAlone)?> NextAsync(CancellationToken ct)
+        public async ValueTask<(string Folder, bool HeldAlone, Unsettled? Within)?> NextAsync(CancellationToken ct)
         {
             await _ready.WaitAsync(ct).ConfigureAwait(false);
             lock (_folders)
@@ -1016,6 +1139,12 @@ public sealed class KeptListings : IAsyncDisposable
         public long Kept;
 
         public long Failed;
+
+        /// <summary>How many of the folders that could not be listed the walk before could (or did not come to).</summary>
+        public long FailedAfresh;
+
+        /// <summary>The folders that could not be listed.</summary>
+        public ConcurrentDictionary<string, byte> FailedNow { get; } = new(StringComparer.Ordinal);
     }
 }
 
