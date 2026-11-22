@@ -79,11 +79,14 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
     /// <summary>How long a query takes to answer.</summary>
     public TimeSpan QueryTakes { get; set; }
 
-    /// <summary>The most queries seen running at once.</summary>
-    public int MostQueriesAtOnce { get; private set; }
+    /// <summary>The most queries seen running at once; a test sets it back to see the most from there on.</summary>
+    public int MostQueriesAtOnce { get; set; }
 
     /// <summary>How many queries were refused as one too many.</summary>
     public int QueriesRefused => Volatile.Read(ref _queriesRefused);
+
+    /// <summary>What became of each query, in the order the server was done with them: refused as one too many, or answered.</summary>
+    public ConcurrentQueue<(string Query, bool Refused)> QueryAnswers { get; } = new();
 
     /// <summary>The most items an answer holds, the rest cut off with the server's notice (a hosted Artifactory's half a million); null for no limit.</summary>
     public int? HardLimit { get; set; }
@@ -928,6 +931,7 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
         var text = Encoding.UTF8.GetString(request.Body);
         Queries.Enqueue((request.Headers.GetValueOrDefault("stream") == "true" ? "stream " : "") + text);
         var running = Interlocked.Increment(ref _queriesNow);
+        var refused = false;
         try
         {
             lock (_gate)
@@ -941,6 +945,7 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
                 await Task.Delay(QueryPending).ConfigureAwait(false);
                 if (Volatile.Read(ref _queriesNow) > most)
                 {
+                    refused = true;
                     Interlocked.Increment(ref _queriesRefused);
                     return Response.Error(429, "too many requests");
                 }
@@ -959,6 +964,7 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
         finally
         {
             Interlocked.Decrement(ref _queriesNow);
+            QueryAnswers.Enqueue((text, refused));
         }
     }
 

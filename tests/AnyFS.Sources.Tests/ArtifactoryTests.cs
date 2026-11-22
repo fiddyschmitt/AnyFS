@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using AnyFS.Sdk;
@@ -1119,22 +1120,120 @@ public class ArtifactoryTests
     }
 
     [TestMethod]
-    public async Task AServerThatRefusesQueriesBeyondThoseItRunsAtOnceIsSentFewerAtATime()
+    public Task AServerThatRefusesQueriesBeyondThoseItRunsAtOnceIsSentFewerAtATime() => ARefusingServerIsSentFewerAtATimeAsync(againLate: false);
+
+    /// <summary>
+    /// The same where a query refused and sent again reaches the server late, after the one that was in its way has gone
+    /// (once on macOS in CI, 22-Nov-2026): it is answered, the count ends with the source still sending two at a time, and
+    /// the refusal that halves that comes in the walk that follows. The test above said no walk after the count is refused
+    /// anything, which the source does not promise: it halves once for each round of refusals, and loses nothing.
+    /// </summary>
+    [TestMethod]
+    public Task AQuerySentAgainThatReachesTheServerLateLeavesTheNextRefusalToAWalk() => ARefusingServerIsSentFewerAtATimeAsync(againLate: true);
+
+    private static readonly Regex SendsFewer = new(@"sends it (\d+) at a time from now on", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// What the source promises of a server that runs one query at once and refuses the rest (429), in whatever order the
+    /// refusals and the queries sent again reach it: the count and the walks are whole and right; every query refused is
+    /// sent again and answered; each time it sends fewer at once, that is fewer than before; and it comes down to what
+    /// the server runs, from when a walk is refused nothing and never has more there at once. How many it sends at once
+    /// is read where it says so, in its log.
+    /// </summary>
+    private static async Task ARefusingServerIsSentFewerAtATimeAsync(bool againLate)
     {
         var fake = ArtifactorySeed.Lab();
         fake.QueriesAtOnce = 1;
         fake.QueryTakes = TimeSpan.FromMilliseconds(150);
         fake.QueryPending = TimeSpan.FromMilliseconds(20);
-        await using var source = await StartAsync(fake, ArtifactorySeed.Settings(fake));
+        if (againLate)
+        {
+            OneAtATimeAfterARefusal(fake);
+        }
+
+        var log = new LineLogger();
+        using var context = new TestSourceContext(logger: log);
+        var settings = ArtifactorySeed.Settings(fake);
+        await using var source = await StartAsync(fake, settings, context);
+
+        // how many queries the source sends at once: what the settings come to, then what it said each time it sent fewer
+        List<int> AtOnce() => [settings.Requests, .. log.Lines.Select(l => SendsFewer.Match(l)).Where(m => m.Success).Select(m => int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture))];
+
         await source.CountFilesAsync(CancellationToken.None);
         Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
         Assert.AreEqual(ArtifactorySeed.Files, source.Counters.FilesKnown);
         Assert.IsTrue(fake.QueriesRefused > 0, "one too many was refused, and asked again");
+        Assert.IsTrue(AtOnce().Count > 1, "refused, the source sends fewer at once, and says how many in its log, where this reads it:\n" + log);
+        if (againLate)
+        {
+            fake.Fault = null;
+            CollectionAssert.AreEqual(new[] { settings.Requests, settings.Requests / 2 }, AtOnce(), "the query sent again met no other at the server, so the count ended a refusal short: two at a time, one more than the server runs");
+        }
 
-        // from then on one at a time: a walk of every folder is refused nothing
-        var refused = fake.QueriesRefused;
-        await source.WalkAsync(new SourceCounters(), full: true, CancellationToken.None);
-        Assert.AreEqual(refused, fake.QueriesRefused);
+        // walks of every folder until the source is down to what the server runs: it is by the count's end as a rule, and
+        // by a walk's where the count ended above it (a walk is refused as soon as two of its queries are there at once)
+        for (var above = 0; ; above++)
+        {
+            var atOnce = AtOnce()[^1];
+            var refused = fake.QueriesRefused;
+            fake.MostQueriesAtOnce = 0;
+            var walked = new SourceCounters();
+            Assert.IsTrue(await source.WalkAsync(walked, full: true, CancellationToken.None), "the walk went into every folder");
+            Assert.AreEqual(ArtifactorySeed.Files, walked.FilesKnown, "and counted every file");
+            if (atOnce <= fake.QueriesAtOnce)
+            {
+                Assert.AreEqual(refused, fake.QueriesRefused, "from then on a walk of every folder is refused nothing");
+                Assert.IsTrue(fake.MostQueriesAtOnce <= fake.QueriesAtOnce, $"nor has it more queries at the server at once than the server runs: {fake.MostQueriesAtOnce}");
+                break;
+            }
+
+            Assert.IsTrue(above < 3, $"after {above + 1} walks the source still sends {AtOnce()[^1]} queries at once to a server that runs {fake.QueriesAtOnce}");
+        }
+
+        var answers = fake.QueryAnswers.ToList();
+        for (var i = 0; i < answers.Count; i++)
+        {
+            if (answers[i].Refused)
+            {
+                Assert.IsTrue(answers.Skip(i + 1).Any(a => a.Query == answers[i].Query && !a.Refused), "a query that was refused was not sent again and answered: " + answers[i].Query);
+            }
+        }
+
+        var said = AtOnce();
+        for (var i = 1; i < said.Count; i++)
+        {
+            Assert.IsTrue(said[i] < said[i - 1], "each time fewer than before, never more again: " + string.Join(", ", said));
+        }
+
+        Assert.IsTrue(said.Count - 1 <= fake.QueriesRefused, $"and once for a round of refusals, not without one: {said.Count - 1} times for {fake.QueriesRefused} refusals");
+    }
+
+    /// <summary>
+    /// From the first query refused on, each query waits at the server's door until the server is done with every one
+    /// before it: none meets another there, so none is refused, whenever the source sends them. A query refused and sent
+    /// again so reaches the server after the one that was in its way has gone, as one held up on its way would.
+    /// </summary>
+    private static void OneAtATimeAfterARefusal(FakeArtifactory fake)
+    {
+        var door = new object();
+        var through = 0;
+        fake.Fault = request =>
+        {
+            if (request.Method == "POST" && request.Url.AbsolutePath.EndsWith("/api/search/aql", StringComparison.Ordinal))
+            {
+                lock (door)
+                {
+                    if (fake.QueriesRefused > 0)
+                    {
+                        SpinWait.SpinUntil(() => fake.QueryAnswers.Count >= through, TimeSpan.FromSeconds(30));
+                    }
+
+                    through++;
+                }
+            }
+
+            return null;
+        };
     }
 
     [TestMethod]
@@ -1259,6 +1358,7 @@ public class ArtifactoryTests
 
         Assert.AreEqual("libs-release-local (artifactory.example.com)", plugin.SuggestName(new ArtifactorySettings { Address = "https://artifactory.example.com/ui/repos/tree/General/libs-release-local" }));
         Assert.AreEqual("acme (artifactory.example.com)", plugin.SuggestName(new ArtifactorySettings { Address = "https://artifactory.example.com/artifactory/libs-release-local/org/acme/" }));
+        Assert.AreEqual("index (artifactory.example.com)", plugin.SuggestName(new ArtifactorySettings { Address = "https://artifactory.example.com/artifactory/libs-release-local/.index/" }), "a source's name begins with no dot, as a folder's may");
         Assert.AreEqual("example.jfrog.io", plugin.SuggestName(new ArtifactorySettings { Address = "https://example.jfrog.io/" }));
         Assert.IsNull(plugin.SuggestName(new ArtifactorySettings { Address = "nothing" }));
 
