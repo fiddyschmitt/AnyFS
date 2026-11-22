@@ -279,6 +279,49 @@ public class WebDavMountTests
         Assert.AreEqual(HttpStatusCode.Forbidden, (await client.DeleteAsync("work/")).StatusCode, "the collection root stays");
     }
 
+    /// <summary>
+    /// A name that reads as an escape ("Q3%20report.pdf") is that name and no other. The path the server framework hands
+    /// over is decoded already; decoded once more, every request for the file went to "Q3 report.pdf": it was listed, and
+    /// its GET, PUT and DELETE reached the other file, or none (review of 21-Nov-2026). A Destination, which comes escaped,
+    /// is decoded the one time too, as an address and as a path.
+    /// </summary>
+    [TestMethod]
+    public async Task ANameThatReadsAsAnEscapeIsReachedByTheHrefItIsListedWith()
+    {
+        // each with the file a second decoding, or a plus read as a space, would name
+        (string Name, string Twin)[] names = [("Q3%20report.pdf", "Q3 report.pdf"), ("a+b.txt", "a b.txt"), ("100%25.txt", "100%.txt"), ("50%2Foff.txt", "50/off.txt")];
+        var source = Tree();
+        foreach (var (name, twin) in names)
+        {
+            source.AddFile("odd/" + name, "this is " + name).AddFile("odd/" + twin, "the twin of " + name);
+        }
+
+        var (_, _, client) = await StartAsync(source);
+        var doc = await XmlAsync(await client.SendAsync(Request("PROPFIND", "work/odd/", null, ("Depth", "1"))));
+        foreach (var (name, twin) in names)
+        {
+            var href = "/work/odd/" + Uri.EscapeDataString(name);
+            Assert.AreEqual(name, Prop(ResponseFor(doc, href)!, "displayname")!.Value, "listed by an href that spells its name, escaped once");
+            Assert.AreEqual("this is " + name, await client.GetStringAsync(href), "the href sent back reads that very file");
+
+            Assert.AreEqual(HttpStatusCode.NoContent, (await client.PutAsync(href, new StringContent("written to " + name))).StatusCode, "a PUT replaces it, and makes no other");
+            Assert.AreEqual("written to " + name, Encoding.UTF8.GetString(source.GetFile("odd/" + name)!));
+            Assert.AreEqual("the twin of " + name, Encoding.UTF8.GetString(source.GetFile("odd/" + twin)!), "its twin is as it was");
+
+            var copy = await client.SendAsync(Request("COPY", href, null, ("Destination", $"{client.BaseAddress}work/odd/{Uri.EscapeDataString("copy of " + name)}")));
+            Assert.AreEqual(HttpStatusCode.Created, copy.StatusCode, await copy.Content.ReadAsStringAsync());
+            Assert.AreEqual("written to " + name, Encoding.UTF8.GetString(source.GetFile("odd/copy of " + name)!), "a Destination that is an address");
+            var move = await client.SendAsync(Request("MOVE", "/work/odd/" + Uri.EscapeDataString("copy of " + name), null, ("Destination", "/work/odd/" + Uri.EscapeDataString("moved " + name))));
+            Assert.AreEqual(HttpStatusCode.Created, move.StatusCode, await move.Content.ReadAsStringAsync());
+            Assert.AreEqual("written to " + name, Encoding.UTF8.GetString(source.GetFile("odd/moved " + name)!), "a Destination that is a path");
+            Assert.IsFalse(source.Exists("odd/copy of " + name), "moved from where the copy went");
+
+            Assert.AreEqual(HttpStatusCode.NoContent, (await client.DeleteAsync(href)).StatusCode);
+            Assert.IsFalse(source.Exists("odd/" + name), "the DELETE took that file");
+            Assert.IsTrue(source.Exists("odd/" + twin), "and not its twin");
+        }
+    }
+
     [TestMethod]
     public async Task LocksGuardWritesUntilUnlocked()
     {

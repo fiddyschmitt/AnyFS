@@ -136,6 +136,9 @@ internal sealed partial class WebDavServer : IAsyncDisposable
         ctx.Response.Headers["DAV"] = "1, 2";
         ctx.Response.Headers["MS-Author-Via"] = "DAV";
         var method = ctx.Request.Method.ToUpperInvariant();
+
+        // decoded already, by the server framework, and not again here: a name that reads as an escape
+        // ("Q3%20report.pdf") is that name, and decoded twice it was another file's
         var path = ctx.Request.Path.Value ?? "/";
         var (collectionName, rest) = SplitPath(path);
 
@@ -531,9 +534,11 @@ internal sealed partial class WebDavServer : IAsyncDisposable
             return;
         }
 
+        // an address or a path (RFC 4918 10.3), escaped either way, and nothing has decoded it yet: decoded here, the one
+        // time. A path is taken as it stands, not through Uri, which on Unix reads one as a file's name and escapes it again
         var destination = r.Ctx.Request.Headers["Destination"].ToString();
-        var destinationPath = Uri.TryCreate(destination, UriKind.Absolute, out var uri) ? uri.AbsolutePath : destination;
-        var (destCollection, destRest) = SplitPath(destinationPath);
+        var destinationPath = !destination.StartsWith('/') && Uri.TryCreate(destination, UriKind.Absolute, out var uri) ? uri.AbsolutePath : destination;
+        var (destCollection, destRest) = SplitPath(Uri.UnescapeDataString(destinationPath));
         if (!destCollection.Equals(r.Collection, StringComparison.OrdinalIgnoreCase) || !VfsPath.TryNormalize(destRest, out var destPath, out _))
         {
             await ErrorAsync(r.Ctx, StatusCodes.Status502BadGateway, "The destination must be inside the same collection.", ct).ConfigureAwait(false);
@@ -857,9 +862,10 @@ internal sealed partial class WebDavServer : IAsyncDisposable
         return header.Length == 0 ? [] : TokenPattern().Matches(header).Select(m => m.Groups[1].Value).ToList();
     }
 
+    /// <summary>The collection a path names and the rest of it; the path as decoded, never decoded here.</summary>
     private static (string Collection, string Remainder) SplitPath(string path)
     {
-        var trimmed = Uri.UnescapeDataString(path).Replace('\\', '/').TrimStart('/');
+        var trimmed = path.Replace('\\', '/').TrimStart('/');
         if (trimmed.Length == 0)
         {
             return ("", "");
