@@ -1,4 +1,4 @@
-using LibSmb.Protocol;
+﻿using LibSmb.Protocol;
 using Microsoft.Extensions.Logging;
 
 namespace LibSmb;
@@ -276,7 +276,7 @@ internal sealed partial class SmbConnection
             }
             finally
             {
-                if (open.File is { } file)
+                if (open.File is { } file && !open.DeleteOnClose)
                 {
                     // a failed close means a buffered write did not land: said, not passed off as success
                     await file.DisposeAsync().ConfigureAwait(false);
@@ -285,7 +285,31 @@ internal sealed partial class SmbConnection
 
             if (open.DeleteOnClose)
             {
-                await open.Share.FileSystem.DeleteAsync(open.Path, ct).ConfigureAwait(false);
+                // The file ceases to exist with this close, so nothing written through it is to be kept first: a file
+                // system that stores a file as it closes would store it, then delete it. And whatever its close does,
+                // the delete follows: a close that failed left the file there, for that file system to store later.
+                var givenUp = false;
+                if (open.File is { } leaving)
+                {
+                    try
+                    {
+                        await leaving.AbandonAsync().ConfigureAwait(false);
+                        givenUp = true;
+                    }
+                    catch (Exception ex) when (IsFileSystemFailure(ex))
+                    {
+                        Logger.LogDebug("smb: giving up {Path} of {Share}, deleted as it closes, failed: {Error}", open.Path, open.Share.Name, ex.Message);
+                    }
+                }
+
+                try
+                {
+                    await open.Share.FileSystem.DeleteAsync(open.Path, ct).ConfigureAwait(false);
+                }
+                catch (SmbFileSystemException ex) when (givenUp && ex.Error == SmbFileSystemError.NotFound)
+                {
+                    // a new file that was only ever here: given up, it is gone already
+                }
             }
         }
         catch (Exception ex) when (IsFileSystemFailure(ex))
@@ -470,6 +494,7 @@ internal sealed partial class SmbConnection
 
         try
         {
+            open.Written = true;
             await file.WriteAsync((long)offset, request.Slice(dataOffset, (int)length), ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (IsFileSystemFailure(ex))

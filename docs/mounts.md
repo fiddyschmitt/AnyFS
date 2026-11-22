@@ -1,4 +1,4 @@
-# Connecting to a mount
+﻿# Connecting to a mount
 
 AnyFS never maps a drive letter or creates a persistent connection unless you opt in; every
 mount provider is reached through the OS's own path form. The tile's status line is the access
@@ -105,6 +105,11 @@ requests side by side: a slow read from a source holds up nothing else, and othe
 and opens carry on. **Requests at a time** (64) bounds how many of one machine's requests run at
 once. A request still running after half a second gets an interim reply, so the client waits rather
 than giving up on the connection.
+
+A file deleted as it closes (how Explorer drops the part of a copy it cancels) is given up, not kept
+first, and is deleted whatever its close does. A file a client was still writing when its connection
+went is given up too: half a file is no file. Both matter on a source that stores a file when it
+closes (SharePoint uploads it then); on one whose writes land as they are made nothing changes.
 
 - **Windows 11 24H2+**: a port other than 445 needs the device-less
   `net use \\<host>\<collection> /TCPPORT:1445 /USER:<user>` once per session (no drive

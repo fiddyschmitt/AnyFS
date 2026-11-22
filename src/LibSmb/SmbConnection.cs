@@ -1,4 +1,4 @@
-using System.Buffers;
+﻿using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
@@ -731,7 +731,15 @@ internal sealed partial class SmbConnection
             {
                 try
                 {
-                    await file.DisposeAsync().ConfigureAwait(false);
+                    if (open.Written)
+                    {
+                        // its client was still writing it: what had arrived is not the file, and is not kept as one
+                        await file.AbandonAsync().ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await file.DisposeAsync().ConfigureAwait(false);
+                    }
                 }
                 catch (Exception ex)
                 {

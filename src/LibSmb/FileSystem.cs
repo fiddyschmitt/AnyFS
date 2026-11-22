@@ -1,4 +1,4 @@
-namespace LibSmb;
+﻿namespace LibSmb;
 
 /// <summary>
 /// The file system behind one share. Paths are share-relative, separated by forward slashes, with no leading or trailing
@@ -58,6 +58,14 @@ public interface ISmbFile : IAsyncDisposable
 
     /// <summary>Truncates or extends the file to <paramref name="length"/>.</summary>
     ValueTask SetLengthAsync(long length, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Ends the open without keeping what was written through it, where the file system can tell the two apart (one that
+    /// stores a file when it is closed): for a file deleted as it closes, and for one its client was still writing when
+    /// the connection went. The default closes it as <see cref="IAsyncDisposable.DisposeAsync"/> does, which is right
+    /// for a file system whose writes are in the file as they are made.
+    /// </summary>
+    ValueTask AbandonAsync() => DisposeAsync();
 
     /// <summary>Makes what was written durable (or at least visible to other opens).</summary>
     ValueTask FlushAsync(CancellationToken cancellationToken);

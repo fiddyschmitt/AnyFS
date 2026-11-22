@@ -1,4 +1,4 @@
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using AnyFS.Sdk;
 using LibSmb;
 
@@ -233,6 +233,19 @@ internal sealed class VfsShareFileSystem(IVirtualFileSystem fs, IMountStatsSink 
             try
             {
                 await file.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (VfsException ex)
+            {
+                throw Translate(ex);
+            }
+        }
+
+        public async ValueTask AbandonAsync()
+        {
+            _readAhead.Dispose();
+            try
+            {
+                await file.AbandonAsync().ConfigureAwait(false);
             }
             catch (VfsException ex)
             {

@@ -1,4 +1,4 @@
-# LibSmb
+﻿# LibSmb
 
 An SMB 2/3 file server in pure C#. It serves shares from a file system you implement (`ISmbFileSystem`), or from a
 folder of the machine (`LocalFileSystem`), to the SMB clients built into Windows, macOS and Linux.
@@ -25,6 +25,9 @@ dotnet add package LibSmb
 - Apple's SMB2 extensions: macOS gets each directory entry's access, mode and Finder facts in the listing itself.
 - A lookup by name is one stat, not a listing filtered.
 - Read-only shares, and files that are read-only themselves.
+- A file deleted as it closes, and one its client was still writing when the connection went, are ended with
+  `ISmbFile.AbandonAsync`. A file system that stores a file when it closes implements it to keep nothing of the
+  write; by default it is the close, which is right where writes are in the file as they are made.
 - Shares can be added and removed while the server runs.
 - Any port, so no administrator rights are needed (Windows 11 24H2 connects to another port with
   `net use \\host\share /TCPPORT:1445`; macOS with `smb://host:1445/share`; Linux with `mount -t cifs -o port=1445`).

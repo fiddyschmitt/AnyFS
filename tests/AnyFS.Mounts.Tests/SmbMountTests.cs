@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Text;
@@ -394,6 +394,108 @@ public class SmbMountTests
 
         (await client.CloseAsync(tree, fileId)).EnsureSuccess();
         return [.. data];
+    }
+
+    /// <summary>
+    /// A file deleted as it closes (SMB's delete-on-close, which is how Explorer drops the part of a copy it cancels) is
+    /// given up, not kept first: its close kept what was written, which on a source that uploads at the close uploaded
+    /// the part and then deleted it. And the delete follows whatever the close does: a close that failed skipped it, so
+    /// with a source that keeps a failed upload to try again the cancelled copy landed later (the review's second pass,
+    /// 22-Nov-2026, N5 and N12).
+    /// </summary>
+    [TestMethod]
+    public async Task AFileDeletedAsItClosesIsGivenUpAndStillDeletedWhenItsCloseFails()
+    {
+        var source = Tree();
+        var told = new ClosesTold(await VfsAsync(source));
+        var (_, _, port) = await MountAsync(new CloseFails(told, "refused.bin"));
+        var (client, tree) = await ConnectAsync(port);
+
+        foreach (var name in new[] { "part.bin", "refused.bin" })
+        {
+            var id = SmbTestClient.FileIdOf((await client.CreateAsync(tree, name, Access.Delete | Access.FileWriteData | 0x00100080, Disposition.Create)).EnsureSuccess());
+            (await client.WriteAsync(tree, id, 0, new byte[1000])).EnsureSuccess();
+            (await client.DeleteOnCloseAsync(tree, id)).EnsureSuccess();
+            Assert.AreEqual(Status.Success, (await client.CloseAsync(tree, id)).Status, name);
+            CollectionAssert.AreEqual(new[] { "given up" }, told.Of(name), $"{name}: {string.Join(", ", told.Of(name))}");
+            Assert.IsNull(source.GetFile(name), $"{name} is deleted");
+        }
+
+        // a file closed in the ordinary way is kept as before, and one whose close fails says so
+        var kept = await client.OpenAsync(tree, "kept.bin", write: true, disposition: Disposition.Create);
+        (await client.WriteAsync(tree, kept, 0, new byte[1000])).EnsureSuccess();
+        (await client.CloseAsync(tree, kept)).EnsureSuccess();
+        CollectionAssert.AreEqual(new[] { "closed" }, told.Of("kept.bin"));
+        Assert.AreEqual(1000, source.GetFile("kept.bin")!.Length);
+    }
+
+    /// <summary>
+    /// A file still being written when its connection goes is given up: the client went (a cable, a sleep, a crash)
+    /// part way through, and what had arrived is not the file. It was closed like any other, which keeps it: half a file
+    /// on a source that uploads at the close. A file only read, or closed by its client before the connection went, is
+    /// closed as before.
+    /// </summary>
+    [TestMethod]
+    public async Task AFileStillBeingWrittenWhenItsConnectionGoesIsGivenUp()
+    {
+        var source = Tree();
+        var told = new ClosesTold(await VfsAsync(source));
+        var (_, _, port) = await MountAsync(told);
+        var (client, tree) = await ConnectAsync(port);
+
+        var whole = await client.OpenAsync(tree, "whole.bin", write: true, disposition: Disposition.Create);
+        (await client.WriteAsync(tree, whole, 0, new byte[1000])).EnsureSuccess();
+        (await client.CloseAsync(tree, whole)).EnsureSuccess();
+        var half = await client.OpenAsync(tree, "half.bin", write: true, disposition: Disposition.Create);
+        (await client.WriteAsync(tree, half, 0, new byte[1000])).EnsureSuccess();
+        await client.OpenAsync(tree, "readme.txt");
+
+        await client.DisposeAsync();   // the connection goes with two files open
+
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while ((told.Of("half.bin").Length == 0 || told.Of("readme.txt").Length == 0) && watch.Elapsed < TimeSpan.FromSeconds(10))
+        {
+            await Task.Delay(20);
+        }
+
+        CollectionAssert.AreEqual(new[] { "given up" }, told.Of("half.bin"), string.Join(", ", told.Of("half.bin")));
+        CollectionAssert.AreEqual(new[] { "closed" }, told.Of("readme.txt"), "only read: closed");
+        CollectionAssert.AreEqual(new[] { "closed" }, told.Of("whole.bin"), "closed by its client before: kept");
+    }
+
+    /// <summary>A collection where one file cannot be closed, as on a source whose upload at the close the server refuses.</summary>
+    private sealed class CloseFails(IVirtualFileSystem inner, string name) : Passthrough(inner)
+    {
+        public override async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct)
+        {
+            var file = await Inner.OpenAsync(path, mode, ct);
+            return path.EndsWith(name, StringComparison.OrdinalIgnoreCase) ? new Failing(file) : file;
+        }
+
+        private sealed class Failing(IVfsFile file) : IVfsFile
+        {
+            public long Length => file.Length;
+
+            public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct) => file.ReadAsync(offset, buffer, ct);
+
+            public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct) => file.WriteAsync(offset, data, ct);
+
+            public ValueTask SetLengthAsync(long length, CancellationToken ct) => file.SetLengthAsync(length, ct);
+
+            public ValueTask FlushAsync(CancellationToken ct) => file.FlushAsync(ct);
+
+            public async ValueTask AbandonAsync()
+            {
+                await file.AbandonAsync();
+                throw new VfsException(VfsError.Unavailable, "the server did not answer");
+            }
+
+            public async ValueTask DisposeAsync()
+            {
+                await file.DisposeAsync();
+                throw new VfsException(VfsError.Unavailable, "the server did not take the upload; it is kept and tried again");
+            }
+        }
     }
 
     /// <summary>A collection passed through, changed by the subclass where it says.</summary>

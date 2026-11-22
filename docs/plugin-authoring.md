@@ -1,4 +1,4 @@
-# Writing a plugin
+﻿# Writing a plugin
 
 A plugin is a .NET class library that references `AnyFS.Sdk` and contains a class implementing
 `ISourcePlugin` (a kind of source) or `IMountProviderPlugin` (a kind of mount). Drop the DLL
@@ -105,7 +105,7 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
 - A file that holds its writes until it closes (an upload of the whole file) should implement
   `IVfsFile.AbandonAsync`: the mounts call it instead of `DisposeAsync` for a write that broke off
   part way (a WebDAV `PUT` or FTP upload cut short, a file deleted as it closes, a file still being
-  written as a WinFsp volume goes), and nothing of that write is to be kept. By default it is the
+  written as a WinFsp volume or an SMB connection goes), and nothing of that write is to be kept. By default it is the
   close, which is right for a file whose writes land as they are made. A wrapper passes it on.
   `DisposeAsync` may throw when the close fails (the upload was refused): the mounts that can tell
   their client do.

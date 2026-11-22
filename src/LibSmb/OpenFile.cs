@@ -1,4 +1,4 @@
-using System.Security.Cryptography;
+﻿using System.Security.Cryptography;
 using System.Text;
 using LibSmb.Protocol;
 
@@ -35,6 +35,9 @@ internal sealed class OpenFile(FileId id, SmbShare share, string path, ISmbFile?
     public bool CanWrite { get; } = canWrite;
 
     public bool DeleteOnClose { get; set; }
+
+    /// <summary>Whether anything was written through it, or its length set: what a connection that goes leaves half done.</summary>
+    public bool Written { get; set; }
 
     /// <summary>A QUERY_DIRECTORY's entries, once listed; the next enumeration reply starts at <see cref="DirectoryPosition"/>.</summary>
     public List<SmbEntry>? DirectoryEntries { get; set; }

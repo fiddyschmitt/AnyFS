@@ -1,4 +1,4 @@
-using LibSmb.Protocol;
+﻿using LibSmb.Protocol;
 using Microsoft.Extensions.Logging;
 
 namespace LibSmb;
@@ -387,6 +387,7 @@ internal sealed partial class SmbConnection
             return Status.InvalidParameter;
         }
 
+        open.Written = true;
         await file.SetLengthAsync((long)length, ct).ConfigureAwait(false);
         return Status.Success;
     }
