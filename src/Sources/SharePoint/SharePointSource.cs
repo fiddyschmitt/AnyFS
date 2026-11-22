@@ -801,6 +801,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
 
         var sameName = string.Equals(fromPath, toPath, StringComparison.OrdinalIgnoreCase);
         var to = sameName ? null : await Listings.StatAsync(toPath, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false);
+        var over = false;
         if (to is not null)
         {
             if (!replace || from.IsDirectory || to.IsDirectory)
@@ -808,13 +809,24 @@ public abstract partial class SharePointSource : SourceBase, ICountable
                 throw VfsException.AlreadyExists(toPath);
             }
 
-            await DeleteAsync(toPath, ct).ConfigureAwait(false);
+            // The file there is replaced by SharePoint, in the move itself. Deleted first and the move made after, a move
+            // that failed (a lock, a throttle, a dropped connection) left the name empty: the old file in the recycle
+            // bin and the new one under the name it was written to, which is how editors save. Only a file whose bytes
+            // are still here, waiting to be uploaded, is ended here first: SharePoint knows nothing of it.
+            if (_pending.ContainsKey(toPath))
+            {
+                await DeleteAsync(toPath, ct).ConfigureAwait(false);
+            }
+            else
+            {
+                over = true;
+            }
         }
 
         ItemRef moved;
         try
         {
-            moved = await Run(() => Store.MoveAsync(fromLibrary, fromItemPath, toItemPath, from.IsDirectory, ct)).ConfigureAwait(false);
+            moved = await Run(() => Store.MoveAsync(fromLibrary, fromItemPath, toItemPath, from.IsDirectory, over, ct)).ConfigureAwait(false);
         }
         catch
         {

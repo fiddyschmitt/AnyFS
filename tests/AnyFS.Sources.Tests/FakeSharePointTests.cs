@@ -632,6 +632,43 @@ public class FakeSharePointTests
         await source.WalkAsync(new SourceCounters(), None);
         CollectionAssert.AreEqual(longer, await ReadAllAsync(source, path), "and after the walk");
     }
+    /// <summary>
+    /// A rename over a file that fails leaves the file that was there. The rename deleted the target and then moved, in
+    /// two requests: a move that failed after the delete (a lock, a throttle, a dropped connection) left the name empty,
+    /// the old file in the recycle bin and the new one under the name it was written to. Editors save this way (the
+    /// review's second pass, 22-Nov-2026, N13). SharePoint replaces in the one move now.
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
+    [DataRow(true, DisplayName = "tenant, Graph")]
+    public async Task ARenameOverAFileThatFailsLeavesTheFileThatWasThere(bool tenant)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        var old = "the document as it was"u8.ToArray();
+        var saved = "the document as the editor saved it, beside the old one"u8.ToArray();
+        var document = fake.Seed(documents, "edited/report.docx", old);
+        fake.Seed(documents, "edited/~report.tmp", saved);
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode) : FarmSettings(fake), context);
+        CollectionAssert.AreEquivalent(new[] { "report.docx", "~report.tmp" }, await SpsTestServer.NamesAsync(source, "Documents/edited"));
+
+        // the move is refused once, as for a file someone has open
+        fake.Fail(r => tenant ? r.Method == "PATCH" && r.Host.StartsWith("graph.microsoft.", StringComparison.OrdinalIgnoreCase) : r.RawPath.Contains("MoveToUsingPath", StringComparison.OrdinalIgnoreCase), 1, _ => tenant
+            ? FakeSharePoint.Response.Json(423, FakeSharePoint.GraphError("resourceLocked", "The resource you are attempting to access is locked"))
+            : FakeSharePoint.Response.Json(423, FakeSharePoint.RestError("-2130575245, Microsoft.SharePoint.SPFileLockException", "The file is locked for shared use.")));
+        await Assert.ThrowsExactlyAsync<VfsException>(() => source.RenameAsync("Documents/edited/~report.tmp", "Documents/edited/report.docx", replace: true, None));
+        var there = documents.Root.Folder("edited")!.File("report.docx");
+        Assert.IsNotNull(there, "the document is still under its name");
+        CollectionAssert.AreEqual(old, there.Content, "as it was");
+        CollectionAssert.AreEquivalent(new[] { "report.docx", "~report.tmp" }, await SpsTestServer.NamesAsync(source, "Documents/edited"));
+
+        await source.RenameAsync("Documents/edited/~report.tmp", "Documents/edited/report.docx", replace: true, None);
+        CollectionAssert.AreEqual(saved, documents.Root.Folder("edited")!.File("report.docx")!.Content, "replaced in the one move");
+        CollectionAssert.AreEqual(new[] { "report.docx" }, await SpsTestServer.NamesAsync(source, "Documents/edited"));
+        CollectionAssert.AreEqual(saved, await ReadAllAsync(source, "Documents/edited/report.docx"));
+        GC.KeepAlive(document);
+    }
     private static bool IsUpload(bool tenant, string method, string host, string rawPath) => tenant
         ? host.StartsWith("graph.microsoft.", StringComparison.OrdinalIgnoreCase) && (method == "PUT" && rawPath.Contains("content", StringComparison.OrdinalIgnoreCase) || rawPath.Contains("createUploadSession", StringComparison.OrdinalIgnoreCase))
         : method == "POST" && rawPath.Contains("/Files/AddUsingPath", StringComparison.OrdinalIgnoreCase);

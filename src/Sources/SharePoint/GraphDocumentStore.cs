@@ -492,7 +492,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
         return listed;
     }
 
-    public async Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, CancellationToken ct)
+    public async Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, bool replace, CancellationToken ct)
     {
         var (toParent, toName) = VfsPath.SplitLast(toPath);
         string parentId;
@@ -508,7 +508,8 @@ internal sealed class GraphDocumentStore : IDocumentStore
         }
 
         var json = "{\"name\":" + Json.Quote(toName) + ",\"parentReference\":{\"id\":" + Json.Quote(parentId) + "}}";
-        using var moved = await _graph.SendJsonAsync(HttpMethod.Patch, SharePointPaths.ItemAddress(library.Key, fromPath), json, Display(library, fromPath), ct).ConfigureAwait(false);
+        var address = SharePointPaths.ItemAddress(library.Key, fromPath) + (replace && !isFolder ? "?@microsoft.graph.conflictBehavior=replace" : "");
+        using var moved = await _graph.SendJsonAsync(HttpMethod.Patch, address, json, Display(library, fromPath), ct).ConfigureAwait(false);
         return GraphDrives.ParseItem(moved.RootElement).Item;
     }
 

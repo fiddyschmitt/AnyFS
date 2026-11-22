@@ -601,6 +601,10 @@ public class SharePointOnlineLiveTests
     [TestMethod]
     public Task ANewFileDoesNotReplaceOneMadeSinceTheFolderWasListed() => Target.ANewFileDoesNotReplaceOneMadeSinceTheFolderWasListedAsync(GraphDrives.SimpleUploadLimit);
 
+    /// <summary>A rename over a file replaces it in the one move (the review's second pass, N13).</summary>
+    [TestMethod]
+    public Task ARenameOverAFileReplacesIt() => Target.ARenameOverAFileReplacesItAsync();
+
     /// <summary>Files at the edges of Graph's one-request upload and of an upload session's pieces (the last a single byte).</summary>
     [TestMethod]
     public Task FilesAtTheUploadLimitsRoundTrip() => Target.UploadsRoundTripAsync(

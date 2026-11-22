@@ -1003,6 +1003,10 @@ public abstract class SharePointRestLiveTests
     [TestMethod]
     public Task ANewFileDoesNotReplaceOneMadeSinceTheFolderWasListed() => Target.ANewFileDoesNotReplaceOneMadeSinceTheFolderWasListedAsync(SharePointRestClient.SimpleUploadLimit);
 
+    /// <summary>A rename over a file replaces it in the one move (the review's second pass, N13).</summary>
+    [TestMethod]
+    public Task ARenameOverAFileReplacesIt() => Target.ARenameOverAFileReplacesItAsync();
+
     /// <summary>
     /// Files at the edges of the one-request upload and of its pieces. One of 8 to 10 MiB was left empty while the limit was
     /// 8 MiB and the pieces 10: it went as StartUpload alone, which never makes the file (found by the fakes, 24-Oct-2026).

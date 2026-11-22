@@ -630,7 +630,17 @@ internal sealed partial class FakeSharePoint
 
             if (target.Child(name) is { } there && there != item)
             {
-                return GraphJson(409, GraphError("nameAlreadyExists", "Name already exists"));
+                if (there is not FileItem || item is not FileItem || !request.Query.TryGetValue("@microsoft.graph.conflictBehavior", out var conflict) || conflict != "replace")
+                {
+                    return GraphJson(409, GraphError("nameAlreadyExists", "Name already exists"));
+                }
+
+                if (there is FileItem { Locked: true })
+                {
+                    return GraphJson(423, GraphError("resourceLocked", "The resource you are attempting to access is locked"));
+                }
+
+                target.Children.Remove(there);
             }
 
             item.Parent!.Children.Remove(item);

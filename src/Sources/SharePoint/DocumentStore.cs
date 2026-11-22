@@ -221,8 +221,11 @@ internal interface IDocumentStore : IDisposable
     /// </summary>
     Task<int> CountChildrenAsync(LibraryInfo library, string itemPath, CancellationToken ct);
 
-    /// <summary>Renames or moves within the library; the target must not exist.</summary>
-    Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, CancellationToken ct);
+    /// <summary>
+    /// Renames or moves within the library. The target must not exist, unless <paramref name="replace"/>: then a file
+    /// there is replaced by the one moved, in the one request, so a move that fails leaves it as it was.
+    /// </summary>
+    Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, bool replace, CancellationToken ct);
 
     Task SetTimesAsync(LibraryInfo library, string itemPath, DateTimeOffset? created, DateTimeOffset? modified, CancellationToken ct);
 }

@@ -873,12 +873,12 @@ internal sealed class MemoryDocumentStore : IDocumentStore
         return Task.CompletedTask;
     }
 
-    public Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, CancellationToken ct)
+    public Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, bool replace, CancellationToken ct)
     {
         lock (_gate)
         {
             Check(library);
-            if (_items.ContainsKey((library.Key, toPath)))
+            if (_items.ContainsKey((library.Key, toPath)) && !replace)
             {
                 throw VfsException.AlreadyExists(toPath);
             }

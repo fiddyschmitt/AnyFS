@@ -609,13 +609,15 @@ internal sealed class RestDocumentStore : IDocumentStore
         return listed;
     }
 
-    public async Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, CancellationToken ct)
+    public async Task<ItemRef> MoveAsync(LibraryInfo library, string fromPath, string toPath, bool isFolder, bool replace, CancellationToken ct)
     {
         var from = Url(library, fromPath);
         var to = Url(library, toPath);
+
+        // moveOperations is SharePoint's MoveOperations: 1 is Overwrite
         var api = isFolder
             ? $"{SharePointRestClient.FolderApi(from)}/MoveToUsingPath(DecodedUrl='{SharePointRestClient.Encode(to)}')"
-            : $"{SharePointRestClient.FileApi(from)}/MoveToUsingPath(DecodedUrl='{SharePointRestClient.Encode(to)}',moveOperations=0)";
+            : $"{SharePointRestClient.FileApi(from)}/MoveToUsingPath(DecodedUrl='{SharePointRestClient.Encode(to)}',moveOperations={(replace ? 1 : 0)})";
         using (var _ = await Client(library).PostJsonAsync(api, null, Display(library, fromPath), ct).ConfigureAwait(false))
         {
         }

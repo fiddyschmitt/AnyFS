@@ -263,6 +263,34 @@ internal sealed class SharePointTarget
         }
     }
 
+    /// <summary>
+    /// A rename over a file replaces it, in the one move: the target has the moved file's content and the old name is
+    /// gone. On a real server this is the check that it takes the replacing move as the source sends it.
+    /// </summary>
+    public async Task ARenameOverAFileReplacesItAsync()
+    {
+        Require();
+        await using var source = await StartWithFixtureAsync(Settings());
+        var name = $"renamed-{Guid.NewGuid():N}";
+        var folder = VfsPath.Join(VfsPath.Join(VfsPath.Join(Library, FixtureFolder), "scratch"), name);
+        await source.CreateDirectoryAsync(folder, CancellationToken.None);
+        var old = "the document as it was"u8.ToArray();
+        var saved = "the document as the editor saved it, beside the old one"u8.ToArray();
+        await SpoTestServer.EnsureFileAsync(source, VfsPath.Join(folder, "report.docx"), old);
+        await SpoTestServer.EnsureFileAsync(source, VfsPath.Join(folder, "~report.tmp"), saved);
+
+        await source.RenameAsync(VfsPath.Join(folder, "~report.tmp"), VfsPath.Join(folder, "report.docx"), replace: true, CancellationToken.None);
+        CollectionAssert.AreEqual(new[] { "report.docx" }, await SpsTestServer.NamesAsync(source, folder));
+        await using (var file = await source.OpenAsync(VfsPath.Join(folder, "report.docx"), VfsOpenMode.Read, CancellationToken.None))
+        {
+            var bytes = new byte[file.Length];
+            Assert.AreEqual(bytes.Length, await file.ReadFullyAsync(0, bytes, CancellationToken.None));
+            CollectionAssert.AreEqual(saved, bytes);
+        }
+
+        await source.DeleteAsync(VfsPath.Join(folder, "report.docx"), CancellationToken.None);
+        await source.DeleteAsync(folder, CancellationToken.None);
+    }
     /// <summary>The SDK contract's setup on this target: libraries at the top, or the library pinned and nothing spooled.</summary>
     public async Task<SourceContractSetup> ContractSetupAsync(bool pinned)
     {
