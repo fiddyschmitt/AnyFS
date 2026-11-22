@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using AnyFS.Fixtures;
 using AnyFS.Sdk;
@@ -536,6 +537,161 @@ public class MirrorSourceTests
         Assert.AreEqual(2, mostPaths, "two paths counted at once");
         var (_, directories) = await WalkAsync(source);
         Assert.AreEqual(directories, source.Counters.DirectoriesKnown, "every folder counted once");
+    }
+
+    [TestMethod]
+    public async Task AFolderThatMayNotBeReadIsAnErrorNotAnEmptyFolder()
+    {
+        var a = Path.Combine(_root, "A");
+        var closed = Path.Combine(a, "closed");
+        Directory.CreateDirectory(Path.Combine(a, "open"));
+        Directory.CreateDirectory(closed);
+        File.WriteAllText(Path.Combine(a, "open", "a.txt"), "a");
+        File.WriteAllText(Path.Combine(closed, "b.txt"), "b");
+        using var context = new TestSourceContext("mirror");
+        await using var source = await StartAsync(a, context);
+        var chain = Chain(a);
+        try
+        {
+            DenyListing(closed);
+            var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, chain + "/closed"));
+            Assert.AreEqual(VfsError.AccessDenied, ex.Error);
+            var asked = context.UpstreamRequests.Requests.Last(r => r.What == "List folder");
+            Assert.AreEqual(closed, asked.Target);
+            Assert.IsInstanceOfType<UnauthorizedAccessException>(asked.Error, "what the file system refused is a failed row");
+            Assert.IsTrue(asked.IsDone);
+            CollectionAssert.AreEqual(new[] { "closed/", "open/" }, await NamesAsync(source, chain), "the folder above still shows it");
+            CollectionAssert.AreEqual(new[] { "a.txt" }, await NamesAsync(source, chain + "/open"));
+        }
+        finally
+        {
+            AllowListing(closed);
+        }
+
+        CollectionAssert.AreEqual(new[] { "b.txt" }, await NamesAsync(source, chain + "/closed"), "and lists again once it may be read");
+    }
+
+    [TestMethod]
+    public async Task ACountThatCouldNotReadAFolderEndsAsALowerBoundNotComplete()
+    {
+        var a = Path.Combine(_root, "A");
+        var closed = Path.Combine(a, "closed");
+        Directory.CreateDirectory(Path.Combine(a, "open"));
+        Directory.CreateDirectory(Path.Combine(closed, "below"));
+        File.WriteAllText(Path.Combine(a, "x.txt"), "x");
+        File.WriteAllText(Path.Combine(a, "open", "a.txt"), "a");
+        File.WriteAllText(Path.Combine(closed, "b.txt"), "b");
+        File.WriteAllText(Path.Combine(closed, "below", "c.txt"), "c");
+        var log = new LineLogger();
+        using var context = new TestSourceContext("mirror", log);
+        await using var source = await StartAsync(a, context);
+        try
+        {
+            DenyListing(closed);
+            await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+            Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "two files went uncounted: the host leaves the count the lower bound it is");
+            var (files, directories) = await WalkAsync(source);
+            Assert.AreEqual(2, files, "x.txt and open/a.txt");
+            Assert.AreEqual(files, source.Counters.FilesKnown, "the rest is counted all the same");
+            Assert.AreEqual(directories, source.Counters.DirectoriesKnown, "the folder itself among them, as its parent's listing shows it");
+            Assert.AreEqual(1, log.Lines.Count(l => l.Contains("could not read 1 of the folders", StringComparison.Ordinal)), log.ToString());
+            Assert.IsTrue(log.Lines.Any(l => l.Contains("count skipped " + closed, StringComparison.Ordinal)), log.ToString());
+        }
+        finally
+        {
+            AllowListing(closed);
+        }
+
+        await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(EnumerationState.InProgress, source.Counters.State, "a count that read every folder is the host's to mark Complete");
+        Assert.AreEqual(4, source.Counters.FilesKnown);
+    }
+
+    [TestMethod]
+    public async Task AFolderGoneSinceItsParentWasListedLeavesTheCountWholeButAPathGoneDoesNot()
+    {
+        var a = Path.Combine(_root, "A");
+        var sub = Path.Combine(a, "sub");
+        Directory.CreateDirectory(sub);
+        File.WriteAllText(Path.Combine(a, "x.txt"), "x");
+        await using var source = await StartAsync(a, threads: 1, pathsInParallel: 1);
+
+        // deleted between its parent's listing and its own
+        source.CountListing = (_, real) =>
+        {
+            if (real == sub)
+            {
+                Directory.Delete(sub);
+            }
+        };
+        await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(EnumerationState.InProgress, source.Counters.State, "a folder that is no more is nothing left out");
+
+        // the whole path gone under the count, as a share that drops
+        Directory.CreateDirectory(sub);
+        source.CountListing = (_, real) =>
+        {
+            if (real == sub)
+            {
+                Directory.Delete(a, true);
+            }
+        };
+        await ((ICountable)source).CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(EnumerationState.Unknown, source.Counters.State, "what the count had not come to is left out");
+    }
+
+    /// <summary>
+    /// Takes from the account the tests run as the right to list a folder (a deny entry on Windows, no mode bits elsewhere)
+    /// until <see cref="AllowListing"/> gives it back: called inside a try whose finally does, or the tree could not be
+    /// deleted. Inconclusive where the account lists the folder all the same (root, a token that reads past permissions).
+    /// </summary>
+    private static void DenyListing(string folder)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Icacls(folder, "/deny", $@"{Environment.UserDomainName}\{Environment.UserName}:(RD)");
+        }
+        else
+        {
+            File.SetUnixFileMode(folder, UnixFileMode.None);
+        }
+
+        try
+        {
+            Directory.GetFileSystemEntries(folder);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return;
+        }
+
+        Assert.Inconclusive("the account the tests run as lists a folder it is denied (root, or a token that reads past permissions): the case cannot be made here");
+    }
+
+    private static void AllowListing(string folder)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Icacls(folder, "/remove:d", $@"{Environment.UserDomainName}\{Environment.UserName}");
+        }
+        else
+        {
+            File.SetUnixFileMode(folder, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    private static void Icacls(params string[] arguments)
+    {
+        var start = new ProcessStartInfo("icacls.exe") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        foreach (var argument in arguments)
+        {
+            start.ArgumentList.Add(argument);
+        }
+
+        using var process = Process.Start(start)!;
+        process.StandardOutput.ReadToEnd();
+        process.StandardError.ReadToEnd();
+        process.WaitForExit();
     }
 
     /// <summary>What the host's generic count would find: every listing, directory by directory.</summary>

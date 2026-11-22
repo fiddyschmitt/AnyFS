@@ -15,7 +15,9 @@ namespace AnyFS.Sources.Mirror;
 /// </summary>
 public sealed class MirrorSource : SourceBase, ICountable
 {
-    private static readonly EnumerationOptions Enumeration = new() { AttributesToSkip = 0, IgnoreInaccessible = true, ReturnSpecialDirectories = false };
+    // a folder the account may not read fails its listing: ignored, it was an empty folder to whoever listed it and no gap
+    // in a count (review of 21-Nov-2026). In a listing of one folder the option covers that folder's own open and read alone
+    private static readonly EnumerationOptions Enumeration = new() { AttributesToSkip = 0, IgnoreInaccessible = false, ReturnSpecialDirectories = false };
 
     /// <summary>The most threads per path, and paths at a time, a count takes (<see cref="MirrorSettings.CountThreadsPerPath"/>, <see cref="MirrorSettings.CountPathsInParallel"/>).</summary>
     internal const int MaxCountParallelism = 64;
@@ -68,7 +70,9 @@ public sealed class MirrorSource : SourceBase, ICountable
     /// in parallel, with <see cref="SourceBase.Counters"/> updated as the walks go. The threads are the walk's, not the
     /// thread pool's: a listing blocks on the disk or the share, and 64 of them would starve the pool the rest of AnyFS
     /// runs on. A path configured inside another (C:\ and C:\Photos) is counted once, by its own walk; junctions and
-    /// symlinks are counted but not followed; an unreachable path contributes nothing until the next count.
+    /// symlinks are counted but not followed; an unreachable path contributes nothing until the next count. A folder that
+    /// cannot be read is left out with what is below it, and the count then ends as a lower bound
+    /// (<see cref="EnumerationState.Unknown"/>), as a walk of kept listings does where it could not list a folder.
     /// </summary>
     public async Task CountFilesAsync(CancellationToken ct)
     {
@@ -82,14 +86,20 @@ public sealed class MirrorSource : SourceBase, ICountable
             await turns.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                await WalkForCountAsync(root, chains, threads, ct).ConfigureAwait(false);
+                return await WalkForCountAsync(root, chains, threads, ct).ConfigureAwait(false);
             }
             finally
             {
                 turns.Release();
             }
         }).ToList();
-        await Task.WhenAll(walks).ConfigureAwait(false);
+        var leftOut = (await Task.WhenAll(walks).ConfigureAwait(false)).Sum();
+        if (leftOut > 0)
+        {
+            // said before the host looks: it marks Complete only a count still in progress as it ends
+            Counters.SetState(EnumerationState.Unknown);
+            Logger.LogInformation("mirror: the count could not read {LeftOut:N0} of the folders, which it leaves out: {Files:N0} files in {Folders:N0} folders is a lower bound", leftOut, Counters.FilesKnown, Counters.DirectoriesKnown);
+        }
     }
 
     /// <summary>Chain levels the walks won't see: those above any configured path, and configured paths inside another (which the outer walk skips).</summary>
@@ -100,16 +110,18 @@ public sealed class MirrorSource : SourceBase, ICountable
     /// One path's count: <paramref name="threads"/> threads take its folders from one stack (deepest first, so the stack
     /// stays short), list them and put the subfolders back, until none is left or being listed.
     /// </summary>
-    private async Task WalkForCountAsync(MirrorRoot root, HashSet<string> chains, int threads, CancellationToken ct)
+    /// <returns>How many folders it could not read, and so left out with what is below them.</returns>
+    private async Task<long> WalkForCountAsync(MirrorRoot root, HashSet<string> chains, int threads, CancellationToken ct)
     {
         if (!IsThere(root))
         {
             Logger.LogDebug("mirror: count skipped {Path}: not reachable", root.Original);
-            return;
+            return 0;
         }
 
         using var folders = new BlockingCollection<(string Real, string Chain)>(new ConcurrentStack<(string Real, string Chain)>());
         var outstanding = 1;
+        long leftOut = 0;
         folders.Add((root.FullPath, root.ChainPath), ct);
 
         void Count()
@@ -170,6 +182,13 @@ public sealed class MirrorSource : SourceBase, ICountable
                     }
                     catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                     {
+                        // one gone since its parent was listed is nothing left out, unless the path itself has gone (a share
+                        // that dropped): then it is everything not yet counted
+                        if (ex is not DirectoryNotFoundException || !IsThere(root))
+                        {
+                            Interlocked.Increment(ref leftOut);
+                        }
+
                         at.Failed(ex, ct);
                         asked?.Failed(ex, ct);
                         Logger.LogDebug("mirror: count skipped {Path}: {Error}", real, ex.Message);
@@ -197,6 +216,7 @@ public sealed class MirrorSource : SourceBase, ICountable
             .Select(_ => Task.Factory.StartNew(Count, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default))
             .ToList();
         await Task.WhenAll(counting).ConfigureAwait(false);
+        return Interlocked.Read(ref leftOut);
     }
 
     protected override Task OnInitialiseAsync(CancellationToken ct)
