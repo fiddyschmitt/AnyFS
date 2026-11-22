@@ -168,7 +168,116 @@ public class SpoolCacheTests
     {
         File.WriteAllText(Path.Combine(_dir, "stale.spool"), "x");
         await using var cache = new SpoolCache(_dir, time: _time);
-        Assert.AreEqual(0, Directory.GetFiles(_dir, "*.spool").Length);
+
+        // beside the start, not before it (hundreds of thousands of them take a while), and never this run's own
+        var data = Bytes(100);
+        var up = new DrippingUpstream(data);
+        up.Release(100);
+        await using var file = await cache.OpenAsync("k", 100, up.OpenAsync, CancellationToken.None);
+        await file.ReadFullyAsync(0, new byte[100], CancellationToken.None);
+        for (var i = 0; i < 500 && File.Exists(Path.Combine(_dir, "stale.spool")); i++)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.IsFalse(File.Exists(Path.Combine(_dir, "stale.spool")), "what an earlier run left is removed");
+        Assert.AreEqual(1, Directory.GetFiles(_dir, "*.spool").Length, "this run's file stays");
+        var again = new byte[100];
+        await file.ReadFullyAsync(0, again, CancellationToken.None);
+        CollectionAssert.AreEqual(data, again);
+    }
+
+    [TestMethod]
+    public async Task AFinishedFileNobodyReadsHoldsNoHandleAndIsReadAgainAllTheSame()
+    {
+        // a cache of a repository's small files holds hundreds of thousands: until 22-Nov-2026 each kept two handles open
+        var data = Bytes(1000);
+        await using var cache = new SpoolCache(_dir, time: _time);
+        var up = new DrippingUpstream(data);
+        up.Release(1000);
+        await using (var first = await cache.OpenAsync("k", 1000, up.OpenAsync, CancellationToken.None))
+        {
+            await first.ReadFullyAsync(0, new byte[1000], CancellationToken.None);
+            await WaitForCompleteAsync(first);
+        }
+
+        var path = Directory.GetFiles(_dir, "*.spool").Single();
+        for (var i = 0; ; i++)
+        {
+            try
+            {
+                // nothing else has it open: the download closed its handle as it finished, the reader's went with the reader
+                using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                }
+
+                break;
+            }
+            catch (IOException) when (i < 100)
+            {
+                await Task.Delay(10);
+            }
+        }
+
+        await using var second = await cache.OpenAsync("k", 1000, up.OpenAsync, CancellationToken.None);
+        var read = new byte[1000];
+        await second.ReadFullyAsync(0, read, CancellationToken.None);
+        CollectionAssert.AreEqual(data, read);
+        Assert.AreEqual(1, up.Opens, "from the file kept: no second download");
+    }
+
+    [TestMethod]
+    public async Task TheOneUsedLongestAgoMakesRoomAndOnePastItsAgeGoesWhenItsReaderLetsGo()
+    {
+        var data = Bytes(1000);
+        await using var cache = new SpoolCache(_dir, maxBytes: 3500, maxAge: TimeSpan.FromHours(1), time: _time);
+        var downloads = new Dictionary<string, int>();
+        async Task HeldAsync(string key)
+        {
+            var up = new DrippingUpstream(data);
+            up.Release(1000);
+            await using var f = await cache.OpenAsync(key, 1000, ct =>
+            {
+                downloads[key] = downloads.GetValueOrDefault(key) + 1;
+                return up.OpenAsync(ct);
+            }, CancellationToken.None);
+            await f.ReadFullyAsync(0, new byte[1000], CancellationToken.None);
+            await WaitForCompleteAsync(f);
+            _time.Advance(TimeSpan.FromMinutes(1));
+        }
+
+        foreach (var key in new[] { "k0", "k1", "k2" })
+        {
+            await HeldAsync(key);
+        }
+
+        Assert.AreEqual(3000, cache.BytesOnDisk, "counted as they arrive");
+
+        // k0 read again: k1 is now the one used longest ago, and the one to make room
+        await HeldAsync("k0");
+        await HeldAsync("k3");
+        await HeldAsync("k4");
+        Assert.AreEqual(4, cache.Count, "k0, k2, k3, k4");
+        await HeldAsync("k0");
+        await HeldAsync("k1");
+        Assert.AreEqual((1, 2), (downloads["k0"], downloads["k1"]), "k0 was kept and read from its file each time; k1 went, and was downloaded again");
+
+        // one past its age while someone reads it stays for that reader, and goes when the reader does
+        var late = new DrippingUpstream(data);
+        late.Release(1000);
+        var reader = await cache.OpenAsync("late", 1000, late.OpenAsync, CancellationToken.None);
+        await reader.ReadFullyAsync(0, new byte[1000], CancellationToken.None);
+        await WaitForCompleteAsync(reader);
+        _time.Advance(TimeSpan.FromHours(2));
+        await HeldAsync("other");
+        var still = new byte[1000];
+        await reader.ReadFullyAsync(0, still, CancellationToken.None);
+        CollectionAssert.AreEqual(data, still, "its reader reads on");
+        await reader.DisposeAsync();
+        await using (await cache.OpenAsync("late", 1000, late.OpenAsync, CancellationToken.None))
+        {
+            Assert.AreEqual(2, late.Opens, "downloaded again: the aged one went with its reader");
+        }
     }
 
     private static async Task WaitForCompleteAsync(IVfsFile file)
