@@ -37,6 +37,15 @@ public interface IVfsFile : IAsyncDisposable
     ValueTask SetLengthAsync(long length, CancellationToken ct);
 
     ValueTask FlushAsync(CancellationToken ct);
+
+    /// <summary>
+    /// Closes the file without keeping what was written through this open, where the file can: for a write that broke
+    /// off part way (an upload whose body ended early, a copy that was cancelled and whose file is deleted next), which
+    /// <see cref="IAsyncDisposable.DisposeAsync"/> would keep as far as it got. A file whose writes land as they are made
+    /// has nothing to take back and closes as it always does, which is the default; one that holds its writes until the
+    /// close (the upload of a whole file) drops them, and what the source had before stays as it was. A wrapper passes it on.
+    /// </summary>
+    ValueTask AbandonAsync() => DisposeAsync();
 }
 
 public static class VfsFileExtensions

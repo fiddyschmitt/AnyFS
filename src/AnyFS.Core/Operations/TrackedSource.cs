@@ -297,6 +297,21 @@ public sealed class TrackedSource : ISource
             }
         }
 
+        /// <summary>A write given up ends the operation as one its caller gave up, not as one that succeeded.</summary>
+        public async ValueTask AbandonAsync()
+        {
+            try
+            {
+                await inner.AbandonAsync().ConfigureAwait(false);
+                op.Cancel("the write was given up: nothing of it is kept");
+            }
+            catch (Exception ex)
+            {
+                op.Fail(ex);
+                throw;
+            }
+        }
+
         /// <summary>The close is part of the operation: a write-on-close upload that fails ends it Failed.</summary>
         public async ValueTask DisposeAsync()
         {

@@ -1021,6 +1021,7 @@ internal sealed class FtpSession
         var offset = _restart;
         var mode = append ? VfsOpenMode.OpenOrCreate : offset > 0 ? VfsOpenMode.ReadWrite : VfsOpenMode.Create;
         var file = await target.Fs.OpenAsync(target.Path, mode, ct).ConfigureAwait(false);
+        var closed = false;
         try
         {
             if (append)
@@ -1048,15 +1049,32 @@ internal sealed class FtpSession
 
                     await file.FlushAsync(token).ConfigureAwait(false);
                 }
+                catch
+                {
+                    // aborted, or its connection broke: no file. Closed, the part that came would have been kept as the
+                    // file (and, where the file is uploaded at its close, put in place of the one that was there)
+                    closed = true;
+                    await file.AbandonAsync().ConfigureAwait(false);
+                    throw;
+                }
                 finally
                 {
                     ArrayPool<byte>.Shared.Return(buffer);
                 }
+
+                // closed, and with that kept, before the client is told the transfer is complete: a file that is taken at
+                // its close (an upload) and refused then has the refusal told, not "226 Transfer complete"
+                closed = true;
+                await file.DisposeAsync().ConfigureAwait(false);
             }, ct).ConfigureAwait(false);
         }
         finally
         {
-            await file.DisposeAsync().ConfigureAwait(false);
+            if (!closed)
+            {
+                // the transfer never began (no data connection): nothing was written
+                await file.AbandonAsync().ConfigureAwait(false);
+            }
         }
     }
 

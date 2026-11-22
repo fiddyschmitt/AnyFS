@@ -623,5 +623,7 @@ public sealed class CountingVfsFile(IVfsFile inner, StatsCollector stats, string
 
     public ValueTask FlushAsync(CancellationToken ct) => inner.FlushAsync(ct);
 
+    public ValueTask AbandonAsync() => inner.AbandonAsync();
+
     public ValueTask DisposeAsync() => inner.DisposeAsync();
 }

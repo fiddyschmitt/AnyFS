@@ -44,7 +44,7 @@ public class FtpMountTests
         public Guid Id { get; } = Guid.NewGuid();
     }
 
-    private async Task<(IMount Mount, TestMountContext Context, int Port)> StartAsync(ISource source, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool readOnly = false, string? user = null, string? password = null, bool anonymous = true)
+    private async Task<(IMount Mount, TestMountContext Context, int Port)> StartAsync(ISource source, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool readOnly = false, string? user = null, string? password = null, bool anonymous = true, Func<IVirtualFileSystem, IVirtualFileSystem>? wrap = null)
     {
         await source.InitialiseAsync(new TestSourceContext(collection), CancellationToken.None);
         var p = port ?? FreePort();
@@ -57,7 +57,8 @@ public class FtpMountTests
         var mount = provider.CreateMount(settings, new Collection(collection));
         var context = new TestMountContext(collection, "ftp", logger: new ConsoleLogger(), shareWith: shareWith);
         Console.WriteLine($"[test] starting ftp mount '{collection}' on {p}");
-        await mount.StartAsync(new SingleSourceVfs(source, collection, readOnly), context, CancellationToken.None);
+        IVirtualFileSystem vfs = new SingleSourceVfs(source, collection, readOnly);
+        await mount.StartAsync(wrap?.Invoke(vfs) ?? vfs, context, CancellationToken.None);
         Console.WriteLine($"[test] mount '{collection}' started");
         _cleanup.Add(mount);
         Assert.AreEqual($"ftp://{(user is null ? "" : user + "@")}localhost:{p}/{collection}/", mount.AccessPaths.Single().Value);
@@ -268,6 +269,51 @@ public class FtpMountTests
         data.Close();
         Assert.AreEqual(200, (await client.CommandAsync("NOOP")).Code, "the control connection is still good");
         Assert.IsTrue((await client.ListAsync("/work")).Count > 0, "and still lists");
+    }
+
+    /// <summary>
+    /// An upload that is aborted, or whose data connection breaks, is no file. The part that came was closed as the file,
+    /// which a source that takes a file at its close (SharePoint's upload) put in place of the one that was there (review of
+    /// 21-Nov-2026, R3): it is given up now. One that came whole is closed, before the client is told it is complete.
+    /// </summary>
+    [TestMethod]
+    public async Task AnUploadAbortedOrBrokenOffIsGivenUpNotKeptAsFarAsItCame()
+    {
+        ClosesTold told = null!;
+        var (_, _, port) = await StartAsync(Tree(), wrap: vfs => told = new ClosesTold(vfs));
+        var client = await ConnectAsync(port);
+
+        using (var data = await client.PassiveAsync())
+        {
+            Assert.AreEqual(150, (await client.CommandAsync("STOR /work/aborted.bin")).Code);
+            await data.GetStream().WriteAsync(new byte[200_000]);
+            await data.GetStream().FlushAsync();
+            await Task.Delay(300);
+            await client.SendAsync("ABOR");
+            var first = await client.ReadReplyAsync();
+            Assert.AreEqual(426, first.Code, first.Text);
+            Assert.AreEqual(226, (await client.ReadReplyAsync()).Code);
+        }
+
+        CollectionAssert.AreEqual(new[] { "given up" }, told.Of("aborted.bin"), "aborted: " + string.Join(", ", told.Of("aborted.bin")));
+
+        using (var data = await client.PassiveAsync())
+        {
+            Assert.AreEqual(150, (await client.CommandAsync("STOR /work/reset.bin")).Code);
+            await data.GetStream().WriteAsync(new byte[200_000]);
+            await data.GetStream().FlushAsync();
+            await Task.Delay(300);
+            data.Client.LingerState = new LingerOption(true, 0);   // closed with a reset, as a connection that broke
+            data.Client.Close();
+            var reply = await client.ReadReplyAsync();
+            Assert.AreEqual(426, reply.Code, reply.Text);
+        }
+
+        CollectionAssert.AreEqual(new[] { "given up" }, told.Of("reset.bin"), "broken off: " + string.Join(", ", told.Of("reset.bin")));
+
+        Assert.AreEqual(226, (await client.StoreAsync("/work/whole.bin", new byte[200_000])).Code);
+        CollectionAssert.AreEqual(new[] { "closed" }, told.Of("whole.bin"), "whole: " + string.Join(", ", told.Of("whole.bin")));
+        Assert.AreEqual(200, (await client.CommandAsync("NOOP")).Code, "the control connection is still good");
     }
 
     [TestMethod]

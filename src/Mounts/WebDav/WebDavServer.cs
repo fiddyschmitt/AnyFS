@@ -417,7 +417,9 @@ internal sealed partial class WebDavServer : IAsyncDisposable
             return;
         }
 
-        await using (var file = await r.Fs.OpenAsync(r.Path, VfsOpenMode.Create, ct).ConfigureAwait(false))
+        var file = await r.Fs.OpenAsync(r.Path, VfsOpenMode.Create, ct).ConfigureAwait(false);
+        var whole = false;
+        try
         {
             var buffer = ArrayPool<byte>.Shared.Rent(256 * 1024);
             try
@@ -431,10 +433,24 @@ internal sealed partial class WebDavServer : IAsyncDisposable
                 }
 
                 await file.FlushAsync(ct).ConfigureAwait(false);
+                whole = true;
             }
             finally
             {
                 ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        finally
+        {
+            if (whole)
+            {
+                await file.DisposeAsync().ConfigureAwait(false);
+            }
+            else
+            {
+                // a body that broke off part way is no file: closed, the part that came would have been kept as the file
+                // (and, where the file is uploaded at its close, put in place of the one that was there)
+                await file.AbandonAsync().ConfigureAwait(false);
             }
         }
 

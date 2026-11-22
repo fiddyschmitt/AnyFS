@@ -46,7 +46,7 @@ public class WebDavMountTests
         public Guid Id { get; } = Guid.NewGuid();
     }
 
-    private async Task<(IMount Mount, TestMountContext Context, HttpClient Client)> StartAsync(ISource source, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool readOnly = false, string? user = null, string? password = null)
+    private async Task<(IMount Mount, TestMountContext Context, HttpClient Client)> StartAsync(ISource source, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool readOnly = false, string? user = null, string? password = null, Func<IVirtualFileSystem, IVirtualFileSystem>? wrap = null)
     {
         await source.InitialiseAsync(new TestSourceContext(collection), CancellationToken.None);
         var p = port ?? FreePort();
@@ -57,7 +57,8 @@ public class WebDavMountTests
         settings.Password = password;
         var mount = provider.CreateMount(settings, new Collection(collection));
         var context = new TestMountContext(collection, "webdav", shareWith: shareWith);
-        await mount.StartAsync(new SingleSourceVfs(source, collection, readOnly), context, CancellationToken.None);
+        IVirtualFileSystem vfs = new SingleSourceVfs(source, collection, readOnly);
+        await mount.StartAsync(wrap?.Invoke(vfs) ?? vfs, context, CancellationToken.None);
         _cleanup.Add(mount);
         var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{p}/") };
         _cleanup.Add(new ClientDisposer(client));
@@ -68,6 +69,56 @@ public class WebDavMountTests
         }
 
         return (mount, context, client);
+    }
+
+    /// <summary>
+    /// A PUT whose body breaks off part way is no file. The part that came was closed as the file, which a source that takes a
+    /// file at its close (SharePoint's upload) put in place of the one that was there (review of 21-Nov-2026, R3): it is
+    /// given up now, and a PUT that came whole is closed as before.
+    /// </summary>
+    [TestMethod]
+    public async Task APutWhoseBodyBreaksOffIsGivenUpNotKeptAsFarAsItCame()
+    {
+        ClosesTold told = null!;
+        var (_, _, client) = await StartAsync(Tree(), wrap: vfs => told = new ClosesTold(vfs));
+
+        using var broken = new HttpRequestMessage(HttpMethod.Put, "work/broken.bin") { Content = new BreakingContent(declared: 4 << 20, sent: 1 << 20) };
+        try
+        {
+            using var answer = await client.SendAsync(broken);
+            Assert.Fail($"the request was to break off, and was answered {(int)answer.StatusCode}");
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or OperationCanceledException)
+        {
+        }
+
+        var until = System.Diagnostics.Stopwatch.StartNew();
+        while (told.Of("broken.bin").Length == 0 && until.Elapsed < TimeSpan.FromSeconds(15))
+        {
+            await Task.Delay(50);
+        }
+
+        CollectionAssert.AreEqual(new[] { "given up" }, told.Of("broken.bin"), string.Join(", ", told.Of("broken.bin")));
+
+        Assert.AreEqual(HttpStatusCode.Created, (await client.PutAsync("work/whole.bin", new ByteArrayContent(new byte[100_000]))).StatusCode);
+        CollectionAssert.AreEqual(new[] { "closed" }, told.Of("whole.bin"), string.Join(", ", told.Of("whole.bin")));
+    }
+
+    /// <summary>A body that says how long it is and breaks off before that.</summary>
+    private sealed class BreakingContent(long declared, int sent) : HttpContent
+    {
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            await stream.WriteAsync(new byte[sent]);
+            await stream.FlushAsync();
+            throw new IOException("the upload broke off");
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = declared;
+            return true;
+        }
     }
 
     private static HttpRequestMessage Request(string method, string url, string? body = null, params (string Name, string Value)[] headers)
