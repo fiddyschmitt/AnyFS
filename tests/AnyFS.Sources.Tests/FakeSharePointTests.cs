@@ -314,4 +314,32 @@ public class FakeSharePointTests
         CollectionAssert.AreEqual(bytes[(5 << 19)..((5 << 19) + 4096)], piece);
         Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth);
     }
+
+    /// <summary>
+    /// The local copy of a file goes once the file has been uploaded. It stayed until the next start: .NET leaves a
+    /// request's content open for the collector, the copy could not be deleted while its stream was, and nothing came back
+    /// for it. So every file written in a run stayed in the cache for the rest of that run.
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
+    [DataRow(true, DisplayName = "tenant, Graph")]
+    public async Task AnUploadedFilesLocalCopyGoesOnceItHasLanded(bool tenant)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "copies/there.txt", "x"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode) : FarmSettings(fake), context);
+        var bytes = new byte[100_000];
+        new Random(9).NextBytes(bytes);
+
+        await using (var file = await source.OpenAsync("Documents/copies/new.bin", VfsOpenMode.CreateNew, None))
+        {
+            await file.WriteAsync(0, bytes, None);
+        }
+
+        CollectionAssert.AreEqual(bytes, documents.Root.Folder("copies")!.File("new.bin")!.Content);
+        var left = Directory.GetFiles(Path.Combine(context.CacheDirectory, "uploads"));
+        Assert.AreEqual(0, left.Length, string.Join(", ", left.Select(Path.GetFileName)));
+    }
 }

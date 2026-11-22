@@ -254,6 +254,9 @@ public sealed class GraphClient : IDisposable
                 throw VfsException.Unavailable($"{Service.Name} could not be reached: {ex.Message}");
             }
 
+            // answered, so the body has gone or was not wanted: closed now. .NET leaves a request's content open for the
+            // collector, and an upload's is the local file that is deleted once it has landed, which an open stream prevents
+            request.Content?.Dispose();
             var status = response.StatusCode;
             if (_pace?.Hold(response) is { } hold)
             {
