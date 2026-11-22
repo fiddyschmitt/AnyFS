@@ -34,6 +34,9 @@ public partial class MainWindow : Window
     // when a wait was last logged (a Stopwatch timestamp), 0 before the first; the window's thread's own
     private long _stallLogged;
 
+    // what the last refresh threw (its type and message), null after one that threw nothing; the window's thread's own
+    private string? _refreshFailure;
+
     public MainWindow(GuiHost host)
     {
         _host = host;
@@ -119,17 +122,40 @@ public partial class MainWindow : Window
     /// <summary>Changes arrive on any thread; the UI picks them up within a quarter second, and every second regardless.</summary>
     private void OnEngineChanged() => Interlocked.Exchange(ref _dirty, 1);
 
+    /// <summary>
+    /// A refresh reads what plugins supply (a mount's access paths, a source's counters), so it may throw anything. It is
+    /// caught here because nothing after it would say so: the dispatcher keeps what a timer's tick throws to itself and
+    /// never starts the timer again, and the window then showed what it showed at that moment for as long as it stayed open.
+    /// A failure is logged when it begins and when it changes, not every tick, and once more when a refresh works again.
+    /// </summary>
     private void Tick()
     {
-        var now = DateTime.UtcNow;
-        if (Interlocked.Exchange(ref _dirty, 0) == 1 || now - _lastRefresh >= TimeSpan.FromSeconds(1))
+        try
         {
-            _lastRefresh = now;
-            ViewModel.Refresh();
+            var now = DateTime.UtcNow;
+            if (Interlocked.Exchange(ref _dirty, 0) == 1 || now - _lastRefresh >= TimeSpan.FromSeconds(1))
+            {
+                _lastRefresh = now;
+                ViewModel.Refresh();
+                if (_refreshFailure is not null)
+                {
+                    _refreshFailure = null;
+                    _host.Logger.LogInformation("window: it refreshes again");
+                }
+            }
+            else if (ViewModel.OperationsTab.IsActive)
+            {
+                ViewModel.OperationsTab.Refresh();
+            }
         }
-        else if (ViewModel.OperationsTab.IsActive)
+        catch (Exception ex)
         {
-            ViewModel.OperationsTab.Refresh();
+            var failure = $"{ex.GetType().FullName}: {ex.Message}";
+            if (failure != _refreshFailure)
+            {
+                _refreshFailure = failure;
+                _host.Logger.LogWarning(ex, "window: its refresh failed; it shows what it showed before, and tries again within a second (logged again only when the failure changes)");
+            }
         }
     }
 

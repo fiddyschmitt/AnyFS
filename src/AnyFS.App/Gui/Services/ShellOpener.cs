@@ -51,7 +51,17 @@ public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? show
         }
     }
 
-    public void OpenFile(string path) => Launch(path);
+    public void OpenFile(string path)
+    {
+        try
+        {
+            Launch(path);
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or InvalidOperationException)
+        {
+            logger.LogWarning(ex, "could not open {Path}", path);
+        }
+    }
 
     /// <summary>
     /// The path <see cref="Open"/> opens, which the Copy path button copies: the folder in the file manager, the URL, the

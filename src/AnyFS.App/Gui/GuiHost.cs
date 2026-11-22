@@ -3,6 +3,7 @@ using AnyFS.Core.Logging;
 using AnyFS.Core.Plugins;
 using AnyFS.Core.Runtime;
 using AnyFS.Core.Settings;
+using Avalonia.Threading;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.App.Gui;
@@ -89,6 +90,26 @@ public sealed class GuiHost : IAsyncDisposable
         });
     }
 
+    /// <summary>
+    /// For the dispatcher of the window's thread, whose <c>UnhandledException</c> the app gives this to: what nothing
+    /// caught there (in a click's handler or a command, in something posted to it, after an await) is an error in the
+    /// log, and handled. Unhandled, it ends the window's loop and so the process, and every mount with it. A timer's tick
+    /// does not come this way: the dispatcher keeps what one throws to itself, and the window guards its own.
+    /// </summary>
+    public void OnWindowThreadException(object sender, DispatcherUnhandledExceptionEventArgs e)
+    {
+        try
+        {
+            Logger.LogError(e.Exception, "an exception on the window's thread that nothing caught; the window and the mounts go on");
+        }
+        catch (Exception)
+        {
+            // the log is closed already (the window is on its way out): nothing to say it with
+        }
+
+        e.Handled = true;
+    }
+
     /// <summary>Stops mounts and sources, flushes stats, closes the log. Safe to call twice.</summary>
     public async Task ShutdownAsync()
     {
@@ -99,20 +120,26 @@ public sealed class GuiHost : IAsyncDisposable
 
         _shutDown = true;
         await _stop.CancelAsync().ConfigureAwait(false);
-        if (_run is not null)
+        try
         {
-            try
+            if (_run is not null)
             {
                 await _run.WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false);
             }
-            catch (TimeoutException)
-            {
-                Logger.LogWarning("shutdown did not finish within 15 s; exiting anyway");
-            }
-        }
-        else
-        {
+
+            // a run stops the engine as it ends, and this then does nothing: it is for the run that never began, and so
+            // that the close does not rest on how a run ended (cancelled while its sources were still starting, one
+            // used to end with nothing stopped)
             await Engine.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            Logger.LogWarning("shutdown did not finish within 15 s; exiting anyway");
+        }
+        catch (Exception ex)
+        {
+            // the window closes whatever the run or the stop ended with
+            Logger.LogWarning(ex, "shutdown did not finish cleanly; exiting anyway");
         }
 
         Logger.LogInformation("window closed");

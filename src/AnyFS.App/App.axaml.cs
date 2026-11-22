@@ -5,6 +5,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using Avalonia.Styling;
+using Avalonia.Threading;
 
 namespace AnyFS.App;
 
@@ -22,6 +23,9 @@ public partial class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             Host = GuiHost.Create(Options ?? new GuiOptions());
+
+            // before the window is made: what throws on its thread from here on is logged, and the window and the mounts stay
+            Dispatcher.UIThread.UnhandledException += Host.OnWindowThreadException;
             PluginIcons.Registry = Host.Engine.Registry;
             ApplyTheme(Host.Engine.Settings.App.Theme);
             WindowEdges.FollowEveryWindow();
