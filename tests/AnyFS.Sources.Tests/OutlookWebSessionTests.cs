@@ -1,11 +1,14 @@
 using System.Net;
 using System.Text;
+using System.Text.Json.Nodes;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
+using AnyFS.Sources.Common;
 using AnyFS.Sources.Microsoft365;
 using AnyFS.Sources.Outlook;
 using AnyFS.Sources.Outlook.Ews;
 using AnyFS.Sources.Outlook.Mail;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Sources.Tests;
 
@@ -549,6 +552,73 @@ public class OutlookWebSessionTests
         Assert.AreEqual(DateTimeOffset.FromUnixTimeSeconds(1800000000), expires);
         Assert.AreEqual(("jane@contoso.com", (DateTimeOffset?)null), OwaTokenSession.Claims(Jwt("""{"preferred_username":"jane@contoso.com"}""")));
         Assert.AreEqual(((string?)null, (DateTimeOffset?)null), OwaTokenSession.Claims("not a token"));
+    }
+
+    // far longer than a wait that ends takes: only one that would go on to its ten minutes runs into it
+    private static readonly TimeSpan Patience = TimeSpan.FromSeconds(20);
+
+    private static OwaTokenSession TokenSession() => new(new Uri("https://outlook.test"), "msedge.exe", Path.Combine(Path.GetTempPath(), "anyfs-unused-profile"), NullLogger.Instance);
+
+    /// <summary>The wait for a token no call carries, the page at <paramref name="page"/>, with its ten minutes ahead of it; no browser is launched.</summary>
+    private static Task<OwaTokenSession.Capture> Wait(OwaTokenSession session, bool headless, Func<bool> noPage, Task gone, string page = "https://login.microsoftonline.com/common/oauth2/authorize")
+        => session.WaitAsync(headless, TimeSpan.FromMinutes(10), () => null, () => page, noPage, gone, CancellationToken.None);
+
+    [TestMethod]
+    public async Task AWindowThatIsClosedEndsTheWaitAtOnce()
+    {
+        // the person closes the sign-in window and the browser quits with it, which ends its DevTools connection. Until
+        // 22-Nov-2026 the wait slept between its looks and looked at nothing that told it: ten minutes of "Sign in to
+        // ... in the window that opened", the profile held all the while
+        var session = TokenSession();
+        var gone = new TaskCompletionSource();
+        var wait = Wait(session, headless: false, noPage: () => false, gone.Task);
+        Assert.IsFalse(wait.IsCompleted, "waited on while the browser is there");
+
+        gone.SetResult();
+        var capture = await wait.WaitAsync(Patience);
+        Assert.AreEqual($"the {session.BrowserName} window was closed before the sign-in to outlook.test finished; Retry to sign in", capture.Failure);
+        Assert.IsTrue(capture.Final, "the person's answer: no window opens again until they ask for one");
+        Assert.IsNull(capture.Token);
+    }
+
+    [TestMethod]
+    public async Task AWindowWhoseLastPageHasGoneEndsTheWaitThoughTheBrowserStaysUp()
+    {
+        // Edge can stay up in the background with its window closed: the connection holds, and no page is left
+        var session = TokenSession();
+        var pages = new DevToolsPages();
+        pages.On("Target.attachedToTarget", new JsonObject { ["sessionId"] = "S1", ["targetInfo"] = new JsonObject { ["targetId"] = "T1", ["type"] = "page", ["url"] = "https://login.microsoftonline.com/common/oauth2/authorize" } });
+        var wait = session.WaitAsync(headless: false, TimeSpan.FromMinutes(10), () => null, () => pages.Where, () => !pages.Any, new TaskCompletionSource().Task, CancellationToken.None);
+        Assert.IsFalse(wait.IsCompleted, "waited on while its page is there");
+
+        pages.On("Target.detachedFromTarget", new JsonObject { ["sessionId"] = "S1" });
+        var capture = await wait.WaitAsync(Patience);
+        Assert.AreEqual($"the {session.BrowserName} window was closed before the sign-in to outlook.test finished; Retry to sign in", capture.Failure);
+        Assert.IsTrue(capture.Final);
+    }
+
+    [TestMethod]
+    public async Task ABrowserWithoutAWindowThatQuitsEndsTheWaitAtOnce()
+    {
+        var session = TokenSession();
+        var gone = new TaskCompletionSource();
+        var wait = Wait(session, headless: true, noPage: () => false, gone.Task, page: "https://outlook.test/mail/");
+        Assert.IsFalse(wait.IsCompleted, "waited on while the browser is there");
+
+        gone.SetResult();
+        var capture = await wait.WaitAsync(Patience);
+        Assert.AreEqual($"{session.BrowserName} quit before the sign-in was read", capture.Failure);
+        Assert.IsFalse(capture.Final, "nothing the person did: a window may still be opened for them");
+        Assert.IsNull(capture.Token);
+    }
+
+    [TestMethod]
+    public async Task ATokenReadEndsTheWaitWhateverBecameOfTheWindow()
+    {
+        // the person signs in and closes the window as the mailbox loads: the token its calls carried is the answer
+        var session = TokenSession();
+        var capture = await session.WaitAsync(headless: false, TimeSpan.FromMinutes(10), () => "a-token", () => "https://outlook.test/mail/", () => true, Task.CompletedTask, CancellationToken.None).WaitAsync(Patience);
+        Assert.AreEqual(("a-token", (string?)null), (capture.Token, capture.Failure));
     }
 
     [TestMethod]

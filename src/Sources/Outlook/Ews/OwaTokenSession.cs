@@ -134,11 +134,11 @@ internal sealed class OwaTokenSession
     }
 
     /// <summary>What one launch of the browser came to: a token, or why not and whether trying again can help.</summary>
-    private sealed record Capture(string? Token, string? Failure = null, bool Final = false);
+    internal sealed record Capture(string? Token, string? Failure = null, bool Final = false);
 
     private async Task<Capture> CaptureAsync(bool headless, TimeSpan deadline, CancellationToken ct)
     {
-        var mode = headless ? "headless" : "with a window";
+        var mode = Mode(headless);
         DevToolsBrowser? browser = null;
         try
         {
@@ -153,36 +153,16 @@ internal sealed class OwaTokenSession
             _logger.LogInformation("outlook: opened {Browser} {Mode} for {Host} (DevTools on port {Port})", BrowserName, mode, _origin.Host, browser.Port);
 
             var requests = new ConcurrentDictionary<string, (string? Url, string? Bearer)>();
-            var pages = new ConcurrentDictionary<string, string>();
+            var pages = new DevToolsPages();
             string? found = null;
             devTools.Event += (method, p, sessionId) =>
             {
+                pages.On(method, p);
                 switch (method)
                 {
                     case "Target.attachedToTarget":
                         {
-                            var sid = p["sessionId"]!.GetValue<string>();
-                            var info = p["targetInfo"]!;
-                            if (info["type"]?.GetValue<string>() == "page")
-                            {
-                                pages[sid] = info["url"]?.GetValue<string>() ?? "";
-                            }
-
-                            _ = devTools.SendAsync("Network.enable", new JsonObject(), sid, CancellationToken.None);
-                            break;
-                        }
-
-                    case "Target.targetInfoChanged":
-                        {
-                            var info = p["targetInfo"]!;
-                            if (info["type"]?.GetValue<string>() == "page")
-                            {
-                                foreach (var key in pages.Keys)
-                                {
-                                    pages[key] = info["url"]?.GetValue<string>() ?? "";
-                                }
-                            }
-
+                            _ = devTools.SendAsync("Network.enable", new JsonObject(), p["sessionId"]!.GetValue<string>(), CancellationToken.None);
                             break;
                         }
 
@@ -214,7 +194,7 @@ internal sealed class OwaTokenSession
             for (var i = 0; i < 100 && page is null; i++)
             {
                 await Task.Delay(100, ct).ConfigureAwait(false);
-                page = pages.Keys.FirstOrDefault();
+                page = pages.FirstSession;
             }
 
             if (page is null)
@@ -224,49 +204,11 @@ internal sealed class OwaTokenSession
 
             await Task.Delay(300, ct).ConfigureAwait(false);
             await devTools.SendAsync("Page.navigate", new JsonObject { ["url"] = _origin.AbsoluteUri.TrimEnd('/') + "/mail/" }, page, ct).ConfigureAwait(false);
-
-            var until = DateTime.UtcNow + deadline;
-            var onSignInSince = (DateTime?)null;
-            while (true)
-            {
-                ct.ThrowIfCancellationRequested();
-                if (found is { } token)
-                {
-                    return new Capture(token);
-                }
-
-                var where = pages.Values.FirstOrDefault(u => u.Length > 0) ?? "";
-                var atSignIn = where.Contains("login.microsoftonline.", StringComparison.OrdinalIgnoreCase) || where.Contains("login.live.com", StringComparison.OrdinalIgnoreCase) || where.Contains("login.windows.net", StringComparison.OrdinalIgnoreCase);
-                if (headless && atSignIn)
-                {
-                    // the profile's session has lapsed: a person is needed, and a headless browser can show them nothing
-                    onSignInSince ??= DateTime.UtcNow;
-                    if (DateTime.UtcNow - onSignInSince > TimeSpan.FromSeconds(8))
-                    {
-                        return new Capture(null, "no saved sign-in");
-                    }
-                }
-
-                if (!headless && pages.IsEmpty)
-                {
-                    return new Capture(null, $"the {BrowserName} window was closed before the sign-in to {_origin.Host} finished; Retry to sign in", Final: true);
-                }
-
-                if (DateTime.UtcNow > until)
-                {
-                    _logger.LogInformation("outlook: no token for {Host} after {Seconds} s {Mode}; the page is at {Where}", _origin.Host, deadline.TotalSeconds, mode, where);
-                    return headless
-                        ? new Capture(null, "no saved sign-in")
-                        : new Capture(null, $"nobody finished the sign-in to {_origin.Host} within {InteractiveDeadline.TotalMinutes:N0} minutes; Retry to sign in", Final: true);
-                }
-
-                await Task.Delay(TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);
-            }
+            return await WaitAsync(headless, deadline, () => found, () => pages.Where, () => !pages.Any, devTools.Closed, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is WebSocketException or IOException or TimeoutException)
         {
-            _logger.LogInformation("outlook: {Browser} ({Mode}) closed before the sign-in to {Host} was read: {Error}", BrowserName, mode, _origin.Host, ex.Message);
-            return headless ? new Capture(null, $"{BrowserName} quit before the sign-in was read") : new Capture(null, $"the {BrowserName} window was closed before the sign-in to {_origin.Host} finished; Retry to sign in", Final: true);
+            return BrowserGone(headless, ex.Message);
         }
         catch (Exception ex) when (ex is KeyNotFoundException or InvalidOperationException or JsonException)
         {
@@ -280,6 +222,72 @@ internal sealed class OwaTokenSession
             }
         }
     }
+
+    /// <summary>
+    /// Waits while the page signs in and calls the service: the token, once a call carried it; otherwise what the wait
+    /// came to — a headless launch held on the sign-in page (no saved sign-in), the window closed (<paramref name="noPage"/>:
+    /// its last page gone, though the browser may stay up in the background), the browser gone, or the deadline.
+    /// <paramref name="gone"/> ends when the browser's connection has (<see cref="DevToolsClient.Closed"/>): the wait
+    /// sends the browser nothing, so nothing else would tell it.
+    /// </summary>
+    internal async Task<Capture> WaitAsync(bool headless, TimeSpan deadline, Func<string?> found, Func<string> where, Func<bool> noPage, Task gone, CancellationToken ct)
+    {
+        var until = DateTime.UtcNow + deadline;
+        var onSignInSince = (DateTime?)null;
+        while (true)
+        {
+            ct.ThrowIfCancellationRequested();
+            if (found() is { } token)
+            {
+                return new Capture(token);
+            }
+
+            if (gone.IsCompleted)
+            {
+                return BrowserGone(headless, "its DevTools connection closed");
+            }
+
+            var page = where();
+            var atSignIn = page.Contains("login.microsoftonline.", StringComparison.OrdinalIgnoreCase) || page.Contains("login.live.com", StringComparison.OrdinalIgnoreCase) || page.Contains("login.windows.net", StringComparison.OrdinalIgnoreCase);
+            if (headless && atSignIn)
+            {
+                // the profile's session has lapsed: a person is needed, and a headless browser can show them nothing
+                onSignInSince ??= DateTime.UtcNow;
+                if (DateTime.UtcNow - onSignInSince > TimeSpan.FromSeconds(8))
+                {
+                    return new Capture(null, "no saved sign-in");
+                }
+            }
+
+            if (!headless && noPage())
+            {
+                return WindowClosed();
+            }
+
+            if (DateTime.UtcNow > until)
+            {
+                _logger.LogInformation("outlook: no token for {Host} after {Seconds} s {Mode}; the page is at {Where}", _origin.Host, deadline.TotalSeconds, Mode(headless), page);
+                return headless
+                    ? new Capture(null, "no saved sign-in")
+                    : new Capture(null, $"nobody finished the sign-in to {_origin.Host} within {InteractiveDeadline.TotalMinutes:N0} minutes; Retry to sign in", Final: true);
+            }
+
+            // the next look in a second, or at once when the browser goes: until 22-Nov-2026 only the second, and a browser
+            // that had gone was waited on to the deadline
+            await Task.WhenAny(gone, Task.Delay(TimeSpan.FromSeconds(1), ct)).ConfigureAwait(false);
+        }
+    }
+
+    private Capture WindowClosed() => new(null, $"the {BrowserName} window was closed before the sign-in to {_origin.Host} finished; Retry to sign in", Final: true);
+
+    /// <summary>The browser went before the sign-in was read: a window is the person's to close, and their closing it is final; one without a window quit, which a window may yet get past.</summary>
+    private Capture BrowserGone(bool headless, string how)
+    {
+        _logger.LogInformation("outlook: {Browser} ({Mode}) closed before the sign-in to {Host} was read: {Error}", BrowserName, Mode(headless), _origin.Host, how);
+        return headless ? new Capture(null, $"{BrowserName} quit before the sign-in was read") : WindowClosed();
+    }
+
+    private static string Mode(bool headless) => headless ? "headless" : "with a window";
 
     /// <summary>The account (upn or preferred_username) and expiry a JWT carries; nulls for anything else.</summary>
     internal static (string? Account, DateTimeOffset? ExpiresAt) Claims(string token)

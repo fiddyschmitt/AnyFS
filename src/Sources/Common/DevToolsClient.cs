@@ -10,36 +10,50 @@ namespace AnyFS.Sources.Common;
 /// Enough of the Chrome DevTools protocol for the web sessions: commands over one WebSocket, answers matched by id, to
 /// the browser or to one of its targets' sessions, and events handed to a callback with the session they came from (a
 /// session that watches what a page sends listens to them; one that polls ignores them). When the connection ends, every
-/// command still waiting fails at once rather than at its timeout. The one client the web sessions share
+/// command still waiting fails at once rather than at its timeout, and <see cref="Closed"/> tells a session that is
+/// sending none. The one client the web sessions share
 /// (<see cref="DevToolsBrowser"/>): SharePoint's and 3DX's <see cref="BrowserSession"/>, Outlook's and Teams'.
 /// </summary>
 public sealed class DevToolsClient : IAsyncDisposable
 {
-    private readonly ClientWebSocket _socket = new();
+    private readonly WebSocket _socket;
     private readonly ConcurrentDictionary<int, TaskCompletionSource<JsonNode>> _pending = new();
     private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly CancellationTokenSource _stop = new();
-    private Task _receive = Task.CompletedTask;
+    private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly Task _receive;
     private int _nextId;
+
+    /// <summary>A client over a connection that is already open: the browser's, or in the tests one that stands in for it.</summary>
+    internal DevToolsClient(WebSocket socket)
+    {
+        _socket = socket;
+        _receive = ReceiveAsync();
+    }
 
     /// <summary>An event: its method, its parameters, the session it came from (null for the browser's own).</summary>
     public event Action<string, JsonNode, string?>? Event;
 
+    /// <summary>
+    /// Ends when the connection has, whichever end closed it (the browser quit, or this was disposed); it never fails. A
+    /// session that only listens while it waits sends nothing that would meet the closed connection, so it waits on this.
+    /// </summary>
+    public Task Closed => _closed.Task;
+
     public static async Task<DevToolsClient> ConnectAsync(Uri endpoint, CancellationToken ct)
     {
-        var client = new DevToolsClient();
+        var socket = new ClientWebSocket();
         try
         {
-            await client._socket.ConnectAsync(endpoint, ct).ConfigureAwait(false);
+            await socket.ConnectAsync(endpoint, ct).ConfigureAwait(false);
         }
         catch
         {
-            await client.DisposeAsync().ConfigureAwait(false);
+            socket.Dispose();
             throw;
         }
 
-        client._receive = client.ReceiveAsync();
-        return client;
+        return new DevToolsClient(socket);
     }
 
     public async Task<JsonNode> SendAsync(string method, JsonObject? parameters = null, string? sessionId = null, CancellationToken ct = default)
@@ -47,7 +61,7 @@ public sealed class DevToolsClient : IAsyncDisposable
         var id = Interlocked.Increment(ref _nextId);
         var answer = new TaskCompletionSource<JsonNode>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = answer;
-        if (_receive.IsCompleted)
+        if (Closed.IsCompleted)
         {
             _pending.TryRemove(id, out _);
             throw new IOException("the DevTools connection closed");
@@ -140,6 +154,8 @@ public sealed class DevToolsClient : IAsyncDisposable
         }
         finally
         {
+            // said before the commands waiting are failed: one sent from here on finds it said, or is among them
+            _closed.TrySetResult();
             foreach (var answer in _pending.Values)
             {
                 answer.TrySetException(new IOException("the DevTools connection closed"));

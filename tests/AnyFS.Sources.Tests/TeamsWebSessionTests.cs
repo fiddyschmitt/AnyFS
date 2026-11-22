@@ -1,10 +1,15 @@
 using System.Text;
+using System.Text.Json.Nodes;
+using AnyFS.Sources.Common;
 using AnyFS.Sources.Teams;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Sources.Tests;
 
-/// <summary>Which of the page's bearers the Teams web session reads (spec 7.9), with made-up, unsigned tokens; no browser is launched.</summary>
+/// <summary>
+/// Which of the page's bearers the Teams web session reads (spec 7.9), with made-up, unsigned tokens, and how its wait
+/// for them ends when the browser goes; no browser is launched.
+/// </summary>
 [TestClass]
 public class TeamsWebSessionTests
 {
@@ -52,5 +57,61 @@ public class TeamsWebSessionTests
         session.Take(renewed);
         session.Take(old); // the page sends the old one again before it renews it everywhere
         Assert.AreEqual(renewed, await session.TokenAsync(TeamsService.ChatService, interactive: false, _ => { }, CancellationToken.None));
+    }
+
+    // far longer than a wait that ends takes: only one that would go on to its ten minutes runs into it
+    private static readonly TimeSpan Patience = TimeSpan.FromSeconds(20);
+
+    /// <summary>The wait for a sign-in nobody finishes, at <paramref name="page"/>, with its ten minutes ahead of it.</summary>
+    private static Task<TeamsWebSession.Capture> Wait(TeamsWebSession session, bool headless, Func<bool> closed, Task gone, string page = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize")
+        => session.WaitAsync(headless, TimeSpan.FromMinutes(10), [TeamsService.ChatService], () => null, () => page, closed, gone, CancellationToken.None);
+
+    [TestMethod]
+    public async Task AWindowThatIsClosedEndsTheWaitAtOnce()
+    {
+        // the person closes the sign-in window and the browser quits with it, which ends its DevTools connection. Until
+        // 22-Nov-2026 the wait slept between its looks and looked at nothing that told it: ten minutes of "Sign in to
+        // Teams in the window that opened", the profile held all the while
+        var session = Session();
+        var gone = new TaskCompletionSource();
+        var wait = Wait(session, headless: false, closed: () => false, gone.Task);
+        Assert.IsFalse(wait.IsCompleted, "waited on while the browser is there");
+
+        gone.SetResult();
+        var capture = await wait.WaitAsync(Patience);
+        Assert.AreEqual($"the {session.BrowserName} window was closed before the sign-in to teams.test finished; Retry to sign in", capture.Failure);
+        Assert.IsTrue(capture.Final, "the person's answer: no window opens again until they ask for one");
+        Assert.IsFalse(capture.Got);
+    }
+
+    [TestMethod]
+    public async Task AWindowWhoseLastPageHasGoneEndsTheWaitThoughTheBrowserStaysUp()
+    {
+        // Edge can stay up in the background with its window closed: the connection holds, and no page is left
+        var session = Session();
+        var pages = new DevToolsPages();
+        pages.On("Target.attachedToTarget", new JsonObject { ["sessionId"] = "S1", ["targetInfo"] = new JsonObject { ["targetId"] = "T1", ["type"] = "page", ["url"] = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize" } });
+        var wait = session.WaitAsync(headless: false, TimeSpan.FromMinutes(10), [TeamsService.ChatService], () => null, () => pages.Where, () => !pages.Any, new TaskCompletionSource().Task, CancellationToken.None);
+        Assert.IsFalse(wait.IsCompleted, "waited on while its page is there");
+
+        pages.On("Target.targetDestroyed", new JsonObject { ["targetId"] = "T1" });
+        var capture = await wait.WaitAsync(Patience);
+        Assert.AreEqual($"the {session.BrowserName} window was closed before the sign-in to teams.test finished; Retry to sign in", capture.Failure);
+        Assert.IsTrue(capture.Final);
+    }
+
+    [TestMethod]
+    public async Task ABrowserWithoutAWindowThatQuitsEndsTheWaitAtOnce()
+    {
+        var session = Session();
+        var gone = new TaskCompletionSource();
+        var wait = Wait(session, headless: true, closed: () => false, gone.Task, page: "https://teams.test/v2/");
+        Assert.IsFalse(wait.IsCompleted, "waited on while the browser is there");
+
+        gone.SetResult();
+        var capture = await wait.WaitAsync(Patience);
+        Assert.AreEqual($"{session.BrowserName} (headless) closed before the sign-in to teams.test was read", capture.Failure);
+        Assert.IsFalse(capture.Final, "nothing the person did: a window may still be opened for them");
+        Assert.IsFalse(capture.Got);
     }
 }

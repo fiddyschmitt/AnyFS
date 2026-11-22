@@ -306,7 +306,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
     }
 
     /// <summary>What one browser launch came to: whether a fresh set was captured, else why not and whether trying again can help.</summary>
-    private sealed record Capture(bool Got, string? Failure = null, bool Final = false);
+    internal sealed record Capture(bool Got, string? Failure = null, bool Final = false);
 
     /// <summary>One capture: done once the core services' tokens and <paramref name="want"/>'s are in hand.</summary>
     private async Task<Capture> CaptureAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, CancellationToken ct, string? address = null)
@@ -342,35 +342,18 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             var cdp = browser.Client;
             logger.LogInformation("teams: opened {Browser} {Mode} for {Host} (DevTools on port {Port})", BrowserName, mode, teamsHost.Host, browser.Port);
 
-            var pages = new ConcurrentDictionary<string, string>();
+            var pages = new DevToolsPages();
             string? wrongAccount = null;
             cdp.Event += (method, p, sessionId) =>
             {
+                pages.On(method, p);
                 switch (method)
                 {
                     case "Target.attachedToTarget":
                         {
                             var sid = p["sessionId"]!.GetValue<string>();
-                            if (p["targetInfo"]?["type"]?.GetValue<string>() == "page")
-                            {
-                                pages[sid] = p["targetInfo"]?["url"]?.GetValue<string>() ?? "";
-                            }
-
                             _ = cdp.SendAsync("Network.enable", new JsonObject(), sid, CancellationToken.None);
                             _ = cdp.SendAsync("Target.setAutoAttach", new JsonObject { ["autoAttach"] = true, ["waitForDebuggerOnStart"] = false, ["flatten"] = true }, sid, CancellationToken.None);
-                            break;
-                        }
-
-                    case "Target.targetInfoChanged":
-                        {
-                            if (p["targetInfo"]?["type"]?.GetValue<string>() == "page")
-                            {
-                                foreach (var key in pages.Keys)
-                                {
-                                    pages[key] = p["targetInfo"]?["url"]?.GetValue<string>() ?? "";
-                                }
-                            }
-
                             break;
                         }
 
@@ -395,7 +378,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
             for (var i = 0; i < 100 && page is null; i++)
             {
                 await Task.Delay(100, ct).ConfigureAwait(false);
-                page = pages.Keys.FirstOrDefault();
+                page = pages.FirstSession;
             }
 
             if (page is null)
@@ -405,7 +388,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
 
             await Task.Delay(300, ct).ConfigureAwait(false);
             await cdp.SendAsync("Page.navigate", new JsonObject { ["url"] = address ?? StartPage }, page, ct).ConfigureAwait(false);
-            var capture = await WaitAsync(headless, deadline, want, () => wrongAccount, () => pages.Values.FirstOrDefault(u => u.Length > 0) ?? "", () => pages.IsEmpty, ct).ConfigureAwait(false);
+            var capture = await WaitAsync(headless, deadline, want, () => wrongAccount, () => pages.Where, () => !pages.Any, cdp.Closed, ct).ConfigureAwait(false);
             return (capture, null);
         }
         catch (Exception ex) when (ex is WebSocketException or IOException or TimeoutException)
@@ -446,7 +429,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         {
             logger.LogInformation("teams: opened Firefox through WebDriver {Mode} for {Host}, driver {Driver}", mode, teamsHost.Host, browser.Driver);
             browser.Navigate(address ?? StartPage);
-            return await WaitAsync(headless, deadline, want, () => wrongAccount, () => browser.Page ?? "", () => !browser.Open, ct).ConfigureAwait(false);
+            return await WaitAsync(headless, deadline, want, () => wrongAccount, () => browser.Page ?? "", () => !browser.Open, NeverGone, ct).ConfigureAwait(false);
         }
         catch (IOException ex)
         {
@@ -458,12 +441,19 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
         }
     }
 
+    // for a browser asked at each look whether its window is open (Firefox, through its driver), which meets one that has
+    // gone: nothing beside the looks to wait on
+    private static readonly Task NeverGone = new TaskCompletionSource().Task;
+
     /// <summary>
     /// Waits while the page signs in and calls the services: done once every service's token is in hand; otherwise what
     /// the wait came to — another account's tokens, a headless launch held on the sign-in page (no saved sign-in), the
-    /// window closed, or the deadline (with a window, some tokens are enough to go on with).
+    /// window closed (<paramref name="closed"/>: no page of it left, though the browser may stay up in the background), the
+    /// browser gone, or the deadline (with a window, some tokens are enough to go on with). <paramref name="gone"/> ends
+    /// when the browser's connection has (<see cref="DevToolsClient.Closed"/>): the wait sends a browser driven over
+    /// DevTools nothing, so nothing else would tell it.
     /// </summary>
-    private async Task<Capture> WaitAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, Func<string?> wrongAccount, Func<string> where, Func<bool> closed, CancellationToken ct)
+    internal async Task<Capture> WaitAsync(bool headless, TimeSpan deadline, IReadOnlyCollection<TeamsService> want, Func<string?> wrongAccount, Func<string> where, Func<bool> closed, Task gone, CancellationToken ct)
     {
         var mode = headless ? "headless" : "with a window";
         var until = DateTime.UtcNow + deadline;
@@ -498,7 +488,12 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
                 }
             }
 
-            if (!headless && closed())
+            if (headless && gone.IsCompleted)
+            {
+                return new Capture(false, $"{BrowserName} ({mode}) closed before the sign-in to {teamsHost.Host} was read");
+            }
+
+            if (!headless && (gone.IsCompleted || closed()))
             {
                 return new Capture(false, $"the {BrowserName} window was closed before the sign-in to {teamsHost.Host} finished; Retry to sign in", Final: true);
             }
@@ -511,7 +506,9 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
                     : new Capture(false, headless ? "no saved sign-in" : $"nobody finished the sign-in to {teamsHost.Host} in time; Retry to sign in", Final: !headless);
             }
 
-            await Task.Delay(TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);
+            // the next look in a second, or at once when the browser goes: until 22-Nov-2026 only the second, and a browser
+            // that had gone was waited on to the deadline
+            await Task.WhenAny(gone, Task.Delay(TimeSpan.FromSeconds(1), ct)).ConfigureAwait(false);
         }
     }
 
