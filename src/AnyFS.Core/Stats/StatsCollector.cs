@@ -185,7 +185,10 @@ public sealed class StatsCollector
             Session = _total.Session(),
             ActiveConnections = Math.Max(0, _total.Connections),
         };
-        foreach (var (name, c) in _collections.OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
+
+        // the table's own copy, taken whole: sorted as it stood, it was counted and then copied, and the copy threw when
+        // another thread had counted a collection for the first time in between
+        foreach (var (name, c) in _collections.ToArray().OrderBy(p => p.Key, StringComparer.OrdinalIgnoreCase))
         {
             snapshot.Collections[name] = new CollectionStats { Total = c.Lifetime(), Session = c.Session(), ActiveConnections = Math.Max(0, c.Connections) };
         }

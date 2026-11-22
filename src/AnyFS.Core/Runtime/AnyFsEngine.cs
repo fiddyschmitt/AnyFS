@@ -47,6 +47,9 @@ public sealed class AnyFsEngine : IAsyncDisposable
     // status.json writes that failed in a row (every 2 s): a warning once they have for half a minute
     private int _statusFailures;
 
+    // what the run's last tick threw (its type and message), null after one that threw nothing
+    private string? _tickFailure;
+
     public AnyFsEngine(SettingsPaths paths, PluginRegistry registry, ILoggerFactory loggerFactory, IPromptHandler? prompts = null, TimeProvider? time = null)
     {
         Paths = paths;
@@ -199,20 +202,23 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>Start, keep status.json and stats.json fresh, stop on cancellation.</summary>
     public async Task RunAsync(IReadOnlyCollection<string>? collectionNames, CancellationToken ct)
     {
-        await StartAsync(collectionNames, ct).ConfigureAwait(false);
-        WriteStatus();
-        var lastFlush = _time.GetTimestamp();
+        // refused here, outside the try, so that a second run does not stop what the first started
+        if (_started)
+        {
+            throw new InvalidOperationException("already started");
+        }
+
+        // the start is under the finally too: cancelled part way (the window closed while sources start), it left what it
+        // had started running, no source disposed, no mount stopped, no stats flushed
         try
         {
+            await StartAsync(collectionNames, ct).ConfigureAwait(false);
+            var lastFlush = _time.GetTimestamp();
+            Tick(ref lastFlush, ct);
             while (!ct.IsCancellationRequested)
             {
                 await Task.Delay(TimeSpan.FromSeconds(2), _time, ct).ConfigureAwait(false);
-                WriteStatus();
-                if (_time.GetElapsedTime(lastFlush) >= TimeSpan.FromSeconds(30))
-                {
-                    FlushStats();
-                    lastFlush = _time.GetTimestamp();
-                }
+                Tick(ref lastFlush, ct);
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -221,6 +227,42 @@ public sealed class AnyFsEngine : IAsyncDisposable
         finally
         {
             await StopAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// One tick of <see cref="RunAsync"/>: stats.json when half a minute has gone by, then status.json. Much of what the
+    /// status is made of is a plugin's to supply (a mount's access paths, a source's counters, a progress fraction that may
+    /// be no number JSON can carry), so a tick may throw anything. That costs the tick: it used to end the run, and with it
+    /// every source and mount while the window stayed up. A failure is logged when it begins and when it changes, not every
+    /// two seconds, and once more when a tick works again.
+    /// </summary>
+    private void Tick(ref long lastFlush, CancellationToken ct)
+    {
+        try
+        {
+            // the stats first, so that they are kept while a status cannot be made
+            if (_time.GetElapsedTime(lastFlush) >= TimeSpan.FromSeconds(30))
+            {
+                lastFlush = _time.GetTimestamp();
+                FlushStats();
+            }
+
+            WriteStatus();
+            if (_tickFailure is not null && _statusFailures == 0)
+            {
+                _tickFailure = null;
+                _logger.LogInformation("status.json and stats.json are kept fresh again");
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            var failure = $"{ex.GetType().FullName}: {ex.Message}";
+            if (failure != _tickFailure)
+            {
+                _tickFailure = failure;
+                _logger.LogWarning(ex, "status.json and stats.json could not be kept fresh; the sources and mounts go on, and it is tried again every two seconds (logged again only when the failure changes)");
+            }
         }
     }
 

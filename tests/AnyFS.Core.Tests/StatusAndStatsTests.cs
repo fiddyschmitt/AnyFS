@@ -163,4 +163,36 @@ public class StatsCollectorTests
         Assert.AreEqual(0, stats.Snapshot().Collections.Count, "a deleted collection leaves the table");
         Assert.AreEqual(0, stats.ToFile().Collections.Count, "and the file");
     }
+
+    /// <summary>
+    /// Snapshots (the status tick, the Stats tab) taken while collections are counted for the first time on other threads.
+    /// Sorted as it stood, the table was asked how many rows it had and then to copy them, and the copy threw when a row
+    /// had arrived in between.
+    /// </summary>
+    [TestMethod]
+    public async Task ASnapshotTakenWhileCollectionsAreFirstCountedDoesNotThrow()
+    {
+        var snapshots = 0;
+        for (var round = 0; round < 100; round++)
+        {
+            var stats = new StatsCollector();
+            var counting = Task.Run(() =>
+            {
+                for (var i = 0; i < 2000; i++)
+                {
+                    stats.FileServed($"c{i}");
+                }
+            });
+            while (!counting.IsCompleted)
+            {
+                stats.Snapshot();
+                snapshots++;
+            }
+
+            await counting;
+            Assert.AreEqual(2000, stats.Snapshot().Collections.Count);
+        }
+
+        Assert.IsTrue(snapshots > 0);
+    }
 }
