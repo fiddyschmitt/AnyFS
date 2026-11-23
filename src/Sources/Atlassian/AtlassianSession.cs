@@ -31,14 +31,12 @@ internal sealed record AtlassianStandIn(Func<HttpMessageHandler> Handler, Func<b
 internal sealed class AtlassianSession : IDisposable, IRequestSession
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(120);
-    private static readonly TimeSpan RecentFor = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan MinRenewalInterval = TimeSpan.FromSeconds(30);
 
     // the cookies of a sign-in just made, by product and installation: the Test's, for the source started from the same dialog
-    private static readonly ConcurrentDictionary<string, (string Cookies, DateTime At)> Recent = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly ILogger _logger;
-    private readonly ISecretStore? _secrets;
+    private readonly KeptSignIn _kept;
     private readonly AtlassianStandIn? _standIn;
     private readonly HttpMessageHandler _handler;
     private readonly SignInRenewal _renewal;
@@ -57,7 +55,7 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
         Product = product;
         Settings = settings;
         _logger = logger;
-        _secrets = secrets;
+        _kept = new KeptSignIn(secrets, CookiesSecret, AtlassianSignInTarget.Name(product), logger);
         _standIn = standIn;
         Url = settings.Url ?? throw new SourceFailedException("The address is not an http or https address.", permanent: true);
         Method = settings.EffectiveSignIn;
@@ -332,10 +330,9 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
             return false;
         }
 
-        // a sign-in just made (the Test's) first, then the one kept from the last run
-        var recent = Recent.TryGetValue(RecentKey, out var r) && DateTime.UtcNow - r.At < RecentFor ? r.Cookies : null;
+        // what the dialog's Test just left for these settings first, then what was kept at the last run (KeptSignIn)
         string? refused = null;
-        foreach (var kept in new[] { recent, _secrets?.Get(CookiesSecret) }.OfType<string>().Distinct(StringComparer.Ordinal))
+        foreach (var kept in _kept.Find(Address.Base, Who))
         {
             CookieJar.Clear(Cookies);
             if (CookieJar.Import(Cookies, kept, Address.Base.Host) <= 0)
@@ -370,8 +367,6 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
         CookieJar.Clear(Cookies);
         return false;
     }
-
-    private string RecentKey => $"{LogName}|{Address.Base.AbsoluteUri}";
 
     /// <summary>Whether a kept session is the account the settings name (a changed user name signs in afresh).</summary>
     private bool SameAccount(AtlassianUser user) => Settings.User is not { } wanted || user.Name.Equals(wanted.Trim(), StringComparison.OrdinalIgnoreCase);
@@ -789,16 +784,7 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
             return;
         }
 
-        var json = CookieJar.Export(Cookies);
-        Recent[RecentKey] = (json, DateTime.UtcNow);
-        try
-        {
-            _secrets?.Set(CookiesSecret, json);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
-        {
-            _logger.LogWarning("{Product}: the session could not be kept for the next start: {Error}", LogName, ex.Message);
-        }
+        _kept.Keep(Address.Base, Who, CookieJar.Export(Cookies));
     }
 
     public void Dispose()

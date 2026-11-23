@@ -71,15 +71,13 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
     public const string TokenSecret = "artifactory-client-token";
 
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan RecentFor = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan MinRenewalInterval = TimeSpan.FromSeconds(30);
 
     // the token of a sign-in the Test just made, by installation, for the source started from the same dialog: taken once,
     // since a refresh token renews once, and two sessions holding one would leave the second with one already spent
-    private static readonly ConcurrentDictionary<string, (string Token, DateTime At)> Recent = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly ILogger _logger;
-    private readonly ISecretStore? _secrets;
+    private readonly KeptSignIn _kept;
     private readonly ArtifactoryStandIn? _standIn;
     private readonly HttpMessageHandler _handler;
     private readonly SignInRenewal _renewal;
@@ -99,7 +97,7 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
     {
         Settings = settings;
         _logger = logger;
-        _secrets = secrets;
+        _kept = new KeptSignIn(secrets, TokenSecret, "artifactory", logger);
         _standIn = standIn;
         Url = settings.Url ?? throw new SourceFailedException("The address is not an http or https address.", permanent: true);
         Method = settings.EffectiveSignIn;
@@ -459,9 +457,9 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
             return false;
         }
 
-        // a sign-in the Test just made first (this session's alone from now on), then the one kept from the last run
-        var recent = Recent.TryRemove(Address.Base.AbsoluteUri, out var r) && DateTime.UtcNow - r.At < RecentFor ? r.Token : null;
-        foreach (var kept in new[] { recent, _secrets?.Get(TokenSecret) }.OfType<string>().Distinct(StringComparer.Ordinal))
+        // what the dialog's Test just left for these settings first (this session's alone from now on), then what was kept
+        // at the last run (KeptSignIn)
+        foreach (var kept in _kept.Find(Address.Base, Settings.Who))
         {
             if (ArtifactoryClientToken.Parse(kept) is not { } token)
             {
@@ -669,7 +667,11 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
         {
             _client = renewed with { User = renewed.User ?? token.User };
             _logger.LogInformation("artifactory: renewed the sign-in for {Host}; its token runs to {Until}", Url.Host, _client.Until?.ToString("u") ?? "no end");
-            Save();
+
+            // kept at once, signed in yet or not: the refresh token it replaces is spent. A kept token renewed as a start
+            // begins was kept only once the start was through, two requests on, and a start cut short between left the
+            // spent one in the store: the next start asked the person for a browser and a code (R9a)
+            _kept.Keep(Address.Base, Settings.Who, _client.ToJson());
             return true;
         }
 
@@ -817,21 +819,7 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
             return;
         }
 
-        var json = client.ToJson();
-        if (_secrets is null)
-        {
-            Recent[Address.Base.AbsoluteUri] = (json, DateTime.UtcNow);
-            return;
-        }
-
-        try
-        {
-            _secrets.Set(TokenSecret, json);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
-        {
-            _logger.LogWarning("artifactory: the sign-in could not be kept for the next start: {Error}", ex.Message);
-        }
+        _kept.Keep(Address.Base, Settings.Who, client.ToJson());
     }
 
     public void Dispose()

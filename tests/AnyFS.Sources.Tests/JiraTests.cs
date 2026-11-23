@@ -269,6 +269,57 @@ public class JiraTests
     }
 
     [TestMethod]
+    public async Task TwoSourcesOfOneServerEachSignInAsTheirOwnAccount()
+    {
+        // One signs in with a user name and password, the other with the web session of another account. Every sign-in
+        // was also left where the dialog's Test leaves its own for the source it starts, under the server's name alone,
+        // and the second source to start took the first's: it ran as that account, and kept its session as its own
+        // (the review of 21-Nov-2026, R9c)
+        var fake = JiraSeed.Lab();
+        fake.AddAccount("colleague", "Col League");
+        await using var first = await StartAsync(fake, new JiraSettings { Address = fake.Server, SignInMethod = AtlassianSignInChoices.Password, Username = "tester", Password = JiraSeed.Password });
+        Assert.AreEqual("tester", first.Session.User?.Name);
+
+        var asked = 0;
+        var browser = fake.StandIn((_, _) => { asked++; return Task.FromResult<IReadOnlyList<SessionCookie>>([fake.SessionFor("colleague")]); });
+        await using var second = await StartAsync(fake, new JiraSettings { Address = fake.Server, SignInMethod = AtlassianSignInChoices.WebSession }, standIn: browser);
+        Assert.AreEqual("colleague", second.Session.User?.Name);
+        Assert.AreEqual(1, asked, "its own sign-in, in its own browser");
+    }
+
+    [TestMethod]
+    public async Task TheTestTriesThePasswordAsTypedThoughASourceIsSignedIn()
+    {
+        // the Test took the session a running source had just left, and said a wrong password worked
+        var fake = JiraSeed.Lab();
+        var settings = new JiraSettings { Address = fake.Server, SignInMethod = AtlassianSignInChoices.Password, Username = "tester", Password = JiraSeed.Password };
+        await using var running = await StartAsync(fake, settings);
+
+        var typed = new JiraSettings { Address = fake.Server, SignInMethod = AtlassianSignInChoices.Password, Username = "tester", Password = "wrong" };
+        var result = await JiraPlugin.TestAsync(typed, new Progress<string>(), fake.StandIn(), CancellationToken.None);
+        Assert.IsFalse(result.Success, result.Message);
+    }
+
+    [TestMethod]
+    public async Task TheTestsSignInGoesToTheSourceStartedFromItAndToThatOneAlone()
+    {
+        var fake = JiraSeed.Lab();
+        var asked = 0;
+        var browser = fake.StandIn((_, _) => { asked++; return Task.FromResult<IReadOnlyList<SessionCookie>>([fake.SessionFor("tester")]); });
+        var settings = new JiraSettings { Address = fake.Server, SignInMethod = AtlassianSignInChoices.WebSession };
+        var result = await JiraPlugin.TestAsync(settings, new Progress<string>(), browser, CancellationToken.None);
+        Assert.IsTrue(result.Success, result.Message);
+        Assert.AreEqual(1, asked);
+
+        await using var started = await StartAsync(fake, settings, standIn: browser);
+        Assert.AreEqual(1, asked, "the person is not asked again by the source the dialog starts");
+        Assert.AreEqual("with the session kept from before", started.Session.How);
+
+        // it was that source's from then on: another signs in for itself
+        await using var another = await StartAsync(fake, settings, standIn: browser);
+        Assert.AreEqual(2, asked);
+    }
+    [TestMethod]
     public async Task AWrongPasswordIsRefusedOnceAndNotGivenAgain()
     {
         var fake = JiraSeed.Lab();

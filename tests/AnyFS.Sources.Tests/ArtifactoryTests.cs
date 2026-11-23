@@ -515,6 +515,31 @@ public class ArtifactoryTests
     }
 
     [TestMethod]
+    public async Task AKeptSignInRenewedAsAStartBeginsIsKeptThoughTheStartIsCutShort()
+    {
+        // A refresh token is good for one use. A kept token that had run out was renewed as the start began, and the pair
+        // the platform answered with was kept only once the start was through, two requests later. A connection dropped
+        // or AnyFS closed in between left the spent token in the store, and the next start asked the person for a
+        // browser and a code (the review of 21-Nov-2026, R9a)
+        var fake = ArtifactorySeed.Lab(root: "/cut-short");
+        using var context = new TestSourceContext();
+        var settings = WebSession(fake, "");
+        await using (await StartAsync(fake, settings, context, fake.StandIn(fake.Person("tester"), useKept: false)))
+        {
+        }
+
+        fake.Now += TimeSpan.FromDays(400);
+        fake.Fault = r => r.Method == "GET" && r.Url.AbsolutePath.EndsWith("/api/repositories", StringComparison.Ordinal) ? throw new HttpRequestException("the connection was closed") : null;
+        var noBrowser = fake.StandIn((_, _, _) => throw new InvalidOperationException("no browser should be needed"));
+        await Assert.ThrowsAsync<Exception>(() => StartAsync(fake, settings, context, noBrowser));
+        Assert.AreEqual(1, fake.Count("POST /access/api/v1/tokens"), "the token was renewed before the connection dropped");
+        StringAssert.Contains(context.Secrets.Get(ArtifactorySession.TokenSecret), fake.ClientTokens[^1], "the pair the renewal answered with is the one kept");
+
+        fake.Fault = null;
+        await using var again = await StartAsync(fake, settings, context, noBrowser);
+        Assert.AreEqual("with the sign-in kept from before", again.Session.How);
+    }
+    [TestMethod]
     public async Task AKeptSignInNothingRenewsAnyMoreAsksThePersonAgain()
     {
         var fake = ArtifactorySeed.Lab();

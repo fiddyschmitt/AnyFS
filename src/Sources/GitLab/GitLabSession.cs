@@ -28,14 +28,12 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
     public const string CookiesSecret = "gitlab-cookies";
 
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(120);
-    private static readonly TimeSpan RecentFor = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan MinRenewalInterval = TimeSpan.FromSeconds(30);
 
-    // the cookies of a sign-in just made, by installation: the Test's, for the source started from the same dialog
-    private static readonly ConcurrentDictionary<string, (string Cookies, DateTime At)> Recent = new(StringComparer.OrdinalIgnoreCase);
+
 
     private readonly ILogger _logger;
-    private readonly ISecretStore? _secrets;
+    private readonly KeptSignIn _kept;
     private readonly GitLabStandIn? _standIn;
     private readonly HttpMessageHandler _handler;
     private readonly SignInRenewal _renewal;
@@ -49,7 +47,7 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
     {
         Settings = settings;
         _logger = logger;
-        _secrets = secrets;
+        _kept = new KeptSignIn(secrets, CookiesSecret, "gitlab", logger);
         _standIn = standIn;
         Url = settings.Url ?? throw new SourceFailedException("The address is not an http or https address.", permanent: true);
         Method = settings.EffectiveSignIn;
@@ -219,9 +217,8 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
             return false;
         }
 
-        // a sign-in just made (the Test's) first, then the one kept from the last run
-        var recent = Recent.TryGetValue(Address.Server.AbsoluteUri, out var r) && DateTime.UtcNow - r.At < RecentFor ? r.Cookies : null;
-        foreach (var kept in new[] { recent, _secrets?.Get(CookiesSecret) }.OfType<string>().Distinct(StringComparer.Ordinal))
+        // what the dialog's Test just left for these settings first, then what was kept at the last run (KeptSignIn)
+        foreach (var kept in _kept.Find(Address.Server, Settings.Who))
         {
             CookieJar.Clear(Cookies);
             if (CookieJar.Import(Cookies, kept, Address.Server.Host) <= 0)
@@ -544,16 +541,7 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
             return;
         }
 
-        var json = CookieJar.Export(Cookies);
-        Recent[Address.Server.AbsoluteUri] = (json, DateTime.UtcNow);
-        try
-        {
-            _secrets?.Set(CookiesSecret, json);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
-        {
-            _logger.LogWarning("gitlab: the session could not be kept for the next start: {Error}", ex.Message);
-        }
+        _kept.Keep(Address.Server, Settings.Who, CookieJar.Export(Cookies));
     }
 
     public void Dispose()

@@ -36,14 +36,12 @@ internal sealed class ThreeDXSession : IDisposable
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(120);
     private static readonly TimeSpan FlowTimeout = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan DefaultMinRenewalInterval = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan RecentFor = TimeSpan.FromMinutes(15);
 
     // the cookies of a sign-in just made, by 3DSpace address: the Test's, for the source started from the same dialog
-    private static readonly ConcurrentDictionary<string, (string Cookies, DateTime At)> Recent = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly ThreeDXSettings _settings;
     private readonly ILogger _logger;
-    private readonly ISecretStore? _secrets;
+    private readonly KeptSignIn _kept;
     private readonly SocketsHttpHandler _handler;
     private readonly HttpClient _flowHttp;
     private readonly bool _singleSignOn;
@@ -75,7 +73,7 @@ internal sealed class ThreeDXSession : IDisposable
         _useKept = options.UseKept;
         _settings = settings;
         _logger = logger;
-        _secrets = secrets;
+        _kept = new KeptSignIn(secrets, CookiesSecret, "3dx", logger);
         Space = settings.Space ?? throw new SourceFailedException("The 3DSpace URL is not an http or https address.", permanent: true);
         Method = settings.EffectiveSignIn;
         Cookies = CookieJar.New();
@@ -168,7 +166,8 @@ internal sealed class ThreeDXSession : IDisposable
     public async Task SignInAsync(bool interactive, Action<string> progress, CancellationToken ct)
     {
         progress($"Signing in to {Space.Host}");
-        var kept = !_useKept ? null : Recent.TryGetValue(Space.AbsoluteUri, out var recent) && DateTime.UtcNow - recent.At < RecentFor ? recent.Cookies : _secrets?.Get(CookiesSecret);
+        // what the dialog's Test just left for these settings, else what was kept at the last run (KeptSignIn)
+        var kept = !_useKept ? null : _kept.Find(Space, _settings.Who).FirstOrDefault();
         var hadKept = kept is not null && Import(kept) > 0;
         if (hadKept && await AnswersAsync(Space, ct).ConfigureAwait(false))
         {
@@ -522,16 +521,7 @@ internal sealed class ThreeDXSession : IDisposable
     /// <summary>Keeps the cookies: in the secret store for the next start, and for a source started from the dialog whose Test made them.</summary>
     public void Save()
     {
-        var json = CookieJar.Export(Cookies);
-        Recent[Space.AbsoluteUri] = (json, DateTime.UtcNow);
-        try
-        {
-            _secrets?.Set(CookiesSecret, json);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
-        {
-            _logger.LogWarning("3dx: the session could not be kept for the next start: {Error}", ex.Message);
-        }
+        _kept.Keep(Space, _settings.Who, CookieJar.Export(Cookies));
     }
 
     /// <summary>The cookies kept from before, into the session's jar (those since expired left out); how many.</summary>

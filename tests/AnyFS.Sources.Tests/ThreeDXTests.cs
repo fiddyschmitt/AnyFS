@@ -317,9 +317,10 @@ public class ThreeDXSignInTests
         RefreshMinutes = 60,
     };
 
-    private static async Task<(bool SignedIn, string? Problem, ThreeDXSession Session)> SignInAsync(ThreeDXSettings settings, ILogger? logger = null)
+    /// <param name="secrets">The source's store, where a sign-in is kept from one start to the next; null for a dialog's Test, which keeps none.</param>
+    private static async Task<(bool SignedIn, string? Problem, ThreeDXSession Session)> SignInAsync(ThreeDXSettings settings, ILogger? logger = null, ISecretStore? secrets = null)
     {
-        var session = new ThreeDXSession(settings, logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, secrets: null, new SessionOptions(Browser: false));
+        var session = new ThreeDXSession(settings, logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance, secrets, new SessionOptions(Browser: false));
         try
         {
             await session.SignInAsync(interactive: false, _ => { }, CancellationToken.None);
@@ -489,14 +490,17 @@ public class ThreeDXSignInTests
     {
         using var fake = new Fake3DX(Fake3DX.Passport.Saml, Fake3DX.Idp.Badge);
         var settings = Settings(fake, ThreeDXSettings.WebSession);
-        var (signedIn, problem, first) = await SignInAsync(settings);
+
+        // one source over three starts: what it keeps is in its own store
+        using var context = new TestSourceContext();
+        var (signedIn, problem, first) = await SignInAsync(settings, secrets: context.Secrets);
         first.Dispose();
         Assert.IsTrue(signedIn, problem);
         Assert.AreEqual(1, fake.BadgeAttempts);
 
         // 3DSpace's session timed out, 3DPassport's sign-in stands: the cookies kept open 3DSpace again, no PIN
         fake.ExpireSessions();
-        var (again, why, second) = await SignInAsync(settings);
+        var (again, why, second) = await SignInAsync(settings, secrets: context.Secrets);
         second.Dispose();
         Assert.IsTrue(again, why);
         Assert.AreEqual(1, fake.BadgeAttempts, "no PIN while 3DPassport's sign-in stands");
@@ -505,7 +509,7 @@ public class ThreeDXSignInTests
         fake.ExpireAll();
         fake.Requests.Clear();
         var log = new LineLogger();
-        var (third, whyNot, session) = await SignInAsync(settings, log);
+        var (third, whyNot, session) = await SignInAsync(settings, log, context.Secrets);
         using (session)
         {
             Assert.IsTrue(third, whyNot + "\n" + log);
