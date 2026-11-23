@@ -173,7 +173,16 @@ internal sealed class EwsMailStore : IMailStore
                     continue;
                 }
 
-                await SyncAsync(state, ct).ConfigureAwait(false);
+                try
+                {
+                    await SyncAsync(state, ct).ConfigureAwait(false);
+                }
+                catch (EwsException ex) when (!ex.Transient && ex.Code != "401")
+                {
+                    // the folder's own (refused to the account, gone): what was read of it stands and the others are
+                    // synced as ever. It ended the refresh, at every refresh: no new mail in any folder after it
+                    _logger.LogInformation("outlook: the folder {Folder} could not be synced ({Error}); what was read of it before stands", state.Folder.Name, ex.Message);
+                }
             }
         }
 

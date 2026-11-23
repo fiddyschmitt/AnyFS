@@ -324,6 +324,19 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
                 _pace.Hold(null);
                 continue;
             }
+            catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                // the client's own time limit, not the caller's cancellation, which it used to leave as: no answer, as a
+                // connection that dropped, tried again and then told as one
+                if (attempt < Attempts)
+                {
+                    _logger.LogInformation("outlook: {Operation} to {Host} was not answered in {Seconds:N0} s; trying again", operation, _url.Host, _http.Timeout.TotalSeconds);
+                    _pace.Hold(null);
+                    continue;
+                }
+
+                throw new HttpRequestException($"{_url.Host} did not answer {operation} within {_http.Timeout.TotalSeconds:N0} s", ex);
+            }
 
             using (response)
             {

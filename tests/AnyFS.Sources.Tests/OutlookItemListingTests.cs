@@ -199,6 +199,123 @@ public class OutlookItemListingTests
         }
     }
 
+    // --- one thing the server will not give is that thing's alone (the review of 21-Nov-2026, R12) -----------------------
+
+    /// <summary>Exchange's refusal of one call, as it answers one: at 200, the error in the response message.</summary>
+    private static HttpResponseMessage Refused(string action, string code = "ErrorAccessDenied", string text = "Access is denied. Check credentials and try again.")
+        => new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                """{"Header":{"ServerVersionInfo":{"MajorVersion":15,"MinorVersion":21,"Version":"V2018_01_08"}},"Body":{"__type":"@ACTION@Response:#Exchange","ResponseMessages":{"Items":[{"__type":"@ACTION@ResponseMessage:#Exchange","ResponseClass":"Error","ResponseCode":"@CODE@","MessageText":"@TEXT@"}]}}}""".Replace("@ACTION@", action, StringComparison.Ordinal).Replace("@CODE@", code, StringComparison.Ordinal).Replace("@TEXT@", text, StringComparison.Ordinal),
+                Encoding.UTF8, "application/json"),
+        };
+
+    private static bool Names(HttpRequestMessage request, string id) => request.Content!.ReadAsStringAsync().Result.Contains(id, StringComparison.Ordinal);
+
+    [TestMethod]
+    public async Task AFolderTheServerRefusesIsThatFoldersAloneNotTheMailboxs()
+    {
+        // a mailbox's folders were read one after another with nothing to catch one that failed: a folder the server
+        // refused the account meant no start at all
+        var fake = WithMay(out _);
+        var sent = fake.Folders.Values.Single(f => f.Distinguished == "sentitems");
+        fake.Intercept = (request, action) => action == "SyncFolderItems" && Names(request, sent.Id) ? Refused(action) : null;
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            var root = (await OutlookFixtures.ListAsync(source, "")).Select(e => e.Name).ToList();
+            CollectionAssert.Contains(root, "Inbox");
+            CollectionAssert.Contains(root, "Sent Items", "the folder shows: that is where it says it could not be read");
+            Assert.AreEqual(20, (await ItemFoldersAsync(source, May)).Count, "the other folders are read as ever");
+
+            var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ListAsync(source, "Sent Items"));
+            Assert.AreEqual(VfsError.AccessDenied, ex.Error);
+            StringAssert.Contains(ex.Message, "Access is denied");
+        }
+    }
+
+    [TestMethod]
+    public async Task AMailboxOfWhichNoFolderCanBeReadDoesNotStart()
+    {
+        // every folder refused is the mailbox refused: the start says so, in place of a tree of folders that each say it
+        var fake = WithMay(out _);
+        fake.Intercept = (_, action) => action is "SyncFolderItems" or "FindItem" ? Refused(action) : null;
+        using var context = new TestSourceContext("outlook");
+        var source = new OutlookSource(Settings(), fake.StandIn());
+        await using (source)
+        {
+            var ex = await Assert.ThrowsAsync<Exception>(() => source.InitialiseAsync(context, CancellationToken.None));
+            StringAssert.Contains(ex.Message, "Access is denied");
+        }
+    }
+
+    [TestMethod]
+    public async Task ARefreshGoesOnPastAFolderTheServerRefuses()
+    {
+        // the refresh synced the folders one after another and ended at the first that failed, at every refresh: no new
+        // mail in any folder from then on
+        var fake = WithMay(out _);
+        var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
+        var sent = fake.Folders.Values.Single(f => f.Distinguished == "sentitems");
+        fake.AddMessage(sent, "Sent before", ("Megan Bowen", "meganb@fake.test"), new DateTimeOffset(2026, 5, 2, 9, 0, 0, TimeSpan.Zero), "<p>Sent.</p>", []);
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            Assert.AreEqual(1, (await ItemFoldersAsync(source, "Sent Items/2026/05")).Count);
+
+            // both folders change; the server refuses one of them from now on
+            fake.Intercept = (request, action) => action == "SyncFolderItems" && Names(request, sent.Id) ? Refused(action) : null;
+            fake.AddMessage(sent, "Sent since", ("Megan Bowen", "meganb@fake.test"), new DateTimeOffset(2026, 5, 3, 9, 0, 0, TimeSpan.Zero), "<p>Sent.</p>", []);
+            fake.AddMessage(inbox, "Arrived since", ("Adele Vance", "adelev@fake.test"), new DateTimeOffset(2026, 5, 21, 9, 0, 0, TimeSpan.Zero), "<p>New.</p>", []);
+            await source.RefreshAsync(CancellationToken.None);
+
+            Assert.AreEqual(21, (await ItemFoldersAsync(source, May)).Count, "the inbox has its new message");
+            Assert.AreEqual(1, (await ItemFoldersAsync(source, "Sent Items/2026/05")).Count, "what was read of the refused folder stands");
+        }
+    }
+
+    [TestMethod]
+    public async Task AContactTheServerCannotGiveIsListedWithItsNeighbours()
+    {
+        // a folder of contacts lists each with its card's size, which is the card read: one the server failed on failed
+        // the listing of the whole folder
+        var fake = FakeExchange.Mailbox();
+        var contacts = fake.Folders.Values.Single(f => f.Distinguished == "contacts");
+        var bad = fake.AddContact(contacts, "Unreadable Card", "Unreadable", "Card", "card@fake.test", "Contoso", "None", "+1 555 0199");
+        fake.Intercept = (request, action) => action == "GetItem" && Names(request, bad.Id) ? Refused(action, "ErrorItemCorrupt", "The item is corrupt.") : null;
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            var listed = await OutlookFixtures.ListAsync(source, "Contacts");
+            CollectionAssert.Contains(listed.Select(e => e.Name).ToList(), "Adele Vance.vcf");
+            CollectionAssert.Contains(listed.Select(e => e.Name).ToList(), "Unreadable Card.vcf", "listed, though its card cannot be made");
+            Assert.IsTrue(listed.Single(e => e.Name == "Adele Vance.vcf").Length > 0, "its neighbours with their cards' sizes");
+
+            var failed = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, "Contacts/Unreadable Card.vcf"));
+            StringAssert.Contains(failed.Message, "corrupt");
+        }
+    }
+
+    [TestMethod]
+    public async Task ARequestThatTimesOutIsTriedAgainNotLeftAsACancellation()
+    {
+        // the client's own time limit came out as a cancellation nobody had asked for: not tried again, and not told as
+        // a mailbox that did not answer
+        var fake = WithMay(out _);
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            var timedOut = 0;
+            fake.Intercept = (_, action) => action == "GetItem" && timedOut++ == 0 ? throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout of 120 seconds elapsing.") : null;
+            var folders = await ItemFoldersAsync(source, May);
+            StringAssert.Contains(await OutlookFixtures.TextAsync(source, $"{folders[0]}/message.eml"), "Subject: Report");
+            Assert.IsTrue(timedOut >= 2, "asked again");
+        }
+    }
     [TestMethod]
     public async Task AnAttachmentTheServerFailsOnFailsItsOwnItemAlone()
     {

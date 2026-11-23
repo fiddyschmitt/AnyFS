@@ -194,7 +194,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                 await _books.StartAsync(ct).ConfigureAwait(false);
             }
 
-            Swap(await MailTree.BuildAsync(_store, ct, (done, total, name) => Context.ReportProgress($"Listing {name} ({done} of {total} folders)", total == 0 ? null : (double)done / total), _books?.Node, _settings.ShowHidden).ConfigureAwait(false));
+            Swap(await MailTree.BuildAsync(_store, ct, (done, total, name) => Context.ReportProgress($"Listing {name} ({done} of {total} folders)", total == 0 ? null : (double)done / total), _books?.Node, _settings.ShowHidden, ItsOwn).ConfigureAwait(false));
             if (kept is null)
             {
                 await KeepListingAsync(ct).ConfigureAwait(false);
@@ -590,7 +590,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                 await _books.RefreshAsync(ct).ConfigureAwait(false);
             }
 
-            Swap(await MailTree.BuildAsync(Store, ct, null, _books?.Node, _settings.ShowHidden).ConfigureAwait(false));
+            Swap(await MailTree.BuildAsync(Store, ct, null, _books?.Node, _settings.ShowHidden, ItsOwn).ConfigureAwait(false));
             ForgetFiles();
             ListNewBehind();
             Logger.LogInformation("outlook: {Name} read again in {Seconds:F1} s: {Folders:N0} folders, {Items:N0} items", Store.Name, Stopwatch.GetElapsedTime(started).TotalSeconds, _tree.FolderCount, _tree.ItemCount);
@@ -1033,6 +1033,12 @@ public sealed class OutlookSource : SourceBase, ICountable
         switch (node)
         {
             case DirNode dir:
+                // its own folders show where it has some; with nothing to show, it says why
+                if (dir.Failure is { } unread && dir.Children.Count == 0)
+                {
+                    throw CouldNotRead(dir, unread);
+                }
+
                 foreach (var child in dir.Children)
                 {
                     if (child is AddressBooksNode { Books.HasLists: false })
@@ -1040,7 +1046,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                         continue;
                     }
 
-                    yield return child is ContactNode contact ? await RunAsync(() => CardEntryAsync(contact, ct)).ConfigureAwait(false) : child.Entry;
+                    yield return child is ContactNode contact ? await RunAsync(() => CardEntryOrAsItStandsAsync(contact, ct)).ConfigureAwait(false) : child.Entry;
                 }
 
                 break;
@@ -1204,6 +1210,24 @@ public sealed class OutlookSource : SourceBase, ICountable
         return _listings.For(item) ?? ItemListing.Of(Kept(item) ?? await AloneAsync(node, ct).ConfigureAwait(false));
     }
 
+    /// <summary>
+    /// A contact's entry with its card's size, or as it stands before its card is made where the card cannot be: one
+    /// contact the store could not read failed the listing of its whole folder (the review of 21-Nov-2026, R12). It is
+    /// listed, and says why when it is opened.
+    /// </summary>
+    private async Task<VfsEntry> CardEntryOrAsItStandsAsync(ContactNode contact, CancellationToken ct)
+    {
+        try
+        {
+            return await CardEntryAsync(contact, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ItsOwn(ex))
+        {
+            Logger.LogInformation("outlook: the contact {Name} could not be read ({Error}); it is listed, and says so when opened", contact.Name, ex.Message);
+            return contact.Entry;
+        }
+    }
+
     private async Task<VfsEntry> CardEntryAsync(ContactNode contact, CancellationToken ct)
     {
         var listing = await ListingAsync(contact, ct).ConfigureAwait(false);
@@ -1264,8 +1288,21 @@ public sealed class OutlookSource : SourceBase, ICountable
     }
 
     /// <summary>Whether a batch's failure is the store's as a whole (the network, the sign-in, a server too busy, the source stopping), not its items'.</summary>
-    private static bool Systemic(ExceptionDispatchInfo? failure)
-        => failure?.SourceException is HttpRequestException or SignInRequiredException or IOException or OperationCanceledException or EwsException { Transient: true } or EwsException { Code: "401" };
+    private static bool Systemic(ExceptionDispatchInfo? failure) => Systemic(failure?.SourceException);
+
+    private static bool Systemic(Exception? failure)
+        => failure is HttpRequestException or SignInRequiredException or IOException or OperationCanceledException or EwsException { Transient: true } or EwsException { Code: "401" };
+
+    /// <summary>
+    /// Whether a failure is the one thing's that was asked for (a folder refused to the account or gone, a contact the
+    /// store cannot read) and not the store's as a whole: what the store itself said of it, and none of what
+    /// <see cref="Systemic(Exception?)"/> names.
+    /// </summary>
+    private static bool ItsOwn(Exception failure) => failure is EwsException or PstException && !Systemic(failure);
+
+    /// <summary>What listing a folder comes to when its items could not be read and it has nothing else to show.</summary>
+    private static VfsException CouldNotRead(DirNode folder, Exception failure)
+        => new(failure is EwsException { Code: "ErrorAccessDenied" } ? VfsError.AccessDenied : VfsError.IoError, $"the folder {folder.Name} could not be read: {failure.Message}", failure);
 
     /// <summary>
     /// Starts the batch after the one an item is in, from the first item after it in its folder neither made nor being

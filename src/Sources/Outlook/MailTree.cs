@@ -37,6 +37,9 @@ internal sealed class DirNode(string name, MailFolder? folder, DateTimeOffset? c
 
     public IReadOnlyList<TreeNode> Children => _children;
 
+    /// <summary>Why the folder's items could not be read, where they could not: the folder shows, without them, and says so when it has nothing else to show.</summary>
+    public Exception? Failure { get; set; }
+
     public override VfsEntry Entry => VfsEntry.Directory(Name, Modified, Created);
 
     public TreeNode? Child(string name) => _byName.TryGetValue(name, out var node) ? node : null;
@@ -154,7 +157,14 @@ internal sealed class MailTree
     /// <param name="progress">Told of each folder as it is listed (how many are done, how many there are, the folder's name); null for nobody.</param>
     /// <param name="addressBooks">The address books' folder, put at the root first (a mailbox folder of its name is numbered); null for none.</param>
     /// <param name="showEmpty">Whether folders with nothing in them are shown (with Outlook's hidden ones, when asked for); else left out.</param>
-    public static async Task<MailTree> BuildAsync(IMailStore store, CancellationToken ct, Action<int, int, string>? progress, AddressBooksNode? addressBooks = null, bool showEmpty = false)
+    /// <param name="foldersOwn">
+    /// Whether a failure to read a folder's items is that folder's own (refused to the account, gone since the folders
+    /// were read) and not the store's as a whole (the network, the sign-in). Such a folder is shown without its items
+    /// (<see cref="DirNode.Failure"/>) and the others are read as ever, unless none could be read at all, which is the
+    /// mailbox's failure. Null takes every failure for the mailbox's, as all were: one folder the server refused meant
+    /// no start, and at a refresh no new mail in any folder (the review of 21-Nov-2026, R12).
+    /// </param>
+    public static async Task<MailTree> BuildAsync(IMailStore store, CancellationToken ct, Action<int, int, string>? progress, AddressBooksNode? addressBooks = null, bool showEmpty = false, Func<Exception, bool>? foldersOwn = null)
     {
         var root = new DirNode("", null, null, null);
         if (addressBooks is not null)
@@ -164,7 +174,14 @@ internal sealed class MailTree
 
         var total = CountFolders(store.Folders);
         var done = 0;
-        await AddFoldersAsync(root, store.Folders, store, ct, name => progress?.Invoke(++done, total, name), showEmpty).ConfigureAwait(false);
+        var read = new Reading(foldersOwn);
+        await AddFoldersAsync(root, store.Folders, store, ct, name => progress?.Invoke(++done, total, name), showEmpty, read).ConfigureAwait(false);
+        if (read.Folders == 0 && read.FirstFailure is { } nothingRead)
+        {
+            // not one folder could be read: the mailbox's failure, told as the first of them
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(nothingRead).Throw();
+        }
+
         var counts = new Counts();
         Count(root, counts);
         return new MailTree(root, counts.Folders, counts.Items, counts.Files, counts.ById);
@@ -229,20 +246,42 @@ internal sealed class MailTree
     /// such as 'Journal' that are empty, let's not show them"), unless <paramref name="showEmpty"/>; a refresh that finds
     /// something in it shows it.
     /// </summary>
-    private static async Task AddFoldersAsync(DirNode parent, IReadOnlyList<MailFolder> folders, IMailStore store, CancellationToken ct, Action<string> listed, bool showEmpty)
+    private static async Task AddFoldersAsync(DirNode parent, IReadOnlyList<MailFolder> folders, IMailStore store, CancellationToken ct, Action<string> listed, bool showEmpty, Reading read)
     {
         foreach (var folder in folders)
         {
             ct.ThrowIfCancellationRequested();
             var dir = new DirNode(parent.Unique(MailNames.Folder(folder.Name), isFile: false), folder, folder.Created, folder.Modified);
-            AddItems(dir, await store.ItemsAsync(folder, ct).ConfigureAwait(false));
+            try
+            {
+                AddItems(dir, await store.ItemsAsync(folder, ct).ConfigureAwait(false));
+                read.Folders++;
+            }
+            catch (Exception ex) when (read.IsFoldersOwn(ex))
+            {
+                dir.Failure = ex;
+                read.FirstFailure ??= ex;
+            }
+
             listed(folder.Name);
-            await AddFoldersAsync(dir, folder.Folders, store, ct, listed, showEmpty).ConfigureAwait(false);
-            if (showEmpty || dir.Children.Count > 0)
+            await AddFoldersAsync(dir, folder.Folders, store, ct, listed, showEmpty, read).ConfigureAwait(false);
+
+            // a folder that could not be read shows though it has nothing in it: that is where it says so
+            if (showEmpty || dir.Children.Count > 0 || dir.Failure is not null)
             {
                 parent.Add(dir);
             }
         }
+    }
+
+    /// <summary>How the reading of a mailbox's folders goes: how many were read, and the first that could not be.</summary>
+    private sealed class Reading(Func<Exception, bool>? foldersOwn)
+    {
+        public int Folders { get; set; }
+
+        public Exception? FirstFailure { get; set; }
+
+        public bool IsFoldersOwn(Exception failure) => foldersOwn?.Invoke(failure) == true;
     }
 
     private static void AddItems(DirNode dir, IEnumerable<MailItemSummary> items)
