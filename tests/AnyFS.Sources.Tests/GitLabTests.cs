@@ -1814,6 +1814,54 @@ public class GitLabTicketTests
         await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync("issues/#99 Nothing/issue.md", VfsOpenMode.Read, CancellationToken.None));
     }
 
+    [TestMethod]
+    public async Task AnIssuesFileOpensWithoutTheProjectsOtherIssuesNamedAgain()
+    {
+        // to find one issue's folder the project's issues were all named again and a folder made for each, at every open:
+        // a search that read every issue's file of a project of N issues named N issues N times (the review of
+        // 21-Nov-2026, P5)
+        var fake = GitLabSeed.Lab();
+        var docs = fake.ProjectAt("anyfs/docs");
+        var tester = fake.UserNamed("tester");
+        var titles = new[] { "", "   ", "CON", "ends with a dot.", "a/b:c*?", new string('x', 200), "two\nlines", "Twin", "twin", "#7 not its number", "Ã¼nÃ¯cÃ¶dÃ© âœ“" };
+        foreach (var title in titles)
+        {
+            docs.IssueList.Add(new FakeGitLab.Ticket(docs.IssueList.Count + 1, title, "Text.", tester, GitLabSeed.Opened.AddDays(docs.IssueList.Count)));
+        }
+
+        await using var source = await StartAsync(fake);
+        var names = (await ListAsync(source, "issues")).Select(e => e.Name).ToList();
+        Assert.AreEqual(docs.IssueList.Count, names.Count);
+        _ = await ReadAsync(source, $"issues/{names[0]}/issue.md");
+
+        var before = source.ListingsToFind;
+        foreach (var name in names)
+        {
+            // found by the name its folder was listed with, and the same one
+            var found = (TicketFolder)await source.ResolveAsync($"issues/{name}", CancellationToken.None);
+            Assert.AreEqual(name, found.Name);
+            Assert.AreEqual(GitLabNames.Issue(found.Ticket.Iid, found.Ticket.Title), name);
+        }
+
+        Assert.AreEqual(before, source.ListingsToFind, "an issue's folder is found by its number, nothing listed");
+        foreach (var name in names)
+        {
+            StringAssert.StartsWith(System.Text.Encoding.UTF8.GetString(await ReadAsync(source, $"issues/{name}/issue.md")), "# #");
+        }
+
+        Assert.AreEqual(before + names.Count, source.ListingsToFind, "each file's open lists its own issue's folder, and no other");
+
+        // what is no issue's name finds nothing, as before
+        foreach (var none in new[] { "#99 Nothing", "#1", "#1x Install", "1 Install fails on Debian", "!1 Docs_ say more", "# 1", "#-1 x", "#" })
+        {
+            var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.ResolveAsync($"issues/{none}", CancellationToken.None), none);
+            Assert.AreEqual(VfsError.NotFound, ex.Error, none);
+        }
+
+        Assert.IsInstanceOfType<TicketFolder>(await source.ResolveAsync("merge requests/!1 a title it never had", CancellationToken.None));
+        Assert.IsInstanceOfType<TicketFolder>(await source.ResolveAsync("ISSUES/#1 INSTALL FAILS ON DEBIAN", CancellationToken.None));
+    }
+
     private const string First = "issues/#1 Install fails on Debian";
 
     [TestMethod]

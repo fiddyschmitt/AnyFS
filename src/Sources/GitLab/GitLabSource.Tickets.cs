@@ -6,8 +6,8 @@ using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.GitLab;
 
-/// <summary>A project's issues or merge requests as last asked: by number, the newest change, when the whole list was last read.</summary>
-internal sealed record TicketList(IReadOnlyList<GlTicket> Items, DateTimeOffset? Newest, DateTimeOffset WholeAt);
+/// <summary>A project's issues or merge requests as last asked: in the order of their numbers and by number, the newest change, when the whole list was last read.</summary>
+internal sealed record TicketList(IReadOnlyList<GlTicket> Items, IReadOnlyDictionary<long, GlTicket> ByNumber, DateTimeOffset? Newest, DateTimeOffset WholeAt);
 
 public sealed partial class GitLabSource
 {
@@ -21,9 +21,16 @@ public sealed partial class GitLabSource
     /// so a project of thousands costs a request a minute while it is open.
     /// </summary>
     internal async Task<IReadOnlyList<GlTicket>> TicketsAsync(GlProject project, bool mergeRequests, CancellationToken ct)
+        => (await TicketListAsync(project, mergeRequests, ct).ConfigureAwait(false)).Items;
+
+    /// <summary>One of a project's issues or merge requests by its number, from the same list; null where there is none.</summary>
+    internal async Task<GlTicket?> TicketAsync(GlProject project, bool mergeRequests, long number, CancellationToken ct)
+        => (await TicketListAsync(project, mergeRequests, ct).ConfigureAwait(false)).ByNumber.GetValueOrDefault(number);
+
+    private Task<TicketList> TicketListAsync(GlProject project, bool mergeRequests, CancellationToken ct)
     {
         var key = $"tickets:{project.Id}:{(mergeRequests ? "mr" : "issue")}";
-        var list = await Cache.GetAsync(key, Refresh, async c =>
+        return Cache.GetAsync(key, Refresh, async c =>
         {
             var what = mergeRequests ? "merge_requests" : "issues";
             var state = Settings.OpenOnly ? "opened" : "all";
@@ -35,7 +42,7 @@ public sealed partial class GitLabSource
                 query += "&updated_after=" + Uri.EscapeDataString(previous!.Newest!.Value.AddSeconds(-1).ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture));
             }
 
-            var byNumber = whole ? new Dictionary<long, GlTicket>() : previous!.Items.ToDictionary(t => t.Iid);
+            var byNumber = whole ? new Dictionary<long, GlTicket>() : new Dictionary<long, GlTicket>(previous!.ByNumber);
             await foreach (var e in Api.PagesAsync(query, c).ConfigureAwait(false))
             {
                 var ticket = GlTicket.Parse(e);
@@ -51,11 +58,10 @@ public sealed partial class GitLabSource
 
             var items = byNumber.Values.OrderBy(t => t.Iid).ToList();
             var newest = items.Count == 0 ? previous?.Newest : items.Max(t => t.Updated);
-            var fresh = new TicketList(items, newest, whole ? DateTimeOffset.UtcNow : previous!.WholeAt);
+            var fresh = new TicketList(items, byNumber, newest, whole ? DateTimeOffset.UtcNow : previous!.WholeAt);
             _tickets[key] = fresh;
             return fresh;
-        }, ct).ConfigureAwait(false);
-        return list.Items;
+        }, ct);
     }
 
     /// <summary>An issue's or merge request's comments, oldest first; asked again when the issue has changed since.</summary>

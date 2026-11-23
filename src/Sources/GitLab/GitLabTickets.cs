@@ -1,3 +1,4 @@
+using System.Globalization;
 using AnyFS.Sdk;
 
 namespace AnyFS.Sources.GitLab;
@@ -8,8 +9,41 @@ internal sealed class TicketsFolder(GlProject project, bool mergeRequests, strin
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
         var tickets = await source.TicketsAsync(project, mergeRequests, ct).ConfigureAwait(false);
-        var names = GitLabNames.Unique(tickets.Select(t => mergeRequests ? GitLabNames.MergeRequest(t.Iid, t.Title) : GitLabNames.Issue(t.Iid, t.Title)).ToList());
+        var names = GitLabNames.Unique(tickets.Select(NameOf).ToList());
         return tickets.Select((t, i) => (GlNode)new TicketFolder(project, t, mergeRequests, names[i])).ToList();
+    }
+
+    /// <summary>
+    /// One issue's or merge request's folder by the number its name starts with, nothing else named or made. Finding one
+    /// listed them all: each was named again and a folder made for each, so a search that read every issue's file of a
+    /// project of N issues named N issues N times (the review of 21-Nov-2026, P5: 4 GiB allocated to read 2,000 issues'
+    /// files, 15 for 4,000). Its name is the one a listing gives it: the number a name starts with keeps the names apart,
+    /// so none is ever numbered as another's twin in case.
+    /// </summary>
+    public override async Task<GlNode?> FindAsync(GitLabSource source, string path, string name, CancellationToken ct)
+    {
+        if (NumberIn(name) is not { } number || await source.TicketAsync(project, mergeRequests, number, ct).ConfigureAwait(false) is not { } ticket)
+        {
+            return null;
+        }
+
+        // by the name it has, or by its number alone where its title has changed since the name was listed
+        var own = GitLabNames.Unique([NameOf(ticket)])[0];
+        return own.Equals(name, StringComparison.OrdinalIgnoreCase) || TicketFolder.SameTicket(own, name) ? new TicketFolder(project, ticket, mergeRequests, own) : null;
+    }
+
+    private string NameOf(GlTicket ticket) => mergeRequests ? GitLabNames.MergeRequest(ticket.Iid, ticket.Title) : GitLabNames.Issue(ticket.Iid, ticket.Title);
+
+    /// <summary>The number a folder's name starts with (<c>#12 â€¦</c>, <c>!7 â€¦</c>), or null where it starts with none.</summary>
+    private long? NumberIn(string name)
+    {
+        if (name.Length < 2 || name[0] != (mergeRequests ? '!' : '#'))
+        {
+            return null;
+        }
+
+        var end = name.IndexOf(' ', StringComparison.Ordinal);
+        return long.TryParse(end < 0 ? name.AsSpan(1) : name.AsSpan(1, end - 1), NumberStyles.None, CultureInfo.InvariantCulture, out var number) ? number : null;
     }
 }
 
