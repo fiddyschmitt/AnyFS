@@ -126,4 +126,11 @@ public abstract class WebSignInTarget(Uri page, string profileDir)
 
         return Path.Combine(root, host);
     }
+
+    /// <summary>
+    /// A page's address as a log may have it: where the page is, and nothing of what follows its path. A sign-in page's
+    /// query names the account, the tenant and the state of the sign-in.
+    /// </summary>
+    public static string Bare(string? address)
+        => Uri.TryCreate(address, UriKind.Absolute, out var page) ? $"{page.Scheme}://{page.Host}{page.AbsolutePath}" : "no page";
 }

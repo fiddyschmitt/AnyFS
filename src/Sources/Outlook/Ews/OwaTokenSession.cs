@@ -266,7 +266,7 @@ internal sealed class OwaTokenSession
 
             if (DateTime.UtcNow > until)
             {
-                _logger.LogInformation("outlook: no token for {Host} after {Seconds} s {Mode}; the page is at {Where}", _origin.Host, deadline.TotalSeconds, Mode(headless), page);
+                _logger.LogInformation("outlook: no token for {Host} after {Seconds} s {Mode}; the page is at {Where}", _origin.Host, deadline.TotalSeconds, Mode(headless), WebSignInTarget.Bare(page));
                 return headless
                     ? new Capture(null, "no saved sign-in")
                     : new Capture(null, $"nobody finished the sign-in to {_origin.Host} within {InteractiveDeadline.TotalMinutes:N0} minutes; Retry to sign in", Final: true);

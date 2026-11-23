@@ -43,6 +43,8 @@ public interface IRequestSession
 /// </summary>
 public abstract class RequestCore : IDisposable
 {
+    private static readonly HttpRequestOptionsKey<object?> HintKey = new("AnyFS.RequestCore.Hint");
+
     private readonly IRequestSession _session;
     private readonly RequestPace _pace;
     private readonly PriorityGate _gate;
@@ -72,6 +74,9 @@ public abstract class RequestCore : IDisposable
 
     /// <summary>The server's host, for the messages.</summary>
     protected abstract string Host { get; }
+
+    /// <summary>The host a message names for a request to <paramref name="address"/>: the server's, unless the client asks more than one.</summary>
+    protected virtual string HostOf(Uri? address) => Host;
 
     /// <summary>What the log lines begin with: "gitlab".</summary>
     protected abstract string LogName { get; }
@@ -132,6 +137,16 @@ public abstract class RequestCore : IDisposable
     /// <summary>Whether the sign-in may be made again for this request (not for one that has been sent on to another server).</summary>
     protected virtual bool MayRenew(Sent sent) => true;
 
+    /// <summary>Makes the sign-in again for a request it was refused to: through the session, unless the client's sign-in is not one for all its requests.</summary>
+    protected virtual Task RenewAsync(int generation, Sent sent, CancellationToken ct) => _session.RenewAsync(generation, ct);
+
+    /// <summary>Whether an answer is one to hand to the caller: a success, unless the client takes more for an answer (a download asked past its end).</summary>
+    protected virtual bool IsAnswer(HttpResponseMessage response, Sent sent)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        return response.IsSuccessStatusCode;
+    }
+
     /// <summary>A hold began or lengthened: for the client's log line, and whoever it tells.</summary>
     protected virtual void OnHold(TimeSpan hold, HttpResponseMessage response, string? kind, string what)
     {
@@ -191,7 +206,7 @@ public abstract class RequestCore : IDisposable
     /// Sends a request (made afresh for each attempt) and returns a successful response; refusals and failures become
     /// <see cref="VfsException"/>s, after the retries the class describes.
     /// </summary>
-    /// <param name="hint">What the client knows of the request, which its hooks read back from <see cref="Sent.Hint"/>.</param>
+    /// <param name="hint">What the client knows of the request, which its hooks read back from <see cref="Sent.Hint"/> and its session from <see cref="HintOf"/>.</param>
     protected async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, string what, CancellationToken ct, HttpCompletionOption completion = HttpCompletionOption.ResponseContentRead, object? hint = null)
     {
         ArgumentNullException.ThrowIfNull(make);
@@ -206,9 +221,15 @@ public abstract class RequestCore : IDisposable
             Exception? dropped = null;
             HttpMethod own;
             string? kind;
+            Uri? address;
             using (var request = make())
             {
                 own = request.Method;
+                if (hint is not null)
+                {
+                    request.Options.Set(HintKey, hint);
+                }
+
                 if (sentOn is not null)
                 {
                     request.RequestUri = sentOn;
@@ -219,6 +240,7 @@ public abstract class RequestCore : IDisposable
                     }
                 }
 
+                address = request.RequestUri;
                 kind = KindOf(request);
                 using var turn = await _pace.TakeAsync(kind, ct).ConfigureAwait(false);
                 await _gate.WaitAsync(urgent: !Walks.Current, ct).ConfigureAwait(false);
@@ -257,7 +279,7 @@ public abstract class RequestCore : IDisposable
             {
                 if (attempt >= Attempts)
                 {
-                    throw new VfsException(VfsError.Unavailable, $"{Product} ({Host}) did not answer: {dropped!.Message}", dropped);
+                    throw new VfsException(VfsError.Unavailable, $"{Product} ({HostOf(address)}) did not answer: {dropped!.Message}", dropped);
                 }
 
                 // paused with the place given back: each client held it through the pause, so a person's request waited
@@ -267,9 +289,9 @@ public abstract class RequestCore : IDisposable
                 continue;
             }
 
-            var sent = new Sent(sentOn, hint);
+            var sent = new Sent(address, sentOn, hint);
             var lapsed = IsLapsed(response, sent);
-            if (response.IsSuccessStatusCode && !lapsed)
+            if (IsAnswer(response, sent) && !lapsed)
             {
                 return response;
             }
@@ -286,7 +308,7 @@ public abstract class RequestCore : IDisposable
                     if (!renewed && _session.CanRenew)
                     {
                         renewed = true;
-                        await _session.RenewAsync(generation, ct).ConfigureAwait(false);
+                        await RenewAsync(generation, sent, ct).ConfigureAwait(false);
                         continue;
                     }
 
@@ -312,7 +334,7 @@ public abstract class RequestCore : IDisposable
             {
                 response.Dispose();
                 renewed = true;
-                await _session.RenewAsync(generation, ct).ConfigureAwait(false);
+                await RenewAsync(generation, sent, ct).ConfigureAwait(false);
                 continue;
             }
 
@@ -392,6 +414,18 @@ public abstract class RequestCore : IDisposable
         }
     }
 
+    /// <summary>
+    /// An answer's JSON as <see cref="JsonAsync"/> reads it, or an empty object where the service had nothing to say (204,
+    /// or a success with no body). For an answer read whole before it was handed over, whose length is known then.
+    /// </summary>
+    protected Task<JsonDocument> JsonOrNothingAsync(HttpResponseMessage response, string what, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        return response.StatusCode == HttpStatusCode.NoContent || response.Content.Headers.ContentLength == 0
+            ? Task.FromResult(JsonDocument.Parse("{}"))
+            : JsonAsync(response, what, ct);
+    }
+
     /// <summary>What a successful answer that is not JSON comes to where JSON was asked for: a page served in place of data, as a lapsed session is somewhere a 401 does not say so.</summary>
     protected virtual VfsException NotData(HttpResponseMessage response, string what)
         => new(VfsError.Unavailable, $"{Product} ({Host}) answered {what} with {ContentType(response)}, not data: the sign-in may have lapsed. Retry the source.");
@@ -435,8 +469,12 @@ public abstract class RequestCore : IDisposable
     {
     }
 
+    /// <summary>What a client gave <see cref="SendAsync"/> with a request: for its session, which is handed the request alone.</summary>
+    public static object? HintOf(HttpRequestMessage? request) => request is not null && request.Options.TryGetValue(HintKey, out var hint) ? hint : null;
+
     /// <summary>What the hooks are told of the request an answer is to.</summary>
+    /// <param name="Address">Where it went.</param>
     /// <param name="SentOn">Where an earlier answer sent it on to; null while it goes to its own address.</param>
     /// <param name="Hint">What the client gave <see cref="SendAsync"/> with it.</param>
-    protected readonly record struct Sent(Uri? SentOn, object? Hint);
+    protected readonly record struct Sent(Uri? Address, Uri? SentOn, object? Hint);
 }

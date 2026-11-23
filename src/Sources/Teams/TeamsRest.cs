@@ -33,16 +33,16 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
     private const string ClientVersion = "49/25113001312";
     private const int MaxImageBytes = 50 << 20;
 
-    private readonly HttpClient _http = new(UpstreamRequestsHandler.Around(handler ?? new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, PooledConnectionLifetime = TimeSpan.FromMinutes(2) }, watcher))
-    {
-        Timeout = TimeSpan.FromSeconds(100),
-    };
-
-    private readonly SemaphoreSlim _inFlight = new(Math.Clamp(concurrency, 1, 64), Math.Clamp(concurrency, 1, 64));
-
-    // no pace of AnyFS's own (until 5-Nov-2026 at most 8 a second whatever the settings said): a service that asks AnyFS to wait
-    // (429, 503 with Retry-After) is waited for, by every request of it together
-    private readonly RequestPace _pace = RequestPace.Unpaced("teams");
+    // every request goes through the loop the sources share (TeamsRequests), which owns the client
+    private readonly TeamsRequests _requests = new(
+        teamsApiHost,
+        new HttpClient(UpstreamRequestsHandler.Around(handler ?? new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, PooledConnectionLifetime = TimeSpan.FromMinutes(2) }, watcher))
+        {
+            Timeout = TimeSpan.FromSeconds(100),
+        },
+        tokenFor,
+        concurrency,
+        logger);
     private Services? _services;
 
     public string Account { get; set; } = "";
@@ -377,8 +377,7 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
 
     public ValueTask DisposeAsync()
     {
-        _http.Dispose();
-        _inFlight.Dispose();
+        _requests.Dispose();
         return ValueTask.CompletedTask;
     }
 
@@ -633,37 +632,19 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
         }
     }
 
-    public async Task<HttpResponseMessage> ContentAsync(string downloadUrl, long offset, CancellationToken ct)
-    {
-        // pre-authenticated: no token goes with it
-        await _pace.WaitAsync(ct).ConfigureAwait(false);
-        using var request = new HttpRequestMessage(HttpMethod.Get, downloadUrl);
-        if (offset > 0)
-        {
-            request.Headers.Range = new RangeHeaderValue(offset, null);
-        }
+    public Task<HttpResponseMessage> ContentAsync(string downloadUrl, long offset, CancellationToken ct)
 
-        HttpResponseMessage response;
-        try
+        // pre-authenticated: no token goes with it, and the address goes in no message
+        => _requests.OpenAsync(() =>
         {
-            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        }
-        catch (HttpRequestException ex)
-        {
-            throw VfsException.Unavailable($"SharePoint ({new Uri(downloadUrl).Host}) could not be reached: {ex.Message}");
-        }
+            var request = new HttpRequestMessage(HttpMethod.Get, downloadUrl);
+            if (offset > 0)
+            {
+                request.Headers.Range = new RangeHeaderValue(offset, null);
+            }
 
-        if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
-        {
-            return response;
-        }
-
-        using (response)
-        {
-            throw Error(response.StatusCode, downloadUrl, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false));
-        }
-    }
-
+            return request;
+        }, TeamsRequests.Download, "the file's content", ct);
     /// <summary>A site address on a SharePoint host, or a refusal: the SharePoint token is never sent elsewhere.</summary>
     private static string SharePointSite(string siteUrl)
         => Uri.TryCreate(siteUrl, UriKind.Absolute, out var site) && site.Scheme == Uri.UriSchemeHttps && TeamsServices.IsSharePointHost(site.Host)
@@ -1079,15 +1060,17 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             return null;
         }
 
-        await _pace.WaitAsync(ct).ConfigureAwait(false);
-        using var request = new HttpRequestMessage(HttpMethod.Get, src);
-        request.Headers.TryAddWithoutValidation("Authorization", $"skype_token {skype}");
-        request.Headers.TryAddWithoutValidation("x-ms-client-version", ClientVersion);
-        request.Headers.Accept.ParseAdd("image/*");
-        request.Headers.Range = range;
         try
         {
-            var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+            var response = await _requests.OpenAsync(() =>
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, src);
+                request.Headers.TryAddWithoutValidation("Authorization", $"skype_token {skype}");
+                request.Headers.TryAddWithoutValidation("x-ms-client-version", ClientVersion);
+                request.Headers.Accept.ParseAdd("image/*");
+                request.Headers.Range = range;
+                return request;
+            }, TeamsRequests.Media, "an inline image", ct).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode || ResponseLength.Of(response) > MaxImageBytes)
             {
                 logger.LogInformation("teams: an inline image could not be read ({Status}, {Length} bytes)", (int)response.StatusCode, ResponseLength.Of(response));
@@ -1097,13 +1080,12 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
 
             return response;
         }
-        catch (HttpRequestException ex)
+        catch (VfsException ex)
         {
             logger.LogInformation("teams: an inline image could not be read ({Error})", ex.Message);
             return null;
         }
     }
-
     public Task<HttpResponseMessage> MediaAsync(string address, long offset, CancellationToken ct) => MediaAsync(address, new RangeHeaderValue(offset, null), ct);
 
     /// <summary>Its first byte asked for: a recording's whole length is in the answer's headers, and none of the video crosses the network but that byte.</summary>
@@ -1121,36 +1103,15 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             throw new VfsException(VfsError.AccessDenied, "a recording off Teams' media service, or no skype token to read it with");
         }
 
-        await _pace.WaitAsync(ct).ConfigureAwait(false);
-        using var request = new HttpRequestMessage(HttpMethod.Get, address);
-        request.Headers.TryAddWithoutValidation("Authorization", $"skype_token {skype}");
-        request.Headers.TryAddWithoutValidation("x-ms-client-version", ClientVersion);
-        request.Headers.Range = range;
-        HttpResponseMessage response;
-        try
+        return await _requests.OpenAsync(() =>
         {
-            response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        }
-        catch (HttpRequestException ex)
-        {
-            throw VfsException.Unavailable($"Teams' media service could not be reached: {ex.Message}");
-        }
-
-        if (response.IsSuccessStatusCode || response.StatusCode == HttpStatusCode.RequestedRangeNotSatisfiable)
-        {
-            return response;
-        }
-
-        var status = response.StatusCode;
-        response.Dispose();
-        throw status switch
-        {
-            HttpStatusCode.NotFound or HttpStatusCode.Gone => new VfsException(VfsError.NotFound, "Teams' media service has no such recording (any more)"),
-            HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => new VfsException(VfsError.AccessDenied, $"Teams' media service refused the recording ({(int)status})"),
-            _ => VfsException.Unavailable($"Teams' media service answered {(int)status}"),
-        };
+            var request = new HttpRequestMessage(HttpMethod.Get, address);
+            request.Headers.TryAddWithoutValidation("Authorization", $"skype_token {skype}");
+            request.Headers.TryAddWithoutValidation("x-ms-client-version", ClientVersion);
+            request.Headers.Range = range;
+            return request;
+        }, TeamsRequests.Media, "a recording", ct).ConfigureAwait(false);
     }
-
     // --- the messages page ---------------------------------------------------------------------------------------------
 
     private async Task<MessagePage> PageAsync(string url, CancellationToken ct)
@@ -1268,109 +1229,8 @@ internal sealed class TeamsRest(Uri teamsApiHost, Func<TeamsService, string?, Ca
             _ => true,
         };
 
-    private async Task<JsonDocument> SendAsync(HttpMethod method, string url, TeamsService service, string? body, CancellationToken ct)
-    {
-        if (!MayCarry(service, url))
-        {
-            throw VfsException.AccessDenied(url);
-        }
-
-        await _inFlight.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            string? refused = null;
-            var renewed = false;
-            for (var attempt = 0; ; attempt++)
-            {
-                await _pace.WaitAsync(ct).ConfigureAwait(false);
-                var token = await tokenFor(service, refused, ct).ConfigureAwait(false);
-                refused = null;
-                using var request = new HttpRequestMessage(method, url);
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-                request.Headers.Accept.ParseAdd("application/json");
-                if (body is not null)
-                {
-                    request.Content = new StringContent(body, Encoding.UTF8, "application/json");
-                }
-
-                HttpResponseMessage response;
-                try
-                {
-                    response = await _http.SendAsync(request, ct).ConfigureAwait(false);
-                }
-                catch (HttpRequestException ex)
-                {
-                    throw VfsException.Unavailable($"Teams ({new Uri(url).Host}) could not be reached: {ex.Message}");
-                }
-                catch (TaskCanceledException) when (!ct.IsCancellationRequested)
-                {
-                    throw VfsException.Unavailable($"Teams ({new Uri(url).Host}) did not answer within {_http.Timeout.TotalSeconds:F0} s");
-                }
-
-                try
-                {
-                    if ((int)response.StatusCode is 429 or 503 && attempt < 5)
-                    {
-                        _pace.Hold(response);
-                        var after = response.Headers.RetryAfter?.Delta ?? response.Headers.RetryAfter?.Date - DateTimeOffset.UtcNow ?? TimeSpan.FromSeconds(Math.Min(30, 1 << attempt));
-                        logger.LogInformation("teams: {Host} is throttling; holding {Seconds:F0}s", new Uri(url).Host, Math.Max(0, after.TotalSeconds));
-                        await Task.Delay(after > TimeSpan.Zero ? after : TimeSpan.FromSeconds(1), ct).ConfigureAwait(false);
-                        continue;
-                    }
-
-                    // a token the service no longer takes before its expiry (revoked, or a claims challenge): once more, with
-                    // a fresh one; a 403 is the account's permission, not the token, so it is not asked again
-                    if (response.StatusCode == HttpStatusCode.Unauthorized && !renewed)
-                    {
-                        renewed = true;
-                        refused = token;
-                        logger.LogInformation("teams: {Host} refused the web session's token; asking for a fresh one", new Uri(url).Host);
-                        continue;
-                    }
-
-                    var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-                    if (!response.IsSuccessStatusCode)
-                    {
-                        throw Error(response.StatusCode, url, text);
-                    }
-
-                    try
-                    {
-                        return JsonDocument.Parse(text.Length == 0 ? "{}" : text);
-                    }
-                    catch (JsonException)
-                    {
-                        // a proxy's or a portal's page in place of the service's answer
-                        throw new VfsException(VfsError.IoError, $"Teams ({new Uri(url).Host}) answered with something other than JSON: {Trim(text)}");
-                    }
-                }
-                finally
-                {
-                    response.Dispose();
-                }
-            }
-        }
-        finally
-        {
-            _inFlight.Release();
-        }
-    }
-
-    private static VfsException Error(HttpStatusCode code, string url, string body)
-    {
-        var host = new Uri(url).Host;
-        var message = $"Teams ({host}) answered {(int)code}";
-        return code switch
-        {
-            HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => VfsException.AccessDenied($"{message}: the sign-in does not reach this ({Trim(body)})"),
-            HttpStatusCode.NotFound => VfsException.NotFound(url),
-            >= (HttpStatusCode)500 => VfsException.Unavailable(message),
-            _ => new VfsException(VfsError.IoError, $"{message}: {Trim(body)}"),
-        };
-    }
-
-    private static string Trim(string body) => body.Length <= 200 ? body : body[..200];
-
+    private Task<JsonDocument> SendAsync(HttpMethod method, string url, TeamsService service, string? body, CancellationToken ct)
+        => MayCarry(service, url) ? _requests.JsonAsync(method, url, service, body, ct) : Task.FromException<JsonDocument>(VfsException.AccessDenied(url));
     // --- JSON helpers --------------------------------------------------------------------------------------------------
 
     private static JsonElement Obj(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) ? v : default;

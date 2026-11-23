@@ -69,6 +69,156 @@ public class TeamsRestTests
         CollectionAssert.AreEqual(new[] { (TeamsService.Aggregator, "aggregator-1") }, refusals);
     }
 
+    // --- the loop the sources share (the review of 21-Nov-2026, R10) ---------------------------------------------------
+
+    /// <summary>A service that answers what is asked after its address as a test says, try by try.</summary>
+    private sealed class Scripted(Func<HttpRequestMessage, int, HttpResponseMessage> answer) : HttpMessageHandler
+    {
+        private int _calls;
+
+        public int Calls => Volatile.Read(ref _calls);
+
+        /// <summary>What was asked after the service's address, in the order it came.</summary>
+        public System.Collections.Concurrent.ConcurrentQueue<string> Asked { get; } = new();
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (request.RequestUri!.AbsolutePath == "/api/authsvc/v1.0/authz")
+            {
+                return Task.FromResult(Json(HttpStatusCode.OK, Authz));
+            }
+
+            Asked.Enqueue(request.RequestUri.Host);
+            return Task.FromResult(answer(request, Interlocked.Increment(ref _calls)));
+        }
+    }
+
+    private static HttpResponseMessage Json(HttpStatusCode status, string body) => new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+
+    private static TeamsRest Over(HttpMessageHandler service, int concurrency = 2)
+        => new(new Uri("https://teams.test"), (_, _, _) => Task.FromResult("token"), concurrency, NullLogger.Instance, service);
+
+    [TestMethod]
+    public async Task ARequestThatGetsNoAnswerIsTriedAgain()
+    {
+        // the call failed at the first drop, and with failures held until the next walk a blip cost a folder for a whole walk
+        var service = new Scripted((_, call) => call == 1 ? throw new HttpRequestException("the connection was closed") : Json(HttpStatusCode.OK, Teams));
+        await using var rest = Over(service);
+
+        Assert.AreEqual("Lab", (await rest.StructureAsync(CancellationToken.None)).Teams.Single().DisplayName);
+        Assert.AreEqual(2, service.Calls);
+    }
+
+    [TestMethod]
+    [DataRow(HttpStatusCode.InternalServerError)]
+    [DataRow(HttpStatusCode.BadGateway)]
+    public async Task AFailureOfTheServicesOwnIsTriedAgain(HttpStatusCode failure)
+    {
+        // only 429 and 503 were
+        var service = new Scripted((_, call) => call == 1 ? Json(failure, "{}") : Json(HttpStatusCode.OK, Teams));
+        await using var rest = Over(service);
+
+        Assert.AreEqual("Lab", (await rest.StructureAsync(CancellationToken.None)).Teams.Single().DisplayName);
+        Assert.AreEqual(2, service.Calls);
+    }
+
+    [TestMethod]
+    public async Task ARequestToldToWaitGivesItsPlaceBackMeanwhile()
+    {
+        // one at a time. The aggregator says it is busy and names no time, so the request pauses before it goes again:
+        // it kept its place through that pause, and the conversation asked for meanwhile waited for it
+        var busy = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var service = new Scripted((request, _) =>
+        {
+            if (request.RequestUri!.Host == "agg.test" && busy.TrySetResult())
+            {
+                return Json(HttpStatusCode.TooManyRequests, "{}");
+            }
+
+            return Json(HttpStatusCode.OK, request.RequestUri.Host == "agg.test" ? Teams : """{"messages":[],"_metadata":{}}""");
+        });
+        await using var rest = Over(service, concurrency: 1);
+        var structure = rest.StructureAsync(CancellationToken.None);
+        await busy.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+        await rest.MessagesAsync("19:chat", 50, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
+        await structure.WaitAsync(TimeSpan.FromSeconds(10));
+        CollectionAssert.AreEqual(new[] { "agg.test", "chat.test", "agg.test" }, service.Asked.ToArray());
+    }
+
+    [TestMethod]
+    public async Task AStatusIsTheErrorItIsInEverySource()
+    {
+        // busy at every try was the request's own failure (IoError), so the tile stayed Ready
+        var service = new Scripted((_, _) =>
+        {
+            var busy = Json(HttpStatusCode.TooManyRequests, "{}");
+            busy.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.Zero);
+            return busy;
+        });
+        await using var rest = Over(service);
+
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => rest.StructureAsync(CancellationToken.None));
+        Assert.AreEqual(VfsError.Unavailable, ex.Error);
+    }
+
+    [TestMethod]
+    public async Task ADownloadThatGetsNoAnswerIsTriedAgain()
+    {
+        // a file's bytes went round the send path: no second try, and a request that timed out was thrown as it came
+        var service = new Scripted((_, call) => call == 1 ? throw new HttpRequestException("the connection was reset") : new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent([1, 2, 3]) });
+        await using var rest = Over(service);
+
+        using var response = await rest.ContentAsync("https://t.sharepoint.com/_layouts/15/download.aspx?UniqueId=1&tempauth=SECRET", 0, CancellationToken.None);
+        Assert.AreEqual(3, (await response.Content.ReadAsByteArrayAsync()).Length);
+        Assert.AreEqual(2, service.Calls);
+    }
+
+    [TestMethod]
+    public async Task ADownloadThatTimesOutIsUnavailableNotACancellation()
+    {
+        var service = new Scripted((_, _) => throw new TaskCanceledException("the request timed out"));
+        await using var rest = Over(service);
+
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => rest.ContentAsync("https://t.sharepoint.com/_layouts/15/download.aspx?UniqueId=1&tempauth=SECRET", 0, CancellationToken.None));
+        Assert.AreEqual(VfsError.Unavailable, ex.Error);
+        Assert.AreEqual(3, service.Calls);
+    }
+
+    [TestMethod]
+    public async Task ADownloadsAddressIsNotInItsError()
+    {
+        // the address carries what opens the file to whoever has it, and an error's words go to logs and to the tile
+        foreach (var status in new[] { HttpStatusCode.NotFound, HttpStatusCode.Forbidden, HttpStatusCode.Conflict })
+        {
+            var service = new Scripted((_, _) => Json(status, "{}"));
+            await using var rest = Over(service);
+
+            var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => rest.ContentAsync("https://t.sharepoint.com/_layouts/15/download.aspx?UniqueId=1&tempauth=SECRET", 0, CancellationToken.None));
+            Assert.IsFalse(ex.Message.Contains("SECRET", StringComparison.Ordinal) || ex.Message.Contains("tempauth", StringComparison.Ordinal), $"{(int)status}: {ex.Message}");
+        }
+    }
+
+    [TestMethod]
+    public void ASignInPagesAddressIsLoggedWithoutWhatNamesTheAccount()
+    {
+        // the line that says where the page stood when no token came (Teams' and Outlook's) had the whole address
+        Assert.AreEqual("https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            AnyFS.Sources.Common.WebSignInTarget.Bare("https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=5e3ce6c0&login_hint=someone%40example.com&state=abc#frag"));
+        Assert.AreEqual("https://teams.microsoft.com/v2/", AnyFS.Sources.Common.WebSignInTarget.Bare("https://user:secret@teams.microsoft.com/v2/"));
+        Assert.AreEqual("no page", AnyFS.Sources.Common.WebSignInTarget.Bare(""));
+        Assert.AreEqual("no page", AnyFS.Sources.Common.WebSignInTarget.Bare(null));
+    }
+
+    [TestMethod]
+    public async Task ADownloadAskedPastItsEndIsAnAnswer()
+    {
+        var service = new Scripted((_, _) => new HttpResponseMessage(HttpStatusCode.RequestedRangeNotSatisfiable));
+        await using var rest = Over(service);
+
+        using var response = await rest.ContentAsync("https://t.sharepoint.com/_layouts/15/download.aspx?UniqueId=1", 10, CancellationToken.None);
+        Assert.AreEqual(HttpStatusCode.RequestedRangeNotSatisfiable, response.StatusCode);
+    }
     [TestMethod]
     public async Task AMessagesReactionsEditAndDeletionAreRead()
     {

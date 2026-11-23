@@ -500,7 +500,7 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
 
             if (DateTime.UtcNow > until)
             {
-                logger.LogInformation("teams: {Count}/{Total} service tokens after {Seconds:F0}s {Mode}; the page is at {Where}", Wanted.Count(w => Fresh(w) is not null), Wanted.Length, deadline.TotalSeconds, mode, page);
+                logger.LogInformation("teams: {Count}/{Total} service tokens after {Seconds:F0}s {Mode}; the page is at {Where}", Wanted.Count(w => Fresh(w) is not null), Wanted.Length, deadline.TotalSeconds, mode, WebSignInTarget.Bare(page));
                 return Wanted.Any(w => Fresh(w) is not null) && !headless
                     ? new Capture(true)
                     : new Capture(false, headless ? "no saved sign-in" : $"nobody finished the sign-in to {teamsHost.Host} in time; Retry to sign in", Final: !headless);
