@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -484,6 +484,9 @@ public sealed class SpoolCache : IAsyncDisposable
 
         private async Task PumpAsync()
         {
+            // The download is its readers', whoever opened the file: it is begun inside a person's open, and is not to
+            // carry that call's patience with a wait the upstream asks for. A read has its own limit, a minute without a byte.
+            UpstreamPatience.Current = null;
             var ct = _stopped;
             try
             {

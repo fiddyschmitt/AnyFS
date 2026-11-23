@@ -1,4 +1,4 @@
-using AnyFS.Core.Model;
+﻿using AnyFS.Core.Model;
 using AnyFS.Core.Operations;
 using AnyFS.Core.Settings;
 using AnyFS.Core.Status;
@@ -254,7 +254,7 @@ public sealed class SourceRunner : IAsyncDisposable
                 // source); the retries after a failure are the host's own, and show no sign-in window
                 var context = new SourceContextImpl(this, Definition, _paths, _secrets, _prompts, _logger) { Attended = attempt == 0 };
                 var created = _plugin!.CreateSource(_settings ?? _plugin.CreateDefaultSettings());
-                var tracked = _operations is null ? null : new TrackedSource(created, Handle, _operations);
+                var tracked = _operations is null ? null : new TrackedSource(created, Handle, _operations, () => Definition.SilenceLimitSeconds > 0 ? TimeSpan.FromSeconds(Definition.SilenceLimitSeconds) : null, _logger);
                 context.UpstreamWatcher = tracked?.UpstreamRows();
                 source = (ISource?)tracked ?? created;
                 await source.InitialiseAsync(context, ct).ConfigureAwait(false);

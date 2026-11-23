@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 
 namespace AnyFS.Sdk;
@@ -23,6 +23,13 @@ public interface IWatchedRequest
 {
     /// <summary>Bytes have gone by, in either direction.</summary>
     void AddBytes(long count);
+
+    /// <summary>
+    /// Bytes are on their way to the upstream with the request (its body): counted as <see cref="AddBytes"/> counts
+    /// them, and, unlike bytes that have come from it, no sign that the upstream is answering, which a host may judge a
+    /// call's wait by. By default the same as <see cref="AddBytes"/>.
+    /// </summary>
+    void Sent(long count) => AddBytes(count);
 
     /// <summary>A listing has given entries.</summary>
     void AddEntries(long count);
@@ -231,7 +238,7 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
         HttpResponseMessage response;
         try
         {
-            asked.AddBytes(request.Content?.Headers.ContentLength ?? 0);
+            asked.Sent(request.Content?.Headers.ContentLength ?? 0);
             response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -251,7 +258,7 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
         HttpResponseMessage response;
         try
         {
-            asked.AddBytes(request.Content?.Headers.ContentLength ?? 0);
+            asked.Sent(request.Content?.Headers.ContentLength ?? 0);
             response = base.Send(request, cancellationToken);
         }
         catch (Exception ex)

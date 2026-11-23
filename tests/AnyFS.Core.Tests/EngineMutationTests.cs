@@ -1,4 +1,4 @@
-using AnyFS.Core.Model;
+﻿using AnyFS.Core.Model;
 using AnyFS.Core.Operations;
 using AnyFS.Core.Plugins;
 using AnyFS.Core.Runtime;
@@ -142,6 +142,28 @@ public class EngineMutationTests
         Assert.AreEqual("b.txt=B", Reload().Sources.Single().Settings!["files"]!.GetValue<string>());
     }
 
+    [TestMethod]
+    public async Task HowLongASourceWaitsOnASilentServerIsKeptWithItAndChangedWithoutARestart()
+    {
+        await using var engine = await StartedAsync();
+        var work = await engine.AddCollectionAsync("work");
+        var alpha = await engine.AddSourceAsync("alpha", "memory", true, false, new MemoryPluginSettings { Files = "a.txt=A" });
+        Assert.AreEqual(60, Reload().Sources.Single().SilenceLimitSeconds, "a minute until it is set");
+        await engine.AddMembershipAsync(work.Id, alpha.Id, "", false);
+        var runner = engine.FindSourceRunner(alpha.Id)!;
+        await Wait.UntilAsync(() => runner.Handle.IsUsable, what: "alpha ready");
+        var instance = runner.Handle.Current;
+
+        await engine.UpdateSourceAsync(alpha.Id, "alpha", true, false, new MemoryPluginSettings { Files = "a.txt=A" }, silenceLimitSeconds: 0);
+        Assert.AreEqual(0, Reload().Sources.Single(s => s.Name == "alpha").SilenceLimitSeconds, "0: as long as the source itself waits");
+        Assert.AreSame(instance, engine.FindSourceRunner(alpha.Id)!.Handle.Current, "it is read at each call: no restart");
+
+        await engine.UpdateSourceAsync(alpha.Id, "alpha", true, false, new MemoryPluginSettings { Files = "a.txt=A" });
+        Assert.AreEqual(0, Reload().Sources.Single(s => s.Name == "alpha").SilenceLimitSeconds, "an edit that does not name it leaves it");
+
+        var beta = await engine.AddSourceAsync("beta", "memory", true, false, new MemoryPluginSettings(), silenceLimitSeconds: 999_999);
+        Assert.AreEqual(86_400, beta.SilenceLimitSeconds, "a day at most");
+    }
     [TestMethod]
     public async Task DisablingASourceRemovesItFromTheTreeAndEnablingBringsItBack()
     {

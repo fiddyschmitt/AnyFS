@@ -729,7 +729,30 @@ public sealed class ListingCache
             _ = RunAsync(path, fetch);
         }
 
-        return new ValueTask<IReadOnlyList<VfsEntry>>(fetch.Result.Task.WaitAsync(ct));
+        return new ValueTask<IReadOnlyList<VfsEntry>>(JoinAsync(path, fetch, ct));
+    }
+
+    /// <summary>
+    /// A caller's wait for a listing on its way. Its token ends its own wait and not the listing, which others may wait
+    /// on. Where the host gave the caller up for an upstream that says nothing (<see cref="UpstreamPatience.GivenUp"/>),
+    /// the listing also gives up its place: the next to ask begins one of its own, which is how an upstream that answers
+    /// again is found. Joined, the one that hung held every later caller until its own request's time was up.
+    /// </summary>
+    private async Task<IReadOnlyList<VfsEntry>> JoinAsync(string path, Fetch fetch, CancellationToken ct)
+    {
+        try
+        {
+            return await fetch.Result.Task.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (UpstreamPatience.GivenUp && !fetch.Result.Task.IsCompleted)
+        {
+            lock (_gate)
+            {
+                Forget(path, fetch);
+            }
+
+            throw;
+        }
     }
 
     private async Task RunAsync(string path, Fetch fetch)

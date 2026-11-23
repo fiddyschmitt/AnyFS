@@ -1,4 +1,4 @@
-# Settings files
+﻿# Settings files
 
 AnyFS keeps three JSON files under `settings/`, plus state beside it. Everything is UTF-8,
 indented, with stable property order and a `version` field (currently 1); files are written
@@ -47,6 +47,7 @@ secret properties never enter it.
       "type": "mirror",
       "enabled": true,
       "countFilesOnStart": false,
+      "silenceLimitSeconds": 60,   // how long a folder you open waits while the server has been asked and sends nothing; 0 waits as long as the source does
       "settings": { "paths": "\\\\aus-files-01\\shared\nD:/Photos", "checkIntervalSeconds": 60 }
     }
   ]

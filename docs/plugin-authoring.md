@@ -125,6 +125,26 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   `await Context.UpstreamWatcher.AskAsync("LIST", path, () => client.ListAsync(path, ct), ct)`, or
   `Ask` for one that blocks; for one that stays open, say `Asked(what, target)` yourself, and `Done()`
   when it ends. A call answered from what you hold asks nothing, and is no row here.
+- The host stops waiting for an upstream that says nothing, by what you report here. A stat, a
+  listing or an open for reading that a person's file manager made is given up, as Unavailable, once
+  your source has had requests out to a server and nothing back from it for the source's limit (60
+  seconds unless the person set another; 0 for none). "Back" is an answer, bytes, entries, or a call
+  that ended well. It is not how long the call has taken: a great folder is long while its pages keep
+  coming. From then until something comes from that server, a request to it made for a person's call
+  is refused before it is sent: `Asked` throws that Unavailable, which you let through as the call's
+  failure; one call every ten seconds is let wait, and a walk's requests are sent as ever. Servers
+  are told apart by the address in `target`, so report each request to the server it goes to. Three
+  things are yours:
+  - Bytes that go out with a request are no sign of life: say them with `IWatchedRequest.Sent`, as
+    `UpstreamRequestsHandler` does, not `AddBytes`.
+  - A wait you make before you send anything because the server asked for it (a hold after a 429)
+    is invisible to the host: call `UpstreamPatience.ThrowIfOutlasted(wait)` before it, which refuses
+    a person's call at once where the wait is longer than its patience, and does nothing for a walk.
+  - A fetch your callers share must give up its place when `UpstreamPatience.GivenUp` is true as a
+    caller's wait is cancelled, so that the next caller starts a new one. `ListingCache` and
+    `RequestCache` do.
+  Not limited: reads (a spooled or ranged read fails after a minute without a byte), anything that
+  writes, and whatever you do by yourself.
 - Read-only is not your setting: say what you *can* do in `Capabilities`; the user decides per
   collection and per mount whether writes are allowed.
 - File counts: keep `Counters` up to date if you know your tree's size. When the user ticks

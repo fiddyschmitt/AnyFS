@@ -1,4 +1,4 @@
-using System.Text.Json.Nodes;
+﻿using System.Text.Json.Nodes;
 
 namespace AnyFS.Core.Model;
 
@@ -16,6 +16,18 @@ public sealed class SourceDefinition
 
     /// <summary>Walk the whole tree in the background at start so the count is exact (section 6.8).</summary>
     public bool CountFilesOnStart { get; set; }
+
+    /// <summary>
+    /// How long a person's stat, listing or open for reading waits while the source has requests out and nothing comes
+    /// back from its server, in seconds (<see cref="Operations.TrackedSource"/>); 0 for as long as the source itself
+    /// waits. Not a limit on how long a call may take: a great folder is long while the server answers all the while.
+    /// </summary>
+    public int SilenceLimitSeconds { get; set; } = DefaultSilenceLimitSeconds;
+
+    /// <summary>What a source's <see cref="SilenceLimitSeconds"/> is until it is set, and the most it may be set to.</summary>
+    public const int DefaultSilenceLimitSeconds = 60;
+
+    public const int MostSilenceLimitSeconds = 86_400;
 
     /// <summary>The plugin's settings POCO as JSON, minus secret properties.</summary>
     public JsonObject? Settings { get; set; }

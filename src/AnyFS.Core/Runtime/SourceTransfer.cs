@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Nodes;
 using AnyFS.Core.Model;
 using AnyFS.Core.Settings;
@@ -89,6 +89,7 @@ public static class SourceTransfer
         Type = source.Type,
         Enabled = source.Enabled,
         CountFilesOnStart = source.CountFilesOnStart,
+        SilenceLimitSeconds = source.SilenceLimitSeconds,
         Settings = source.Settings?.DeepClone() as JsonObject,
     };
 }

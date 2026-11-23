@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 
 namespace AnyFS.Sources.Common;
@@ -46,6 +46,11 @@ public sealed class RequestCache(CancellationToken stopping)
                     _entries.TryRemove(new KeyValuePair<string, Entry>(key, kept));
                     throw;
                 }
+                catch (OperationCanceledException) when (AnyFS.Sdk.UpstreamPatience.GivenUp && !kept.Task.IsCompleted)
+                {
+                    GiveUpPlace(key, kept);
+                    throw;
+                }
             }
 
             // not started until it wins its place: a loser of the race never asks upstream
@@ -62,9 +67,21 @@ public sealed class RequestCache(CancellationToken stopping)
                     _entries.TryRemove(new KeyValuePair<string, Entry>(key, fresh));
                     throw;
                 }
+                catch (OperationCanceledException) when (AnyFS.Sdk.UpstreamPatience.GivenUp && !fresh.Task.IsCompleted)
+                {
+                    GiveUpPlace(key, fresh);
+                    throw;
+                }
             }
         }
     }
+
+    /// <summary>
+    /// A fetch still on its way whose caller the host gave up for an upstream that says nothing: it goes on for whoever
+    /// else waits on it, and gives up its place, so that the next to ask fetches anew. Joined, the one that hung held
+    /// every later caller until its own request's time was up, though the upstream answered again long before.
+    /// </summary>
+    private void GiveUpPlace(string key, Entry entry) => _entries.TryRemove(new KeyValuePair<string, Entry>(key, entry));
 
     /// <summary>The kept <typeparamref name="T"/> for <paramref name="key"/> if there is one, finished and younger than the time it was asked with; nothing is fetched.</summary>
     public T? Peek<T>(string key)

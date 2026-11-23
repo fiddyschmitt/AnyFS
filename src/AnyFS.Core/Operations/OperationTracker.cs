@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 
 namespace AnyFS.Core.Operations;
 
@@ -31,6 +31,9 @@ public sealed class OperationTracker
         KeepFinishedFor = keepFinishedFor ?? DefaultKeepFinishedFor;
         KeepFinishedAtMost = keepFinishedAtMost;
     }
+
+    /// <summary>The clock the operations are timed by.</summary>
+    public TimeProvider Clock => _time;
 
     public TimeSpan KeepFinishedFor { get; }
 

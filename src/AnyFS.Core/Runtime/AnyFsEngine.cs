@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json.Nodes;
 using AnyFS.Core.Model;
@@ -426,7 +426,8 @@ public sealed class AnyFsEngine : IAsyncDisposable
     // ----- sources -----
 
     /// <summary>Defines a source (sources are global, spec 9.4) and starts it. Secrets go to the secret store, never to sources.json.</summary>
-    public async Task<SourceDefinition> AddSourceAsync(string name, string typeId, bool enabled, bool countFilesOnStart, object settings)
+    /// <param name="silenceLimitSeconds">The source's <see cref="SourceDefinition.SilenceLimitSeconds"/>; null for the default.</param>
+    public async Task<SourceDefinition> AddSourceAsync(string name, string typeId, bool enabled, bool countFilesOnStart, object settings, int? silenceLimitSeconds = null)
     {
         await EnterAsync().ConfigureAwait(false);
         try
@@ -436,6 +437,11 @@ public sealed class AnyFsEngine : IAsyncDisposable
             RequireUniqueSourceName(name, null);
             var plugin = Registry.FindSource(typeId) ?? throw new ArgumentException($"There is no source type '{typeId}'.");
             var definition = new SourceDefinition { Name = name, Type = plugin.TypeId, Enabled = enabled, CountFilesOnStart = countFilesOnStart };
+            if (silenceLimitSeconds is { } silence)
+            {
+                definition.SilenceLimitSeconds = Math.Clamp(silence, 0, SourceDefinition.MostSilenceLimitSeconds);
+            }
+
             plugin.NormaliseSettings(settings);
             definition.Settings = PluginSettingsBinder.Serialise(plugin.SettingsType, settings, (property, value) => Secrets.Set(definition.Id, property, value));
             Settings.Sources.Add(definition);
@@ -459,7 +465,8 @@ public sealed class AnyFsEngine : IAsyncDisposable
     }
 
     /// <summary>Edits a source wherever it's used; it restarts when its settings changed (spec 11.1).</summary>
-    public async Task UpdateSourceAsync(Guid id, string name, bool enabled, bool countFilesOnStart, object settings)
+    /// <param name="silenceLimitSeconds">The source's <see cref="SourceDefinition.SilenceLimitSeconds"/>; null leaves it as it is. It takes effect at the next call, with no restart.</param>
+    public async Task UpdateSourceAsync(Guid id, string name, bool enabled, bool countFilesOnStart, object settings, int? silenceLimitSeconds = null)
     {
         await EnterAsync().ConfigureAwait(false);
         try
@@ -485,6 +492,11 @@ public sealed class AnyFsEngine : IAsyncDisposable
             definition.Name = name;
             definition.Enabled = enabled;
             definition.CountFilesOnStart = countFilesOnStart;
+            if (silenceLimitSeconds is { } silence)
+            {
+                definition.SilenceLimitSeconds = Math.Clamp(silence, 0, SourceDefinition.MostSilenceLimitSeconds);
+            }
+
             definition.Settings = json;
             Settings.SaveSources();
 
@@ -728,6 +740,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
             definition.Type = incoming.Type;
             definition.Enabled = incoming.Enabled;
             definition.CountFilesOnStart = incoming.CountFilesOnStart;
+            definition.SilenceLimitSeconds = incoming.SilenceLimitSeconds;
             definition.Settings = RehomeSecrets(incoming);
             Settings.SaveSources();
 
