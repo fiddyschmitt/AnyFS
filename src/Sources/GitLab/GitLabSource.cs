@@ -136,7 +136,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             MaxInFlight = Scope == ScopeKind.Project ? RequestsPerProject : Requests,
             PartsBelow = Scope == ScopeKind.Project ? null : HoldsProjectsAsync,
             PartsAtOnce = ProjectsAtATime,
-            LeftOut = LeftOutAsync,
             ListTree = ListTreeAsync,
             StampOf = StampAsync,
 
@@ -635,9 +634,10 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     /// "Count files on start": the first walk of the tree (<see cref="KeptListings"/>), which lists every folder it goes into
     /// and keeps the listings, so they open at once afterwards: each project's default branch whole, a hundred entries a
     /// request (<see cref="ListTreeAsync"/>); with listings kept, a walk again every "Walk every folder every" minutes. It
-    /// leaves out the folders that cost requests of their own (<see cref="GlFolder.Walked"/>), so the count ends as a lower
-    /// bound ("+"). A server's or a group's count says how far it has got through the list of its projects; the walk comes to
-    /// each in turn, and all that is below one before the next, so that is how far through the walk it is too.
+    /// goes into every folder: since 6-Nov-2026 a branch's and a tag's too, so nothing is left out and the count is exact
+    /// unless a folder could not be listed. A server's or a group's count says how far it has got through the list of its
+    /// projects; the walk comes to each in turn, and all that is below one before the next, so that is how far through
+    /// the walk it is too.
     /// </summary>
     public async Task CountFilesAsync(CancellationToken ct)
     {
@@ -806,18 +806,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         }
     }
 
-    /// <summary>For a walk: of the folders in a folder, those a walk leaves out (<see cref="GlFolder.Walked"/>).</summary>
-    private async ValueTask<IReadOnlySet<string>?> LeftOutAsync(string path, CancellationToken ct)
-    {
-        if (await ResolveAsync(path, ct).ConfigureAwait(false) is not GlFolder folder)
-        {
-            return null;
-        }
-
-        var children = _settings.Keeps && _lastListed.TryGetValue(VfsPath.Normalize(path), out var last) ? last : await ListedAsync(folder, VfsPath.Normalize(path), ct).ConfigureAwait(false);
-        var left = children.OfType<GlFolder>().Where(f => !f.Walked).Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
-        return left.Count == 0 ? null : left;
-    }
 
     /// <summary>
     /// For a walk: a repository whole, every folder's listing at a commit by path: a project's <c>files</c> (its default branch

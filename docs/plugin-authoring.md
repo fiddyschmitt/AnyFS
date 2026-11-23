@@ -282,7 +282,7 @@ Caching is the source's business; the SDK makes the common strategies one-liners
   earlier run saved listings. Where much is held below a folder (a client has been through it) such a
   walk uses `ListTree` all the same. The options shape the walk: `PartsBelow` walks the folders of a folder each on
   its own (SharePoint's sites, four folders of each at a time, 64 listings in flight in all);
-  `LeftOut` names folders not worth a walk, listed when opened (GitLab's issues, a request or more
+  `LeftOut` names folders not worth a walk, listed when opened (ones that cost a request or more
   each), which makes the count a lower bound, and what has been opened of them the walks check like
   the rest; `ListTree` hands it a whole subtree at once where you have a quicker way than folder by
   folder (GitLab lists a repository a hundred entries a request), and a folder it fails for is listed
