@@ -1,4 +1,4 @@
-﻿# Settings files
+# Settings files
 
 AnyFS keeps three JSON files under `settings/`, plus state beside it. Everything is UTF-8,
 indented, with stable property order and a `version` field (currently 1); files are written

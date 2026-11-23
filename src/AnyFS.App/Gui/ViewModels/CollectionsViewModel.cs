@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using System.Windows.Input;
 using AnyFS.App.Gui.Services;
 using AnyFS.Core.Model;

@@ -1,4 +1,4 @@
-﻿namespace AnyFS.Sdk;
+namespace AnyFS.Sdk;
 
 /// <summary>
 /// How long the call under way waits on an upstream that sends it nothing: set by the host for a call a person's file

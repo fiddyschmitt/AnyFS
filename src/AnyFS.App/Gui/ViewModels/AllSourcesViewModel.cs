@@ -1,4 +1,4 @@
-﻿using System.Collections.ObjectModel;
+using System.Collections.ObjectModel;
 using AnyFS.App.Gui.Services;
 using AnyFS.Core.Runtime;
 using AnyFS.Core.Settings;

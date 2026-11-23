@@ -1,4 +1,4 @@
-﻿using System.Runtime.CompilerServices;
+using System.Runtime.CompilerServices;
 using AnyFS.Core.Runtime;
 using AnyFS.Sdk;
 using Microsoft.Extensions.Logging;

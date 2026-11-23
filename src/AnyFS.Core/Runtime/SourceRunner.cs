@@ -1,4 +1,4 @@
-﻿using AnyFS.Core.Model;
+using AnyFS.Core.Model;
 using AnyFS.Core.Operations;
 using AnyFS.Core.Settings;
 using AnyFS.Core.Status;

@@ -1,4 +1,4 @@
-﻿using AnyFS.App.Gui.Services;
+using AnyFS.App.Gui.Services;
 using AnyFS.App.Gui.ViewModels;
 using AnyFS.Core.Plugins;
 using AnyFS.Core.Runtime;
