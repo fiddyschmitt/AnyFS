@@ -148,9 +148,19 @@ public sealed class BrowserSession
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            // A source that starts just after another of the host has read the profile's sign-in takes that one: each
+            // launched the browser for itself, in turn (JustReadSignIns). Only where a window may be shown, which is a
+            // start: a renewal follows a refusal of what is held, and reads anew.
+            if (interactive && JustReadSignIns.Shared.Find(_profileDir, Site.Host) is { } justRead)
+            {
+                _logger.LogInformation("{Prefix}: the sign-in for {Host} was read from {Browser} a moment ago for another source of it; taking that one", Prefix, Site.Host, BrowserName);
+                return justRead;
+            }
+
             silent = await CaptureAsync(headless: true, SilentDeadline, ct).ConfigureAwait(false);
             if (silent.Cookies is { } cookies)
             {
+                JustReadSignIns.Shared.Remember(_profileDir, Site.Host, cookies);
                 return cookies;
             }
 
@@ -161,7 +171,9 @@ public sealed class BrowserSession
 
             if (!silent.DevToolsUnreachable)
             {
-                return await SignInWithAWindowAsync(interactive, progress, silent, ct).ConfigureAwait(false);
+                var signedIn = await SignInWithAWindowAsync(interactive, progress, silent, ct).ConfigureAwait(false);
+                JustReadSignIns.Shared.Remember(_profileDir, Site.Host, signedIn);
+                return signedIn;
             }
         }
         finally
