@@ -418,7 +418,7 @@ internal sealed class RestDocumentStore : IDocumentStore
         var pageUrl = serverRelative is null ? null : new Uri(Client(library).SiteUrl, SiteAddress.EscapePath(serverRelative));
         var markdown = SharePointPages.Markdown(fields, pageUrl);
         var version = SharePointPages.Version(markdown);
-        _pages.Remember(item.Id, version, markdown);
+        _pages.Remember(item.Id ?? version, version, markdown);
         return (VfsEntry.File(SharePointPages.Shown(entry.Name), markdown.Length, entry.Modified, entry.Created, VfsAttributes.ReadOnly, version), item with { Version = version, Size = markdown.Length });
     }
 

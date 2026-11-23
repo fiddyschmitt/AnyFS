@@ -94,6 +94,96 @@ public class SharePointWalkTests
         Assert.AreEqual(4, (await source.StatAsync("Documents/fixture/made.txt", None))?.Length);
     }
 
+    private static async Task<string> ReadAsync(ISource source, string path)
+    {
+        await using var file = await source.OpenAsync(path, VfsOpenMode.Read, None);
+        var bytes = new byte[file.Length];
+        Assert.AreEqual(bytes.Length, await file.ReadFullyAsync(0, bytes, None));
+        return Encoding.UTF8.GetString(bytes);
+    }
+
+    [TestMethod]
+    public async Task WhatAListingToldOfEachItemIsNotHeldASecondTime()
+    {
+        // the source remembered every item every listing had named, by its path, for as long as it ran: half a gigabyte
+        // for a million (the review of 21-Nov-2026, P7). What an open needs of one is in the listing kept: its version
+        // and its length
+        var store = BusyTenant();
+        await using var source = await MemorySharePointSource.StartAsync(store, otherSites: true, walkEvery: TimeSpan.FromHours(1));
+        await source.CountFilesAsync(None);
+        Assert.AreEqual(3 * 24 + 1, source.Counters.FilesKnown);
+        Assert.AreEqual(0, source.ItemsRemembered, "after a walk of every folder");
+
+        // and each opens as before, nothing asked of SharePoint but its bytes: its folder was listed in this run
+        var lookups = store.ItemLookups;
+        Assert.AreEqual("a", await ReadAsync(source, "Documents/folder3/a.txt"));
+        Assert.AreEqual("b", await ReadAsync(source, "Sites/Axle/Documents/folder7/b.txt"));
+        Assert.AreEqual("plan", await ReadAsync(source, "Subsites/Foo/Documents/plans/plan.txt"));
+        Assert.AreEqual(lookups, store.ItemLookups);
+        Assert.AreEqual(0, source.ItemsRemembered);
+    }
+
+    [TestMethod]
+    public async Task AnItemAskedForOrWrittenIsRememberedUpToANumberOfThem()
+    {
+        var store = MemoryDocumentStore.Sample();
+        for (var i = 0; i < 6; i++)
+        {
+            store.Seed("/Shared Documents", $"kept/file{i}.txt", Encoding.UTF8.GetBytes($"file {i}"));
+        }
+
+        using var context = new TestSourceContext("sharepoint");
+        store.Stamps["/Shared Documents"] = "s1";
+        await using (var first = await MemorySharePointSource.StartAsync(store, walkEvery: TimeSpan.FromHours(1), context: context))
+        {
+            await first.CountFilesAsync(None);
+        }
+
+        // the next start's walk keeps the library by its stamp: no folder of it is listed in this run, so a file's first
+        // open asks SharePoint for it, and remembers the answer
+        var source = new MemorySharePointSource(store, null, false, null, null, null, TimeSpan.FromHours(1), context) { Remembers = 4 };
+        await source.InitialiseAsync(context, None);
+        await using (source)
+        {
+            await source.CountFilesAsync(None);
+            var listed = store.FolderListings;
+            var lookups = store.ItemLookups;
+            for (var i = 0; i < 3; i++)
+            {
+                Assert.AreEqual($"file {i}", await ReadAsync(source, $"Documents/kept/file{i}.txt"));
+            }
+
+            Assert.AreEqual(lookups + 3, store.ItemLookups, "each asked for once");
+            Assert.AreEqual($"file 1", await ReadAsync(source, "Documents/kept/file1.txt"));
+            Assert.AreEqual(lookups + 3, store.ItemLookups, "and remembered");
+            Assert.AreEqual(3, source.ItemsRemembered);
+
+            // one written is remembered as one asked for is
+            await using (var file = await source.OpenAsync("Documents/kept/made.txt", VfsOpenMode.CreateNew, None))
+            {
+                await file.WriteAsync(0, "made"u8.ToArray(), None);
+            }
+
+            Assert.AreEqual("made", await ReadAsync(source, "Documents/kept/made.txt"));
+            Assert.AreEqual(lookups + 3, store.ItemLookups);
+            Assert.AreEqual(4, source.ItemsRemembered);
+
+            // past the number, they start again: one let go is asked for again when it is next opened
+            Assert.AreEqual("file 3", await ReadAsync(source, "Documents/kept/file3.txt"));
+            Assert.AreEqual(1, source.ItemsRemembered);
+            Assert.AreEqual("file 0", await ReadAsync(source, "Documents/kept/file0.txt"));
+            Assert.AreEqual(lookups + 5, store.ItemLookups);
+            Assert.AreEqual(listed, store.FolderListings, "no folder listed for any of it");
+
+            // a folder listed in this run needs none of them
+            await source.WalkAsync(new SourceCounters(), None);
+            Assert.AreEqual(0, source.ItemsRemembered, "what a listing has told since is in the listing");
+            lookups = store.ItemLookups;
+            Assert.AreEqual("file 5", await ReadAsync(source, "Documents/kept/file5.txt"));
+            Assert.AreEqual(lookups, store.ItemLookups);
+        }
+    }
+
     [TestMethod]
     [DataRow(true)]
     [DataRow(false)]

@@ -138,10 +138,10 @@ internal sealed record SitePage(string Name, byte[] Markdown, DateTimeOffset? Cr
 /// What a listing knows about an item beyond its <see cref="VfsEntry"/>: the ids the next calls need. The
 /// source treats it as opaque, except that <see cref="Id"/> and <see cref="Version"/> key the spool cache.
 /// </summary>
-/// <param name="Id">A stable id (Graph item id, SharePoint UniqueId).</param>
+/// <param name="Id">A stable id (Graph item id, SharePoint UniqueId); null for one the source made from a listing's entry, which holds none.</param>
 /// <param name="Version">Changes when the content changes (cTag, ETag).</param>
 /// <param name="DownloadUrl">A pre-authenticated URL for the content, when the flavour has one.</param>
-internal sealed record ItemRef(string Id, string? Version, string? DownloadUrl, long Size, bool IsFolder);
+internal sealed record ItemRef(string? Id, string? Version, string? DownloadUrl, long Size, bool IsFolder);
 
 /// <summary>
 /// The operations <see cref="SharePointSource"/> needs from a flavour, on paths inside a library. Every

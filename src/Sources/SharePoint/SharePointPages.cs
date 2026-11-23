@@ -215,5 +215,30 @@ internal sealed class PageCache
         _pages[id] = (version, markdown);
     }
 
-    public byte[]? Find(string id, string? version) => _pages.TryGetValue(id, out var page) && page.Version == version ? page.Markdown : null;
+    /// <summary>
+    /// A page's Markdown by its id and version; or, with no id (an item made from a listing's entry), by the version alone
+    /// where that is the Markdown's own (<see cref="SharePointPages.Version"/>: a digest of it, so the same bytes).
+    /// </summary>
+    public byte[]? Find(string? id, string? version)
+    {
+        if (id is not null)
+        {
+            return _pages.TryGetValue(id, out var page) && page.Version == version ? page.Markdown : null;
+        }
+
+        if (version is null || !version.StartsWith("md:", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        foreach (var (_, held) in _pages)
+        {
+            if (held.Version == version)
+            {
+                return held.Markdown;
+            }
+        }
+
+        return null;
+    }
 }

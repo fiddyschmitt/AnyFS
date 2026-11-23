@@ -393,6 +393,11 @@ internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? 
 
     protected override TimeSpan WalkEvery => walkEvery ?? base.WalkEvery;
 
+    /// <summary>How many items asked for or written are remembered, when not the source's own number.</summary>
+    public int? Remembers { get; init; }
+
+    protected override int ItemsRememberedAtMost => Remembers ?? base.ItemsRememberedAtMost;
+
     /// <param name="otherSites">As for the tenant's root site: the store's other sites show in a Sites folder.</param>
     /// <param name="given">For a source given several sites: those sites, found in the store by their paths.</param>
     /// <param name="retry">How soon a site left out is tried again, when not the source's own five minutes.</param>
@@ -781,8 +786,14 @@ internal sealed class MemoryDocumentStore : IDocumentStore
         }
     }
 
+    /// <summary>How often one item was asked for by its path.</summary>
+    public int ItemLookups => Volatile.Read(ref _itemLookups);
+
+    private int _itemLookups;
+
     public Task<ItemRef?> GetItemAsync(LibraryInfo library, string itemPath, CancellationToken ct)
     {
+        Interlocked.Increment(ref _itemLookups);
         lock (_gate)
         {
             Check(library);

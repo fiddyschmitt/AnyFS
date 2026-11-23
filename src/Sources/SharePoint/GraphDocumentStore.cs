@@ -383,7 +383,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
         var pageUrl = element.TryGetProperty("webUrl", out var w) && Uri.TryCreate(w.GetString(), UriKind.Absolute, out var u) ? u : null;
         var markdown = SharePointPages.Markdown(fields, pageUrl);
         var version = SharePointPages.Version(markdown);
-        _pages.Remember(item.Id, version, markdown);
+        _pages.Remember(item.Id ?? version, version, markdown);
         return (VfsEntry.File(SharePointPages.Shown(entry.Name), markdown.Length, entry.Modified, entry.Created, VfsAttributes.ReadOnly, version), item with { Version = version, DownloadUrl = null, Size = markdown.Length });
     }
 
@@ -504,7 +504,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
         else
         {
             var parentItem = await GetItemAsync(library, toParent, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(Display(library, toParent));
-            parentId = parentItem.Id;
+            parentId = parentItem.Id ?? throw VfsException.NotFound(Display(library, toParent));
         }
 
         var json = "{\"name\":" + Json.Quote(toName) + ",\"parentReference\":{\"id\":" + Json.Quote(parentId) + "}}";

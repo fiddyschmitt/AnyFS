@@ -57,7 +57,33 @@ public abstract partial class SharePointSource : SourceBase, ICountable
     private volatile bool _topsToPrune = true;
     private readonly ConcurrentDictionary<string, bool> _saidBelow = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _rangeIgnoredSaid = new(StringComparer.Ordinal);
+    // What SharePoint told of the items asked for one at a time, or written, since their folder was last listed: an open
+    // of one needs no second round trip. Not what a listing told of each item: that is in the listing (its version and its
+    // length), and was held here as well, by its path, for every item every listing had named: half a gigabyte for a
+    // million items (the review of 21-Nov-2026, P7).
     private readonly ConcurrentDictionary<string, ItemRef> _items = new(StringComparer.OrdinalIgnoreCase);
+
+    // the folders listed in this run: what their listings say of an item is what SharePoint said of it in this run
+    private readonly ConcurrentDictionary<string, byte> _listedNow = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>How many items are remembered one by one (for tests).</summary>
+    internal int ItemsRemembered => _items.Count;
+
+    /// <summary>
+    /// How many items asked for or written are remembered at most; past that they start again, and one let go is asked for
+    /// when it is next opened.
+    /// </summary>
+    protected virtual int ItemsRememberedAtMost => 20_000;
+
+    private void Remember(string path, ItemRef item)
+    {
+        if (_items.Count >= ItemsRememberedAtMost)
+        {
+            _items.Clear();
+        }
+
+        _items[path] = item;
+    }
     private readonly SemaphoreSlim _otherSitesGate = new(1, 1);
 
     // the other sites search found, by the root site they show under ("" for the source's own)
@@ -329,9 +355,11 @@ public abstract partial class SharePointSource : SourceBase, ICountable
                     break;
                 }
 
-                var (entry, item) = enumerator.Current;
+                var (entry, _) = enumerator.Current;
                 var entryPath = VfsPath.Join(path, entry.Name);
-                _items[entryPath] = item;
+
+                // what was asked of it or written before this listing is older than what the listing says
+                _items.TryRemove(entryPath, out _);
                 seen.Add(entry.Name);
 
                 // what is written here and not uploaded yet is the file, whatever older one SharePoint lists
@@ -342,6 +370,8 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         {
             await enumerator.DisposeAsync().ConfigureAwait(false);
         }
+
+        _listedNow[path] = 0;
 
         // what is being written here and is not upstream yet
         foreach (var (pendingPath, pending) in _pending)
@@ -497,8 +527,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         // the entry put right: read to the entry's, a file made longer since came cut short. And the length is part of
         // the spool's key: a copy made to one length is not the file at another (the short copy was kept under the new
         // version's key, and served after the walk had put the listing right).
-        var asked = !_items.ContainsKey(path);
-        var item = await ItemAsync(path, library, itemPath, ct).ConfigureAwait(false);
+        var (item, asked) = await ItemAsync(path, library, itemPath, entry, ct).ConfigureAwait(false);
         var length = entry.Length;
         if (asked && item.Size != length)
         {
@@ -508,7 +537,8 @@ public abstract partial class SharePointSource : SourceBase, ICountable
 
         if (length <= SpoolBelowBytes && _spool is { } spool)
         {
-            var key = $"{item.Id}:{item.Version}:{length}";
+            // by the item's id where SharePoint was asked for it; by where it is and its time where the listing is gone by
+            var key = $"{item.Id ?? $"{library.Key}/{itemPath}@{entry.Modified?.UtcTicks}"}:{item.Version}:{length}";
             return await spool.OpenAsync(key, length, async downloadCt =>
             {
                 var response = await Run(() => Store.OpenContentAsync(library, itemPath, item, 0, downloadCt)).ConfigureAwait(false);
@@ -528,7 +558,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
             // a server (or a proxy before it) that ignores the range sends the whole file: read past the start
             return await ResponseStream.FromOffsetAsync(response, offset, path, () =>
             {
-                if (_rangeIgnoredSaid.TryAdd(item.Id, true))
+                if (_rangeIgnoredSaid.TryAdd(path, true))
                 {
                     Logger.LogInformation("sharepoint: SharePoint sends '{Path}' whole when asked for a range; reading past the first {Offset:N0} bytes", path, offset);
                 }
@@ -538,7 +568,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
 
     private async Task DownloadToAsync(string path, LibraryInfo library, string itemPath, VfsEntry entry, string tempPath, CancellationToken ct)
     {
-        var item = await ItemAsync(path, library, itemPath, ct).ConfigureAwait(false);
+        var (item, _) = await ItemAsync(path, library, itemPath, entry, ct).ConfigureAwait(false);
         using var response = await Run(() => Store.OpenContentAsync(library, itemPath, item, 0, ct)).ConfigureAwait(false);
         await using var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         await using var file = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16, FileOptions.Asynchronous);
@@ -597,7 +627,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
             throw;
         }
 
-        _items[path] = item;
+        Remember(path, item);
         var now = DateTimeOffset.UtcNow;
         var (created, modified) = file.RequestedTimes;
         if (created is not null || modified is not null)
@@ -655,8 +685,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
 
         try
         {
-            var item = await Run(() => Store.CreateFolderAsync(library, itemPath, ct)).ConfigureAwait(false);
-            _items[path] = item;
+            await Run(() => Store.CreateFolderAsync(library, itemPath, ct)).ConfigureAwait(false);
             var now = DateTimeOffset.UtcNow;
             Listings.Update(path, VfsEntry.Directory(VfsPath.SplitLast(path).Name, now, now), StringComparison.OrdinalIgnoreCase);
         }
@@ -843,7 +872,11 @@ public abstract partial class SharePointSource : SourceBase, ICountable
             throw;
         }
 
-        _items[toPath] = moved;
+        if (!from.IsDirectory)
+        {
+            Remember(toPath, moved);
+        }
+
         Forget(fromPath, from.IsDirectory);
         Listings.Update(toPath, @from with { Name = VfsPath.SplitLast(toPath).Name }, StringComparison.OrdinalIgnoreCase);
         if (from.IsDirectory)
@@ -1669,17 +1702,26 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         }
     }
 
-    /// <summary>The item's ids, from the last listing that saw it, else from the store.</summary>
-    private async Task<ItemRef> ItemAsync(string path, LibraryInfo library, string itemPath, CancellationToken ct)
+    /// <summary>
+    /// What an open needs of a file: as SharePoint told it when it was asked for or written in this run; else from the
+    /// file's entry, where its folder was listed in this run; else asked of SharePoint now (<c>Asked</c>), and remembered.
+    /// One made from an entry has no id.
+    /// </summary>
+    private async Task<(ItemRef Item, bool Asked)> ItemAsync(string path, LibraryInfo library, string itemPath, VfsEntry entry, CancellationToken ct)
     {
         if (_items.TryGetValue(path, out var known))
         {
-            return known;
+            return (known, false);
+        }
+
+        if (_listedNow.ContainsKey(VfsPath.Parent(path)))
+        {
+            return (new ItemRef(null, entry.ETag, null, entry.Length, entry.IsDirectory), false);
         }
 
         var item = await Run(() => Store.GetItemAsync(library, itemPath, ct)).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
-        _items[path] = item;
-        return item;
+        Remember(path, item);
+        return (item, true);
     }
 
     /// <summary>A pending file whose handle has closed is waited for (its upload is landing); one still open refuses the operation.</summary>
@@ -1716,6 +1758,11 @@ public abstract partial class SharePointSource : SourceBase, ICountable
             foreach (var key in _items.Keys.Where(k => VfsPath.IsUnder(k, path)).ToList())
             {
                 _items.TryRemove(key, out _);
+            }
+
+            foreach (var key in _listedNow.Keys.Where(k => VfsPath.IsUnder(k, path)).ToList())
+            {
+                _listedNow.TryRemove(key, out _);
             }
         }
     }
