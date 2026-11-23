@@ -900,8 +900,16 @@ internal sealed class MemoryDocumentStore : IDocumentStore
         }
     }
 
+    /// <summary>Makes setting an item's times fail as a server that will not have it does.</summary>
+    public bool FailSetTimes { get; set; }
+
     public Task SetTimesAsync(LibraryInfo library, string itemPath, DateTimeOffset? created, DateTimeOffset? modified, CancellationToken ct)
     {
+        if (FailSetTimes)
+        {
+            throw new VfsException(VfsError.IoError, $"the times of {itemPath} could not be set");
+        }
+
         lock (_gate)
         {
             Check(library);

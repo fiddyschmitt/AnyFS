@@ -95,6 +95,55 @@ public class SharePointWalkTests
     }
 
     [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task TimesSetOnAFileAfterItIsClosedDoNotListItsFolderAgain(bool kept)
+    {
+        // rsync and cp -p set a file's times after they close it. Each time the folder's listing was thrown away, and the
+        // next file's open listed the folder again, whole: a copy of N files into a folder listed it N times (the review
+        // of 21-Nov-2026, P7)
+        var store = MemoryDocumentStore.Sample();
+        store.Seed("/Shared Documents", "in/there.txt", Encoding.UTF8.GetBytes("there"));
+        await using var source = await MemorySharePointSource.StartAsync(store, walkEvery: kept ? TimeSpan.FromHours(1) : null);
+        if (kept)
+        {
+            await source.CountFilesAsync(None);
+        }
+
+        Assert.AreEqual(1, (await SpsTestServer.NamesAsync(source, "Documents/in")).Count);
+        var before = store.FolderListings;
+        var when = new DateTimeOffset(2026, 3, 4, 5, 6, 7, TimeSpan.Zero);
+        for (var i = 0; i < 10; i++)
+        {
+            var path = $"Documents/in/copy{i}.txt";
+            await using (var file = await source.OpenAsync(path, VfsOpenMode.CreateNew, None))
+            {
+                await file.WriteAsync(0, "copied"u8.ToArray(), None);
+            }
+
+            await source.SetTimesAsync(path, when.AddHours(-i), when.AddMinutes(i), None);
+            var entry = await source.StatAsync(path, None);
+            Assert.AreEqual(when.AddMinutes(i), entry?.Modified, "the time set shows at once");
+            Assert.AreEqual(when.AddHours(-i), entry?.Created);
+            Assert.AreEqual(6, entry?.Length);
+        }
+
+        Assert.AreEqual(11, (await SpsTestServer.NamesAsync(source, "Documents/in")).Count);
+        Assert.AreEqual(before, store.FolderListings, "the folder is not listed again for the times of what was written into it");
+
+        // a folder's too, and what SharePoint will not do forgets the listing as before
+        await source.CreateDirectoryAsync("Documents/in/sub", None);
+        await source.SetTimesAsync("Documents/in/sub", null, when, None);
+        Assert.AreEqual(when, (await source.StatAsync("Documents/in/sub", None))?.Modified);
+        Assert.AreEqual(before, store.FolderListings);
+        store.Seed("/Shared Documents", "in/made outside.txt", Encoding.UTF8.GetBytes("outside"));
+        store.FailSetTimes = true;
+        await Assert.ThrowsExactlyAsync<VfsException>(() => source.SetTimesAsync("Documents/in/there.txt", null, when, None));
+        Assert.IsNotNull(await source.StatAsync("Documents/in/made outside.txt", None), "listed afresh after a failure: what was made outside shows");
+        Assert.AreEqual(before + 1, store.FolderListings);
+    }
+
+    [TestMethod]
     public async Task ALibraryWhoseStampHoldsIsKeptAcrossARestartAndOneWhoseStampMovedIsWalkedAgain()
     {
         var store = MemoryDocumentStore.Sample();

@@ -892,7 +892,23 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         {
             await Run(() => Store.SetTimesAsync(library, itemPath, created, modified, ct)).ConfigureAwait(false);
         }
-        finally
+        catch
+        {
+            // what SharePoint made of it is not known: its folder is listed afresh
+            Listings.InvalidateParentOf(path);
+            throw;
+        }
+
+        // The entry gets its times in the listing as it stands, as an upload's does. The listing was forgotten instead, and
+        // the next open in the folder listed it again, whole: rsync and cp -p set a file's times after they close it, so a
+        // copy of N files into a folder listed it N times (the review of 21-Nov-2026, P7). Where the entry is not held
+        // (no listing, or one on its way that may have been read before the times landed), the listing is forgotten as before.
+        var (parent, name) = VfsPath.SplitLast(path);
+        if (Listings.Held(parent)?.FirstOrDefault(e => e.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) is { } entry)
+        {
+            Listings.Update(path, entry with { Created = created ?? entry.Created, Modified = modified ?? entry.Modified }, StringComparison.OrdinalIgnoreCase);
+        }
+        else
         {
             Listings.InvalidateParentOf(path);
         }
