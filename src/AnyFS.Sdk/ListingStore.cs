@@ -41,6 +41,22 @@ internal sealed class StoredListing
         Folders = folders;
     }
 
+    private StoredListing(string? stamp, int count, int folders)
+    {
+        Stamp = stamp;
+        Count = count;
+        Folders = folders;
+    }
+
+    /// <summary>
+    /// A listing kept in a database, read without its entries: its stamp and counts alone, for what goes by those
+    /// (<see cref="IListingStore.Outline"/>). It has no entries to give (<see cref="HasEntries"/>).
+    /// </summary>
+    public static StoredListing WithoutEntries(string? stamp, int count, int folders) => new(stamp, count, folders);
+
+    /// <summary>Whether the entries are here: not in one read for its counts alone.</summary>
+    public bool HasEntries => Packed is not null || List is not null;
+
     public string? Stamp { get; }
 
     public int Count { get; }
@@ -64,14 +80,16 @@ internal sealed class StoredListing
     public StoredListing WithStamp(string? stamp) => Packed is not null ? new StoredListing(Fetched, stamp, Packed, Count, Folders) : new StoredListing(Fetched, stamp, List!);
 
     /// <summary>The entries: as held, or made from the bytes.</summary>
-    public IReadOnlyList<VfsEntry> Entries() => List ?? ListingCodec.Unpack(Packed!, Count);
+    public IReadOnlyList<VfsEntry> Entries() => List ?? ListingCodec.Unpack(Packed ?? throw NoEntries(), Count);
+
+    private static InvalidOperationException NoEntries() => new("This listing was read for its counts alone and has no entries.");
 
     /// <summary>The names of the folders in it, nothing else made.</summary>
     public List<string> FolderNames()
     {
         if (List is null)
         {
-            return ListingCodec.FolderNames(Packed!, Count, Folders);
+            return ListingCodec.FolderNames(Packed ?? throw NoEntries(), Count, Folders);
         }
 
         var names = new List<string>(Folders);
@@ -109,12 +127,35 @@ internal sealed class StoredListing
 }
 
 /// <summary>
+/// One listing as a walk that keeps a subtree as it is needs it (<see cref="IListingStore.Outline"/>): where it is, how many
+/// entries it has and how many of them are folders, and the listing itself where it has folders in it, for their names;
+/// null where it has none, or a store in memory's own.
+/// </summary>
+internal readonly record struct ListingOutline(string Path, int Count, int Folders, StoredListing? Listing);
+
+/// <summary>
 /// Where a <see cref="ListingCache"/> holds its listings, by folder path: in memory (<see cref="MemoryListingStore"/>), or on
 /// disk for a source that keeps the listings of more than fits (<see cref="SqliteListingStore"/>). Everything but
-/// <see cref="Get"/> and <see cref="All"/> is called under the cache's gate.
+/// <see cref="Get"/> and <see cref="All"/> is called under the cache's gate, but for the reads of a store that
+/// <see cref="ReadsAlone"/>.
 /// </summary>
 internal interface IListingStore : IDisposable
 {
+    /// <summary>
+    /// Whether the store reads by ways of its own that no write disturbs, so <see cref="Under"/> and <see cref="Paths"/> are
+    /// called without the gate, and so is <see cref="Outline"/>: a walk that reads what is held below a folder then holds
+    /// up no listing and no store.
+    /// </summary>
+    bool ReadsAlone { get; }
+
+    /// <summary>
+    /// What <see cref="Under"/> gives, a listing at a time and without the entries of a listing that has no folders in it:
+    /// the folder's own first, then the rest in the store's order, in which a folder comes before what is below it. For a
+    /// walk that keeps what is below a folder as it is, which goes by the counts and by the folders' names: a database
+    /// reads the rest of the entries for nothing, and all of a big folder's at once.
+    /// </summary>
+    IEnumerable<ListingOutline> Outline(string folder);
+
     /// <summary>How many listings are held.</summary>
     int Count { get; }
 
@@ -148,6 +189,9 @@ internal sealed class MemoryListingStore : IListingStore
     private readonly ConcurrentDictionary<string, StoredListing> _entries = new(StringComparer.Ordinal);
     private readonly SortedSet<string> _keys = new(StringComparer.Ordinal);
     private int _count;
+
+    // the paths' order is one set, changed under the gate
+    public bool ReadsAlone => false;
 
     // the sorted set counts what is held at no cost: the dictionary's own Count takes every one of its locks, at every
     // listing stored, which made bringing back a big run's listings take half a minute
@@ -203,6 +247,15 @@ internal sealed class MemoryListingStore : IListingStore
     }
 
     public List<string> Paths() => [.. _keys];
+
+    // the listings are here as they are: nothing is read for them
+    public IEnumerable<ListingOutline> Outline(string folder)
+    {
+        foreach (var (path, listing) in Under(folder))
+        {
+            yield return new ListingOutline(path, listing.Count, listing.Folders, listing);
+        }
+    }
 
     public IEnumerable<(string Path, StoredListing Listing)> All()
     {

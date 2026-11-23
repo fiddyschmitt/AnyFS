@@ -1081,34 +1081,14 @@ public sealed class KeptListings : IAsyncDisposable
     /// </summary>
     private async Task KeepHeldAsync(string folder, bool heldAlone, Walk walk, Action<string, bool> enqueue, CancellationToken ct)
     {
-        var held = Cache.HeldUnder(folder);
-        var paths = new HashSet<string>(held.Count, StringComparer.Ordinal);
-        foreach (var (path, _) in held)
+        var notHeld = CountHeld(folder, walk, ct);
+        foreach (var path in notHeld.Keys.Order(StringComparer.Ordinal))
         {
-            paths.Add(path);
-        }
-
-        foreach (var (path, listing) in held)
-        {
-            Interlocked.Increment(ref walk.Kept);
-            long files = listing.Files;
-            var folders = listing.Folders;
-            if (folders == 0)
-            {
-                walk.Counters.Add(files, folders);
-                continue;
-            }
-
             IReadOnlySet<string>? leftOut = null;
             var asked = false;
-            foreach (var name in listing.FolderNames())
+            foreach (var name in notHeld[path].Order(StringComparer.Ordinal))
             {
                 var child = VfsPath.Join(path, name);
-                if (paths.Contains(child))
-                {
-                    continue;
-                }
-
                 if (heldAlone)
                 {
                     enqueue(child, true);
@@ -1130,9 +1110,44 @@ public sealed class KeptListings : IAsyncDisposable
 
                 enqueue(child, false);
             }
-
-            walk.Counters.Add(files, folders);
         }
+    }
+
+    /// <summary>
+    /// Counts the listings held at <paramref name="folder"/> and below it into the walk, one at a time as the store gives
+    /// them, by their counts; and gives, by listing, the folders each names that no listing is held for. A listing comes
+    /// before those below it, so of the names of one with folders in it, those for which no listing has come when all
+    /// have are what is not held; one whose names have all come is let go as the rest are read.
+    /// <para>
+    /// Every listing below the folder was read whole into memory at once for this, with the cache locked: a folder of
+    /// 250,000 listings allocated 385 MiB and held up a person's listing for 1.5 s (the review of 21-Nov-2026, P4).
+    /// </para>
+    /// </summary>
+    private Dictionary<string, HashSet<string>> CountHeld(string folder, Walk walk, CancellationToken ct)
+    {
+        var notSeen = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var byParent = notSeen.GetAlternateLookup<ReadOnlySpan<char>>();
+        foreach (var held in Cache.OutlineUnder(folder))
+        {
+            ct.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref walk.Kept);
+            walk.Counters.Add(held.Count - held.Folders, held.Folders);
+            var slash = held.Path.LastIndexOf('/');
+            if (held.Path.Length > 0
+                && byParent.TryGetValue(slash < 0 ? default : held.Path.AsSpan(0, slash), out var parent, out var names)
+                && names.GetAlternateLookup<ReadOnlySpan<char>>().Remove(held.Path.AsSpan(slash + 1))
+                && names.Count == 0)
+            {
+                notSeen.Remove(parent);
+            }
+
+            if (held.Folders > 0 && held.Listing is { } listing)
+            {
+                notSeen[held.Path] = new HashSet<string>(listing.FolderNames(), StringComparer.Ordinal);
+            }
+        }
+
+        return notSeen;
     }
 
     /// <summary>One walk's shared state: what it counts into, the listings in flight, its parts, whether it lists every folder whatever its stamp, and what it left out, listed, kept and could not list.</summary>

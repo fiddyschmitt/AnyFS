@@ -249,18 +249,56 @@ public sealed class ListingCache
     internal List<(string Path, StoredListing Listing)> HeldUnder(string folder)
     {
         List<(string Path, StoredListing Listing)> under;
-        lock (_gate)
+        if (_store.ReadsAlone)
         {
+            // not under the gate: reading the listings of a big folder from the database takes as long as there are of
+            // them, and every listing and every store waited for it (the review of 21-Nov-2026, P4: a person's listing
+            // waited 1.5 s while a walk kept a folder of 250,000)
             under = _store.Under(folder);
+        }
+        else
+        {
+            lock (_gate)
+            {
+                under = _store.Under(folder);
+            }
         }
 
         under.RemoveAll(h => IsExpired(h.Listing));
         return under;
     }
 
+    /// <summary>
+    /// What is held of <paramref name="folder"/> and of every folder below it, a listing at a time, for a walk that keeps a
+    /// subtree as it is: where each is and its counts, and the listing itself where it has folders in it. A database is
+    /// read a page at a time as the caller goes, with nothing waiting for it; a store in memory hands over what it holds.
+    /// </summary>
+    internal IEnumerable<ListingOutline> OutlineUnder(string folder)
+    {
+        if (_store.ReadsAlone)
+        {
+            // kept: nothing in it expires
+            return _store.Outline(folder);
+        }
+
+        List<ListingOutline> under;
+        lock (_gate)
+        {
+            under = [.. _store.Outline(folder)];
+        }
+
+        under.RemoveAll(h => h.Listing is { } listing && IsExpired(listing));
+        return under;
+    }
+
     /// <summary>Every path held, in order: for a walk that counts what is held below each folder.</summary>
     internal List<string> Paths()
     {
+        if (_store.ReadsAlone)
+        {
+            return _store.Paths();
+        }
+
         lock (_gate)
         {
             return _store.Paths();

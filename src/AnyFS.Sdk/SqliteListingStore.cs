@@ -230,6 +230,9 @@ internal sealed class SqliteListingStore : IListingStore
     /// <summary>What the store has done since it was opened, as of now; readable after it is disposed too.</summary>
     public ListingStoreStatistics Statistics() => _meter.Snapshot();
 
+    // by the readers' connections, with what this run has stored since the last commit taken under its own lock
+    public bool ReadsAlone => true;
+
     public StoredListing? Get(string path)
     {
         var asked = Stopwatch.GetTimestamp();
@@ -273,6 +276,7 @@ internal sealed class SqliteListingStore : IListingStore
                 if (found is not null)
                 {
                     _meter.Found();
+                    _meter.BytesRead(found.Packed?.Length ?? 0);
                 }
 
                 return found;
@@ -484,7 +488,30 @@ internal sealed class SqliteListingStore : IListingStore
         return paths;
     }
 
+    public IEnumerable<ListingOutline> Outline(string folder)
+    {
+        if (folder.Length > 0 && Get(folder) is { } own)
+        {
+            yield return new ListingOutline(folder, own.Count, own.Folders, own);
+        }
+
+        // a page at a time, none of it held once the caller has gone on; in ordinal order every "folder/â€¦" lies between
+        // "folder/" and "folder0", '0' being the character after '/'
+        foreach (var (path, listing) in folder.Length == 0 ? Range("", null, Entries.OfFolders) : Range(folder + "/", folder + "0", Entries.OfFolders))
+        {
+            yield return new ListingOutline(path, listing.Count, listing.Folders, listing.HasEntries ? listing : null);
+        }
+    }
+
     public IEnumerable<(string Path, StoredListing Listing)> All() => Range("", null);
+
+    /// <summary>Which rows' entries a range reads: all (the default), those of a listing with folders in it, none.</summary>
+    private enum Entries
+    {
+        None = 0,
+        OfFolders = 1,
+        All = 2,
+    }
 
     /// <summary>
     /// The rows from <paramref name="from"/> up to <paramref name="to"/> in path order, a page at a time from a reader, the
@@ -493,7 +520,7 @@ internal sealed class SqliteListingStore : IListingStore
     /// (<see cref="DatabaseOrder"/>). With no <paramref name="to"/>, to the end: no path stands for the end, since the
     /// database has a folder whose name begins with an emoji above any made of characters of one UTF-16 unit.
     /// </summary>
-    private IEnumerable<(string Path, StoredListing Listing)> Range(string from, string? to)
+    private IEnumerable<(string Path, StoredListing Listing)> Range(string from, string? to, Entries entries = Entries.All)
     {
         List<(string Path, StoredListing? Listing)> written = [];
         bool cleared;
@@ -524,7 +551,7 @@ internal sealed class SqliteListingStore : IListingStore
             var last = from;
             while (true)
             {
-                var page = ReadPage(first ? from : last, to, after: !first);
+                var page = ReadPage(first ? from : last, to, after: !first, entries);
                 if (page is null)
                 {
                     yield break;
@@ -577,7 +604,7 @@ internal sealed class SqliteListingStore : IListingStore
     }
 
     /// <summary>One page of the rows from <paramref name="from"/> (after it, with <paramref name="after"/>) up to <paramref name="to"/> (to the end, with none), from a reader; null where the database could not be read.</summary>
-    private List<(string Path, StoredListing Listing)>? ReadPage(string from, string? to, bool after)
+    private List<(string Path, StoredListing Listing)>? ReadPage(string from, string? to, bool after, Entries entries)
     {
         var asked = Stopwatch.GetTimestamp();
         _readerSlots.Wait();
@@ -587,8 +614,15 @@ internal sealed class SqliteListingStore : IListingStore
             var started = _meter.Entered(asked);
             try
             {
-                var page = reader!.Page(from, to, after, PageRows);
+                var page = reader!.Page(from, to, after, PageRows, (int)entries);
                 _meter.Rows(page.Count);
+                long bytes = 0;
+                foreach (var (_, listing) in page)
+                {
+                    bytes += listing.Packed?.Length ?? 0;
+                }
+
+                _meter.BytesRead(bytes);
                 return page;
             }
             catch (SqliteException ex)
@@ -840,8 +874,9 @@ internal sealed class SqliteListingStore : IListingStore
         var stamp = reader.IsDBNull(at) ? null : reader.GetString(at);
         var count = reader.GetInt32(at + 1);
         var folders = reader.GetInt32(at + 2);
-        var entries = reader.GetFieldValue<byte[]>(at + 3);
-        return new StoredListing(0, stamp, entries, count, folders);
+
+        // null where the range was asked for without this row's entries
+        return reader.IsDBNull(at + 3) ? StoredListing.WithoutEntries(stamp, count, folders) : new StoredListing(0, stamp, reader.GetFieldValue<byte[]>(at + 3), count, folders);
     }
 
     private void Failed(string what, SqliteException ex)
@@ -904,10 +939,14 @@ internal sealed class SqliteListingStore : IListingStore
             }
 
             _get = Prepare("SELECT stamp, count, folders, entries FROM listing WHERE path = $path", "$path");
-            _range = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path >= $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
-            _rangeAfter = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path > $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$limit");
-            _rest = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path >= $from ORDER BY path LIMIT $limit", "$from", "$limit");
-            _restAfter = Prepare("SELECT path, stamp, count, folders, entries FROM listing WHERE path > $from ORDER BY path LIMIT $limit", "$from", "$limit");
+            // a row's entries only where they are asked for ($entries: 2 all, 1 those of a listing with folders in it, 0
+            // none): SQLite reads a column when the row's result takes it, and most of a listing's bytes lie on pages of
+            // their own, which a row that is not asked for its entries does not touch
+            const string Row = "SELECT path, stamp, count, folders, CASE WHEN $entries = 2 OR ($entries = 1 AND folders > 0) THEN entries END FROM listing";
+            _range = Prepare(Row + " WHERE path >= $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$entries", "$limit");
+            _rangeAfter = Prepare(Row + " WHERE path > $from AND path < $to ORDER BY path LIMIT $limit", "$from", "$to", "$entries", "$limit");
+            _rest = Prepare(Row + " WHERE path >= $from ORDER BY path LIMIT $limit", "$from", "$entries", "$limit");
+            _restAfter = Prepare(Row + " WHERE path > $from ORDER BY path LIMIT $limit", "$from", "$entries", "$limit");
         }
 
         public StoredListing? Find(string path)
@@ -918,7 +957,7 @@ internal sealed class SqliteListingStore : IListingStore
         }
 
         /// <summary>Up to <paramref name="limit"/> rows from <paramref name="from"/> (after it, with <paramref name="after"/>) up to <paramref name="to"/>, or to the end with none, in path order.</summary>
-        public List<(string Path, StoredListing Listing)> Page(string from, string? to, bool after, int limit)
+        public List<(string Path, StoredListing Listing)> Page(string from, string? to, bool after, int limit, int entries)
         {
             var command = to is null ? (after ? _restAfter : _rest) : after ? _rangeAfter : _range;
             command.Parameters[0].Value = from;
@@ -927,6 +966,7 @@ internal sealed class SqliteListingStore : IListingStore
                 command.Parameters[1].Value = to;
             }
 
+            command.Parameters[^2].Value = entries;
             command.Parameters[^1].Value = limit;
             var page = new List<(string, StoredListing)>(limit);
             using var reader = command.ExecuteReader();
@@ -1074,6 +1114,7 @@ internal sealed class SqliteListingStore : IListingStore
         private long _found;
         private long _rows;
         private long _bytes;
+        private long _bytesRead;
         private long _waited;
         private long _longestWait;
 
@@ -1101,6 +1142,8 @@ internal sealed class SqliteListingStore : IListingStore
 
         public void Bytes(int bytes) => Interlocked.Add(ref _bytes, bytes);
 
+        public void BytesRead(long bytes) => Interlocked.Add(ref _bytesRead, bytes);
+
         public ListingStoreStatistics Snapshot() => new()
         {
             Reads = Of(Read),
@@ -1112,6 +1155,7 @@ internal sealed class SqliteListingStore : IListingStore
             RangeRows = Volatile.Read(ref _rows),
             Commits = Of(Commit),
             BytesWritten = Volatile.Read(ref _bytes),
+            BytesRead = Volatile.Read(ref _bytesRead),
             Waited = Stopwatch.GetElapsedTime(0, Volatile.Read(ref _waited)),
             LongestWait = Stopwatch.GetElapsedTime(0, Volatile.Read(ref _longestWait)),
         };

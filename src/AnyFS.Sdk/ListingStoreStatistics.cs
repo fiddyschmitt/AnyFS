@@ -34,6 +34,9 @@ public sealed record ListingStoreStatistics
     /// <summary>The bytes of the listings stored.</summary>
     public required long BytesWritten { get; init; }
 
+    /// <summary>The bytes of the listings' entries read from the database, by path and in ranges.</summary>
+    public required long BytesRead { get; init; }
+
     /// <summary>How long callers waited for the connection in all.</summary>
     public required TimeSpan Waited { get; init; }
 

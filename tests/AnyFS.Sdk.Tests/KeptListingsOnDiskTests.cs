@@ -119,6 +119,87 @@ public class KeptListingsOnDiskTests
         Assert.AreEqual(41, next.Cache.Count);
     }
 
+    /// <summary>One stamped folder, <c>big</c>, of two hundred folders of thirty files each.</summary>
+    private void OneBigFolder()
+    {
+        _tree.Clear();
+        _tree[""] = [VfsEntry.Directory("big")];
+        _tree["big"] = [.. Enumerable.Range(0, 200).Select(i => VfsEntry.Directory($"folder {i:D3}"))];
+        for (var i = 0; i < 200; i++)
+        {
+            _tree[$"big/folder {i:D3}"] = [.. Enumerable.Range(0, 30).Select(f => VfsEntry.File($"a file with a long enough name {f:D2}.txt", f + 1, etag: $"{i:x8}{f:x8}"))];
+        }
+    }
+
+    [TestMethod]
+    public async Task AWalkThatKeepsAFolderByItsStampReadsTheEntriesOnlyOfListingsWithFoldersInThem()
+    {
+        // a walk that found a folder's stamp unchanged read every listing held below it from the database, entries and all,
+        // into memory at once, to count them: it goes by their counts, and by the names in the few that have folders (the
+        // review of 21-Nov-2026, P4)
+        OneBigFolder();
+        var folder = TempFolder();
+        long written;
+        await using (var kept = Kept(Options(folder)))
+        {
+            await kept.CountAsync(CancellationToken.None);
+            written = kept.DiskStatistics!.BytesWritten;
+        }
+
+        _listed.Clear();
+        await using var next = Kept(Options(folder));
+        var before = next.DiskStatistics!.BytesRead;
+        var counters = new SourceCounters();
+        Assert.IsTrue(await next.WalkAsync(counters, full: false, CancellationToken.None), "the walk went everywhere");
+        Assert.AreEqual(6000, counters.FilesKnown);
+        Assert.AreEqual(201, counters.DirectoriesKnown);
+        Assert.AreEqual(1, _listed.Count, "the root alone was asked of the source: big is kept by its stamp");
+        var read = next.DiskStatistics!.BytesRead - before;
+        Assert.IsTrue(read < written / 10, $"{read:N0} bytes of entries read to keep what is {written:N0} bytes");
+    }
+
+    [TestMethod]
+    public async Task AFolderNotHeldBelowOneKeptByItsStampIsWalked()
+    {
+        // the names sort among each other's paths: "big/a b" lies between "big/a" and "big/a/x"
+        _tree.Clear();
+        _tree[""] = [VfsEntry.Directory("big")];
+        var names = new[] { "a", "a b", "a-", "a0", "b" };
+        _tree["big"] = [.. names.Select(n => VfsEntry.Directory(n)), VfsEntry.File("f.txt", 1)];
+        foreach (var name in names)
+        {
+            _tree[$"big/{name}"] = [VfsEntry.Directory("x"), VfsEntry.File("g.txt", 2)];
+            _tree[$"big/{name}/x"] = [VfsEntry.File("h.txt", 3)];
+        }
+
+        var folder = TempFolder();
+        await using (var kept = Kept(Options(folder)))
+        {
+            await kept.CountAsync(CancellationToken.None);
+            Assert.AreEqual(12, kept.Cache.Count);
+        }
+
+        foreach (var onDisk in new[] { true, false })
+        {
+            // the second time in memory: what the database gave is let go, and the same is asked of a store in memory
+            await using var next = Kept(Options(folder, onDisk));
+            if (!onDisk)
+            {
+                await next.CountAsync(CancellationToken.None);
+            }
+
+            next.Cache.Invalidate("big/a b");
+            next.Cache.InvalidateTree("big/a");
+            next.Cache.Invalidate("big/b/x");
+            _listed.Clear();
+            var counters = new SourceCounters();
+            Assert.IsTrue(await next.WalkAsync(counters, full: false, CancellationToken.None));
+            // the root, which has no stamp; what is not held; and what is below a folder listed afresh
+            CollectionAssert.AreEquivalent(new[] { "", "big/a", "big/a/x", "big/a b", "big/a b/x", "big/b/x" }, _listed.Keys.ToList(), $"on disk: {onDisk}, listed: {string.Join(", ", _listed.Keys.Order())}");
+            Assert.AreEqual(12, next.Cache.Count, $"on disk: {onDisk}");
+        }
+    }
+
     [TestMethod]
     public async Task TheDatabaseIsTheDefault()
     {
