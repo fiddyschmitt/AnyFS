@@ -12,12 +12,8 @@ namespace AnyFS.Sources.ThreeDX;
 /// 3DSearch too once signed in, as Mount3DX does.
 /// </summary>
 internal sealed class ThreeDXSignInTarget(Uri space, bool trustAnyCertificate, string? profileDir = null)
-    : WebSignInTarget(space, profileDir ?? DefaultProfile(space.Host))
+    : AskedSignInTarget(space, profileDir ?? DefaultProfile(space.Host), trustAnyCertificate)
 {
-    private static readonly TimeSpan CheckEvery = TimeSpan.FromSeconds(2);
-
-    private long _lastCheck;
-
     public override string LogPrefix => "3dx";
 
     public override string WebDriverVariable => "ANYFS_3DX_WEBDRIVER";
@@ -29,23 +25,6 @@ internal sealed class ThreeDXSignInTarget(Uri space, bool trustAnyCertificate, s
 
     /// <summary>The profile is AnyFS's own, for this server only: every cookie in it belongs to the sign-in.</summary>
     public override bool Keeps(SessionCookie cookie) => true;
-
-    public override async ValueTask<SignInCheck> CheckAsync(IReadOnlyList<Uri> pages, IReadOnlyList<SessionCookie> cookies, CancellationToken ct)
-    {
-        if (!pages.Any(IsSpacePage) || cookies.Count == 0)
-        {
-            return SignInCheck.NotYet;
-        }
-
-        // 3DSpace's own page can show for a moment before the sign-in (a page that sends the browser on): ask 3DSpace, now and then
-        if (_lastCheck != 0 && Stopwatch.GetElapsedTime(_lastCheck) < CheckEvery)
-        {
-            return SignInCheck.NotYet;
-        }
-
-        _lastCheck = Stopwatch.GetTimestamp();
-        return await SignedInAsync(cookies, ct).ConfigureAwait(false) ? SignInCheck.SignedIn : SignInCheck.NotYet;
-    }
 
     /// <summary>
     /// Once signed in: 3DSearch, whose session WebDriver has to see the browser open for its cookies. Its search address (what
@@ -65,35 +44,10 @@ internal sealed class ThreeDXSignInTarget(Uri space, bool trustAnyCertificate, s
         }
     }
 
-    private bool IsSpacePage(Uri page)
-        => page.Host.Equals(Page.Host, StringComparison.OrdinalIgnoreCase) && page.Port == Page.Port
-            && (page.AbsolutePath + "/").StartsWith(Page.AbsolutePath, StringComparison.OrdinalIgnoreCase);
-
-    private async Task<bool> SignedInAsync(IReadOnlyList<SessionCookie> cookies, CancellationToken ct)
+    /// <summary>Whether 3DSpace answers the browser's cookies with its CSRF token, which only a signed-in session gets.</summary>
+    protected override async Task<bool> AnswersAsync(HttpClient http, CancellationToken ct)
     {
-        using var http = Client(cookies);
-        try
-        {
-            using var response = await http.GetAsync(ThreeDXSession.SpaceProbe(Page), ct).ConfigureAwait(false);
-            return response.IsSuccessStatusCode && ThreeDXSession.IsJson(response);
-        }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && !ct.IsCancellationRequested)
-        {
-            return false;
-        }
-    }
-
-    /// <summary>A client that sends the browser's cookies and follows no redirects (a redirect means not signed in).</summary>
-    private HttpClient Client(IReadOnlyList<SessionCookie> cookies)
-    {
-        var jar = CookieJar.New();
-        CookieJar.Add(jar, cookies);
-        var handler = new SocketsHttpHandler { CookieContainer = jar, UseCookies = true, AllowAutoRedirect = false, AutomaticDecompression = DecompressionMethods.All };
-        if (trustAnyCertificate)
-        {
-            handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
-        }
-
-        return new HttpClient(handler, disposeHandler: true) { Timeout = TimeSpan.FromSeconds(20) };
+        using var response = await http.GetAsync(ThreeDXSession.SpaceProbe(Page), ct).ConfigureAwait(false);
+        return response.IsSuccessStatusCode && ThreeDXSession.IsJson(response);
     }
 }

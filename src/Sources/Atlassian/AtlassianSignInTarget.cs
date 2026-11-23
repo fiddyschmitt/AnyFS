@@ -14,12 +14,8 @@ namespace AnyFS.Sources.Atlassian;
 /// headless launch sign in again without anyone.
 /// </summary>
 internal sealed class AtlassianSignInTarget(AtlassianProduct product, Uri installation, bool trustAnyCertificate, string? profileDir = null)
-    : WebSignInTarget(installation, profileDir ?? DefaultProfile(product, installation.Host))
+    : AskedSignInTarget(installation, profileDir ?? DefaultProfile(product, installation.Host), trustAnyCertificate)
 {
-    private static readonly TimeSpan CheckEvery = TimeSpan.FromSeconds(2);
-
-    private long _lastCheck;
-
     public override string LogPrefix => Name(product);
 
     public override string WebDriverVariable => product.Variable("WEBDRIVER");
@@ -41,60 +37,22 @@ internal sealed class AtlassianSignInTarget(AtlassianProduct product, Uri instal
     /// <summary>The profile is AnyFS's own, for this installation only: every cookie in it belongs to the sign-in (an identity provider's too).</summary>
     public override bool Keeps(SessionCookie cookie) => true;
 
-    public override async ValueTask<SignInCheck> CheckAsync(IReadOnlyList<Uri> pages, IReadOnlyList<SessionCookie> cookies, CancellationToken ct)
-    {
-        if (!pages.Any(IsInstallationPage) || cookies.Count == 0)
-        {
-            return SignInCheck.NotYet;
-        }
-
-        // the login page itself is a page of the installation with a session cookie: ask the product, now and then
-        if (_lastCheck != 0 && Stopwatch.GetElapsedTime(_lastCheck) < CheckEvery)
-        {
-            return SignInCheck.NotYet;
-        }
-
-        _lastCheck = Stopwatch.GetTimestamp();
-        return await SignedInAsync(cookies, ct).ConfigureAwait(false) ? SignInCheck.SignedIn : SignInCheck.NotYet;
-    }
-
-    private bool IsInstallationPage(Uri page)
-        => page.Host.Equals(Page.Host, StringComparison.OrdinalIgnoreCase) && page.Port == Page.Port
-            && (page.AbsolutePath.TrimEnd('/') + "/").StartsWith(Page.AbsolutePath, StringComparison.OrdinalIgnoreCase);
-
     /// <summary>Whether the product's REST API takes the browser's cookies for a person (not the anonymous user).</summary>
-    internal async Task<bool> SignedInAsync(IReadOnlyList<SessionCookie> cookies, CancellationToken ct)
+    protected override async Task<bool> AnswersAsync(HttpClient http, CancellationToken ct)
     {
-        // a jar with room for an identity provider's cookies too: the default holds twenty a domain and lets the oldest go
-        var jar = CookieJar.New();
-        CookieJar.Add(jar, cookies);
-        using var handler = new SocketsHttpHandler { CookieContainer = jar, UseCookies = true, AllowAutoRedirect = false, AutomaticDecompression = DecompressionMethods.All };
-        if (trustAnyCertificate)
-        {
-            handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
-        }
-
-        using var http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(20) };
-        try
-        {
-            using var response = await http.GetAsync(new Uri(Page, AtlassianSession.WhoPath(product)), ct).ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode || response.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) != true)
-            {
-                return false;
-            }
-
-            // Bitbucket's who-am-I call names the account in a header, not its data
-            if (AtlassianSession.NamedUser(product, response) is { } named)
-            {
-                return named.Length > 0;
-            }
-
-            using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false), cancellationToken: ct).ConfigureAwait(false);
-            return AtlassianUser.Parse(product, doc.RootElement) is not null;
-        }
-        catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException && !ct.IsCancellationRequested)
+        using var response = await http.GetAsync(new Uri(Page, AtlassianSession.WhoPath(product)), ct).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode || response.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) != true)
         {
             return false;
         }
+
+        // Bitbucket's who-am-I call names the account in a header, not its data
+        if (AtlassianSession.NamedUser(product, response) is { } named)
+        {
+            return named.Length > 0;
+        }
+
+        using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false), cancellationToken: ct).ConfigureAwait(false);
+        return AtlassianUser.Parse(product, doc.RootElement) is not null;
     }
 }

@@ -108,24 +108,11 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
         }
         else
         {
-            var sockets = new SocketsHttpHandler
-            {
-                UseCookies = false,
-                AllowAutoRedirect = false,
-                AutomaticDecompression = DecompressionMethods.All,
-                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-            };
-            if (settings.TrustAnyCertificate)
-            {
-                sockets.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
-            }
-
-            inner = sockets;
+            inner = SessionHttp.Sockets(settings.TrustAnyCertificate);
         }
 
         _handler = new ClockHandler(this, UpstreamRequestsHandler.Around(inner, watcher));
-        Http = new HttpClient(_handler, disposeHandler: false) { Timeout = RequestTimeout };
-        Http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(ArtifactorySession).Assembly.GetName().Version?.ToString(3) ?? "0"}");
+        Http = SessionHttp.Client(_handler, RequestTimeout, typeof(ArtifactorySession));
         Address = ArtifactoryAddress.Candidates(Url)[0];
         _renewal = new SignInRenewal(RefreshAgainAsync, MinRenewalInterval);
         _renewal.Renewed += () => Renewed?.Invoke();
@@ -393,27 +380,7 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
     internal static DateTimeOffset? IssuedOf(string token) => Claims(token, c => c.Long("iat") is > 0 and var iat ? DateTimeOffset.FromUnixTimeSeconds(iat) : (DateTimeOffset?)null);
 
     /// <summary>What a signed token's claims say, read by <paramref name="read"/>; default for a token that is not one (a reference token, an API key).</summary>
-    private static T? Claims<T>(string token, Func<JsonElement, T?> read)
-    {
-        var parts = token.Split('.');
-        if (parts.Length != 3)
-        {
-            return default;
-        }
-
-        try
-        {
-            var payload = parts[1].Replace('-', '+').Replace('_', '/');
-            payload = payload.PadRight(payload.Length + ((4 - (payload.Length % 4)) % 4), '=');
-            using var doc = JsonDocument.Parse(Convert.FromBase64String(payload));
-            return doc.RootElement.ValueKind == JsonValueKind.Object ? read(doc.RootElement) : default;
-        }
-        catch (Exception ex) when (ex is FormatException or JsonException)
-        {
-            return default;
-        }
-    }
-
+    private static T? Claims<T>(string token, Func<JsonElement, T?> read) => TokenClaims.Read(token, read);
     /// <summary>An API key, which Artifactory reads from a header of its own, not as a bearer token: they begin <c>AKC</c>.</summary>
     internal static bool IsApiKey(string token) => token.StartsWith("AKC", StringComparison.Ordinal) && !token.Contains('.');
 

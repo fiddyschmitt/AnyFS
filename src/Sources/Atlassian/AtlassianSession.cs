@@ -67,24 +67,13 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
         }
         else
         {
-            var sockets = new SocketsHttpHandler
-            {
-                UseCookies = false,
-                AllowAutoRedirect = false,
-                AutomaticDecompression = DecompressionMethods.All,
-                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-            };
-            if (settings.TrustAnyCertificate)
-            {
-                sockets.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
-            }
-
-            inner = sockets;
+            inner = SessionHttp.Sockets(settings.TrustAnyCertificate);
         }
 
-        _handler = new CookieHandler(Cookies, UpstreamRequestsHandler.Around(inner, watcher));
-        Http = new HttpClient(_handler, disposeHandler: false) { Timeout = RequestTimeout };
-        Http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(AtlassianSession).Assembly.GetName().Version?.ToString(3) ?? "0"}");
+        // a request that carries its own authorisation (a token, Basic) goes without the cookies: the server ends the
+        // session such a request makes at once
+        _handler = new CookieJarHandler(Cookies, UpstreamRequestsHandler.Around(inner, watcher), notWithAuthorization: true);
+        Http = SessionHttp.Client(_handler, RequestTimeout, typeof(AtlassianSession));
         Address = AtlassianAddress.Candidates(Url).First();
         _renewal = new SignInRenewal(SignInAgainAsync, MinRenewalInterval);
         _renewal.Renewed += () => Renewed?.Invoke();
@@ -792,42 +781,5 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
         Http.Dispose();
         _handler.Dispose();
         _renewal.Dispose();
-    }
-
-    /// <summary>
-    /// The session's cookies on every request and every answer's kept, whatever sends them (a socket, a test's stand-in), so
-    /// one jar holds the browser's or the login form's cookies and the server's renewals of them. A request that carries
-    /// its own authorisation (a token, Basic) goes without them: the server ends the session such a request makes at once.
-    /// </summary>
-    private sealed class CookieHandler(CookieContainer jar, HttpMessageHandler inner) : DelegatingHandler(inner)
-    {
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
-        {
-            var url = request.RequestUri!;
-            var header = request.Headers.Authorization is null ? jar.GetCookieHeader(url) : "";
-            if (header.Length > 0)
-            {
-                request.Headers.Remove("Cookie");
-                request.Headers.TryAddWithoutValidation("Cookie", header);
-            }
-
-            var response = await base.SendAsync(request, ct).ConfigureAwait(false);
-            if (response.Headers.TryGetValues("Set-Cookie", out var set))
-            {
-                foreach (var cookie in set)
-                {
-                    try
-                    {
-                        jar.SetCookies(url, cookie);
-                    }
-                    catch (CookieException)
-                    {
-                        // a cookie .NET will not hold: the session goes without it
-                    }
-                }
-            }
-
-            return response;
-        }
     }
 }

@@ -514,30 +514,10 @@ internal sealed class TeamsWebSession(Uri teamsHost, string browserPath, string 
 
     /// <summary>A JWT's audience, the account (upn/preferred_username), the account's mri (<c>8:orgid:&lt;oid&gt;</c>), its tenant and expiry; nulls for anything else.</summary>
     internal static (string? Aud, string? Account, string? Mri, string? Tenant, DateTimeOffset? Expires) Claims(string token)
-    {
-        try
-        {
-            var parts = token.Split('.');
-            if (parts.Length < 2)
-            {
-                return (null, null, null, null, null);
-            }
-
-            var payload = parts[1].Replace('-', '+').Replace('_', '/');
-            payload = payload.PadRight(payload.Length + (4 - payload.Length % 4) % 4, '=');
-            using var json = JsonDocument.Parse(Convert.FromBase64String(payload));
-            var root = json.RootElement;
-            string? S(string name) => root.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
-            var aud = S("aud");
-            var account = S("upn") ?? S("preferred_username") ?? S("unique_name");
-            var oid = S("oid");
-            var mri = oid is null ? null : $"8:orgid:{oid}";
-            var expires = root.TryGetProperty("exp", out var e) && e.TryGetInt64(out var seconds) ? DateTimeOffset.FromUnixTimeSeconds(seconds) : (DateTimeOffset?)null;
-            return (aud, account, mri, S("tid"), expires);
-        }
-        catch (Exception ex) when (ex is FormatException or JsonException)
-        {
-            return (null, null, null, null, null);
-        }
-    }
+        => TokenClaims.Read(token, c => (
+            Aud: TokenClaims.Text(c, "aud"),
+            Account: TokenClaims.Text(c, "upn") ?? TokenClaims.Text(c, "preferred_username") ?? TokenClaims.Text(c, "unique_name"),
+            Mri: TokenClaims.Text(c, "oid") is { } oid ? $"8:orgid:{oid}" : null,
+            Tenant: TokenClaims.Text(c, "tid"),
+            Expires: TokenClaims.Time(c, "exp")));
 }

@@ -59,30 +59,12 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
         }
         else
         {
-            var sockets = new SocketsHttpHandler
-            {
-                UseCookies = false,
-                AllowAutoRedirect = false,
-                AutomaticDecompression = DecompressionMethods.All,
-                PooledConnectionLifetime = TimeSpan.FromMinutes(10),
-            };
-            if (settings.TrustAnyCertificate)
-            {
-                sockets.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
-            }
-
             // the Windows sign-ins answer GitLab's Kerberos challenge (Negotiate) with these; nothing else asks for them
-            if (Method is GitLabSignIn.WindowsCurrent or GitLabSignIn.Windows)
-            {
-                sockets.Credentials = settings.Credentials();
-            }
-
-            inner = sockets;
+            inner = SessionHttp.Sockets(settings.TrustAnyCertificate, Method is GitLabSignIn.WindowsCurrent or GitLabSignIn.Windows ? settings.Credentials() : null);
         }
 
-        _handler = new CookieHandler(Cookies, UpstreamRequestsHandler.Around(inner, watcher));
-        Http = new HttpClient(_handler, disposeHandler: false) { Timeout = RequestTimeout };
-        Http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(GitLabSession).Assembly.GetName().Version?.ToString(3) ?? "0"}");
+        _handler = new CookieJarHandler(Cookies, UpstreamRequestsHandler.Around(inner, watcher));
+        Http = SessionHttp.Client(_handler, RequestTimeout, typeof(GitLabSession));
         Address = new GitLabAddress(new Uri($"{Url.Scheme}://{Url.Authority}"), "");
         _renewal = new SignInRenewal(SignInAgainAsync, MinRenewalInterval);
     }
@@ -549,41 +531,5 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
         Http.Dispose();
         _handler.Dispose();
         _renewal.Dispose();
-    }
-
-    /// <summary>
-    /// The session's cookies on every request and every answer's kept, whatever sends them (a socket, a test's stand-in), so
-    /// one jar holds the browser's or the sign-in's cookies and GitLab's renewals of them.
-    /// </summary>
-    private sealed class CookieHandler(CookieContainer jar, HttpMessageHandler inner) : DelegatingHandler(inner)
-    {
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
-        {
-            var url = request.RequestUri!;
-            var header = jar.GetCookieHeader(url);
-            if (header.Length > 0)
-            {
-                request.Headers.Remove("Cookie");
-                request.Headers.TryAddWithoutValidation("Cookie", header);
-            }
-
-            var response = await base.SendAsync(request, ct).ConfigureAwait(false);
-            if (response.Headers.TryGetValues("Set-Cookie", out var set))
-            {
-                foreach (var cookie in set)
-                {
-                    try
-                    {
-                        jar.SetCookies(url, cookie);
-                    }
-                    catch (CookieException)
-                    {
-                        // a cookie .NET will not hold: the session goes without it
-                    }
-                }
-            }
-
-            return response;
-        }
     }
 }

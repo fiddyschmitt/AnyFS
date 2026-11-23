@@ -291,26 +291,5 @@ internal sealed class OwaTokenSession
 
     /// <summary>The account (upn or preferred_username) and expiry a JWT carries; nulls for anything else.</summary>
     internal static (string? Account, DateTimeOffset? ExpiresAt) Claims(string token)
-    {
-        try
-        {
-            var parts = token.Split('.');
-            if (parts.Length < 2)
-            {
-                return (null, null);
-            }
-
-            var payload = parts[1].Replace('-', '+').Replace('_', '/');
-            payload = payload.PadRight(payload.Length + (4 - payload.Length % 4) % 4, '=');
-            using var json = JsonDocument.Parse(Convert.FromBase64String(payload));
-            var root = json.RootElement;
-            var account = root.TryGetProperty("upn", out var upn) ? upn.GetString() : root.TryGetProperty("preferred_username", out var pu) ? pu.GetString() : null;
-            var expires = root.TryGetProperty("exp", out var exp) && exp.TryGetInt64(out var seconds) ? DateTimeOffset.FromUnixTimeSeconds(seconds) : (DateTimeOffset?)null;
-            return (account, expires);
-        }
-        catch (Exception ex) when (ex is FormatException or JsonException)
-        {
-            return (null, null);
-        }
-    }
+        => TokenClaims.Read(token, c => (Account: TokenClaims.Text(c, "upn") ?? TokenClaims.Text(c, "preferred_username"), ExpiresAt: TokenClaims.Time(c, "exp")));
 }
