@@ -392,6 +392,58 @@ public class SourceRunnerTests
         Assert.AreEqual("reported during init", runner.Handle.Status.Text);
     }
 
+    /// <summary>A source one of whose folders the account may not list.</summary>
+    private sealed class OneFolderRefusedPlugin : ISourcePlugin
+    {
+        public string TypeId => "onerefused";
+
+        public string DisplayName => "One folder refused";
+
+        public string Description => "";
+
+        public string TypeFolder => "onerefused";
+
+        public Stream? OpenIcon() => null;
+
+        public Type SettingsType => typeof(MemoryPluginSettings);
+
+        public object CreateDefaultSettings() => new MemoryPluginSettings();
+
+        public ISource CreateSource(object settings) => new OneFolderRefusedSource();
+    }
+
+    private sealed class OneFolderRefusedSource : SourceBase
+    {
+        public override async IAsyncEnumerable<VfsEntry> ListAsync(string path, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.CompletedTask;
+            switch (VfsPath.Normalize(path))
+            {
+                case "":
+                    yield return VfsEntry.File("a.txt", 1, null, null);
+                    yield return VfsEntry.Directory("open");
+                    yield return VfsEntry.Directory("refused");
+                    break;
+                case "open":
+                    yield return VfsEntry.File("b.txt", 1, null, null);
+                    break;
+                default:
+                    throw VfsException.AccessDenied(path);
+            }
+        }
+
+        public override Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct) => throw VfsException.NotFound(path);
+    }
+
+    [TestMethod]
+    public async Task ACountThatLeftAFolderOutEndsAsALowerBound()
+    {
+        // it ended Complete, as exact as a count that missed nothing (the review of 21-Nov-2026, R8)
+        await using var runner = Runner(new MemoryPluginSettings(), countOnStart: true, plugin: new OneFolderRefusedPlugin());
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Current?.Counters.FilesKnown == 2 && runner.Handle.Status.State == ComponentState.Ready, what: "the count over");
+        Assert.AreEqual((2L, false), runner.Handle.FileCount(), "what it could count, and not said to be all there is");
+    }
     [TestMethod]
     public async Task CountOnStartWalksTheTree()
     {

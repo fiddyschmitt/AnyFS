@@ -382,9 +382,21 @@ public sealed class SourceRunner : IAsyncDisposable
     private async Task WalkAsync(ISource source, CancellationToken ct)
     {
         source.Counters.Set(0, 0, EnumerationState.InProgress);
+        var skipped = 0;
         await TreeCount.CountAsync(source, source.Counters, TreeCount.DefaultParallelism,
-            (dir, ex) => _logger.LogDebug("source {Source}: count skipped '{Dir}': {Error}", Definition.Name, dir, ex.Message), ct).ConfigureAwait(false);
-        source.Counters.SetState(EnumerationState.Complete);
+            (dir, ex) =>
+            {
+                // the first where the log is read; the others with them all
+                _logger.Log(Interlocked.Increment(ref skipped) == 1 ? LogLevel.Information : LogLevel.Debug, "source {Source}: count skipped '{Dir}': {Error}", Definition.Name, dir, ex.Message);
+            }, ct).ConfigureAwait(false);
+
+        // a count that left folders out is no count of the whole: a lower bound, shown as one ("1,204+"). It ended
+        // Complete, as exact as a count that missed nothing (the review of 21-Nov-2026, R8)
+        source.Counters.SetState(skipped > 0 ? EnumerationState.Unknown : EnumerationState.Complete);
+        if (skipped > 0)
+        {
+            _logger.LogInformation("source {Source}: the count left out {Count:N0} folders it could not list, and what is below them: it is a lower bound", Definition.Name, skipped);
+        }
     }
 
     private async Task DisposeCurrentAsync()

@@ -857,7 +857,27 @@ public sealed class KeptListings : IAsyncDisposable
                     }
 
                     at?.Failed(ex, ct);
-                    _logger.LogDebug("{Name}: the walk left out '{Folder}': {Error}", _options.Name, folder, ex.Message);
+                    var gone = ex is VfsException { Error: VfsError.NotFound or VfsError.NotADirectory };
+                    if (ex is not (VfsException or SourceFailedException or HttpRequestException or IOException or TimeoutException or OperationCanceledException))
+                    {
+                        // no answer of the upstream's but a fault of the listing's own: its kind and where it was thrown,
+                        // which were nowhere (every folder left out was a line at Debug with the message alone). The
+                        // first of each kind in a walk, so that a fault met in every folder does not fill the log
+                        if (walk.FaultKinds.TryAdd(ex.GetType(), 0))
+                        {
+                            _logger.LogWarning(ex, "{Name}: the walk left out '{Folder}' for a failure that is the listing's own ({Kind}); others of its kind in this walk are logged at Debug", _options.Name, folder, ex.GetType().Name);
+                        }
+                        else
+                        {
+                            _logger.LogDebug("{Name}: the walk left out '{Folder}' for a failure that is the listing's own ({Kind}): {Error}", _options.Name, folder, ex.GetType().Name, ex.Message);
+                        }
+                    }
+                    else
+                    {
+                        // the first of a walk where the log is read; the others with them all, and counted as it ends.
+                        // One gone since its parent was listed is nothing left out, and stays at Debug
+                        _logger.Log(!gone && Interlocked.Exchange(ref walk.LeftOutSaid, 1) == 0 ? LogLevel.Information : LogLevel.Debug, "{Name}: the walk left out '{Folder}': {Error}", _options.Name, folder, ex.Message);
+                    }
                 }
                 finally
                 {
@@ -1142,6 +1162,12 @@ public sealed class KeptListings : IAsyncDisposable
 
         /// <summary>How many of the folders that could not be listed the walk before could (or did not come to).</summary>
         public long FailedAfresh;
+
+        /// <summary>Whether a folder left out has been said where the log is read: the first of a walk is, the others at Debug.</summary>
+        public int LeftOutSaid;
+
+        /// <summary>The kinds of failure of the listing's own this walk has warned of: the first of each is, with where it was thrown.</summary>
+        public readonly ConcurrentDictionary<Type, byte> FaultKinds = new();
 
         /// <summary>The folders that could not be listed.</summary>
         public ConcurrentDictionary<string, byte> FailedNow { get; } = new(StringComparer.Ordinal);

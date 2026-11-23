@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using AnyFS.Sdk.Testing;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Sdk.Tests;
@@ -1207,6 +1208,72 @@ public class KeptListingsTests
     }
 
     /// <summary>A source that only lists, for the host's generic walk.</summary>
+    /// <summary>A log that keeps what it is told.</summary>
+    private sealed class Lines : ILogger
+    {
+        public List<(LogLevel Level, string Text, Exception? Error)> Said { get; } = [];
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (Said)
+            {
+                Said.Add((logLevel, formatter(state, exception), exception));
+            }
+        }
+    }
+
+    [TestMethod]
+    public async Task AWalkSaysWhatItLeftOutWhereTheLogIsReadAndAFaultOfTheListingsOwnWithItsKind()
+    {
+        // every folder a walk left out was a line at Debug with the failure's message alone: nothing where the log is
+        // read by default, and of a fault in the listing itself neither its kind nor where it was thrown
+        static async IAsyncEnumerable<VfsEntry> ListAsync(string path, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.CompletedTask;
+            switch (path)
+            {
+                case "":
+                    yield return VfsEntry.Directory("gone");
+                    yield return VfsEntry.Directory("refused");
+                    yield return VfsEntry.Directory("failed");
+                    yield return VfsEntry.Directory("faulty");
+                    yield return VfsEntry.Directory("faulty too");
+                    yield return VfsEntry.File("x.txt", 1, null, null);
+                    break;
+                case "gone":
+                    throw VfsException.NotFound(path);
+                case "refused":
+                    throw VfsException.AccessDenied(path);
+                case "failed":
+                    throw new VfsException(VfsError.IoError, "the server failed on this folder");
+                default:
+                    throw new InvalidOperationException("a fault in the listing");
+            }
+        }
+
+        var log = new Lines();
+        var counters = new SourceCounters();
+        await using (var kept = new KeptListings(ListAsync, counters, log, new KeptListingsOptions { WalkEvery = TimeSpan.Zero, Parallelism = 1 }))
+        {
+            await kept.CountAsync(CancellationToken.None);
+        }
+
+        var leftOut = log.Said.Where(s => s.Text.Contains("the walk left out '", StringComparison.Ordinal)).ToList();
+        Assert.AreEqual(5, leftOut.Count);
+        var said = leftOut.Single(s => s.Level == LogLevel.Information);
+        Assert.IsFalse(said.Text.Contains("'gone'", StringComparison.Ordinal), "the first the upstream refused or failed, where the log is read; one that is gone is nothing left out");
+        Assert.AreEqual(3, leftOut.Count(s => s.Level == LogLevel.Debug), "the others with everything else");
+        var fault = leftOut.Single(s => s.Level == LogLevel.Warning);
+        StringAssert.Contains(fault.Text, "'faulty", "the first of its kind, and no warning for every folder a fault is met in");
+        StringAssert.Contains(fault.Text, "InvalidOperationException");
+        Assert.IsInstanceOfType<InvalidOperationException>(fault.Error, "with where it was thrown");
+        Assert.AreEqual(EnumerationState.Unknown, counters.State, "and the count is a lower bound, as it was");
+    }
     private sealed class ListingSource(Func<string, CancellationToken, IAsyncEnumerable<VfsEntry>> list) : IVfsOperations
     {
         public IAsyncEnumerable<VfsEntry> ListAsync(string path, CancellationToken ct) => list(path, ct);
