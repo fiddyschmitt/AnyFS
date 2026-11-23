@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Threading.RateLimiting;
@@ -125,6 +125,8 @@ public sealed class RequestPace
                 changed = quota.Changed.Task;
             }
 
+            // a person's request does not wait a window out that is longer than its patience: it is told until when
+            AnyFS.Sdk.UpstreamPatience.ThrowIfOutlasted(wait);
             await Task.WhenAny(changed, Task.Delay(wait, ct)).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
         }
@@ -287,6 +289,10 @@ public sealed class RequestPace
     {
         for (var left = HeldUntil(kind) - DateTime.UtcNow.Ticks; left > 0; left = HeldUntil(kind) - DateTime.UtcNow.Ticks)
         {
+            // A walk waits a hold out, whatever its length. A person's request waited it out too, up to the hour a hold may
+            // be (118 s was measured on a GitLab whose quota a walk had used, 67 to 120 s on SharePoint Online): one longer
+            // than the request's patience is refused at once, saying until when (the review of 21-Nov-2026, R6).
+            AnyFS.Sdk.UpstreamPatience.ThrowIfOutlasted(TimeSpan.FromTicks(left));
             await Task.Delay(TimeSpan.FromTicks(left), ct).ConfigureAwait(false);
         }
     }

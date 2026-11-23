@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 
 namespace AnyFS.Sources.Outlook.Ews;
 
@@ -45,6 +45,8 @@ internal sealed class MailboxPace
                 break;
             }
 
+            // a person's request is refused at once for a hold longer than its patience; a refresh or a count waits it out
+            AnyFS.Sdk.UpstreamPatience.ThrowIfOutlasted(wait, "The mailbox's server");
             await Task.Delay(wait, ct).ConfigureAwait(false);
         }
 
