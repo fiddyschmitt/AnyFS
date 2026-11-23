@@ -1983,6 +1983,42 @@ public class GitLabPipelineTests
         return buffer;
     }
 
+    /// <summary>What stands in front of a GitLab that is down: every request answered 502 while it is.</summary>
+    private sealed class Gateway(HttpMessageHandler inner) : DelegatingHandler(inner)
+    {
+        public bool Down { get; set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Down
+                ? Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.BadGateway) { Content = new StringContent("<html><body>502 Bad Gateway</body></html>", Encoding.UTF8, "text/html"), RequestMessage = request })
+                : base.SendAsync(request, cancellationToken);
+    }
+
+    [TestMethod]
+    public async Task AGitLabItsGatewayCannotReachIsUnavailableAndTheTileSaysSo()
+    {
+        // 502 at every try. In GitLab's own table of errors that was the request's failure (IoError), so the tile stayed
+        // Ready while nothing could be read; with the one table every client shares it is the server's (the review of
+        // 21-Nov-2026, R8)
+        var fake = GitLabSeed.Lab();
+        Gateway? gateway = null;
+        var standIn = fake.StandIn();
+        using var context = new TestSourceContext();
+        await using var source = new GitLabSource(GitLabSeed.Settings(fake.Server + "/anyfs/tools/app"), standIn with { Handler = () => gateway = new Gateway(standIn.Handler()) });
+        await source.InitialiseAsync(context, CancellationToken.None);
+        Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth);
+
+        gateway!.Down = true;
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await ListAsync(source, "issues"));
+        Assert.AreEqual(VfsError.Unavailable, ex.Error);
+        StringAssert.Contains(ex.Message, "is not answering (502)");
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+
+        // and Ready again with the first thing it answers
+        gateway.Down = false;
+        Assert.IsTrue((await ListAsync(source, "pipelines")).Count > 0);
+        Assert.AreEqual(ComponentHealth.Ready, context.LastHealth);
+    }
     [TestMethod]
     public async Task PipelinesAndReleasesShowWhereTheProjectHasThem()
     {

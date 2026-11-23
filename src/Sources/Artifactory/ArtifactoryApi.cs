@@ -232,24 +232,15 @@ internal sealed class ArtifactoryApi : RequestCore
             return request;
         }, what, ct, HttpCompletionOption.ResponseHeadersRead);
 
-    protected override async Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
-    {
-        var body = await BodyAsync(response, ct).ConfigureAwait(false);
-        var message = Message(body);
-        var status = (int)response.StatusCode;
-        return response.StatusCode switch
-        {
-            HttpStatusCode.NotFound => new VfsException(VfsError.NotFound, $"Artifactory has no {what} for this account ({message ?? "404 Not Found"})"),
-            HttpStatusCode.Forbidden => new VfsException(VfsError.AccessDenied, $"Artifactory refused {what}: {message ?? "403 Forbidden"}"),
-            HttpStatusCode.Unauthorized => new VfsException(VfsError.Unavailable, $"Artifactory ({Host}) no longer takes {_session.Settings.Who}: {message ?? "401 Unauthorized"}. Retry the source to sign in again."),
-            HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable => new VfsException(VfsError.Unavailable, $"Artifactory ({Host}) is busy ({status}){(message is null ? "" : ": " + message)}"),
+    protected override string Who => _session.Settings.Who;
 
-            // a call this server does not have, or does not take in this form (an edition without it, a query it cannot run)
-            HttpStatusCode.BadRequest or HttpStatusCode.MethodNotAllowed or HttpStatusCode.NotImplemented => new VfsException(VfsError.NotSupported, $"Artifactory would not take {what} ({status}){(message is null ? "" : ": " + message)}"),
-            _ => new VfsException(VfsError.IoError, $"Artifactory answered {status} to {what}{(message is null ? "" : ": " + message)}"),
-        };
-    }
+    protected override string? Words(string body) => Message(body);
 
+    // a call this server does not have, or does not take in this form (an edition without it, a query it cannot run)
+    protected override VfsException Error(HttpStatusCode status, string what, string? message)
+        => status is HttpStatusCode.BadRequest or HttpStatusCode.MethodNotAllowed or HttpStatusCode.NotImplemented
+            ? new VfsException(VfsError.NotSupported, $"Artifactory would not take {what} ({(int)status}){(message is null ? "" : ": " + message)}", new HttpRequestException(message, null, status))
+            : base.Error(status, what, message);
     /// <summary>Artifactory's own words for an error: the messages of its <c>errors</c>, else a short start of a body that is not a page.</summary>
     internal static string? Message(string body)
     {

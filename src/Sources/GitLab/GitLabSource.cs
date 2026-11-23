@@ -571,7 +571,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
                     _graphQlAnswered = true;
                 }
-                catch (VfsException ex) when (ex.Error is VfsError.IoError or VfsError.NotFound or VfsError.AccessDenied)
+                catch (VfsException ex) when (ex.Error is VfsError.IoError or VfsError.NotFound or VfsError.AccessDenied || IsTooMuch(ex))
                 {
                     if (_graphQlAnswered)
                     {
@@ -594,6 +594,14 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
         return new Dictionary<string, (long Size, bool Lfs)>(sizes, StringComparer.Ordinal);
     }
+
+    /// <summary>
+    /// Whether a query failed as one too heavy for the server does: refused as too many, or given up by what stands in
+    /// front of GitLab (502, 503, 504). The sizes are asked a file at a time then, which a server that is really down
+    /// refuses in its turn.
+    /// </summary>
+    private static bool IsTooMuch(VfsException ex)
+        => RequestCore.StatusOf(ex) is System.Net.HttpStatusCode.TooManyRequests or System.Net.HttpStatusCode.BadGateway or System.Net.HttpStatusCode.ServiceUnavailable or System.Net.HttpStatusCode.GatewayTimeout;
 
     /// <summary>A repository file's bytes, spooled from GitLab as they arrive and kept by its blob (or LFS object): the same file on two branches is one download.</summary>
     internal Task<IVfsFile> OpenBlobAsync(GlProject project, string commit, string path, TreeItem item, CancellationToken ct)

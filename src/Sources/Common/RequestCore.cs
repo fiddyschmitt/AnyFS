@@ -35,7 +35,7 @@ public interface IRequestSession
 /// back for the pause; so is a throttled answer (429, or 503 with Retry-After), which is waited out, and a server's own
 /// failure (500, 502, 503, 504). A sign-in the server no longer takes is made again once through the session and the
 /// request tried again. A request sent on elsewhere is followed where the client says so. What is left is an error, as a
-/// <see cref="VfsException"/> the client words for its product.
+/// <see cref="VfsException"/> by the answer's status, the same for every client (<see cref="Error"/>).
 /// <para>
 /// A client is one of these with the hooks filled in for its product: what a lapsed sign-in looks like there, what its
 /// holds are called, how its errors read. What all share is here once, and is changed here once.
@@ -142,8 +142,50 @@ public abstract class RequestCore : IDisposable
     /// <summary>An answer that is to end the request with an exception of the client's own before it is tried again (a refusal its caller sends again itself); null for none.</summary>
     protected virtual Exception? Refusal(HttpResponseMessage response, Sent sent) => null;
 
-    /// <summary>The error an answer that is no success comes to, in the product's words.</summary>
-    protected abstract Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct);
+    /// <summary>The account as a message names it.</summary>
+    protected abstract string Who { get; }
+
+    /// <summary>The product's own words for an error, from an answer's body; null where it has none (a gateway's page).</summary>
+    protected abstract string? Words(string body);
+
+    /// <summary>The error an answer that is no success comes to: <see cref="Error"/>, with the product's words for it.</summary>
+    protected virtual async Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        return Error(response.StatusCode, what, Words(await BodyAsync(response, ct).ConfigureAwait(false)));
+    }
+
+    /// <summary>
+    /// What a status comes to once the tries are over, the same whichever product answered (each client had a table of
+    /// its own, and the same answer was a different error by source: the review of 21-Nov-2026, R8). A thing that is not
+    /// there, or not to this account, is NotFound; a refusal of the account is AccessDenied. A server that cannot be had
+    /// now is Unavailable, which is what turns a source's tile: a sign-in it no longer takes, a server that is busy (429,
+    /// 503) or one that what stands in front of it cannot reach (502, 504). Anything else is the request's own failure
+    /// (IoError), a 500 among them: a server's fault on the one thing asked says nothing of the rest. Each carries the
+    /// status (<see cref="StatusOf"/>).
+    /// </summary>
+    protected virtual VfsException Error(HttpStatusCode status, string what, string? message)
+    {
+        var code = (int)status;
+        var said = message is null ? "" : ": " + message;
+        var answer = new HttpRequestException(message, null, status);
+        return status switch
+        {
+            HttpStatusCode.NotFound => new VfsException(VfsError.NotFound, $"{Product} has no {what} for this account ({message ?? "404 Not Found"})", answer),
+            HttpStatusCode.Forbidden => new VfsException(VfsError.AccessDenied, $"{Product} refused {what}: {message ?? "403 Forbidden"}", answer),
+            HttpStatusCode.Unauthorized => new VfsException(VfsError.Unavailable, $"{Product} ({Host}) no longer takes {Who}: {message ?? "401 Unauthorized"}. Retry the source to sign in again.", answer),
+            HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable => new VfsException(VfsError.Unavailable, $"{Product} ({Host}) is busy ({code}){said}", answer),
+            HttpStatusCode.BadGateway or HttpStatusCode.GatewayTimeout => new VfsException(VfsError.Unavailable, $"{Product} ({Host}) is not answering ({code}){said}", answer),
+            _ => new VfsException(VfsError.IoError, $"{Product} answered {code} to {what}{said}", answer),
+        };
+    }
+
+    /// <summary>The status of the answer an error came from; null for one that came from no answer (a connection that dropped, a sign-in that could not be made again).</summary>
+    public static HttpStatusCode? StatusOf(VfsException error)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        return (error.InnerException as HttpRequestException)?.StatusCode;
+    }
 
     /// <summary>
     /// Sends a request (made afresh for each attempt) and returns a successful response; refusals and failures become

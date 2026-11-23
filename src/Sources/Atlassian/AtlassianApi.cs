@@ -116,25 +116,9 @@ internal sealed class AtlassianApi : RequestCore
             || path.Contains("/plugins/servlet/external-login", StringComparison.OrdinalIgnoreCase);
     }
 
-    protected override async Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
-    {
-        var body = await BodyAsync(response, ct).ConfigureAwait(false);
+    protected override string Who => _session.Who;
 
-        var message = Message(body);
-        var status = (int)response.StatusCode;
-        return response.StatusCode switch
-        {
-            HttpStatusCode.NotFound => new VfsException(VfsError.NotFound, $"{Name} has no {what} for this account ({message ?? "404 Not Found"})"),
-            HttpStatusCode.Forbidden => new VfsException(VfsError.AccessDenied, $"{Name} refused {what}: {message ?? "403 Forbidden"}"),
-            HttpStatusCode.Unauthorized => new VfsException(VfsError.Unavailable, $"{Name} ({Address.Base.Host}) no longer takes {_session.Who}: {message ?? "401 Unauthorized"}. Retry the source to sign in again."),
-            HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable => new VfsException(VfsError.Unavailable, $"{Name} ({Address.Base.Host}) is busy ({status}){(message is null ? "" : ": " + message)}"),
-
-            // the server's verdict on what was asked (a query it cannot run), told apart by what it carries (IsRejected)
-            HttpStatusCode.BadRequest => new VfsException(VfsError.IoError, $"{Name} answered {status} to {what}{(message is null ? "" : ": " + message)}", new HttpRequestException(message, null, HttpStatusCode.BadRequest)),
-            _ => new VfsException(VfsError.IoError, $"{Name} answered {status} to {what}{(message is null ? "" : ": " + message)}"),
-        };
-    }
-
+    protected override string? Words(string body) => Message(body);
     /// <summary>
     /// Whether a failure is the server's refusal of the request itself (400: a query it cannot run), which asking again does
     /// not change, rather than trouble answering it.

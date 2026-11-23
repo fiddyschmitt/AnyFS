@@ -241,21 +241,9 @@ internal sealed class GitLabApi : RequestCore
         return response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable ? $"{status}, {limit}{counts}" : $"the quota of {limit} is used up{counts}";
     }
 
-    protected override async Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
-    {
-        var body = await BodyAsync(response, ct).ConfigureAwait(false);
+    protected override string Who => _session.Settings.Who;
 
-        var message = Message(body);
-        var status = (int)response.StatusCode;
-        return response.StatusCode switch
-        {
-            HttpStatusCode.NotFound => new VfsException(VfsError.NotFound, $"GitLab has no {what} for this account ({message ?? "404 Not Found"})"),
-            HttpStatusCode.Forbidden => new VfsException(VfsError.AccessDenied, $"GitLab refused {what}: {message ?? "403 Forbidden"}"),
-            HttpStatusCode.Unauthorized => new VfsException(VfsError.Unavailable, $"GitLab ({Address.Server.Host}) no longer takes {_session.Settings.Who}: {message ?? "401 Unauthorized"}. Retry the source to sign in again."),
-            _ => new VfsException(VfsError.IoError, $"GitLab answered {status} to {what}{(message is null ? "" : ": " + message)}"),
-        };
-    }
-
+    protected override string? Words(string body) => Message(body);
     /// <summary>GitLab's own words for an error: its JSON's message or error, else a short start of the body.</summary>
     private static string? Message(string body)
     {

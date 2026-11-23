@@ -44,6 +44,7 @@ public class RequestCoreTests
         var ex = await Assert.ThrowsAsync<VfsException>(() => client.GetAsync("/a", CancellationToken.None));
         Assert.AreEqual(VfsError.Unavailable, ex.Error);
         StringAssert.Contains(ex.Message, "Product (server.test) did not answer: the connection was closed");
+        Assert.IsNull(RequestCore.StatusOf(ex), "no answer, so no status");
         Assert.AreEqual(3, server.Count("/a"));
     }
 
@@ -115,7 +116,8 @@ public class RequestCoreTests
         using var client = new Client(server, session);
 
         var ex = await Assert.ThrowsAsync<VfsException>(() => client.GetAsync("/a", CancellationToken.None));
-        StringAssert.Contains(ex.Message, "answered 401");
+        Assert.AreEqual(VfsError.Unavailable, ex.Error);
+        StringAssert.Contains(ex.Message, "no longer takes someone");
         Assert.AreEqual(1, session.Renewals.Count, "not renewed a second time for the one request");
         Assert.AreEqual(2, server.Count("/a"));
     }
@@ -185,7 +187,8 @@ public class RequestCoreTests
         Assert.AreEqual(3, server.Count("/a"), "twice more, as the clients did");
 
         var ex = await Assert.ThrowsAsync<VfsException>(() => client.GetAsync("/down", CancellationToken.None));
-        StringAssert.Contains(ex.Message, "answered 502");
+        Assert.AreEqual(VfsError.Unavailable, ex.Error);
+        StringAssert.Contains(ex.Message, "Product (server.test) is not answering (502)");
         Assert.AreEqual(3, server.Count("/down"));
     }
 
@@ -253,6 +256,40 @@ public class RequestCoreTests
         var ex = await Assert.ThrowsAsync<VfsException>(() => client.GetAsync("/a", CancellationToken.None));
         StringAssert.Contains(ex.Message, "more than 5 times");
         Assert.AreEqual(6, server.Count("/a"));
+    }
+
+    [TestMethod]
+    [DataRow(HttpStatusCode.NotFound, VfsError.NotFound, "Product has no /a for this account (404 Not Found)")]
+    [DataRow(HttpStatusCode.Forbidden, VfsError.AccessDenied, "Product refused /a: 403 Forbidden")]
+    [DataRow(HttpStatusCode.Unauthorized, VfsError.Unavailable, "Product (server.test) no longer takes someone: 401 Unauthorized. Retry the source to sign in again.")]
+    [DataRow(HttpStatusCode.TooManyRequests, VfsError.Unavailable, "Product (server.test) is busy (429)")]
+    [DataRow(HttpStatusCode.ServiceUnavailable, VfsError.Unavailable, "Product (server.test) is busy (503)")]
+    [DataRow(HttpStatusCode.BadGateway, VfsError.Unavailable, "Product (server.test) is not answering (502)")]
+    [DataRow(HttpStatusCode.GatewayTimeout, VfsError.Unavailable, "Product (server.test) is not answering (504)")]
+    [DataRow(HttpStatusCode.InternalServerError, VfsError.IoError, "Product answered 500 to /a")]
+    [DataRow(HttpStatusCode.BadRequest, VfsError.IoError, "Product answered 400 to /a")]
+    [DataRow(HttpStatusCode.Conflict, VfsError.IoError, "Product answered 409 to /a")]
+    public async Task AStatusComesToTheSameErrorWhicheverClientItIs(HttpStatusCode status, VfsError error, string message)
+    {
+        // each client had a table of its own: a server that was busy or behind a gateway that could not reach it was the
+        // request's own failure in one (the tile stayed Ready) and the server's in the next
+        var server = new Server((_, _) => Task.FromResult(Status(status)));
+        using var client = new Client(server, new Session { CanRenew = false });
+
+        var ex = await Assert.ThrowsAsync<VfsException>(() => client.GetAsync("/a", CancellationToken.None));
+        Assert.AreEqual(error, ex.Error);
+        Assert.AreEqual(message, ex.Message);
+        Assert.AreEqual(status, RequestCore.StatusOf(ex), "the status goes with the error, for a caller that acts on it");
+    }
+
+    [TestMethod]
+    public async Task AnErrorCarriesTheProductsOwnWordsForIt()
+    {
+        var server = new Server((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("the project is archived") }));
+        using var client = new Client(server);
+
+        var ex = await Assert.ThrowsAsync<VfsException>(() => client.GetAsync("/a", CancellationToken.None));
+        Assert.AreEqual("Product refused /a: the project is archived", ex.Message);
     }
 
     private static async Task<HttpResponseMessage> WalkAsync(Client client, string path)
@@ -381,8 +418,10 @@ public class RequestCoreTests
 
         protected override void OnHold(TimeSpan hold, HttpResponseMessage response, string? kind, string what) => Holds++;
 
-        protected override Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
-            => Task.FromResult(new VfsException(VfsError.IoError, $"Product answered {(int)response.StatusCode} to {what}"));
+        protected override string Who => "someone";
+
+        // the product's words for an error are the answer's body as it is, where it has one
+        protected override string? Words(string body) => body is "" or "{}" ? null : body;
 
         protected override void Dispose(bool disposing)
         {
