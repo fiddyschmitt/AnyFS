@@ -880,8 +880,13 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         {
             case ProjectFolder project:
                 Volatile.Read(ref _counted)?.Reached(project.Project);
-                var head = project.Project.Repository ? await HeadAsync(project.Project, ct).ConfigureAwait(false) : null;
-                return $"{project.Project.LastActivity?.UtcTicks ?? 0}|{head?.Commit}";
+
+                // the root of a source of one project is the project as it was read at the start, and nothing lists it
+                // again: its last activity is asked for as it stands (the same answer its head is found by). Taken from
+                // the start's, no walk but the day's whole one saw a comment, a new issue or a pipeline
+                var now = ReferenceEquals(project, _root) ? await ProjectAsync(project.Project, ct).ConfigureAwait(false) : project.Project;
+                var head = now.Repository ? await HeadAsync(project.Project, ct).ConfigureAwait(false) : null;
+                return $"{now.LastActivity?.UtcTicks ?? 0}|{head?.Commit}";
             case FilesFolder files:
                 IsRoot(files.Project, path);
                 return files.Project.Repository && await HeadAsync(files.Project, ct).ConfigureAwait(false) is { } at ? at.Commit : NoRepository;

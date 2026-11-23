@@ -1815,6 +1815,28 @@ public class GitLabTicketTests
     }
 
     [TestMethod]
+    public async Task AWalkOfASourceOfOneProjectSeesWhatMovesNoBranch()
+    {
+        // the root of a source of one project is the project as it was read at the start, and nothing lists it again:
+        // the walks took its last activity from that, so a comment, a new issue or a pipeline, which move no branch,
+        // changed no stamp, and only the day's whole walk listed them
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake, s => s.RefreshSeconds = 1);
+        await source.WalkAsync(new SourceCounters(), full: true, CancellationToken.None);
+        var before = (await ListAsync(source, First)).Single(e => e.Name == "issue.md").Length;
+
+        var docs = fake.ProjectAt("anyfs/docs");
+        var now = DateTimeOffset.UtcNow;
+        docs.IssueList[0].Notes.Add(new FakeGitLab.Note("One more comment.", fake.UserNamed("tester"), now));
+        docs.IssueList[0].Updated = now;
+        docs.LastActivity = now;
+        await Task.Delay(TimeSpan.FromSeconds(1.2));
+
+        await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+        Assert.IsTrue((await ListAsync(source, First)).Single(e => e.Name == "issue.md").Length > before, "the walk listed the issue again, with its new comment");
+    }
+
+    [TestMethod]
     public async Task AnIssuesFileOpensWithoutTheProjectsOtherIssuesNamedAgain()
     {
         // to find one issue's folder the project's issues were all named again and a folder made for each, at every open:
