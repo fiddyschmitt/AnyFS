@@ -65,7 +65,7 @@ internal sealed record ArtifactoryClientToken(string Access, string? Refresh, st
 /// refused. Kept in the source's secret store, it signs in at the next start with nobody at the browser. The client follows no redirects itself: a file's download sent on to a
 /// storage service's address goes there without the sign-in.
 /// </summary>
-internal sealed class ArtifactorySession : IDisposable
+internal sealed class ArtifactorySession : IDisposable, IRequestSession
 {
     /// <summary>The secret the web session's token is kept in for the next start.</summary>
     public const string TokenSecret = "artifactory-client-token";

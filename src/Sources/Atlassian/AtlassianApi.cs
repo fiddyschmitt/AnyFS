@@ -8,34 +8,28 @@ using Microsoft.Extensions.Logging;
 namespace AnyFS.Sources.Atlassian;
 
 /// <summary>
-/// Jira's or Confluence's REST API, as the sources ask it (spec 7.10): every request at the server's pace
-/// (<see cref="RequestPace"/>, by host) with at most so many open at once; a throttled answer (429, 503 with Retry-After)
-/// held and tried again; a server error or a dropped connection tried again twice; a refusal of the sign-in (401, an
-/// answer served to the anonymous user after the session lapsed, or a login page in place of data) renewed once through
-/// the session and tried again; errors as <see cref="VfsException"/>s by status.
+/// Jira's, Confluence's, Bitbucket's or Bamboo's REST API, as the sources ask it (spec 7.10): every request at the
+/// server's pace (<see cref="RequestPace"/>, by host) with at most so many open at once, a client's ahead of a walk's; a
+/// throttled answer (429, 503 with Retry-After) held and tried again; a server error or a dropped connection tried again
+/// twice; a refusal of the sign-in (401, an answer served to the anonymous user after the session lapsed, or a login page
+/// in place of data) renewed once through the session and tried again; errors as <see cref="VfsException"/>s by status.
+/// The sending is <see cref="RequestCore"/>'s, the same for every source; what is Atlassian's own is here.
 /// </summary>
-internal sealed class AtlassianApi : IDisposable
+internal sealed class AtlassianApi : RequestCore
 {
-    private const int Attempts = 3;
-    private const int ThrottledAttempts = 6;
+    /// <summary>Given with a request for a download: an answer to it that is not JSON is what was asked for, not a login page.</summary>
+    private static readonly object Download = new();
 
     private readonly AtlassianSession _session;
-    private readonly RequestPace _pace;
-    private readonly SemaphoreSlim _gate;
-    private readonly ILogger _logger;
 
+    // no pace of AnyFS's own (until 5-Nov-2026 a server was asked at most 25 a second whatever the settings said): a server
+    // that asks AnyFS to wait (429, 503 with Retry-After) is waited for, by every request of it together. As many at once as
+    // the settings ask for: Bitbucket's and Bamboo's are two settings of up to 64 multiplied (until 22-Nov-2026 the gate
+    // stopped at 64 whatever they came to); the session's connections to the server are not bounded either
     public AtlassianApi(AtlassianSession session, int concurrency, ILogger logger)
+        : base(session, RequestPace.Unpaced($"{session.Product}:{session.Address.Base.Authority}"), Math.Clamp(concurrency, 1, 64 * 64), logger)
     {
         _session = session;
-
-        // no pace of AnyFS's own (until 5-Nov-2026 a server was asked at most 25 a second whatever the settings said): a server
-        // that asks AnyFS to wait (429, 503 with Retry-After) is waited for, by every request of it together
-        _pace = RequestPace.Unpaced($"{session.Product}:{session.Address.Base.Authority}");
-
-        // as many as the settings ask for: Bitbucket's and Bamboo's are two settings of up to 64 multiplied (until 22-Nov-2026
-        // the gate stopped at 64 whatever they came to); the session's connections to the server are not bounded either
-        _gate = new SemaphoreSlim(Math.Clamp(concurrency, 1, 64 * 64));
-        _logger = logger;
     }
 
     public AtlassianAddress Address => _session.Address;
@@ -44,7 +38,13 @@ internal sealed class AtlassianApi : IDisposable
 
     private string Name => _session.ProductName;
 
-    private string LogName => AtlassianSignInTarget.Name(_session.Product);
+    protected override string Product => Name;
+
+    protected override string Host => Address.Base.Host;
+
+    protected override string LogName => AtlassianSignInTarget.Name(_session.Product);
+
+    protected override Uri Server => Address.Base;
 
     /// <summary>An address of the product's REST API (<c>search?jql=…</c> under Jira's <c>rest/api/2/</c>).</summary>
     public Uri Rest(string relative) => new(Address.Api(_session.Product), relative);
@@ -56,21 +56,12 @@ internal sealed class AtlassianApi : IDisposable
     public async Task<JsonDocument> GetAsync(Uri url, string what, CancellationToken ct)
     {
         using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), what, ct).ConfigureAwait(false);
-        return await ReadJsonAsync(response, what, ct).ConfigureAwait(false);
+        return await JsonAsync(response, what, ct).ConfigureAwait(false);
     }
 
     /// <summary>One REST call's JSON, or null where the server answers 404 (a thing that is not there, or not to this account).</summary>
-    public async Task<JsonDocument?> FindAsync(string relative, CancellationToken ct)
-    {
-        try
-        {
-            return await GetAsync(relative, ct).ConfigureAwait(false);
-        }
-        catch (VfsException ex) when (ex.Error == VfsError.NotFound)
-        {
-            return null;
-        }
-    }
+    public Task<JsonDocument?> FindAsync(string relative, CancellationToken ct) => FoundAsync(GetAsync(relative, ct));
+
 
     /// <summary>A POST of JSON (Jira's search, whose JQL may not fit an address) and the JSON it answers.</summary>
     public async Task<JsonDocument> PostAsync(string relative, string json, CancellationToken ct)
@@ -83,103 +74,31 @@ internal sealed class AtlassianApi : IDisposable
             request.Headers.TryAddWithoutValidation("X-Atlassian-Token", "no-check");
             return request;
         }, relative, ct).ConfigureAwait(false);
-        return await ReadJsonAsync(response, relative, ct).ConfigureAwait(false);
+        return await JsonAsync(response, relative, ct).ConfigureAwait(false);
     }
 
     /// <summary>A download (an attachment): the response with its body unread, for the caller to stream and dispose.</summary>
     public Task<HttpResponseMessage> OpenAsync(Uri url, string what, CancellationToken ct)
-        => SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), what, ct, HttpCompletionOption.ResponseHeadersRead, json: false);
+        => SendAsync(() => new HttpRequestMessage(HttpMethod.Get, url), what, ct, HttpCompletionOption.ResponseHeadersRead, Download);
 
     /// <summary>A download's headers alone (its size, its kind), by HEAD; the caller disposes the response.</summary>
     public Task<HttpResponseMessage> HeadAsync(Uri url, string what, CancellationToken ct)
-        => SendAsync(() => new HttpRequestMessage(HttpMethod.Head, url), what, ct, HttpCompletionOption.ResponseHeadersRead, json: false);
+        => SendAsync(() => new HttpRequestMessage(HttpMethod.Head, url), what, ct, HttpCompletionOption.ResponseHeadersRead, Download);
 
-    /// <summary>
-    /// Sends a request (made afresh for each attempt) at the server's pace and returns a successful response; refusals and
-    /// failures become <see cref="VfsException"/>s, after the retries the class describes. A call for data
-    /// (<paramref name="json"/>) answered with a page instead is a lapsed sign-in too.
-    /// </summary>
-    private async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, string what, CancellationToken ct, HttpCompletionOption completion = HttpCompletionOption.ResponseContentRead, bool json = true)
-    {
-        var renewed = false;
-        for (var attempt = 1; ; attempt++)
-        {
-            await _pace.WaitAsync(ct).ConfigureAwait(false);
-            var generation = _session.Generation;
-            HttpResponseMessage response;
-            await _gate.WaitAsync(ct).ConfigureAwait(false);
-            try
-            {
-                using var request = make();
-                await _session.AuthorizeAsync(request, ct).ConfigureAwait(false);
-                response = await _session.Http.SendAsync(request, completion, ct).ConfigureAwait(false);
-            }
-            catch (Exception ex) when ((ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested) && attempt < Attempts)
-            {
-                _logger.LogInformation("{Product}: {What} did not answer ({Error}); trying again", LogName, what, ex.Message);
-                await Task.Delay(TimeSpan.FromSeconds(attempt), ct).ConfigureAwait(false);
-                continue;
-            }
-            catch (Exception ex) when (ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested)
-            {
-                throw new VfsException(VfsError.Unavailable, $"{Name} ({Address.Base.Host}) did not answer: {ex.Message}", ex);
-            }
-            finally
-            {
-                _gate.Release();
-            }
+    // a lapsed session is served as the anonymous user where the site lets anyone read (less, not a refusal), or as a
+    // login page in place of data where a sign-in proxy answers for the server (at 200, not a redirect)
+    protected override bool IsLapsed(HttpResponseMessage response, Sent sent)
+        => response.StatusCode == HttpStatusCode.Unauthorized || _session.ServedAnonymously(response)
+            || (int)response.StatusCode is >= 300 and < 400 && IsLoginRedirect(response) || IsPage(response, sent);
 
-            // a lapsed session is served as the anonymous user where the site lets anyone read (less, not a refusal), or
-            // as a login page in place of data where a sign-in proxy answers for the server (at 200, not a redirect)
-            var page = json && response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.NoContent && !IsJson(response);
-            var lapsed = response.StatusCode == HttpStatusCode.Unauthorized || _session.ServedAnonymously(response)
-                || (int)response.StatusCode is >= 300 and < 400 && IsLoginRedirect(response) || page;
-            if (lapsed && !renewed && _session.CanRenew)
-            {
-                response.Dispose();
-                renewed = true;
-                await _session.RenewAsync(generation, ct).ConfigureAwait(false);
-                continue;
-            }
+    protected override VfsException? Lapsed(HttpResponseMessage response, string what, Sent sent)
+        => IsPage(response, sent)
+            ? NotData(response, what)
+            : new VfsException(VfsError.Unavailable, $"{Name} ({Address.Base.Host}) no longer takes {_session.Who}. Retry the source to sign in again.");
 
-            if (response.IsSuccessStatusCode && !lapsed)
-            {
-                return response;
-            }
-
-            if (_pace.Hold(response) is { } hold)
-            {
-                _logger.LogInformation("{Product}: {Host} asks AnyFS to wait {Seconds:N0} s ({Status})", LogName, Address.Base.Host, hold.TotalSeconds, (int)response.StatusCode);
-            }
-
-            var status = response.StatusCode;
-            var retryAfter = response.Headers.RetryAfter is not null;
-            if ((status is HttpStatusCode.TooManyRequests || status is HttpStatusCode.ServiceUnavailable && retryAfter) && attempt < ThrottledAttempts
-                || status is HttpStatusCode.BadGateway or HttpStatusCode.GatewayTimeout or HttpStatusCode.InternalServerError or HttpStatusCode.ServiceUnavailable && attempt < Attempts)
-            {
-                response.Dispose();
-                if (!retryAfter)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(attempt * 2), ct).ConfigureAwait(false);
-                }
-
-                continue;
-            }
-
-            using (response)
-            {
-                throw page
-                    ? new VfsException(VfsError.Unavailable, $"{Name} ({Address.Base.Host}) answered {what} with {ContentType(response)}, not data: the sign-in may have lapsed. Retry the source.")
-                    : lapsed
-                        ? new VfsException(VfsError.Unavailable, $"{Name} ({Address.Base.Host}) no longer takes {_session.Who}. Retry the source to sign in again.")
-                        : await ErrorAsync(response, what, ct).ConfigureAwait(false);
-            }
-        }
-    }
-
-    private static bool IsJson(HttpResponseMessage response) => response.Content.Headers.ContentType?.MediaType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true;
-
-    private static string ContentType(HttpResponseMessage response) => response.Content.Headers.ContentType?.MediaType is { Length: > 0 } type ? type : "no data";
+    /// <summary>Whether a call for data was answered with a page instead.</summary>
+    private static bool IsPage(HttpResponseMessage response, Sent sent)
+        => sent.Hint != Download && response.IsSuccessStatusCode && response.StatusCode != HttpStatusCode.NoContent && !IsJson(response);
 
     /// <summary>Whether a redirect goes to the login page or to single sign-on: a session that lapsed, asked for a page rather than data.</summary>
     private bool IsLoginRedirect(HttpResponseMessage response)
@@ -197,16 +116,9 @@ internal sealed class AtlassianApi : IDisposable
             || path.Contains("/plugins/servlet/external-login", StringComparison.OrdinalIgnoreCase);
     }
 
-    private async Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
+    protected override async Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
     {
-        var body = "";
-        try
-        {
-            body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is HttpRequestException or IOException)
-        {
-        }
+        var body = await BodyAsync(response, ct).ConfigureAwait(false);
 
         var message = Message(body);
         var status = (int)response.StatusCode;
@@ -268,25 +180,4 @@ internal sealed class AtlassianApi : IDisposable
         var text = body.Trim();
         return text.StartsWith('<') ? null : text.Length <= 200 ? text : text[..200];
     }
-
-    private async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response, string what, CancellationToken ct)
-    {
-        if (!IsJson(response))
-        {
-            // a page in place of data (SendAsync renews the sign-in for one; a 204 or the like gets here)
-            throw new VfsException(VfsError.Unavailable, $"{Name} ({Address.Base.Host}) answered {what} with {ContentType(response)}, not data: the sign-in may have lapsed. Retry the source.");
-        }
-
-        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        try
-        {
-            return await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-        }
-        catch (JsonException ex)
-        {
-            throw new VfsException(VfsError.IoError, $"{Name} answered {what} with JSON AnyFS cannot read: {ex.Message}", ex);
-        }
-    }
-
-    public void Dispose() => _gate.Dispose();
 }

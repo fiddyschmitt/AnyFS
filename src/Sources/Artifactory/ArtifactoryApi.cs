@@ -16,59 +16,64 @@ namespace AnyFS.Sources.Artifactory;
 /// time from then on (<see cref="SendFewer"/>); a server error or a dropped connection tried again twice; a refusal of a
 /// web session's access token (401) renewed once through the session and tried again; a request sent on elsewhere (a
 /// file kept in a storage service: a signed address there for a time) followed, the sign-in kept to the server; errors
-/// as <see cref="VfsException"/>s by status.
+/// as <see cref="VfsException"/>s by status. The sending is <see cref="RequestCore"/>'s, the same for every source; what
+/// is Artifactory's own is here.
 /// </summary>
-internal sealed class ArtifactoryApi : IDisposable
+internal sealed class ArtifactoryApi : RequestCore
 {
-    private const int Attempts = 3;
-    private const int ThrottledAttempts = 6;
-    private const int MostRedirects = 5;
+    /// <summary>Given with a query: one refused as one too many (429 with no time to wait) is its caller's to send again (<see cref="OneTooManyException"/>).</summary>
+    private static readonly object Query = new();
 
     private readonly ArtifactorySession _session;
-    private readonly RequestPace _pace;
-    private readonly PriorityGate _gate;
     private readonly PriorityGate _queryGate;
-    private readonly ILogger _logger;
     private long _queriesCutAt;
 
+    // the holds a server asks for, shared by every source and client of that host; no pace besides. A client's request (a
+    // listing or an open someone waits on) takes the next free slot ahead of the walk's
     public ArtifactoryApi(ArtifactorySession session, int concurrency, ILogger logger)
+        : base(session, RequestPace.Unpaced("artifactory:" + session.Address.Base.Authority), Math.Clamp(concurrency, 1, 64 * 64), logger)
     {
         _session = session;
 
-        // the holds a server asks for, shared by every source and client of that host; no pace besides
-        _pace = RequestPace.Unpaced("artifactory:" + session.Address.Base.Authority);
-
-        // a client's request (a listing or an open someone waits on) takes the next free slot ahead of the walk's
-        _gate = new PriorityGate(Math.Clamp(concurrency, 1, 64 * 64));
-
         // queries at once: as many as requests, until the server refuses some (SendFewer)
-        _queryGate = new PriorityGate(_gate.Slots);
-        _logger = logger;
+        _queryGate = new PriorityGate(Slots);
     }
 
     public ArtifactoryAddress Address => _session.Address;
 
-    private string Host => Address.Base.Host;
+    protected override string Product => "Artifactory";
+
+    protected override string Host => Address.Base.Host;
+
+    protected override string LogName => "artifactory";
+
+    protected override Uri Server => Address.Base;
+
+    // a download kept elsewhere (a cloud's object storage) is answered with where it is
+    protected override bool FollowsRedirects => true;
+
+    // the sign-in is the server's own: not made again for an answer from where a request was sent on to
+    protected override bool MayRenew(Sent sent) => sent.SentOn is null;
+
+    protected override void OnHold(TimeSpan hold, HttpResponseMessage response, string? kind, string what)
+        => Logger.LogInformation("artifactory: {Host} asks AnyFS to wait {Seconds:N0} s ({Status}); the request it answered so: {What}", Host, hold.TotalSeconds, (int)response.StatusCode, what);
+
+    protected override Exception? Refusal(HttpResponseMessage response, Sent sent)
+        => sent.Hint == Query && response.StatusCode == HttpStatusCode.TooManyRequests && response.Headers.RetryAfter is null ? new OneTooManyException() : null;
+
+    protected override VfsException NotData(HttpResponseMessage response, string what)
+        => new(VfsError.IoError, $"Artifactory ({Host}) answered {what} with {ContentType(response)}, not data.");
 
     /// <summary>One REST call's JSON (<paramref name="relative"/> to <c>api/</c>).</summary>
     public async Task<JsonDocument> GetAsync(string relative, CancellationToken ct)
     {
         using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, Address.Api(relative)), relative, ct).ConfigureAwait(false);
-        return await ReadJsonAsync(response, relative, ct).ConfigureAwait(false);
+        return await JsonAsync(response, relative, ct).ConfigureAwait(false);
     }
 
     /// <summary>One REST call's JSON, or null where Artifactory answers 404 (a thing that is not there, or not to this account).</summary>
-    public async Task<JsonDocument?> FindAsync(string relative, CancellationToken ct)
-    {
-        try
-        {
-            return await GetAsync(relative, ct).ConfigureAwait(false);
-        }
-        catch (VfsException ex) when (ex.Error == VfsError.NotFound)
-        {
-            return null;
-        }
-    }
+    public Task<JsonDocument?> FindAsync(string relative, CancellationToken ct) => FoundAsync(GetAsync(relative, ct));
+
 
     /// <summary>
     /// A query's items (<c>items.find(…)</c>, posted as text), read as they arrive: up to <paramref name="most"/> of them,
@@ -130,7 +135,7 @@ internal sealed class ArtifactoryApi : IDisposable
 
         Interlocked.Exchange(ref _queriesCutAt, System.Diagnostics.Stopwatch.GetTimestamp());
         _queryGate.Shrink(fewer);
-        _logger.LogInformation("artifactory: {Host} refuses queries beyond those it runs at once (429); AnyFS sends it {Count} at a time from now on", Host, fewer);
+        Logger.LogInformation("artifactory: {Host} refuses queries beyond those it runs at once (429); AnyFS sends it {Count} at a time from now on", Host, fewer);
         return true;
     }
 
@@ -148,7 +153,7 @@ internal sealed class ArtifactoryApi : IDisposable
             }
 
             return request;
-        }, what, ct, HttpCompletionOption.ResponseHeadersRead, query: true).ConfigureAwait(false);
+        }, what, ct, HttpCompletionOption.ResponseHeadersRead, Query).ConfigureAwait(false);
         await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         var reader = new AqlReader();
         var items = new List<ArtItem>();
@@ -227,120 +232,9 @@ internal sealed class ArtifactoryApi : IDisposable
             return request;
         }, what, ct, HttpCompletionOption.ResponseHeadersRead);
 
-    /// <summary>
-    /// Sends a request (made afresh for each attempt) and returns a successful response; refusals and failures become
-    /// <see cref="VfsException"/>s, after the retries the class describes.
-    /// </summary>
-    /// <param name="query">A query: one refused as one too many (429 with no time to wait) is its caller's to send again (<see cref="OneTooManyException"/>).</param>
-    private async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, string what, CancellationToken ct, HttpCompletionOption completion = HttpCompletionOption.ResponseContentRead, bool query = false)
+    protected override async Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
     {
-        var renewed = false;
-        var redirects = 0;
-        Uri? sentOn = null;
-        for (var attempt = 1; ; attempt++)
-        {
-            await _pace.WaitAsync(ct).ConfigureAwait(false);
-            var generation = _session.Generation;
-            HttpResponseMessage response;
-            await _gate.WaitAsync(urgent: !Walks.Current, ct).ConfigureAwait(false);
-            try
-            {
-                using var request = make();
-                if (sentOn is not null)
-                {
-                    request.RequestUri = sentOn;
-                }
-
-                await _session.AuthorizeAsync(request, ct).ConfigureAwait(false);
-                response = await _session.Http.SendAsync(request, completion, ct).ConfigureAwait(false);
-            }
-            catch (Exception ex) when ((ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested) && attempt < Attempts)
-            {
-                _logger.LogInformation("artifactory: {What} did not answer ({Error}); trying again", what, ex.Message);
-                await Task.Delay(TimeSpan.FromSeconds(attempt), ct).ConfigureAwait(false);
-                continue;
-            }
-            catch (Exception ex) when (ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested)
-            {
-                throw new VfsException(VfsError.Unavailable, $"Artifactory ({Host}) did not answer: {ex.Message}", ex);
-            }
-            finally
-            {
-                _gate.Release();
-            }
-
-            if (response.IsSuccessStatusCode)
-            {
-                return response;
-            }
-
-            var status = response.StatusCode;
-            if (status is HttpStatusCode.MovedPermanently or HttpStatusCode.Found or HttpStatusCode.SeeOther or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect
-                && response.Headers.Location is { } location)
-            {
-                var target = location.IsAbsoluteUri ? location : new Uri(response.RequestMessage?.RequestUri ?? Address.Base, location);
-                response.Dispose();
-                if (++redirects > MostRedirects)
-                {
-                    throw new VfsException(VfsError.IoError, $"Artifactory sent {what} on more than {MostRedirects} times, the last to {target.Host}.");
-                }
-
-                sentOn = target;
-                attempt = 0;
-                continue;
-            }
-
-            if (status == HttpStatusCode.Unauthorized && !renewed && _session.CanRenew && sentOn is null)
-            {
-                response.Dispose();
-                renewed = true;
-                await _session.RenewAsync(generation, ct).ConfigureAwait(false);
-                continue;
-            }
-
-            if (_pace.Hold(response) is { } hold)
-            {
-                _logger.LogInformation("artifactory: {Host} asks AnyFS to wait {Seconds:N0} s ({Status}); the request it answered so: {What}", Host, hold.TotalSeconds, (int)status, what);
-            }
-
-            var retryAfter = response.Headers.RetryAfter is not null;
-            if (query && status is HttpStatusCode.TooManyRequests && !retryAfter)
-            {
-                response.Dispose();
-                throw new OneTooManyException();
-            }
-
-            if ((status is HttpStatusCode.TooManyRequests || status is HttpStatusCode.ServiceUnavailable && retryAfter) && attempt < ThrottledAttempts
-                || status is HttpStatusCode.BadGateway or HttpStatusCode.GatewayTimeout or HttpStatusCode.InternalServerError or HttpStatusCode.ServiceUnavailable && attempt < Attempts)
-            {
-                response.Dispose();
-
-                if (!retryAfter)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(attempt * 2), ct).ConfigureAwait(false);
-                }
-
-                continue;
-            }
-
-            using (response)
-            {
-                throw await ErrorAsync(response, what, ct).ConfigureAwait(false);
-            }
-        }
-    }
-
-    private async Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
-    {
-        var body = "";
-        try
-        {
-            body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is HttpRequestException or IOException)
-        {
-        }
-
+        var body = await BodyAsync(response, ct).ConfigureAwait(false);
         var message = Message(body);
         var status = (int)response.StatusCode;
         return response.StatusCode switch
@@ -384,29 +278,6 @@ internal sealed class ArtifactoryApi : IDisposable
         }
 
         return text.StartsWith('<') ? null : text.Length <= 200 ? text : text[..200];
-    }
-
-    private async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response, string what, CancellationToken ct)
-    {
-        var type = response.Content.Headers.ContentType?.MediaType ?? "";
-        if (!type.Contains("json", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new VfsException(VfsError.IoError, $"Artifactory ({Host}) answered {what} with {(type.Length == 0 ? "no data" : type)}, not data.");
-        }
-
-        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        try
-        {
-            return await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-        }
-        catch (JsonException ex)
-        {
-            throw new VfsException(VfsError.IoError, $"Artifactory answered {what} with JSON AnyFS cannot read: {ex.Message}", ex);
-        }
-    }
-
-    public void Dispose()
-    {
     }
 }
 

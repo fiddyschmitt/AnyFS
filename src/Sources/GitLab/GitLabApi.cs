@@ -21,27 +21,18 @@ namespace AnyFS.Sources.GitLab;
 /// again twice; a refusal of the sign-in (401, or a page sent to the sign-in page) renewed once through the session and tried
 /// again; a request sent on elsewhere (an upload kept in object storage: a signed address there for a time, 302 to a GET and
 /// 303 to a HEAD as Grape answers them) followed, the token and the cookies kept to the server; pages followed by their Link
-/// header, offset and keyset alike; errors as <see cref="VfsException"/>s by status.
+/// header, offset and keyset alike; errors as <see cref="VfsException"/>s by status. The sending is
+/// <see cref="RequestCore"/>'s, the same for every source; what is GitLab's own is here.
 /// </summary>
-internal sealed class GitLabApi : IDisposable
+internal sealed class GitLabApi : RequestCore
 {
-    private const int Attempts = 3;
-    private const int ThrottledAttempts = 6;
-    private const int MostRedirects = 5;
-
     private readonly GitLabSession _session;
-    private readonly RequestPace _pace;
-    private readonly PriorityGate _gate;
-    private readonly ILogger _logger;
 
+    // a client's request (a listing or an open someone waits on) takes the next free slot ahead of the walk's
     public GitLabApi(GitLabSession session, int concurrency, ILogger logger)
+        : base(session, HoldsFor(session.Address.Server.Host), Math.Clamp(concurrency, 1, 64 * 64), logger)
     {
         _session = session;
-        _pace = HoldsFor(session.Address.Server.Host);
-
-        // a client's request (a listing or an open someone waits on) takes the next free slot ahead of the walk's
-        _gate = new PriorityGate(Math.Clamp(concurrency, 1, 64 * 64));
-        _logger = logger;
     }
 
     /// <summary>The holds a server asks for (429, 503 with Retry-After, a quota used up), shared by every source and client of that host; no pace besides.</summary>
@@ -56,21 +47,12 @@ internal sealed class GitLabApi : IDisposable
     public async Task<JsonDocument> GetAsync(string relative, CancellationToken ct)
     {
         using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Get, new Uri(Address.Api, relative)), relative, ct).ConfigureAwait(false);
-        return await ReadJsonAsync(response, relative, ct).ConfigureAwait(false);
+        return await JsonAsync(response, relative, ct).ConfigureAwait(false);
     }
 
     /// <summary>One REST call's JSON, or null where GitLab answers 404 (a thing that is not there, or not to this account).</summary>
-    public async Task<JsonDocument?> FindAsync(string relative, CancellationToken ct)
-    {
-        try
-        {
-            return await GetAsync(relative, ct).ConfigureAwait(false);
-        }
-        catch (VfsException ex) when (ex.Error == VfsError.NotFound)
-        {
-            return null;
-        }
-    }
+    public Task<JsonDocument?> FindAsync(string relative, CancellationToken ct) => FoundAsync(GetAsync(relative, ct));
+
 
     /// <summary>
     /// Every element of a listing, page after page as the Link header leads (offset and keyset pagination alike): ask for
@@ -91,7 +73,7 @@ internal sealed class GitLabApi : IDisposable
 
             first = false;
             next = NextPage(response);
-            using var doc = await ReadJsonAsync(response, relative, ct).ConfigureAwait(false);
+            using var doc = await JsonAsync(response, relative, ct).ConfigureAwait(false);
             if (doc.RootElement.ValueKind != JsonValueKind.Array)
             {
                 yield break;
@@ -149,7 +131,7 @@ internal sealed class GitLabApi : IDisposable
         {
             return new HttpRequestMessage(HttpMethod.Post, Address.GraphQl) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
         }, "graphql", ct).ConfigureAwait(false);
-        var doc = await ReadJsonAsync(response, "graphql", ct).ConfigureAwait(false);
+        var doc = await JsonAsync(response, "graphql", ct).ConfigureAwait(false);
         if (doc.RootElement.TryGetProperty("errors", out var errors) && errors.ValueKind == JsonValueKind.Array && errors.GetArrayLength() > 0)
         {
             var message = string.Join("; ", errors.EnumerateArray().Select(e => e.Str("message")).Where(m => m is not null));
@@ -192,137 +174,40 @@ internal sealed class GitLabApi : IDisposable
         return (response.StatusCode == HttpStatusCode.PartialContent, await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false));
     }
 
-    /// <summary>
-    /// Sends a request (made afresh for each attempt) at the server's pace and returns a successful response; refusals and
-    /// failures become <see cref="VfsException"/>s, after the retries the class describes.
-    /// </summary>
-    private async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, string what, CancellationToken ct, HttpCompletionOption completion = HttpCompletionOption.ResponseContentRead)
+    protected override string Product => "GitLab";
+
+    protected override string Host => Address.Server.Host;
+
+    protected override string LogName => "gitlab";
+
+    protected override Uri Server => Address.Server;
+
+    // an upload kept in object storage is answered with where it is, for a time
+    protected override bool FollowsRedirects => true;
+
+    protected override bool RedirectsChangeMethod => true;
+
+    // every answer: a limit named, what is left of it, a hold asked for
+    protected override bool HoldsOnEveryAnswer => true;
+
+    protected override string? KindOf(HttpRequestMessage request) => Kind(request);
+
+    protected override Uri Rebase(Uri target) => Rebased(target);
+
+    // sent to the sign-in page: a page GitLab serves to a browser session alone, or a session that has lapsed
+    protected override bool IsSignInPage(Uri target) => target.AbsolutePath.Contains("/users/sign_in", StringComparison.Ordinal);
+
+    protected override VfsException SentToSignIn(string what)
+        => _session.CanRenew
+            ? new VfsException(VfsError.Unavailable, $"GitLab ({Address.Server.Host}) sent {what} to its sign-in page: the session has lapsed. Retry the source to sign in again.")
+            : new VfsException(VfsError.AccessDenied, $"GitLab serves {what} to a browser session, not to {_session.Settings.Who}: it sent the request to its sign-in page.");
+
+    protected override void OnHold(TimeSpan hold, HttpResponseMessage response, string? kind, string what)
     {
-        var renewed = false;
-        var redirects = 0;
-        Uri? sentOn = null;          // where an answer sent the request on, in place of its own address
-        HttpMethod? sentAs = null;   // and as what: GET where it said so (303; 301 and 302 to a POST), else as it was
-        for (var attempt = 1; ; attempt++)
-        {
-            var generation = _session.Generation;
-            HttpResponseMessage response;
-            string kind;
-            HttpMethod own;
-            using (var request = make())
-            {
-                own = request.Method;
-                if (sentOn is not null)
-                {
-                    request.RequestUri = sentOn;
-                    if (sentAs is not null && sentAs != own)
-                    {
-                        request.Method = sentAs;
-                        request.Content = null;
-                    }
-                }
-
-                kind = Kind(request);
-                using var turn = await _pace.TakeAsync(kind, ct).ConfigureAwait(false);
-                await _gate.WaitAsync(urgent: !Walks.Current, ct).ConfigureAwait(false);
-                try
-                {
-                    await _session.AuthorizeAsync(request, ct).ConfigureAwait(false);
-
-                    // a HEAD sent on as a GET: its headers are all that is wanted of the answer
-                    var read = own == HttpMethod.Head && request.Method != own ? HttpCompletionOption.ResponseHeadersRead : completion;
-                    response = await _session.Http.SendAsync(request, read, ct).ConfigureAwait(false);
-                }
-                catch (Exception ex) when ((ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested) && attempt < Attempts)
-                {
-                    _logger.LogInformation("gitlab: {What} did not answer ({Error}); trying again", what, ex.Message);
-                    await Task.Delay(TimeSpan.FromSeconds(attempt), ct).ConfigureAwait(false);
-                    continue;
-                }
-                catch (Exception ex) when (ex is HttpRequestException or IOException || ex is TaskCanceledException && !ct.IsCancellationRequested)
-                {
-                    throw new VfsException(VfsError.Unavailable, $"GitLab ({Address.Server.Host}) did not answer: {ex.Message}", ex);
-                }
-                finally
-                {
-                    _gate.Release();
-                }
-
-                // every answer: a limit named, what is left of it, a hold asked for
-                if (_pace.Hold(response, kind) is { } hold)
-                {
-                    var why = Why(response);
-                    _logger.LogInformation("gitlab: {Host} asks AnyFS to wait {Seconds:N0} s before more requests like {Kind} ({Why}); the one it answered so: {What}", Address.Server.Host, hold.TotalSeconds, kind, why, what);
-                    Held?.Invoke(hold, why);
-                }
-
-                turn.Answered();
-            }
-
-            if (response.IsSuccessStatusCode)
-            {
-                return response;
-            }
-
-            var status = response.StatusCode;
-            var retryAfter = response.Headers.RetryAfter is not null;
-            if (status is HttpStatusCode.MovedPermanently or HttpStatusCode.Found or HttpStatusCode.SeeOther or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect
-                && response.Headers.Location is { } location)
-            {
-                var target = location.IsAbsoluteUri ? location : new Uri(response.RequestMessage?.RequestUri ?? Address.Server, location);
-                response.Dispose();
-                if (target.AbsolutePath.Contains("/users/sign_in", StringComparison.Ordinal))
-                {
-                    // sent to the sign-in page: a page GitLab serves to a browser session alone, or a session that has lapsed
-                    if (!renewed && _session.CanRenew)
-                    {
-                        renewed = true;
-                        await _session.RenewAsync(generation, ct).ConfigureAwait(false);
-                        continue;
-                    }
-
-                    throw _session.CanRenew
-                        ? new VfsException(VfsError.Unavailable, $"GitLab ({Address.Server.Host}) sent {what} to its sign-in page: the session has lapsed. Retry the source to sign in again.")
-                        : new VfsException(VfsError.AccessDenied, $"GitLab serves {what} to a browser session, not to {_session.Settings.Who}: it sent the request to its sign-in page.");
-                }
-
-                if (++redirects > MostRedirects)
-                {
-                    throw new VfsException(VfsError.IoError, $"GitLab sent {what} on more than {MostRedirects} times, the last to {target.Host}.");
-                }
-
-                sentOn = Rebased(target);
-                sentAs = status is HttpStatusCode.SeeOther || status is HttpStatusCode.MovedPermanently or HttpStatusCode.Found && own == HttpMethod.Post ? HttpMethod.Get : sentAs;
-                attempt = 0;
-                continue;
-            }
-
-            if (status == HttpStatusCode.Unauthorized && !renewed && _session.CanRenew)
-            {
-                response.Dispose();
-                renewed = true;
-                await _session.RenewAsync(generation, ct).ConfigureAwait(false);
-                continue;
-            }
-
-            if ((status is HttpStatusCode.TooManyRequests || status is HttpStatusCode.ServiceUnavailable && retryAfter) && attempt < ThrottledAttempts
-                || status is HttpStatusCode.BadGateway or HttpStatusCode.GatewayTimeout or HttpStatusCode.InternalServerError or HttpStatusCode.ServiceUnavailable && attempt < Attempts)
-            {
-                response.Dispose();
-                if (!retryAfter)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(attempt * 2), ct).ConfigureAwait(false);
-                }
-
-                continue;
-            }
-
-            using (response)
-            {
-                throw await ErrorAsync(response, what, ct).ConfigureAwait(false);
-            }
-        }
+        var why = Why(response);
+        Logger.LogInformation("gitlab: {Host} asks AnyFS to wait {Seconds:N0} s before more requests like {Kind} ({Why}); the one it answered so: {What}", Address.Server.Host, hold.TotalSeconds, kind, why, what);
+        Held?.Invoke(hold, why);
     }
-
     /// <summary>
     /// A request's kind, for the holds: its method and the shape of its path, with what names one thing (an id, a hash, a
     /// file's path as GitLab escapes it) elided, so a limit on one kind of request holds that kind and no other:
@@ -356,16 +241,9 @@ internal sealed class GitLabApi : IDisposable
         return response.StatusCode is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable ? $"{status}, {limit}{counts}" : $"the quota of {limit} is used up{counts}";
     }
 
-    private async Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
+    protected override async Task<VfsException> ErrorAsync(HttpResponseMessage response, string what, CancellationToken ct)
     {
-        var body = "";
-        try
-        {
-            body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is HttpRequestException or IOException)
-        {
-        }
+        var body = await BodyAsync(response, ct).ConfigureAwait(false);
 
         var message = Message(body);
         var status = (int)response.StatusCode;
@@ -408,30 +286,6 @@ internal sealed class GitLabApi : IDisposable
         return text.StartsWith('<') ? null : text.Length <= 200 ? text : text[..200];
     }
 
-    private async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response, string what, CancellationToken ct)
-    {
-        var type = response.Content.Headers.ContentType?.MediaType ?? "";
-        if (!type.Contains("json", StringComparison.OrdinalIgnoreCase))
-        {
-            // a sign-in page served in place of data: the session lapsed somewhere a 401 did not say so
-            throw new VfsException(VfsError.Unavailable, $"GitLab ({Address.Server.Host}) answered {what} with {(type.Length == 0 ? "no data" : type)}, not data: the sign-in may have lapsed. Retry the source.");
-        }
-
-        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        try
-        {
-            return await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-        }
-        catch (JsonException ex)
-        {
-            throw new VfsException(VfsError.IoError, $"GitLab answered {what} with JSON AnyFS cannot read: {ex.Message}", ex);
-        }
-    }
-
     /// <summary>Whether a response's length is known (Content-Length), for a file's size.</summary>
     public static long? LengthOf(HttpResponseMessage response) => response.Content.Headers.ContentLength;
-
-    public void Dispose()
-    {
-    }
 }

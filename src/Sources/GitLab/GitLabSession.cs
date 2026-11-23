@@ -23,7 +23,7 @@ internal sealed record GitLabStandIn(Func<HttpMessageHandler> Handler, Func<bool
 /// source's secret store for the next start, and handed from the settings dialog's Test to the source it starts. The
 /// client follows no redirects itself, so a sign-in page in place of data is seen for what it is.
 /// </summary>
-internal sealed class GitLabSession : IDisposable
+internal sealed class GitLabSession : IDisposable, IRequestSession
 {
     public const string CookiesSecret = "gitlab-cookies";
 

@@ -524,6 +524,9 @@ public class BitbucketTests
         private int _held;
         private int _most;
 
+        /// <summary>What was asked, in the order it reached the server.</summary>
+        public System.Collections.Concurrent.ConcurrentQueue<string> Arrived { get; } = new();
+
         /// <summary>Done once as many are held at once as were wanted.</summary>
         public Task Reached => _reached.Task;
 
@@ -533,6 +536,7 @@ public class BitbucketTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            Arrived.Enqueue(request.RequestUri!.Query);
             var held = Interlocked.Increment(ref _held);
             int most;
             while (held > (most = Volatile.Read(ref _most)) && Interlocked.CompareExchange(ref _most, held, most) != most)
@@ -570,6 +574,34 @@ public class BitbucketTests
         await Task.WhenAll(asked);
         Assert.IsTrue(reached, $"{open} requests open at once, of the {settings.Requests} the settings ask for");
         Assert.AreEqual(settings.Requests, server.MostAtOnce, "and no more than they ask for");
+    }
+
+    [TestMethod]
+    public async Task APersonsRequestTakesTheNextPlaceAheadOfAWalksThatWait()
+    {
+        // one request at a time: a walk has one with the server and two waiting when a person lists a folder. Until the
+        // clients shared their sending (the review of 21-Nov-2026, C1) Atlassian's alone took them in the order they came
+        var settings = new BitbucketSettings { Address = "https://bitbucket.fake.test", AccessToken = "t", RepositoriesAtATime = 1, RequestsPerRepository = 1 };
+        var server = new HoldingServer(1);
+        using var session = new AtlassianSession(AtlassianProduct.Bitbucket, settings, NullLogger.Instance, new AtlassianStandIn(() => server));
+        using var api = new AtlassianApi(session, settings.Requests, NullLogger.Instance);
+
+        async Task AskAsync(string name, bool walk)
+        {
+            Walks.Current = walk;
+            using var answer = await api.GetAsync($"repos?n={name}", CancellationToken.None);
+        }
+
+        var asked = new List<Task> { AskAsync("out", walk: true) };
+        await server.Reached.WaitAsync(TimeSpan.FromSeconds(30));
+        asked.Add(AskAsync("walk1", walk: true));
+        asked.Add(AskAsync("walk2", walk: true));
+        asked.Add(AskAsync("person", walk: false));
+
+        // the order they reached the server in: with one place, one at a time
+        server.Go();
+        await Task.WhenAll(asked).WaitAsync(TimeSpan.FromSeconds(30));
+        CollectionAssert.AreEqual(new[] { "?n=out", "?n=person", "?n=walk1", "?n=walk2" }, server.Arrived.ToArray());
     }
 
     // --- the settings and the Test button -------------------------------------------------------------------------------

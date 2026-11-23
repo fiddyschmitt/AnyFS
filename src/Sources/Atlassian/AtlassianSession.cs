@@ -28,7 +28,7 @@ internal sealed record AtlassianStandIn(Func<HttpMessageHandler> Handler, Func<b
 /// the next start, and handed from the settings dialog's Test to the source it starts. The client follows no redirects itself,
 /// so a login page in place of data is seen for what it is.
 /// </summary>
-internal sealed class AtlassianSession : IDisposable
+internal sealed class AtlassianSession : IDisposable, IRequestSession
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(120);
     private static readonly TimeSpan RecentFor = TimeSpan.FromMinutes(15);
