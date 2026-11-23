@@ -125,6 +125,29 @@ public sealed class AnyFsEngine : IAsyncDisposable
     /// <summary>Starts sources, then collections (whose mounts wait for a usable source). <paramref name="collectionNames"/> null means every enabled collection.</summary>
     public async Task StartAsync(IReadOnlyCollection<string>? collectionNames, CancellationToken ct)
     {
+        // Under the gate a change takes. The window is open while the engine starts and takes changes: one made in that
+        // moment now either comes first, and is in the settings the start reads, or waits and finds what was started.
+        // Without the gate a collection added just then was written to the settings by one thread while this one read
+        // them and kept its runners, and ended with two runners or none. The gate is let go before the collections
+        // start, which may wait long for a source; they are the ones made here, not whatever is there by then.
+        await _mutations.WaitAsync(ct).ConfigureAwait(false);
+        CollectionRunner[] starting;
+        try
+        {
+            starting = Begin(collectionNames);
+        }
+        finally
+        {
+            _mutations.Release();
+        }
+
+        await Task.WhenAll(starting.Select(c => c.StartAsync(ct))).ConfigureAwait(false);
+        OnChanged();
+    }
+
+    /// <summary>What a start reads of the settings and keeps of them, with the gate held: the sources started, the collections' runners made.</summary>
+    private CollectionRunner[] Begin(IReadOnlyCollection<string>? collectionNames)
+    {
         if (_started)
         {
             throw new InvalidOperationException("already started");
@@ -153,9 +176,9 @@ public sealed class AnyFsEngine : IAsyncDisposable
         }
 
         Volatile.Write(ref _sources, sources.ToArray());
-        Volatile.Write(ref _collections, selected.Select(CreateCollectionRunner).ToArray());
-        await Task.WhenAll(Collections.Select(c => c.StartAsync(ct))).ConfigureAwait(false);
-        OnChanged();
+        var collections = selected.Select(CreateCollectionRunner).ToArray();
+        Volatile.Write(ref _collections, collections);
+        return collections;
     }
 
     public async Task StopAsync()

@@ -59,6 +59,25 @@ public class EngineMutationTests
         return engine;
     }
 
+    [TestMethod]
+    public async Task ACollectionAddedWhileTheEngineStartsIsThereOnce()
+    {
+        // The window is open while the engine starts, and takes changes. One made in that moment found the engine between
+        // reading its collections and keeping their runners: the collection was then there twice (two runners, two tiles,
+        // and a window that refreshed no more) or not at all. Met first on a CI runner, 23-Nov-2026, by a window's test.
+        for (var round = 0; round < 100; round++)
+        {
+            var paths = SettingsPaths.Resolve(Path.Combine(_root, "round-" + round, "settings"));
+            Directory.CreateDirectory(paths.Settings);
+            File.WriteAllText(paths.CollectionsFile, """{ "version": 1, "collections": [] }""");
+            await using var engine = new AnyFsEngine(paths, Registry(), NullLoggerFactory.Instance);
+            engine.Load();
+            var started = Task.Run(() => engine.StartAsync(null, CancellationToken.None));
+            var added = await engine.AddCollectionAsync("work");
+            await started;
+            Assert.AreEqual(1, engine.Collections.Count(c => c.Id == added.Id), $"round {round}: the collection's runners");
+        }
+    }
     private SettingsStore Reload()
     {
         var store = new SettingsStore(_paths, NullLogger.Instance);
