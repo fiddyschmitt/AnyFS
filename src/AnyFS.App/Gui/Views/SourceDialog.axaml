@@ -1,4 +1,4 @@
-<Window xmlns="https://github.com/avaloniaui"
+﻿<Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:vm="using:AnyFS.App.Gui.ViewModels"
         xmlns:views="using:AnyFS.App.Gui.Views"
@@ -78,6 +78,10 @@
             <CheckBox IsChecked="{Binding Enabled}" Content="Enabled" />
             <CheckBox IsChecked="{Binding CountFilesOnStart}" Content="Count files on start" ToolTip.Tip="Walk the whole tree in the background after the source starts, so the file count is exact" />
           </StackPanel>
+
+          <TextBlock Classes="caption" Margin="0,8,0,0" Text="{x:Static vm:SourceDialogViewModel.SilenceLimitCaption}" />
+          <TextBox Name="SilenceLimitBox" Text="{Binding SilenceLimit}" Width="120" HorizontalAlignment="Left" />
+          <TextBlock Classes="hint" Text="{x:Static vm:SourceDialogViewModel.SilenceLimitHint}" TextWrapping="Wrap" />
 
           <Separator Margin="0,12,0,10" />
           <TextBlock Classes="subheader" Text="Settings" />

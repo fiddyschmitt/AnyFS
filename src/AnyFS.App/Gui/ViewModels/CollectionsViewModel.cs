@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Windows.Input;
 using AnyFS.App.Gui.Services;
 using AnyFS.Core.Model;
@@ -273,7 +273,7 @@ public sealed partial class CollectionsViewModel : ObservableObject
                 return false;
             }
 
-            var definition = await _engine.AddSourceAsync(dialog.Name, dialog.SelectedPlugin!.TypeId, dialog.Enabled, dialog.CountFilesOnStart, dialog.Settings!);
+            var definition = await _engine.AddSourceAsync(dialog.Name, dialog.SelectedPlugin!.TypeId, dialog.Enabled, dialog.CountFilesOnStart, dialog.Settings!, dialog.RequireSilenceLimit());
             await _engine.AddMembershipAsync(selected.Id, definition.Id, dialog.Path, dialog.ReadOnly);
             return true;
         };
@@ -321,7 +321,7 @@ public sealed partial class CollectionsViewModel : ObservableObject
                 return false;
             }
 
-            await _engine.UpdateSourceAsync(definition.Id, dialog.Name, dialog.Enabled, dialog.CountFilesOnStart, dialog.Settings!);
+            await _engine.UpdateSourceAsync(definition.Id, dialog.Name, dialog.Enabled, dialog.CountFilesOnStart, dialog.Settings!, dialog.RequireSilenceLimit());
             await _engine.UpdateMembershipAsync(collection.Id, definition.Id, dialog.Path, dialog.ReadOnly);
             return true;
         };

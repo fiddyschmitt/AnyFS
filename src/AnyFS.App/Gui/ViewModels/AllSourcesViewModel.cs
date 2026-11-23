@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using AnyFS.App.Gui.Services;
 using AnyFS.Core.Runtime;
 using AnyFS.Core.Settings;
@@ -164,7 +164,7 @@ public sealed partial class AllSourcesViewModel : ObservableObject
                 return false;
             }
 
-            await _engine.AddSourceAsync(dialog.Name, dialog.SelectedPlugin!.TypeId, dialog.Enabled, dialog.CountFilesOnStart, dialog.Settings!);
+            await _engine.AddSourceAsync(dialog.Name, dialog.SelectedPlugin!.TypeId, dialog.Enabled, dialog.CountFilesOnStart, dialog.Settings!, dialog.RequireSilenceLimit());
             return true;
         };
         await _dialogs.ShowAsync(dialog);
@@ -186,7 +186,7 @@ public sealed partial class AllSourcesViewModel : ObservableObject
                 return false;
             }
 
-            await _engine.UpdateSourceAsync(definition.Id, dialog.Name, dialog.Enabled, dialog.CountFilesOnStart, dialog.Settings!);
+            await _engine.UpdateSourceAsync(definition.Id, dialog.Name, dialog.Enabled, dialog.CountFilesOnStart, dialog.Settings!, dialog.RequireSilenceLimit());
             return true;
         };
         await _dialogs.ShowAsync(dialog);

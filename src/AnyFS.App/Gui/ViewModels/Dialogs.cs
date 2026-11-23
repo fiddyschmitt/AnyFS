@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Runtime.InteropServices;
 using AnyFS.App.Gui.Services;
 using AnyFS.Core.Model;
@@ -150,6 +150,7 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
             Name = existing.Name;
             Enabled = existing.Enabled;
             CountFilesOnStart = existing.CountFilesOnStart;
+            SilenceLimit = existing.SilenceLimitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
             SelectedPlugin = PluginChoices.FirstOrDefault(p => p.TypeId.Equals(existing.Type, StringComparison.OrdinalIgnoreCase));
             if (SelectedPlugin is not null && engine.SourceSettingsFor(existing) is { } settings)
             {
@@ -215,6 +216,23 @@ public sealed partial class SourceDialogViewModel : DialogViewModelBase
 
     [ObservableProperty]
     public partial bool CountFilesOnStart { get; set; }
+
+    /// <summary>
+    /// How long a folder opened or a file looked up waits while the source's server has been asked and sends nothing
+    /// back, as typed: seconds, 0 for as long as the source itself waits (<see cref="SourceDefinition.SilenceLimitSeconds"/>).
+    /// </summary>
+    [ObservableProperty]
+    public partial string SilenceLimit { get; set; } = SourceDefinition.DefaultSilenceLimitSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    public const string SilenceLimitCaption = "Stop waiting for a server that sends nothing after (seconds)";
+
+    public const string SilenceLimitHint = "When you open a folder or look a file up: how long AnyFS waits while the server has been asked and has sent nothing back. A big folder that keeps arriving is not cut short. 0 waits as long as the source itself does. Reading, writing and the source's own walks are not limited.";
+
+    /// <summary>The seconds typed; an <see cref="ArgumentException"/> the dialog shows for what is no whole number in range.</summary>
+    public int RequireSilenceLimit()
+        => int.TryParse(SilenceLimit.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var seconds) && seconds <= SourceDefinition.MostSilenceLimitSeconds
+            ? seconds
+            : throw new ArgumentException($"\"{SilenceLimitCaption}\" takes a whole number from 0 to {SourceDefinition.MostSilenceLimitSeconds}.");
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasForm))]

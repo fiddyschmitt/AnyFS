@@ -1,4 +1,4 @@
-using AnyFS.App.Gui.Services;
+﻿using AnyFS.App.Gui.Services;
 using AnyFS.App.Gui.ViewModels;
 using AnyFS.Core.Plugins;
 using AnyFS.Core.Runtime;
@@ -695,6 +695,20 @@ public class ViewModelTests
         Assert.AreEqual("syd-files-06", fromAllSources.Name, "the same from the All sources tab, which has no path");
     }
 
+    [TestMethod]
+    public void SourceDialogTakesHowLongToWaitOnASilentServerAsWholeSeconds()
+    {
+        var dialog = new SourceDialogViewModel(_engine, _dialogs, null, null, askPath: true);
+        Assert.AreEqual("60", dialog.SilenceLimit, "a minute until it is set");
+        Assert.AreEqual(60, dialog.RequireSilenceLimit());
+        dialog.SilenceLimit = " 0 ";
+        Assert.AreEqual(0, dialog.RequireSilenceLimit(), "0: as long as the source itself waits");
+        foreach (var bad in new[] { "", "soon", "-5", "1.5", "86401" })
+        {
+            dialog.SilenceLimit = bad;
+            Assert.ThrowsExactly<ArgumentException>(() => dialog.RequireSilenceLimit(), bad);
+        }
+    }
     [TestMethod]
     public void SourceDialogCountsOnStartByDefaultForQuickSourcesUntilToggledByHand()
     {
