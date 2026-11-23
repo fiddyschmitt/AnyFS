@@ -2104,6 +2104,29 @@ public class GitLabPipelineTests
     }
 
     [TestMethod]
+    [DataRow("")]
+    [DataRow("/anyfs")]
+    [DataRow("/anyfs/docs")]
+    [DataRow("/anyfs/tools/app")]
+    public async Task AWalkListsNoFolderToFindAnother(string scope)
+    {
+        // a walk comes to each folder several times (its stamp, its tree, its listing, its parts), and each time found
+        // it from the root by listing every folder on the way again: an issue's folder by naming every issue of the
+        // project, a wiki's by making every page's text (the review of 21-Nov-2026, P5)
+        var fake = GitLabSeed.Lab();
+        await using var source = await StartAsync(fake, scope);
+        var before = source.ListingsToFind;
+        var counters = new SourceCounters();
+        Assert.IsTrue(await source.WalkAsync(counters, full: true, CancellationToken.None), "the walk went into every folder");
+        Assert.IsTrue(counters.DirectoriesKnown > 10, "a tree with folders in it");
+        Assert.AreEqual(before, source.ListingsToFind, $"listings made only to find a folder, in a walk of {counters.DirectoriesKnown} folders");
+
+        // and the walk after it, which keeps what has not changed
+        Assert.IsTrue(await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None));
+        Assert.AreEqual(before, source.ListingsToFind);
+    }
+
+    [TestMethod]
     public async Task AFolderWhoseListingFailedStaysSoUntilTheNextWalk()
     {
         // GitLab's listings kept no failure, as the other sources' do: a folder that failed was asked again, with its

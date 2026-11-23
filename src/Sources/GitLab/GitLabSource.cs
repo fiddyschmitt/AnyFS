@@ -23,6 +23,10 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     // how many folders' last listings are remembered at most (ResolveAsync); past that they start again
     private const int MostFoldersRemembered = 200_000;
 
+    // how many folders' folders are remembered for the walks at most (ResolveAsync); past that they start again, and a walk
+    // lists once more the few it is in
+    private const int MostWalkedRemembered = 50_000;
+
     // a page of GitLab's listings at its largest
     private const int ProjectsPage = 100;
 
@@ -30,7 +34,10 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     // 8 took the same time within its noise, and the more of them, the less a cluster of ids holds up the rest
     private const int RangesPerWalker = 4;
 
-    private readonly ConcurrentDictionary<string, IReadOnlyList<GlNode>> _lastListed = new(StringComparer.OrdinalIgnoreCase);
+    // what each folder last listed of folders, found by name: on the way down to a project for every call (_lastListed),
+    // anywhere else for the walks alone (_walked)
+    private readonly ConcurrentDictionary<string, FoldersListed> _lastListed = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, FoldersListed> _walked = new(StringComparer.OrdinalIgnoreCase);
     private readonly GitLabSettings _settings;
     private readonly GitLabStandIn? _standIn;
     private readonly CancellationTokenSource _stopping = new();
@@ -195,21 +202,90 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         }
     }
 
+    /// <summary>How many times a folder's children were all made only to find one of them (<see cref="FoundByListingAsync"/>), for tests: a walk does it for none.</summary>
+    internal long ListingsToFind => Interlocked.Read(ref _listingsToFind);
+
+    private long _listingsToFind;
+
+    /// <summary>One of a folder's children by its name, in either case, from the folder's listing made for it: how a folder that cannot find one alone does (<see cref="GlFolder.FindAsync"/>).</summary>
+    internal async Task<GlNode?> FoundByListingAsync(GlFolder folder, string path, string name, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _listingsToFind);
+        return Child(await ListedAsync(folder, path, ct).ConfigureAwait(false), name);
+    }
+
     /// <summary>A folder's children, through the caches below, remembered as what the folder last listed.</summary>
     private async Task<IReadOnlyList<GlNode>> ListedAsync(GlFolder folder, string path, CancellationToken ct)
     {
         var children = await Guard(() => folder.ListAsync(this, ct)).ConfigureAwait(false);
-        if (_settings.Keeps && folder.FoundFromLastListing)
+        if (folder is FilesFolder or TreeFolder)
         {
-            if (_lastListed.Count >= MostFoldersRemembered)
+            // inside a repository the listings kept are what is gone on from (KeptChild)
+            return children;
+        }
+
+        // on the way down to a project, for every call; anywhere else for the walks, whoever listed it: a walk that waited
+        // for a listing a person had asked for goes on from that one
+        var (remembered, most) = _settings.Keeps && folder.FoundFromLastListing ? (_lastListed, MostFoldersRemembered) : (_walked, MostWalkedRemembered);
+        if (FoldersListed.Of(children) is not { } folders)
+        {
+            remembered.TryRemove(path, out _);
+        }
+        else
+        {
+            if (remembered.Count >= most)
             {
-                _lastListed.Clear();
+                remembered.Clear();
             }
 
-            _lastListed[path] = children;
+            remembered[path] = folders;
         }
 
         return children;
+    }
+
+    /// <summary>
+    /// The folders a folder last listed, found by name (<see cref="ResolveAsync"/>): one of a group's thousands of
+    /// projects without going through them all, at every folder below it a walk comes to. The files are not held: an
+    /// issue's is its whole text.
+    /// </summary>
+    private sealed class FoldersListed
+    {
+        private readonly GlFolder[] _folders;
+        private Dictionary<string, GlFolder>? _byName;
+
+        private FoldersListed(GlFolder[] folders) => _folders = folders;
+
+        /// <summary>Null where the folder lists no folder.</summary>
+        public static FoldersListed? Of(IReadOnlyList<GlNode> children)
+        {
+            var folders = children.OfType<GlFolder>().ToArray();
+            return folders.Length == 0 ? null : new FoldersListed(folders);
+        }
+
+        public GlNode? Find(string name)
+        {
+            if (_folders.Length <= 8)
+            {
+                return Child(_folders, name);
+            }
+
+            // made by the first to look, and by two at once the same
+            var byName = _byName;
+            if (byName is null)
+            {
+                byName = new Dictionary<string, GlFolder>(_folders.Length, StringComparer.OrdinalIgnoreCase);
+                foreach (var folder in _folders)
+                {
+                    byName.TryAdd(folder.Name, folder);
+                }
+
+                _byName = byName;
+            }
+
+            // a name as it was listed is found at once; another (an issue's with the title it had) as a listing finds it
+            return byName.TryGetValue(name, out var found) ? found : Child(_folders, name);
+        }
     }
 
     public override async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct)
@@ -229,6 +305,15 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     /// the group's thousands of projects again each time the refresh interval has passed; inside a repository, from the
     /// listings kept of its folders (<see cref="KeptChild"/>); else through the caches. A listing that took longer to read
     /// than the interval was stale as it arrived, and a walk through such a group hardly moved.
+    /// <para>
+    /// For a walk, any folder is found from what the folder it is in last listed (<see cref="FoldersListed"/>). A walk lists
+    /// a folder and then comes to each folder in it several times (its stamp, its tree, its listing, its parts), and each
+    /// time every folder on the way was listed again to find the next: an issue's folder by naming every issue of the
+    /// project and making a folder for each, so a project of N issues named N issues 3 N times (the review of 21-Nov-2026,
+    /// P5: 12.7 GiB allocated for 2,000 issues, 3.3 for 1,000). The folder the walk is in was listed by it, or is kept by a
+    /// stamp that says nothing below it has changed, so what it last listed is what the walk is to go on from. A person's
+    /// call still goes through the caches, as fresh as the refresh interval.
+    /// </para>
     /// </summary>
     internal async Task<GlNode> ResolveAsync(string path, CancellationToken ct)
     {
@@ -250,10 +335,15 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             GlNode? known = null;
             if (_settings.Keeps)
             {
-                known = _lastListed.TryGetValue(at, out var last) ? Child(last, segment) : KeptChild(folder, at, segment);
+                known = _lastListed.TryGetValue(at, out var last) ? last.Find(segment) : KeptChild(folder, at, segment);
             }
 
-            node = known ?? Child(await ListedAsync(folder, at, ct).ConfigureAwait(false), segment) ?? throw VfsException.NotFound(path);
+            if (known is null && Walks.Current && _walked.TryGetValue(at, out var walked))
+            {
+                known = walked.Find(segment);
+            }
+
+            node = known ?? await folder.FindAsync(this, at, segment, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
             at = VfsPath.Join(at, segment);
             if (node is ProjectFolder project)
             {
@@ -298,6 +388,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     // a project's files folder's stamp where it has no repository, or nothing in it
     private const string NoRepository = "none";
 
+    /// <summary>The one of a folder's children with the name, in either case; an issue's also by its number, with a title it had.</summary>
     private static GlNode? Child(IReadOnlyList<GlNode> children, string name)
         => children.FirstOrDefault(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
             ?? children.OfType<TicketFolder>().FirstOrDefault(t => TicketFolder.SameTicket(t.Name, name));

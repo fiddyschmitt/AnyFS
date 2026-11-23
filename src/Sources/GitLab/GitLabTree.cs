@@ -30,6 +30,14 @@ internal abstract class GlFolder(string name, DateTimeOffset? modified = null, D
     public virtual bool FoundFromLastListing => false;
 
     public abstract Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct);
+
+    /// <summary>
+    /// The child named <paramref name="name"/> (in either case), or null: from the folder's listing, made at
+    /// <paramref name="path"/> for the source to remember, unless the folder can find the one without making them all
+    /// (a project's issues, by the number).
+    /// </summary>
+    public virtual Task<GlNode?> FindAsync(GitLabSource source, string path, string name, CancellationToken ct)
+        => source.FoundByListingAsync(this, path, name, ct);
 }
 
 internal abstract class GlFile(string name, long length, DateTimeOffset? modified, DateTimeOffset? created = null, string? etag = null) : GlNode(name)
