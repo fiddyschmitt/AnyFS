@@ -96,7 +96,10 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   marking the source Degraded while a call fails with `Unavailable` and Ready again when one succeeds.
   `HoldDegraded(detail)` is for what lasts until you say it is over (a write kept that the upstream
   has not taken): the source stays Degraded with it whatever its other calls do, until
-  `HoldDegraded(null)`.
+  `HoldDegraded(null)`. `ReachMemory` is for a server or a folder that cannot be reached: after
+  `Remember(message)` a caller's `Enter()` throws `Unavailable` with that message at once, where it
+  would have waited out a timeout to learn the same, but for one caller every ten seconds who is let
+  through to try for real, until a try that reaches it says `Forget()`.
 - `Context.Attended` says whether a person asked for this start (the program starting, or a source
   added, edited, enabled or retried by hand) or the host is trying again by itself after a failure,
   which it does at 10 s, 30 s, a minute and then every five minutes. Show a sign-in window, or

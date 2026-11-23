@@ -12,7 +12,8 @@ namespace AnyFS.Sources.Sshfs;
 /// SFTP through a <see cref="SftpPool"/>. Paths map to <c>root/path</c>; listings go through a two-second
 /// <see cref="ListingCache"/> and stats are answered from it; a symbolic link shows as what it points at (a
 /// dangling one as an empty file); names starting with a dot are hidden; an entry nobody may write is read-only.
-/// A dropped connection is retried once on a fresh one, and the source turns Degraded until something succeeds.
+/// A dropped connection is retried once on a fresh one, and the source turns Degraded until something succeeds; while
+/// the server cannot be reached the pool refuses its callers at once, but for one every ten seconds who connects for real.
 /// "Count files on start" lists many folders at once over the pool instead of the host's one-at-a-time walk. Each call to
 /// the server is told to <see cref="ISourceContext.UpstreamWatcher"/>, an open file as one from its open to its close.
 /// </summary>
@@ -526,6 +527,13 @@ public sealed class SshfsSource : SourceBase, ICountable
             {
                 MarkDegraded($"{_settings.Host}: {ex.Message}");
                 throw VfsException.Unavailable($"{_settings.Host}: {ex.Message}");
+            }
+            catch (VfsException ex)
+            {
+                // refused at once by the pool, which remembers that the server could not be reached: that is this call's
+                // answer, on its first try or on the second after a connection dropped, and nothing here waits for another
+                MarkDegraded($"{_settings.Host}: {ex.Message}");
+                throw;
             }
             catch (ObjectDisposedException)
             {

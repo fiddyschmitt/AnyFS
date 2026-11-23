@@ -11,21 +11,26 @@ namespace AnyFS.Sources.Sshfs;
 /// (SSH.NET multiplexes requests on one connection; several connections multiply throughput), each reconnected
 /// on demand after it drops. Logging in goes through <see cref="SshLogin"/>: key, password, then
 /// keyboard-interactive with the host's prompts; host keys are pinned per source by <see cref="HostKeyStore"/>.
+/// A connect that failed is remembered for the server (<see cref="ReachMemory"/>): the callers after it are refused at
+/// once, one of them every ten seconds connecting for real. Until 23-Nov-2026 each connected again and waited out the
+/// connect timeout, so with a VPN down every stat a file manager made took twenty seconds, one behind another.
 /// </summary>
 internal sealed class SftpPool : IAsyncDisposable
 {
     private readonly SshfsSettings _settings;
     private readonly ISourceContext _context;
     private readonly HostKeyStore _hostKeys;
+    private readonly ReachMemory _reach;
     private readonly Slot[] _slots;
     private int _next = -1;
     private bool _disposed;
 
-    public SftpPool(SshfsSettings settings, ISourceContext context, HostKeyStore hostKeys)
+    public SftpPool(SshfsSettings settings, ISourceContext context, HostKeyStore hostKeys, TimeProvider? time = null)
     {
         _settings = settings;
         _context = context;
         _hostKeys = hostKeys;
+        _reach = new ReachMemory(time: time);
         _slots = Enumerable.Range(0, Math.Clamp(settings.Connections, 1, 16)).Select(_ => new Slot()).ToArray();
     }
 
@@ -83,6 +88,9 @@ internal sealed class SftpPool : IAsyncDisposable
             return ready;
         }
 
+        // refused here while the server is remembered as unreachable, before the wait for the slot: nobody waits behind the
+        // one caller let through to connect, and a caller refused connects to nothing, so no "SSH connect" is told of it
+        using var turn = _reach.Enter();
         await slot.Gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
@@ -92,6 +100,8 @@ internal sealed class SftpPool : IAsyncDisposable
                 return connected;
             }
 
+            // and here, having waited for the slot behind a connect that failed: that answer is this caller's too
+            turn.ThrowIfFoundSince();
             if (slot.Client is { } stale)
             {
                 slot.Client = null;
@@ -99,7 +109,20 @@ internal sealed class SftpPool : IAsyncDisposable
             }
 
             var login = new SshLogin(_settings, _context, _hostKeys);
-            var client = await _context.UpstreamWatcher.AskAsync("SSH connect", $"{_settings.Host.Trim()}:{_settings.Port}", () => login.ConnectAsync(ct), ct).ConfigureAwait(false);
+            SftpClient client;
+            try
+            {
+                client = await _context.UpstreamWatcher.AskAsync("SSH connect", $"{_settings.Host.Trim()}:{_settings.Port}", () => login.ConnectAsync(ct), ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // whatever it failed with, a server that does not answer or a login it refuses, the next caller would
+                // fail with the same; one that gave up waiting says nothing of the server
+                _reach.Remember(ex.Message);
+                throw;
+            }
+
+            _reach.Forget();
             if (ReferenceEquals(slot, _slots[0]) || Home == "/")
             {
                 Home = string.IsNullOrEmpty(client.WorkingDirectory) ? "/" : client.WorkingDirectory;

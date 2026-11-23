@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
@@ -511,6 +513,76 @@ public class SshfsUnitTests
             {
             }
         }
+    }
+
+    /// <summary>A pool for a server that is not there: a port of this machine that nothing listens on, where a connect is refused.</summary>
+    private static SftpPool PoolForNoServer(TestSourceContext context, TimeProvider time, int connections)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        var settings = new SshfsSettings { Host = "127.0.0.1", Port = port, Username = "nobody", Password = "none", Connections = connections, ConnectTimeoutSeconds = 5 };
+        return new SftpPool(settings, context, new HostKeyStore(Path.Combine(context.StateDirectory, "hostkeys.txt")), time);
+    }
+
+    [TestMethod]
+    public async Task AServerThatCannotBeReachedIsTriedOnceEveryTenSecondsNotByEveryCall()
+    {
+        using var context = new TestSourceContext("sshfs");
+        var time = new FakeTime();
+        await using var pool = PoolForNoServer(context, time, connections: 4);
+        int Connects() => context.UpstreamRequests.Requests.Count(r => r.What == "SSH connect");
+
+        var tried = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => pool.GetAsync(CancellationToken.None));
+        Assert.IsFalse(tried.Permanent, tried.Message);
+        Assert.AreEqual(1, Connects());
+
+        // the calls that come after, whichever of the pool's connections is their turn
+        async Task RefusedAsync(int connects)
+        {
+            for (var i = 0; i < 10; i++)
+            {
+                var refused = await Assert.ThrowsAsync<Exception>(() => pool.GetAsync(CancellationToken.None));
+                Assert.AreEqual(connects, Connects(), "refused at once: no connect of its own, and no row for one");
+                Assert.AreEqual(VfsError.Unavailable, (refused as VfsException)?.Error, refused.ToString());
+                Assert.AreEqual(tried.Message + " (tried again every 10 s)", refused.Message);
+            }
+        }
+
+        // with a VPN down each of these connected again and waited out the connect timeout, one behind another
+        await RefusedAsync(connects: 1);
+
+        time.Advance(ReachMemory.RetryEvery);
+        await Assert.ThrowsExactlyAsync<SourceFailedException>(() => pool.GetAsync(CancellationToken.None));
+        Assert.AreEqual(2, Connects(), "ten seconds on, one caller is let through to connect for real");
+        await RefusedAsync(connects: 2);
+        Assert.AreEqual(0, context.UpstreamRequests.Running.Count);
+    }
+
+    [TestMethod]
+    public async Task CallersWaitingBehindAConnectThatFailsHaveItsAnswerAndDoNotConnectOneAfterAnother()
+    {
+        // one connection, so that all wait for the same one: the first is connecting as the others come
+        using var context = new TestSourceContext("sshfs");
+        await using var pool = PoolForNoServer(context, new FakeTime(), connections: 1);
+        var calls = Enumerable.Range(0, 6).Select(async _ =>
+        {
+            try
+            {
+                await pool.GetAsync(CancellationToken.None);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex;
+            }
+        }).ToList();
+        var answers = await Task.WhenAll(calls);
+
+        Assert.AreEqual(1, context.UpstreamRequests.Requests.Count(r => r.What == "SSH connect"), "one connect for them all");
+        Assert.AreEqual(1, answers.Count(a => a is SourceFailedException), "the one who tried");
+        Assert.AreEqual(5, answers.Count(a => a is VfsException { Error: VfsError.Unavailable }), "and those who waited behind it, or came after");
     }
 
     [TestMethod]

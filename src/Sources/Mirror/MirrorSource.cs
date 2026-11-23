@@ -12,6 +12,8 @@ namespace AnyFS.Sources.Mirror;
 /// that aren't, Failed only when none is. Writes go through when the collection and mount allow them. Each
 /// question put to the file system is told to <see cref="ISourceContext.UpstreamWatcher"/>, by the real path: a
 /// listing, a path's metadata, an open file from its open to its close, the check that a mirrored path is there.
+/// A path found not to be there is remembered (a <see cref="ReachMemory"/> each): the calls that need it are refused
+/// at once and ask the disk nothing, one of them every ten seconds asking for real.
 /// </summary>
 public sealed class MirrorSource : SourceBase, ICountable
 {
@@ -33,14 +35,19 @@ public sealed class MirrorSource : SourceBase, ICountable
     private readonly Node _root = new("");
     private readonly List<MirrorRoot> _roots = [];
     private readonly HashSet<MirrorRoot> _unreachable = [];
+
+    // what the calls that need a path go by while it is in _unreachable; the two change together, under the gate
+    private readonly Dictionary<MirrorRoot, ReachMemory> _reach = [];
     private readonly object _gate = new();
     private readonly CancellationTokenSource _stop = new();
+    private readonly TimeProvider? _time;
     private Task? _checker;
     private IUpstreamWatcher? _watcher;
 
-    public MirrorSource(MirrorSettings settings)
+    public MirrorSource(MirrorSettings settings, TimeProvider? time = null)
     {
         _settings = settings;
+        _time = time;
     }
 
     public override SourceCapabilities Capabilities { get; } = new(CanWrite: true, CaseInsensitive: OperatingSystem.IsWindows() || OperatingSystem.IsMacOS());
@@ -238,6 +245,7 @@ public sealed class MirrorSource : SourceBase, ICountable
             }
 
             _roots.Add(root);
+            _reach[root] = new ReachMemory(time: _time);
             var node = _root;
             foreach (var segment in root.Chain)
             {
@@ -285,6 +293,12 @@ public sealed class MirrorSource : SourceBase, ICountable
         if (resolved.Node is null)
         {
             EnsureReachable(resolved.Root!);
+        }
+        else if (Refusal(resolved.Root!) is not null)
+        {
+            // a chain level is a folder even while the path behind it cannot be reached, and its stat goes by the same
+            // check as the calls under it: until 23-Nov-2026 it went round it and asked the disk twice over, every time
+            return Task.FromResult<VfsEntry?>(SyntheticEntry(resolved.Node));
         }
 
         try
@@ -375,12 +389,13 @@ public sealed class MirrorSource : SourceBase, ICountable
             throw resolved.Node is null ? VfsException.NotFound(path) : VfsException.IsADirectory(path);
         }
 
+        // before anything is asked of the path, the folder of a chain level included
+        EnsureReachable(resolved.Root!);
         if (resolved.Node is { } && IsFolder(resolved.Real))
         {
             throw VfsException.IsADirectory(path);
         }
 
-        EnsureReachable(resolved.Root!);
         IWatchedRequest? asked = null;
         try
         {
@@ -563,12 +578,14 @@ public sealed class MirrorSource : SourceBase, ICountable
     /// <summary>
     /// The space of the volume a path is on. A folder of the chain above the mirrored paths has none of its own, so the
     /// first reachable path under it lends its own: a share of the mirror shows its disk's free space, not a made-up one.
+    /// A path remembered as unreachable has none to tell and is not asked, here least of all: a file manager asks for the
+    /// space again and again, and it is the calls under the path that take the turns at finding it back.
     /// </summary>
     public override Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct)
     {
         var resolved = Resolve(VfsPath.Normalize(path));
-        var real = resolved.Real ?? (resolved.Node is { } node ? RootsUnder(node).FirstOrDefault(IsThere)?.FullPath : null);
-        if (real is null)
+        var real = resolved.Real ?? (resolved.Node is { } node ? RootsUnder(node).FirstOrDefault(r => !IsMarkedUnreachable(r) && IsThere(r))?.FullPath : null);
+        if (real is null || (resolved.Root is { } root && IsMarkedUnreachable(root)))
         {
             return Task.FromResult<VfsSpace?>(null);
         }
@@ -671,27 +688,51 @@ public sealed class MirrorSource : SourceBase, ICountable
     /// <summary>Operations under a root that isn't there right now fail as Unavailable, not NotFound.</summary>
     private void EnsureReachable(MirrorRoot root)
     {
-        bool unreachable;
-        lock (_gate)
+        if (Refusal(root) is { } refusal)
         {
-            unreachable = _unreachable.Contains(root);
-        }
-
-        if (unreachable && IsThere(root))
-        {
-            CheckRootsCore(report: true);
-            return;
-        }
-
-        if (unreachable || !IsThere(root))
-        {
-            MarkUnreachable(root);
-            throw VfsException.Unavailable($"{root.Original} is not reachable");
+            throw refusal;
         }
     }
 
-    /// <summary>The check that a mirrored path is there, made for every call under it and every <see cref="MirrorSettings.CheckIntervalSeconds"/>.</summary>
+    /// <summary>
+    /// What a call that needs a mirrored path fails with while the path is not there, and null while it is. A path that
+    /// is there is asked for every call. One found gone is remembered: on a share that has died each ask blocks for the
+    /// system's own timeout, and until 23-Nov-2026 every call under it asked, the calls waiting one after another. Now
+    /// they are refused at once from what is remembered and the disk is asked nothing, but for one call every
+    /// <see cref="ReachMemory.RetryEvery"/> that asks for real, and is the one to find the path back.
+    /// </summary>
+    private VfsException? Refusal(MirrorRoot root)
+    {
+        if (!_reach[root].TryEnter(out var turn, out var refusal))
+        {
+            return refusal;
+        }
+
+        using (turn)
+        {
+            if (!IsThere(root))
+            {
+                return MarkUnreachable(root);
+            }
+
+            MarkReachable(root);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The check that a mirrored path is there: made for every call under a path that is, by one call every
+    /// <see cref="ReachMemory.RetryEvery"/> under one that is not, and for every path each <see cref="MirrorSettings.CheckIntervalSeconds"/>.
+    /// </summary>
     private bool IsThere(MirrorRoot root) => _watcher.Ask("Check path", root.FullPath, () => Directory.Exists(root.FullPath));
+
+    private bool IsMarkedUnreachable(MirrorRoot root)
+    {
+        lock (_gate)
+        {
+            return _unreachable.Contains(root);
+        }
+    }
 
     private bool IsFolder(string real) => _watcher.Ask(GetMetadata, real, () => Directory.Exists(real));
 
@@ -783,18 +824,36 @@ public sealed class MirrorSource : SourceBase, ICountable
     {
         if (root is not null && ex is IOException && !IsThere(root))
         {
-            MarkUnreachable(root);
-            return VfsException.Unavailable($"{root.Original} is not reachable");
+            return MarkUnreachable(root);
         }
 
         return VfsException.FromIo(ex, path);
     }
 
-    private void MarkUnreachable(MirrorRoot root)
+    private static string NotReachable(MirrorRoot root) => $"{root.Original} is not reachable";
+
+    /// <summary>A path was found gone: the source says so, the calls that need it next are refused by that, and this is what the call that found it fails with.</summary>
+    private VfsException MarkUnreachable(MirrorRoot root)
     {
         lock (_gate)
         {
+            _reach[root].Remember(NotReachable(root));
             if (_unreachable.Add(root))
+            {
+                ReportHealthLocked();
+            }
+        }
+
+        return VfsException.Unavailable(NotReachable(root));
+    }
+
+    /// <summary>A path was found there: nothing is remembered against it, and the source says so where it had been marked.</summary>
+    private void MarkReachable(MirrorRoot root)
+    {
+        lock (_gate)
+        {
+            _reach[root].Forget();
+            if (_unreachable.Remove(root))
             {
                 ReportHealthLocked();
             }
@@ -819,6 +878,18 @@ public sealed class MirrorSource : SourceBase, ICountable
             var changed = !_unreachable.SetEquals(unreachable);
             _unreachable.Clear();
             _unreachable.UnionWith(unreachable);
+            foreach (var root in _roots)
+            {
+                if (_unreachable.Contains(root))
+                {
+                    _reach[root].Remember(NotReachable(root));
+                }
+                else
+                {
+                    _reach[root].Forget();
+                }
+            }
+
             if (report && changed)
             {
                 ReportHealthLocked();

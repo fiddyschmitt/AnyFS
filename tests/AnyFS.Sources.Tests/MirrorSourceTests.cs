@@ -37,10 +37,10 @@ public class MirrorSourceTests
         return root.ChainPath;
     }
 
-    private static async Task<MirrorSource> StartAsync(string paths, TestSourceContext? context = null, int interval = 60, int threads = 8, int pathsInParallel = 8)
+    private static async Task<MirrorSource> StartAsync(string paths, TestSourceContext? context = null, int interval = 60, int threads = 8, int pathsInParallel = 8, TimeProvider? time = null)
     {
         var settings = new MirrorSettings { Paths = paths, CheckIntervalSeconds = interval, CountThreadsPerPath = threads, CountPathsInParallel = pathsInParallel };
-        var source = (MirrorSource)new MirrorPlugin().CreateSource(settings);
+        var source = time is null ? (MirrorSource)new MirrorPlugin().CreateSource(settings) : new MirrorSource(settings, time);
         await source.InitialiseAsync(context ?? new TestSourceContext("mirror"), CancellationToken.None);
         return source;
     }
@@ -398,6 +398,145 @@ public class MirrorSourceTests
         var before = context.UpstreamRequests.Requests.Count;
         source.CheckRoots();
         Assert.AreEqual(before + 2, context.UpstreamRequests.Requests.Count, "of its own accord, as well as for a client");
+    }
+
+    /// <summary>What the file system was asked about one mirrored path and what is under it, in the order it was asked.</summary>
+    private static List<string> AskedOf(TestSourceContext context, string path)
+        => context.UpstreamRequests.Requests.Where(r => r.Target.StartsWith(path, StringComparison.Ordinal)).Select(r => r.ToString()).ToList();
+
+    [TestMethod]
+    public async Task APathThatCannotBeReachedIsAskedOnceEveryTenSecondsNotByEveryCallThatNeedsIt()
+    {
+        // "gone" comes before "there" where the folder above the two is asked for its free space
+        var there = Path.Combine(_root, "there");
+        var gone = Path.Combine(_root, "gone");
+        Directory.CreateDirectory(there);
+        File.WriteAllText(Path.Combine(there, "x.txt"), "hello");
+        using var context = new TestSourceContext("mirror");
+        var time = new FakeTime();
+        var source = await StartAsync(there + "\n" + gone, context, time: time);
+        await using var _s = source;
+        var chain = Chain(gone);
+        var check = "Check path " + gone;
+        CollectionAssert.AreEqual(new[] { check }, AskedOf(context, gone), "asked as the source starts");
+
+        // what a file manager does in a folder of it, twenty times over
+        async Task CallsAsync()
+        {
+            for (var i = 0; i < 20; i++)
+            {
+                var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.StatAsync(chain + "/x.txt", CancellationToken.None));
+                Assert.AreEqual(VfsError.Unavailable, ex.Error);
+                StringAssert.StartsWith(ex.Message, gone + " is not reachable");
+                ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, chain + "/sub"));
+                Assert.AreEqual(VfsError.Unavailable, ex.Error);
+                ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync(chain + "/x.txt", VfsOpenMode.Read, CancellationToken.None));
+                Assert.AreEqual(VfsError.Unavailable, ex.Error);
+                ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.CreateDirectoryAsync(chain + "/new", CancellationToken.None));
+                Assert.AreEqual(VfsError.Unavailable, ex.Error);
+                Assert.IsNotNull(await source.GetSpaceAsync(Chain(_root), CancellationToken.None), "the folder above both has the space of the one that is there");
+            }
+        }
+
+        // on a share that has died each ask blocks for the system's own timeout: until 23-Nov-2026 every one of these asked
+        await CallsAsync();
+        CollectionAssert.AreEqual(new[] { check }, AskedOf(context, gone), "refused from what is remembered, the disk asked nothing");
+        var refused = await Assert.ThrowsExactlyAsync<VfsException>(() => source.StatAsync(chain + "/x.txt", CancellationToken.None));
+        Assert.AreEqual(gone + " is not reachable (tried again every 10 s)", refused.Message);
+
+        time.Advance(ReachMemory.RetryEvery);
+        await CallsAsync();
+        CollectionAssert.AreEqual(new[] { check, check }, AskedOf(context, gone), "ten seconds on, one call asks for real, and the rest are refused as before");
+        time.Advance(TimeSpan.FromSeconds(9));
+        await CallsAsync();
+        Assert.AreEqual(2, AskedOf(context, gone).Count);
+        time.Advance(TimeSpan.FromSeconds(1));
+        await CallsAsync();
+        CollectionAssert.AreEqual(new[] { check, check, check }, AskedOf(context, gone));
+
+        Assert.AreEqual(5, (await source.StatAsync(Chain(there) + "/x.txt", CancellationToken.None))?.Length, "the path that is there answers throughout");
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+        Assert.AreEqual(1, context.HealthReports.Count, "said once, as the source started");
+        Assert.AreEqual(0, context.UpstreamRequests.Running.Count);
+    }
+
+    [TestMethod]
+    public async Task AnUnreachablePathsOwnFolderIsStillAFolderAndAsksNothingEither()
+    {
+        var a = Path.Combine(_root, "A");
+        var missing = Path.Combine(_root, "missing");
+        Directory.CreateDirectory(a);
+        using var context = new TestSourceContext("mirror");
+        var time = new FakeTime();
+        var source = await StartAsync(a + "\n" + missing, context, time: time);
+        await using var _s = source;
+        var chain = Chain(missing);
+        var check = "Check path " + missing;
+
+        // a stat of the folder itself went round the check and asked the disk twice over, whatever was remembered
+        for (var i = 0; i < 20; i++)
+        {
+            var own = await source.StatAsync(chain, CancellationToken.None);
+            Assert.IsTrue(own!.IsDirectory, "a level of the chain is a folder whatever is behind it");
+            var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync(chain, VfsOpenMode.Read, CancellationToken.None));
+            Assert.AreEqual(VfsError.Unavailable, ex.Error);
+            ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, chain));
+            Assert.AreEqual(VfsError.Unavailable, ex.Error);
+            await source.GetSpaceAsync(chain, CancellationToken.None);
+        }
+
+        CollectionAssert.AreEqual(new[] { check }, AskedOf(context, missing), "the one check as the source started");
+        Assert.IsNull(await source.GetSpaceAsync(chain, CancellationToken.None), "no space is known of a volume that cannot be reached");
+
+        time.Advance(ReachMemory.RetryEvery);
+        Assert.IsTrue((await source.StatAsync(chain, CancellationToken.None))!.IsDirectory);
+        Assert.IsTrue((await source.StatAsync(chain, CancellationToken.None))!.IsDirectory);
+        CollectionAssert.AreEqual(new[] { check, check }, AskedOf(context, missing), "its stat takes the turn to ask as any call under it does");
+    }
+
+    [TestMethod]
+    public async Task APathThatComesBackIsServedAgainByTheCallLetThroughAndTheSourceIsReady()
+    {
+        var a = Path.Combine(_root, "A");
+        var back = Path.Combine(_root, "back");
+        Directory.CreateDirectory(a);
+        using var context = new TestSourceContext("mirror");
+        var time = new FakeTime();
+        var source = await StartAsync(a + "\n" + back, context, time: time);
+        await using var _s = source;
+        var chain = Chain(back);
+        var check = "Check path " + back;
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+
+        Directory.CreateDirectory(back);
+        File.WriteAllText(Path.Combine(back, "x.txt"), "hello");
+
+        // nobody asks until the ten seconds are over, so until then it is as it was remembered
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.StatAsync(chain + "/x.txt", CancellationToken.None));
+        Assert.AreEqual(VfsError.Unavailable, ex.Error);
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+
+        time.Advance(ReachMemory.RetryEvery);
+        Assert.AreEqual(5, (await source.StatAsync(chain + "/x.txt", CancellationToken.None))?.Length, "the call let through finds it back and is served");
+        Assert.AreEqual(ComponentHealth.Ready, context.LastHealth, "and the source says so");
+        Assert.AreEqual(0, source.Unreachable.Count);
+
+        // a path like any other again: asked for each call, nobody refused
+        var asked = AskedOf(context, back).Count(r => r == check);
+        CollectionAssert.AreEqual(new[] { "x.txt" }, await NamesAsync(source, chain));
+        Assert.AreEqual("hello", await ReadAsync(source, chain + "/x.txt"));
+        Assert.AreEqual(asked + 2, AskedOf(context, back).Count(r => r == check));
+
+        // and gone again, the call that finds it so says so, and the next asks nothing
+        Directory.Delete(back, true);
+        ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.StatAsync(chain + "/x.txt", CancellationToken.None));
+        Assert.AreEqual(back + " is not reachable", ex.Message);
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+        StringAssert.Contains(context.HealthReports[^1].Detail, back);
+        var rows = context.UpstreamRequests.Requests.Count;
+        ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.StatAsync(chain + "/x.txt", CancellationToken.None));
+        Assert.AreEqual(back + " is not reachable (tried again every 10 s)", ex.Message);
+        Assert.AreEqual(rows, context.UpstreamRequests.Requests.Count);
     }
 
     [TestMethod]
