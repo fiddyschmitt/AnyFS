@@ -275,6 +275,58 @@ public class ConfluenceTests
         Assert.AreEqual((await source.StatAsync(Arch + "/Architecture.md", CancellationToken.None))!.Length, Encoding.UTF8.GetByteCount(md));
     }
 
+    private static FakeAtlassian.Response? CommentsRefused(FakeAtlassian.Request request)
+        => request.Url.AbsolutePath.EndsWith("/child/comment", StringComparison.Ordinal) ? FakeAtlassian.Response.Message(403, "the comments of this page are not yours to read") : null;
+
+    [TestMethod]
+    public async Task APageWhoseCommentsCannotBeReadKeepsItsFileItsAttachmentsAndItsChildPages()
+    {
+        // A page's folder waited for the page, its child pages, its attachments and its comments together, and a failure
+        // of any was the folder's. Comments Confluence would not give took the page's own file, its attachments and the
+        // pages below it out of the tree, and out of the walk (the review of 21-Nov-2026, R12)
+        var fake = ConfluenceSeed.Lab();
+        await using var whole = await StartAsync(fake, ConfluenceSeed.Settings(fake));
+        var expected = await NamesAsync(whole, Arch);
+
+        var refusing = true;
+        fake.Fault = r => refusing ? CommentsRefused(r) : null;
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake));
+        CollectionAssert.AreEqual(expected, await NamesAsync(source, Arch), "everything the folder has, as with the comments read");
+        var md = await TextAsync(source, Arch + "/Architecture.md");
+        StringAssert.Contains(md, "Issue ANYFS-1.", "the page itself is whole");
+        var said = md[md.IndexOf("## Comments", StringComparison.Ordinal)..];
+        StringAssert.Contains(said, "could not be read");
+        StringAssert.Contains(said, "the comments of this page are not yours to read");
+
+        // and they are asked for again by the next walk
+        refusing = false;
+        await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+        StringAssert.Contains(await TextAsync(source, Arch + "/Architecture.md"), "A footer comment, with **bold**.");
+    }
+
+    [TestMethod]
+    public async Task AChangedPageWhoseCommentsCannotBeReadIsReadAgainAtTheNextWalkThoughNothingChangedSince()
+    {
+        // a walk between the whole readings of a space reads only the pages that changed: one of those whose comments
+        // would not come failed the space's walk, and with the fix would wait a day for them were it not remembered
+        var fake = ConfluenceSeed.Lab();
+        var settings = ConfluenceSeed.Settings(fake, "/display/ANYFS");
+        await using var source = await StartAsync(fake, settings);
+        var page = "AnyFS Lab Home/Architecture/Architecture.md";
+        await source.CountFilesAsync(CancellationToken.None);
+        StringAssert.Contains(await TextAsync(source, page), "A footer comment, with **bold**.");
+
+        var refusing = true;
+        fake.Fault = r => refusing ? CommentsRefused(r) : null;
+        fake.AddComment(fake.PageTitled("Architecture"), "tester", "<p>One more.</p>", DateTimeOffset.UtcNow);
+        await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+        StringAssert.Contains(await TextAsync(source, page), "could not be read", "the page's document says so, and the rest of the space is as it was");
+        CollectionAssert.Contains(await NamesAsync(source, "AnyFS Lab Home"), "AnyFS Lab Home.md");
+
+        refusing = false;
+        await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+        StringAssert.Contains(await TextAsync(source, page), "One more.");
+    }
     [TestMethod]
     public async Task APagesCommentsEndItsMarkdownOldestFirst()
     {

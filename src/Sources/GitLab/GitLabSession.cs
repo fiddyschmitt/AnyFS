@@ -67,6 +67,7 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
         Http = SessionHttp.Client(_handler, RequestTimeout, typeof(GitLabSession));
         Address = new GitLabAddress(new Uri($"{Url.Scheme}://{Url.Authority}"), "");
         _renewal = new SignInRenewal(SignInAgainAsync, MinRenewalInterval);
+        _renewal.Renewed += () => Renewed?.Invoke();
     }
 
     public GitLabSettings Settings { get; }
@@ -92,6 +93,9 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
 
     /// <summary>How many times the sign-in has been renewed: a request remembers it, so one renewal serves every request that lapsed with it.</summary>
     public int Generation => _renewal.Generation;
+
+    /// <summary>The sign-in was renewed: what failed for want of one may be asked again.</summary>
+    public event Action? Renewed;
 
     /// <summary>Whether a refused request may be signed in again: not with a token, which only a person can replace.</summary>
     public bool CanRenew => Method != GitLabSignIn.AccessToken;

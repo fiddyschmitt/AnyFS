@@ -34,7 +34,8 @@ internal static class ConfluenceDocuments
 
     /// <summary>The page's Markdown, UTF-8 without a byte order mark.</summary>
     /// <param name="comments">The comments to end with, oldest first; null leaves them out (the Comments setting off).</param>
-    public static byte[] Page(ConfluenceContent content, StorageContext context, IReadOnlyList<ConfluenceComment>? comments)
+    /// <param name="commentsUnread">Why the comments could not be read, where they could not: said where they would stand.</param>
+    public static byte[] Page(ConfluenceContent content, StorageContext context, IReadOnlyList<ConfluenceComment>? comments, string? commentsUnread = null)
     {
         var sb = new StringBuilder();
         sb.Append(WebAddress(content, context.Installation).AbsoluteUri).Append("\n\n");
@@ -50,7 +51,12 @@ internal static class ConfluenceDocuments
             sb.Append(body).Append("\n\n");
         }
 
-        if (comments is not null && comments.Count > 0)
+        if (commentsUnread is { Length: > 0 })
+        {
+            // the page is whole but for them, and says so: the reader is not shown a page that looks to have none
+            sb.Append("## Comments\n\n*The comments could not be read: ").Append(AtlassianNames.OneLine(commentsUnread)).Append("*\n");
+        }
+        else if (comments is not null && comments.Count > 0)
         {
             // one listed twice (a page of them moved under an offset read) is one
             var byId = new Dictionary<string, ConfluenceComment>(StringComparer.Ordinal);

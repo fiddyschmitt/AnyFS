@@ -166,6 +166,11 @@ public abstract partial class SharePointSource : SourceBase, ICountable
             MaxInFlight = int.MaxValue,
             PartsBelow = HoldsSitesAsync,
             StampOf = StampAsync,
+
+            // a folder that failed answers so until the next walk asks it again, as the other sources' do: it was asked
+            // again at every visit and every pass of a search, a throttled one with each of its waits. A write through
+            // the mount forgets the folder it writes to, its failure with it
+            KeepFailures = true,
             Name = "sharepoint",
 
             // the listings last run saw open at once at the next start: for the same site(s), account and settings that
@@ -244,6 +249,9 @@ public abstract partial class SharePointSource : SourceBase, ICountable
     /// what is below it.
     /// </summary>
     internal Task WalkAsync(SourceCounters counters, CancellationToken ct) => Kept.WalkAsync(counters, ct);
+
+    /// <summary>The sign-in was renewed: what was refused for want of one may be answered now, and is asked again when next asked for.</summary>
+    protected void SignInRenewed() => _kept?.Cache.ForgetFailures();
 
     /// <summary>Whether a folder's subfolders are sites, each walked on its own: a Subsites or Sites folder, or the root of a source given several sites.</summary>
     private async ValueTask<bool> HoldsSitesAsync(string folder, CancellationToken ct)

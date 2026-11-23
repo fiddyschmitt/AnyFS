@@ -1113,7 +1113,7 @@ public sealed class SharePointSiteSource : SharePointSource
             throw new SourceFailedException(ex.Message, permanent: ex.Permanent, ex);
         }
 
-        var handler = new BrowserSessionHandler(cookies, siteUri, c => signIn(false, c), Logger, _standIn?.Handler(), watcher: Context.UpstreamWatcher);
+        var handler = new BrowserSessionHandler(cookies, siteUri, c => signIn(false, c), Logger, _standIn?.Handler(), watcher: Context.UpstreamWatcher, renewed: SignInRenewed);
         var rest = new SharePointRestClient(siteUri, credentials: null, trustAnyCertificate: false, Logger, MarkDegraded, MarkHealthy, handler);
         if (_settings.IsMultiSite)
         {

@@ -160,5 +160,21 @@ public sealed partial class GitLabSource
         {
             return false;
         }
+        catch (VfsException ex) when (ex.Error is VfsError.IoError)
+        {
+            return CouldNotSay(ex);
+        }
+    }
+
+    /// <summary>
+    /// A part of a project or group the server could not say it has: a failure of its own on that one call (a 500 on one
+    /// project's pipelines), not "there is none" and not a server that cannot be had. The part shows, and says why when
+    /// it is opened. It used to be the whole folder's failure: a project's files and issues gone for the want of an
+    /// answer about its pipelines (the review of 21-Nov-2026, R12).
+    /// </summary>
+    internal bool CouldNotSay(VfsException failure)
+    {
+        Logger.LogInformation("gitlab: a part of a folder could not be asked for ({Error}); it shows, and says so when it is opened", failure.Message);
+        return true;
     }
 }

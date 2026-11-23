@@ -43,14 +43,19 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
     /// What sends the requests: a handler that keeps the cookies, unless a test stands in for SharePoint, when the cookies
     /// are carried through the one given as the default handler carries them (<see cref="CookieJarHandler"/>).
     /// </param>
+    /// <param name="renewed">Told when the cookies have been renewed: what was refused for want of them may be answered now.</param>
     /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>): one sent again after a renewal is a request again.</param>
-    public BrowserSessionHandler(IReadOnlyList<SessionCookie> initial, Uri site, Func<CancellationToken, Task<IReadOnlyList<SessionCookie>>> renew, ILogger logger, HttpMessageHandler? inner = null, TimeSpan? minRenewalInterval = null, IUpstreamWatcher? watcher = null)
+    public BrowserSessionHandler(IReadOnlyList<SessionCookie> initial, Uri site, Func<CancellationToken, Task<IReadOnlyList<SessionCookie>>> renew, ILogger logger, HttpMessageHandler? inner = null, TimeSpan? minRenewalInterval = null, IUpstreamWatcher? watcher = null, Action? renewed = null)
     {
         _site = site;
         _renew = renew;
         _logger = logger;
         _minRenewalInterval = minRenewalInterval ?? DefaultMinRenewalInterval;
         _renewal = new SignInRenewal(RenewNowAsync, _minRenewalInterval);
+        if (renewed is not null)
+        {
+            _renewal.Renewed += renewed;
+        }
         _cookies = new CookieContainer();
         Apply(initial);
         InnerHandler = inner is not null ? new CookieJarHandler(_cookies, UpstreamRequestsHandler.Around(inner, watcher)) : UpstreamRequestsHandler.Around(new SocketsHttpHandler

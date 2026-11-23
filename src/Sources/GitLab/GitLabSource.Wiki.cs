@@ -24,6 +24,10 @@ public sealed partial class GitLabSource
         {
             return false;
         }
+        catch (VfsException ex) when (ex.Error is VfsError.IoError)
+        {
+            return CouldNotSay(ex);
+        }
     }
 
     /// <summary>

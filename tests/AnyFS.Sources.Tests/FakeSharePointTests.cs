@@ -295,6 +295,42 @@ public class FakeSharePointTests
         Assert.IsNotNull(fake.TestSite.Library("Documents").Root.Folder("after-throttle"));
     }
 
+    [TestMethod]
+    public async Task AFolderWhoseListingFailedStaysSoUntilTheNextWalk()
+    {
+        // SharePoint's listings kept no failure, as six other sources' do: a folder the account may not list was asked
+        // again at every visit and every pass of a search, a throttled one with each of its waits (the review of
+        // 21-Nov-2026, R12)
+        using var fake = FakeSharePoint.Sandbox();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "refused/a.txt", "a"u8.ToArray());
+        var folder = documents.Root.Folder("refused")!;
+        var refusing = true;
+        var asked = 0;
+        fake.Fail(r => refusing && r.IsGraph && r.RawPath.EndsWith("/children", StringComparison.OrdinalIgnoreCase)
+            && (r.RawPath.Contains("refused", StringComparison.OrdinalIgnoreCase) || r.RawPath.Contains(folder.GraphId, StringComparison.OrdinalIgnoreCase)) && Interlocked.Increment(ref asked) > 0,
+            1000, _ => FakeSharePoint.Response.Json(403, FakeSharePoint.GraphError("accessDenied", "Access denied")));
+        using var context = new TestSourceContext("sharepoint");
+        var settings = TenantSettings(fake, SharePointSettings.AppDeviceCode);
+        settings.KeepListings = true;
+        settings.WalkMinutes = 0;
+        await using var source = await StartAsync(fake, settings, context);
+
+        // the start's own walk done with, whatever it reached
+        await source.WalkAsync(new SourceCounters(), None);
+        var first = await Assert.ThrowsExactlyAsync<VfsException>(async () => await SpsTestServer.NamesAsync(source, "Documents/refused"));
+        Assert.AreEqual(VfsError.AccessDenied, first.Error);
+        var before = asked;
+        Assert.IsTrue(before > 0);
+
+        refusing = false;
+        var again = await Assert.ThrowsExactlyAsync<VfsException>(async () => await SpsTestServer.NamesAsync(source, "Documents/refused"));
+        Assert.AreEqual(first.Message, again.Message, "answered at once as it failed");
+        Assert.AreEqual(before, asked, "nothing asked");
+
+        await source.WalkAsync(new SourceCounters(), None);
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, "Documents/refused"), "a.txt", "the walk asked again, and it answered");
+    }
     /// <summary>Graph's download addresses expire: a read after that asks for the file's address again.</summary>
     [TestMethod]
     public async Task ADownloadAddressThatExpiredIsAskedForAgain()

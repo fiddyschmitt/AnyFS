@@ -549,15 +549,53 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         var pageTask = PageAsync(folder, ct);
         var childrenTask = folder.Blog ? Task.FromResult(new List<ConfluenceContent>()) : ChildPagesAsync(id, ct);
         var attachmentsTask = _settings.Attachments ? AttachmentsAsync(id, ct) : Task.FromResult(new List<ConfluenceAttachment>());
-        var commentsTask = _settings.Comments ? CommentsAsync(id, ct) : Task.FromResult(new List<ConfluenceComment>());
+        var commentsTask = CommentsOrWhyNotAsync(id, fresh: false, ct);
         await Task.WhenAll(pageTask, childrenTask, attachmentsTask, commentsTask).ConfigureAwait(false);
+        var (comments, unread) = await commentsTask.ConfigureAwait(false);
         return await BuildPageAsync(folder.Name, await pageTask.ConfigureAwait(false), await childrenTask.ConfigureAwait(false),
-            await attachmentsTask.ConfigureAwait(false), _settings.Comments ? await commentsTask.ConfigureAwait(false) : null, folder.Blog, ct).ConfigureAwait(false);
+            await attachmentsTask.ConfigureAwait(false), comments, folder.Blog, ct, unread).ConfigureAwait(false);
+    }
+
+    // pages whose comments could not be read at their last reading: read again by the next walk, changed or not
+    private readonly ConcurrentDictionary<string, byte> _commentsUnread = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// A page's comments for its document, or why they could not be read: a failure of that one call (refused, not
+    /// there, an error of the server's on it), not a server that cannot be had. What makes up the folder (the page, its
+    /// child pages, its attachments) fails the folder; the comments only fill the page's document, which says they
+    /// could not be read. They used to take the folder with them: the page's file, its attachments and every page below
+    /// it out of the tree and out of the walk (the review of 21-Nov-2026, R12). The page is remembered, and the next
+    /// walk reads it again.
+    /// </summary>
+    private async Task<(IReadOnlyList<ConfluenceComment>? Comments, string? Unread)> CommentsOrWhyNotAsync(string pageId, bool fresh, CancellationToken ct)
+    {
+        if (!_settings.Comments)
+        {
+            return (null, null);
+        }
+
+        try
+        {
+            if (fresh)
+            {
+                Cache.Forget($"comments:{pageId}");
+            }
+
+            var comments = await CommentsAsync(pageId, ct).ConfigureAwait(false);
+            _commentsUnread.TryRemove(pageId, out _);
+            return (comments, null);
+        }
+        catch (VfsException ex) when (ex.Error is VfsError.IoError or VfsError.AccessDenied or VfsError.NotFound)
+        {
+            _commentsUnread[pageId] = 0;
+            Logger.LogInformation("confluence: the comments of the page {Id} could not be read ({Error}); its document says so, and the next walk asks again", pageId, ex.Message);
+            return (null, ex.Message);
+        }
     }
 
     /// <summary>A page folder's children from what was read of it (alone, or with its whole space).</summary>
     private async Task<IReadOnlyList<CoNode>> BuildPageAsync(string folderName, ConfluenceContent page, IReadOnlyList<ConfluenceContent> children,
-        IReadOnlyList<ConfluenceAttachment> attachments, IReadOnlyList<ConfluenceComment>? comments, bool blog, CancellationToken ct)
+        IReadOnlyList<ConfluenceAttachment> attachments, IReadOnlyList<ConfluenceComment>? comments, bool blog, CancellationToken ct, string? commentsUnread = null)
     {
         // child pages by title, however Confluence ordered them, so a name taken twice is numbered alike from either read
         children = children.OrderBy(c => c.Title, StringComparer.OrdinalIgnoreCase).ThenBy(c => c.Id, StringComparer.Ordinal).ToList();
@@ -574,7 +612,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         var context = new StorageContext(Installation, page.SpaceKey, page.Id,
             file => byFile.TryGetValue(file, out var shown) ? AtlassianMarkdown.RelativeLink(shown) : null,
             key => _people.GetValueOrDefault(key));
-        var nodes = new List<CoNode> { new CoText(markdownName, ConfluenceDocuments.Page(page, context, comments), page.Changed, page.Created) };
+        var nodes = new List<CoNode> { new CoText(markdownName, ConfluenceDocuments.Page(page, context, comments, commentsUnread), page.Changed, page.Created) };
         nodes.AddRange(attachments.Select((a, i) => (CoNode)new ConfluenceAttachmentFile(a, attachmentNames[i])));
         nodes.AddRange(children.Select((c, i) => (CoNode)new ConfluencePageFolder(c, childNames[i], page.Id, blog)));
         return nodes;
@@ -752,6 +790,15 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             }
         }
 
+        // and the pages of the space whose comments could not be read last time, changed since or not
+        foreach (var id in _commentsUnread.Keys)
+        {
+            if (_places.TryGetValue(id, out var unread) && (unread.Path == path || unread.Path.StartsWith(path + "/", StringComparison.Ordinal)))
+            {
+                affected.TryAdd(id, null);
+            }
+        }
+
         // the unchanged as held; the changed listed again, at the paths they had
         var listings = new Dictionary<string, IReadOnlyList<VfsEntry>>(Kept.Cache.Under(path), StringComparer.Ordinal);
         foreach (var id in affected.Keys)
@@ -767,8 +814,8 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             Remember(page);
             var children = place.Blog ? new List<ConfluenceContent>() : await FreshAsync(() => ChildPagesAsync(id, ct), $"children:{id}").ConfigureAwait(false);
             var attachments = _settings.Attachments ? await FreshAsync(() => AttachmentsAsync(id, ct), $"attachments:{id}").ConfigureAwait(false) : [];
-            var comments = _settings.Comments ? await FreshAsync(() => CommentsAsync(id, ct), $"comments:{id}").ConfigureAwait(false) : null;
-            var nodes = await BuildPageAsync(name, page, children, attachments, comments, place.Blog, ct).ConfigureAwait(false);
+            var (comments, unread) = await CommentsOrWhyNotAsync(id, fresh: true, ct).ConfigureAwait(false);
+            var nodes = await BuildPageAsync(name, page, children, attachments, comments, place.Blog, ct, unread).ConfigureAwait(false);
             listings[place.Path] = nodes.Select(n => n.Entry).ToList();
         }
 

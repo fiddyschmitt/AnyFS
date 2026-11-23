@@ -1994,6 +1994,83 @@ public class GitLabPipelineTests
                 : base.SendAsync(request, cancellationToken);
     }
 
+    /// <summary>A GitLab that fails one kind of call: answered as the test says where the address is one of them.</summary>
+    private sealed class Failing(HttpMessageHandler inner, Func<Uri, bool> which, System.Net.HttpStatusCode status) : DelegatingHandler(inner)
+    {
+        private int _asked;
+
+        public bool On { get; set; } = true;
+
+        public int Asked => Volatile.Read(ref _asked);
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (!On || !which(request.RequestUri!))
+            {
+                return base.SendAsync(request, cancellationToken);
+            }
+
+            Interlocked.Increment(ref _asked);
+            return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent("""{"message":"the pipelines of this project cannot be read"}""", Encoding.UTF8, "application/json"), RequestMessage = request });
+        }
+    }
+
+    private static async Task<(GitLabSource Source, Failing Failing)> StartFailingAsync(FakeGitLab fake, Func<Uri, bool> which)
+    {
+        Failing? failing = null;
+        var standIn = fake.StandIn();
+        var source = new GitLabSource(GitLabSeed.Settings(fake.Server + "/anyfs/tools/app"), standIn with { Handler = () => failing = new Failing(standIn.Handler(), which, System.Net.HttpStatusCode.UnprocessableEntity) });
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        return (source, failing!);
+    }
+
+    private static bool IsPipelines(Uri address) => address.AbsolutePath.EndsWith("/pipelines", StringComparison.Ordinal);
+
+    [TestMethod]
+    public async Task AProjectWhosePipelinesCannotBeAskedStillShowsItsFilesAndIssues()
+    {
+        // A project's folder asks whether it has a wiki, pipelines and releases, all three together, and took only "not
+        // found" and "not allowed" for none. Any other failure of one of them (a 500 on the pipelines of one project) was
+        // the folder's: no files, no issues, and no path below it (the review of 21-Nov-2026, R12). The same error
+        // here after a 500's three tries; a 422 gets there at once.
+        var fake = GitLabSeed.Lab();
+        var (source, _) = await StartFailingAsync(fake, IsPipelines);
+        await using (source)
+        {
+            CollectionAssert.AreEqual(new[] { "files", "branches", "tags", "issues", "merge requests", "pipelines", "releases" }, (await ListAsync(source, "")).Select(e => e.Name).ToArray(),
+                "the part that could not be asked shows, and says why when it is opened");
+            Assert.IsNotNull(await ListAsync(source, "issues"), "the folders beside it list as ever");
+            Assert.IsTrue((await ListAsync(source, "files")).Count > 0);
+
+            var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await ListAsync(source, "pipelines"));
+            Assert.AreEqual(VfsError.IoError, ex.Error);
+            StringAssert.Contains(ex.Message, "the pipelines of this project cannot be read");
+        }
+    }
+
+    [TestMethod]
+    public async Task AFolderWhoseListingFailedStaysSoUntilTheNextWalk()
+    {
+        // GitLab's listings kept no failure, as the other sources' do: a folder that failed was asked again, with its
+        // tries and their waits, at every visit and every pass of a search
+        var fake = GitLabSeed.Lab();
+        var (source, failing) = await StartFailingAsync(fake, IsPipelines);
+        await using (source)
+        {
+            var first = await Assert.ThrowsExactlyAsync<VfsException>(async () => await ListAsync(source, "pipelines"));
+            var asked = failing.Asked;
+            Assert.IsTrue(asked > 0);
+
+            failing.On = false;
+            var again = await Assert.ThrowsExactlyAsync<VfsException>(async () => await ListAsync(source, "pipelines"));
+            Assert.AreEqual(first.Message, again.Message, "answered at once as it failed");
+            Assert.AreEqual(asked, failing.Asked, "nothing asked");
+
+            await source.WalkAsync(new SourceCounters(), full: true, CancellationToken.None);
+            Assert.IsTrue((await ListAsync(source, "pipelines")).Count > 0, "the walk asked again, and it answered");
+        }
+    }
+
     [TestMethod]
     public async Task AGitLabItsGatewayCannotReachIsUnavailableAndTheTileSaysSo()
     {

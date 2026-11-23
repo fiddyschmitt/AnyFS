@@ -135,6 +135,10 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             LeftOut = LeftOutAsync,
             ListTree = ListTreeAsync,
             StampOf = StampAsync,
+
+            // a folder that failed answers so until the next walk asks it again, as the other sources' do: it was asked
+            // again, with its tries and their waits, at every visit and every pass of a search
+            KeepFailures = true,
             Name = "gitlab",
 
             // the listings last run saw open at once at the next start: for the same server, account and scope, the same
@@ -144,6 +148,8 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             SaveKey = $"{_session.Address.Server}|{_session.User?.Username}|{path}|{_settings.Shape}|md{GitLabDocuments.Format}|keys{GitLabKeys.Format}",
         });
 
+        // a sign-in renewed: what it refused may be answered now
+        _session.Renewed += _kept.Cache.ForgetFailures;
         _kept.StartWalksOfHeld();
         Logger.LogInformation("gitlab: serving {Scope} {Path} on {Server} as {User}",
             Scope.ToString().ToLowerInvariant(), path, _session.Address.Server, _session.User?.Username);
@@ -760,6 +766,9 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
     /// <summary>The listings as kept, for tests.</summary>
     internal ListingCache Listings => Kept.Cache;
+
+    /// <summary>One walk now (a test's: the walks after the count come by the clock), stamps kept unless <paramref name="full"/>.</summary>
+    internal Task<bool> WalkAsync(SourceCounters counters, bool full, CancellationToken ct) => Kept.WalkAsync(counters, full, ct);
 
     /// <summary>
     /// A folder's stamp for the walks (<see cref="KeptListingsOptions.StampOf"/>): a project's folder has its last activity
