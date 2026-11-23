@@ -17,6 +17,10 @@ namespace AnyFS.Sources.Atlassian.Bitbucket;
 /// </summary>
 public sealed class BitbucketSource : SourceBase, ICountable
 {
+    // the tile follows the requests made of the server, which the client tells of as they go, not the calls made of the
+    // source: one of those may ask nothing, and may hand back a file whose bytes are asked for only later
+    protected override bool HealthFollowsCalls => false;
+
     // entries a browse or a list call carries at most a page: Bitbucket's own cap
     private const int PageSize = 1000;
 
@@ -69,6 +73,7 @@ public sealed class BitbucketSource : SourceBase, ICountable
         _session = new AtlassianSession(AtlassianProduct.Bitbucket, _settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
         await _session.SignInAsync(interactive: Context.Attended, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
         _api = new AtlassianApi(_session, _settings.Requests, Logger);
+        _api.TellHealth(MarkHealthy, MarkDegraded);
         _cache = new RequestCache(_stopping.Token);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 

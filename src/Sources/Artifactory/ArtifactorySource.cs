@@ -19,6 +19,10 @@ namespace AnyFS.Sources.Artifactory;
 /// </summary>
 public sealed partial class ArtifactorySource : SourceBase, ICountable
 {
+    // the tile follows the requests made of the server, which the client tells of as they go, not the calls made of the
+    // source: one of those may ask nothing, and may hand back a file whose bytes are asked for only later
+    protected override bool HealthFollowsCalls => false;
+
     // a file up to this long is fetched whole and kept for a while (many small reads of it then ask nothing); a longer one is read in ranges
     private const long SpoolBelow = 8L << 20;
 
@@ -89,6 +93,7 @@ public sealed partial class ArtifactorySource : SourceBase, ICountable
         _session = new ArtifactorySession(_settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
         await _session.SignInAsync(interactive: Context.Attended, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
         _api = new ArtifactoryApi(_session, _settings.Requests, Logger);
+        _api.TellHealth(MarkHealthy, MarkDegraded);
         _cache = new RequestCache(_stopping.Token);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 

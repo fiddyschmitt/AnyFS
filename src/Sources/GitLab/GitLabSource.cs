@@ -16,6 +16,9 @@ namespace AnyFS.Sources.GitLab;
 /// </summary>
 public sealed partial class GitLabSource : SourceBase, ICountable
 {
+    // the tile follows the requests made of the server, which the client tells of as they go, not the calls made of the
+    // source: one of those may ask nothing, and may hand back a file whose bytes are asked for only later
+    protected override bool HealthFollowsCalls => false;
 
     // how many folders' last listings are remembered at most (ResolveAsync); past that they start again
     private const int MostFoldersRemembered = 200_000;
@@ -79,6 +82,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         _session = new GitLabSession(_settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
         await _session.SignInAsync(interactive: Context.Attended, message => Context.ReportProgress(message), ct).ConfigureAwait(false);
         _api = new GitLabApi(_session, Requests, Logger);
+        _api.TellHealth(MarkHealthy, MarkDegraded);
         _api.Held += (wait, why) => Volatile.Read(ref _counted)?.Waiting(wait, why);
         _listings = new RequestCache(_stopping.Token);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);

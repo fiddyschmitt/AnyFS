@@ -21,6 +21,10 @@ namespace AnyFS.Sources.Atlassian.Confluence;
 /// </summary>
 public sealed class ConfluenceSource : SourceBase, ICountable
 {
+    // the tile follows the requests made of the server, which the client tells of as they go, not the calls made of the
+    // source: one of those may ask nothing, and may hand back a file whose bytes are asked for only later
+    protected override bool HealthFollowsCalls => false;
+
     // pages with their bodies a request carries (Confluence caps a request with bodies lower than one without)
     private const int BodiesPerRequest = 50;
 
@@ -85,6 +89,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
 
         // "Requests at a time" is 1 to 64 (the client itself takes more: Bitbucket's and Bamboo's two settings multiplied)
         _api = new AtlassianApi(_session, Math.Clamp(_settings.Concurrency, 1, 64), Logger);
+        _api.TellHealth(MarkHealthy, MarkDegraded);
         _cache = new RequestCache(_stopping.Token);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 

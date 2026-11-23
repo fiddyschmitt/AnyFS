@@ -2011,17 +2011,72 @@ public class GitLabPipelineTests
             }
 
             Interlocked.Increment(ref _asked);
-            return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent("""{"message":"the pipelines of this project cannot be read"}""", Encoding.UTF8, "application/json"), RequestMessage = request });
+            var answer = new HttpResponseMessage(status) { Content = new StringContent("""{"message":"the pipelines of this project cannot be read"}""", Encoding.UTF8, "application/json"), RequestMessage = request };
+            if (status == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                // busy, and no time to wait named: tried at once until the tries are over, then the server's failure
+                answer.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.Zero);
+            }
+
+            return Task.FromResult(answer);
         }
     }
 
-    private static async Task<(GitLabSource Source, Failing Failing)> StartFailingAsync(FakeGitLab fake, Func<Uri, bool> which)
+    private static async Task<(GitLabSource Source, Failing Failing)> StartFailingAsync(FakeGitLab fake, Func<Uri, bool> which,
+        System.Net.HttpStatusCode status = System.Net.HttpStatusCode.UnprocessableEntity, TestSourceContext? context = null, bool on = true)
     {
         Failing? failing = null;
         var standIn = fake.StandIn();
-        var source = new GitLabSource(GitLabSeed.Settings(fake.Server + "/anyfs/tools/app"), standIn with { Handler = () => failing = new Failing(standIn.Handler(), which, System.Net.HttpStatusCode.UnprocessableEntity) });
-        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        var source = new GitLabSource(GitLabSeed.Settings(fake.Server + "/anyfs/tools/app"), standIn with { Handler = () => failing = new Failing(standIn.Handler(), which, status) { On = on } });
+        await source.InitialiseAsync(context ?? new TestSourceContext(), CancellationToken.None);
         return (source, failing!);
+    }
+
+    [TestMethod]
+    public async Task AFileKeptHereOpenedWhileGitLabIsDownDoesNotTurnTheTileReady()
+    {
+        // The tile followed the calls made of the source, not the requests made of GitLab: a call that succeeded marked
+        // it Ready whether or not anything had been asked. With GitLab down, opening a file already kept here turned the
+        // tile Ready (the review of 21-Nov-2026, R8)
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        var (source, failing) = await StartFailingAsync(fake, _ => true, System.Net.HttpStatusCode.TooManyRequests, context, on: false);
+        await using (source)
+        {
+            var file = "files/" + (await ListAsync(source, "files")).First(e => !e.IsDirectory).Name;
+            var whole = await ReadAsync(source, file);
+
+            failing.On = true;
+            var ex = await Assert.ThrowsExactlyAsync<VfsException>(async () => await ListAsync(source, "branches"));
+            Assert.AreEqual(VfsError.Unavailable, ex.Error);
+            Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+
+            CollectionAssert.AreEqual(whole, await ReadAsync(source, file), "read from what is kept");
+            Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth, "nothing was asked of GitLab: it is as far out of reach as it was");
+
+            failing.On = false;
+            Assert.IsTrue((await ListAsync(source, "tags")).Count >= 0);
+            Assert.AreEqual(ComponentHealth.Ready, context.LastHealth, "an answer from GitLab is what says it is back");
+        }
+    }
+
+    [TestMethod]
+    public async Task ADownloadGitLabDoesNotAnswerTurnsTheTile()
+    {
+        // an open hands back a file whose bytes come as they are read: the open had succeeded, and the download that then
+        // failed told the tile nothing
+        var fake = GitLabSeed.Lab();
+        using var context = new TestSourceContext();
+        var (source, failing) = await StartFailingAsync(fake, u => u.AbsolutePath.Contains("/repository/blobs/", StringComparison.Ordinal) || u.AbsolutePath.EndsWith("/raw", StringComparison.Ordinal),
+            System.Net.HttpStatusCode.TooManyRequests, context);
+        await using (source)
+        {
+            var file = "files/" + (await ListAsync(source, "files")).First(e => !e.IsDirectory && e.Length > 0).Name;
+            Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth);
+            await Assert.ThrowsAsync<Exception>(() => ReadAsync(source, file));
+            Assert.IsTrue(failing.Asked > 0, "the bytes were asked for");
+            Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+        }
     }
 
     private static bool IsPipelines(Uri address) => address.AbsolutePath.EndsWith("/pipelines", StringComparison.Ordinal);

@@ -210,6 +210,47 @@ public abstract class RequestCore : IDisposable
     protected async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, string what, CancellationToken ct, HttpCompletionOption completion = HttpCompletionOption.ResponseContentRead, object? hint = null)
     {
         ArgumentNullException.ThrowIfNull(make);
+        HttpResponseMessage answer;
+        try
+        {
+            answer = await SendThroughAsync(make, what, ct, completion, hint).ConfigureAwait(false);
+        }
+        catch (VfsException ex) when (ex.Error == VfsError.Unavailable)
+        {
+            CouldNotBeHad?.Invoke(ex);
+            throw;
+        }
+
+        Answered?.Invoke();
+        return answer;
+    }
+
+    /// <summary>
+    /// A request was answered: the server can be had. With <see cref="CouldNotBeHad"/>, what a source marks its health
+    /// by, so the tile follows what was asked of the server and how that went, whoever asked: a walk, a download that
+    /// began after its open had returned. It followed the calls made of the source, of which one that asked nothing
+    /// said the server was well, and a download that failed said nothing (the review of 21-Nov-2026, R8).
+    /// </summary>
+    public event Action? Answered;
+
+    /// <summary>A request ended with the server not to be had: no answer after its tries, busy, a sign-in that could not be made again.</summary>
+    public event Action<VfsException>? CouldNotBeHad;
+
+    /// <summary>
+    /// Has a source's health follow this client's requests: <paramref name="reached"/> for each one answered,
+    /// <paramref name="outOfReach"/> with why for each that ends with the server not to be had. A source gives its
+    /// <c>MarkHealthy</c> and <c>MarkDegraded</c>, and says its guard marks nothing (<c>HealthFollowsCalls</c>).
+    /// </summary>
+    public void TellHealth(Action reached, Action<string> outOfReach)
+    {
+        ArgumentNullException.ThrowIfNull(reached);
+        ArgumentNullException.ThrowIfNull(outOfReach);
+        Answered += reached;
+        CouldNotBeHad += failure => outOfReach(failure.Message);
+    }
+
+    private async Task<HttpResponseMessage> SendThroughAsync(Func<HttpRequestMessage> make, string what, CancellationToken ct, HttpCompletionOption completion, object? hint)
+    {
         var renewed = false;
         var redirects = 0;
         Uri? sentOn = null;          // where an answer sent the request on, in place of its own address
