@@ -18,8 +18,9 @@ namespace AnyFS.Sources.SharePoint;
 /// <see cref="LibraryInfo.Pages"/>) are read-only Markdown files made by the store, as are the pages in a site's own
 /// folder (a classic site's default.aspx).
 /// Listings sit in the SDK's <see cref="KeptListings"/>, for two seconds or, with <see cref="KeepListings"/>, until listed
-/// afresh by the walk of the whole tree every <see cref="WalkEvery"/>, and stats are answered from them; a
-/// listing also remembers each item's ids (and download URL, where the flavour has one), so an open needs no extra round trip. Files below the
+/// afresh by the walk of the whole tree every <see cref="WalkEvery"/>, and stats are answered from them; an open of
+/// a file whose folder was listed in this run goes by its entry there (its version and length) and needs no extra
+/// round trip, and one this run has not listed is asked for once and remembered. Files below the
 /// spool threshold are downloaded whole into the <see cref="SpoolCache"/> (and served again from it while
 /// their version is unchanged); larger ones are read in ranges through <see cref="RandomAccessOverStream"/>,
 /// several at a time. Writes go to a local temp file and are uploaded when the handle closes. Trouble with the
