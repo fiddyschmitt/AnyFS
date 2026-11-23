@@ -96,7 +96,13 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   marking the source Degraded while a call fails with `Unavailable` and Ready again when one succeeds.
   `HoldDegraded(detail)` is for what lasts until you say it is over (a write kept that the upstream
   has not taken): the source stays Degraded with it whatever its other calls do, until
-  `HoldDegraded(null)`. `ReachMemory` is for a server or a folder that cannot be reached: after
+  `HoldDegraded(null)`. A source with several such things holds each by a name of its own,
+  `HoldDegraded("uploads", detail)` and `HoldDegraded("list", detail)`: every one is said, each until
+  it is itself over, and the source is Ready when none is left and the upstream is reached. A source
+  that hears of each request to its upstream as it goes (an HTTP client that tells of answers and of
+  failures) marks itself by those and overrides `HealthFollowsCalls` to false, so that `Guard` says
+  nothing: a call may succeed with nothing asked, which says nothing of the upstream.
+  `ReachMemory` is for a server or a folder that cannot be reached: after
   `Remember(message)` a caller's `Enter()` throws `Unavailable` with that message at once, where it
   would have waited out a timeout to learn the same, but for one caller every ten seconds who is let
   through to try for real, until a try that reaches it says `Forget()`.
