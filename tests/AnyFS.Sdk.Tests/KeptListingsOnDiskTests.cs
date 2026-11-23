@@ -159,6 +159,34 @@ public class KeptListingsOnDiskTests
     }
 
     [TestMethod]
+    public async Task LettingGoOfAFolderAndAllBelowItReadsTheirPathsAlone()
+    {
+        // what is held below a folder was read whole, every listing's entries with it, to learn the paths to let go of;
+        // and so was the whole database for a walk of what is held, which counts the paths below each folder
+        OneBigFolder();
+        var folder = TempFolder();
+        long written;
+        await using (var kept = Kept(Options(folder)))
+        {
+            await kept.CountAsync(CancellationToken.None);
+            written = kept.DiskStatistics!.BytesWritten;
+        }
+
+        await using var next = Kept(Options(folder));
+        Assert.AreEqual(202, next.Cache.Count);
+        var before = next.DiskStatistics!.BytesRead;
+        next.Cache.InvalidateTree("big/folder 007");
+        Assert.AreEqual(201, next.Cache.Count);
+        next.Cache.InvalidateTree("big");
+        Assert.AreEqual(1, next.Cache.Count, "the root's is left");
+        Assert.IsNotNull(next.Cache.Held(""));
+        next.Cache.InvalidateTree("");
+        Assert.AreEqual(0, next.Cache.Count);
+        var read = next.DiskStatistics!.BytesRead - before;
+        Assert.IsTrue(read < written / 10, $"{read:N0} bytes of entries read to let go of what is {written:N0} bytes");
+    }
+
+    [TestMethod]
     public async Task AFolderNotHeldBelowOneKeptByItsStampIsWalked()
     {
         // the names sort among each other's paths: "big/a b" lies between "big/a" and "big/a/x"

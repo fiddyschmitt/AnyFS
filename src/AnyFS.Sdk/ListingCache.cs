@@ -296,12 +296,12 @@ public sealed class ListingCache
     {
         if (_store.ReadsAlone)
         {
-            return _store.Paths();
+            return _store.Paths("");
         }
 
         lock (_gate)
         {
-            return _store.Paths();
+            return _store.Paths("");
         }
     }
 
@@ -689,7 +689,8 @@ public sealed class ListingCache
 
     private void InvalidateTreeLocked(string directoryPath)
     {
-        foreach (var (path, _) in _store.Under(directoryPath))
+        // by their paths: the listings themselves were read for it, every one below the folder, under the gate
+        foreach (var path in _store.Paths(directoryPath))
         {
             RemoveLocked(path);
         }

@@ -477,10 +477,17 @@ internal sealed class SqliteListingStore : IListingStore
         return held;
     }
 
-    public List<string> Paths()
+    public List<string> Paths(string folder)
     {
-        var paths = new List<string>(Count);
-        foreach (var (path, _) in Range("", null))
+        // the paths alone: every listing's entries were read with them, the whole database for a list of names (the
+        // review of 21-Nov-2026, P4: 282 MiB of entries for the paths of 250,000 listings)
+        var paths = new List<string>(folder.Length == 0 ? Count : 0);
+        if (folder.Length > 0 && Get(folder) is not null)
+        {
+            paths.Add(folder);
+        }
+
+        foreach (var (path, _) in folder.Length == 0 ? Range("", null, Entries.None) : Range(folder + "/", folder + "0", Entries.None))
         {
             paths.Add(path);
         }

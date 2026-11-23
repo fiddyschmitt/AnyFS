@@ -142,9 +142,9 @@ internal readonly record struct ListingOutline(string Path, int Count, int Folde
 internal interface IListingStore : IDisposable
 {
     /// <summary>
-    /// Whether the store reads by ways of its own that no write disturbs, so <see cref="Under"/> and <see cref="Paths"/> are
-    /// called without the gate, and so is <see cref="Outline"/>: a walk that reads what is held below a folder then holds
-    /// up no listing and no store.
+    /// Whether the store reads by ways of its own that no write disturbs, so <see cref="Under"/>, <see cref="Paths"/> and
+    /// <see cref="Outline"/> may be called without the gate: a walk that reads what is held below a folder then holds up
+    /// no listing and no store.
     /// </summary>
     bool ReadsAlone { get; }
 
@@ -176,8 +176,8 @@ internal interface IListingStore : IDisposable
     /// <summary>What is held at <paramref name="folder"/> and below it, the folder's own first, then the rest in path order; everything for the root.</summary>
     List<(string Path, StoredListing Listing)> Under(string folder);
 
-    /// <summary>Every path held, in order.</summary>
-    List<string> Paths();
+    /// <summary>The paths of what is held at <paramref name="folder"/> and below it, the folder's own first, then the rest in order; every path for the root. Nothing of the listings is read for them.</summary>
+    List<string> Paths(string folder);
 
     /// <summary>Every listing held, a moment's view, nothing copied. Called without the gate.</summary>
     IEnumerable<(string Path, StoredListing Listing)> All();
@@ -246,7 +246,7 @@ internal sealed class MemoryListingStore : IListingStore
         return held;
     }
 
-    public List<string> Paths() => [.. _keys];
+    public List<string> Paths(string folder) => [.. KeysUnder(folder)];
 
     // the listings are here as they are: nothing is read for them
     public IEnumerable<ListingOutline> Outline(string folder)
