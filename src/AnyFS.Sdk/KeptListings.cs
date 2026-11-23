@@ -1130,17 +1130,26 @@ public sealed class KeptListings : IAsyncDisposable
         foreach (var held in Cache.OutlineUnder(folder))
         {
             ct.ThrowIfCancellationRequested();
-            Interlocked.Increment(ref walk.Kept);
-            walk.Counters.Add(held.Count - held.Folders, held.Folders);
-            var slash = held.Path.LastIndexOf('/');
-            if (held.Path.Length > 0
-                && byParent.TryGetValue(slash < 0 ? default : held.Path.AsSpan(0, slash), out var parent, out var names)
-                && names.GetAlternateLookup<ReadOnlySpan<char>>().Remove(held.Path.AsSpan(slash + 1))
-                && names.Count == 0)
+            if (held.Path.Length != folder.Length)
             {
-                notSeen.Remove(parent);
+                // below the folder: kept with it where the listing of the folder it is in is, and names it. One held
+                // below a folder that is not held (let go since: a write, a rename) is not kept here: the walk comes to it
+                // by that folder, which it lists, and counts it then. Counted here too, it was counted twice
+                var slash = held.Path.LastIndexOf('/');
+                if (!byParent.TryGetValue(slash < 0 ? default : held.Path.AsSpan(0, slash), out var parent, out var names)
+                    || !names.GetAlternateLookup<ReadOnlySpan<char>>().Remove(held.Path.AsSpan(slash + 1)))
+                {
+                    continue;
+                }
+
+                if (names.Count == 0)
+                {
+                    notSeen.Remove(parent);
+                }
             }
 
+            Interlocked.Increment(ref walk.Kept);
+            walk.Counters.Add(held.Count - held.Folders, held.Folders);
             if (held.Folders > 0 && held.Listing is { } listing)
             {
                 notSeen[held.Path] = new HashSet<string>(listing.FolderNames(), StringComparer.Ordinal);

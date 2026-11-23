@@ -225,6 +225,11 @@ public class KeptListingsOnDiskTests
             // the root, which has no stamp; what is not held; and what is below a folder listed afresh
             CollectionAssert.AreEquivalent(new[] { "", "big/a", "big/a/x", "big/a b", "big/a b/x", "big/b/x" }, _listed.Keys.ToList(), $"on disk: {onDisk}, listed: {string.Join(", ", _listed.Keys.Order())}");
             Assert.AreEqual(12, next.Cache.Count, $"on disk: {onDisk}");
+
+            // each file and folder once: what is held below a folder that is not, the walk comes to by that folder, which
+            // it lists. It was counted with what is kept and again when the walk came to it
+            Assert.AreEqual(1 + 5 + 5, counters.FilesKnown, $"on disk: {onDisk}");
+            Assert.AreEqual(1 + 5 + 5, counters.DirectoriesKnown, $"on disk: {onDisk}");
         }
     }
 
