@@ -296,6 +296,10 @@ public class OutlookItemListingTests
 
             var failed = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, "Contacts/Unreadable Card.vcf"));
             StringAssert.Contains(failed.Message, "corrupt");
+
+            // the one contact's failure, and nothing of the mailbox's: every such item turned the tile (R8)
+            Assert.AreEqual(VfsError.IoError, failed.Error);
+            Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth);
         }
     }
 
@@ -314,6 +318,54 @@ public class OutlookItemListingTests
             var folders = await ItemFoldersAsync(source, May);
             StringAssert.Contains(await OutlookFixtures.TextAsync(source, $"{folders[0]}/message.eml"), "Subject: Report");
             Assert.IsTrue(timedOut >= 2, "asked again");
+        }
+    }
+    [TestMethod]
+    public async Task AnAnswerThatIsNoExchangeAnswerIsStillTheMailboxsTrouble()
+    {
+        // only what Exchange says of the one thing asked for is that thing's alone (refused, corrupt). A page in place of
+        // an answer may be the whole server's trouble: it turns the tile, as it did
+        var fake = FakeExchange.Mailbox();
+        var contacts = fake.Folders.Values.Single(f => f.Distinguished == "contacts");
+        var bad = fake.AddContact(contacts, "Unreadable Card", "Unreadable", "Card", "card@fake.test", "Contoso", "None", "+1 555 0199");
+        fake.Intercept = (request, action) => action == "GetItem" && Names(request, bad.Id)
+            ? new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("<html><body>Something went wrong.</body></html>", Encoding.UTF8, "text/html") }
+            : null;
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            var failed = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, "Contacts/Unreadable Card.vcf"));
+            Assert.AreEqual(VfsError.Unavailable, failed.Error);
+            Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+        }
+    }
+    [TestMethod]
+    public async Task ARefreshThatFailedStaysOnTheTileUntilARefreshSucceeds()
+    {
+        // it was said as a mailbox out of reach is, which the next call that got through unsaid: a message opened, and the
+        // tile was Ready with a listing no fresher for it (the review of 21-Nov-2026, R8)
+        var fake = WithMay(out _);
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            fake.Intercept = (_, action) => action == "FindFolder"
+                ? new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("""{"Body":{"ErrorCode":500,"ExceptionName":"StoragePermanentException","FaultMessage":"The folders cannot be read.","IsTransient":false,"ResponseCode":"ErrorInternalServerError"}}""", Encoding.UTF8, "application/json") }
+                : null;
+            await source.RefreshAndSayAsync(CancellationToken.None);
+            Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+            StringAssert.Contains(context.HealthReports[^1].Detail, "looking for changes failed");
+
+            // a message opened gets through: the mailbox is reached, and the listing is no fresher for it
+            var folders = await ItemFoldersAsync(source, May);
+            StringAssert.Contains(await OutlookFixtures.TextAsync(source, $"{folders[0]}/message.eml"), "Subject: Report");
+            Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+            StringAssert.Contains(context.HealthReports[^1].Detail, "looking for changes failed");
+
+            fake.Intercept = null;
+            await source.RefreshAndSayAsync(CancellationToken.None);
+            Assert.AreEqual(ComponentHealth.Ready, context.LastHealth);
         }
     }
     [TestMethod]

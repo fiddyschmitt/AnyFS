@@ -964,6 +964,34 @@ public class ThreeDXSourceTests
     }
 
     [TestMethod]
+    public async Task AListThatCouldNotBeReadAfreshStaysOnTheTileUntilOneIs()
+    {
+        // it was said as 3DX out of reach is, which the next call that got through unsaid: a document opened, and the
+        // tile was Ready with a list no fresher for it (the review of 21-Nov-2026, R8)
+        using var fake = new Fake3DX();
+        var docs = Enumerable.Range(0, 3).Select(i => fake.Add($"OLD-{i}", "1", $"Old {i}", "Document", ("a.txt", Bytes(8, i)))).ToList();
+        using var context = new TestSourceContext("3dx");
+        await using var source = await StartAsync(ThreeDXSignInTests.Settings(fake), context);
+        var folder = (await ListAsync(source, "")).First(e => e.Name.StartsWith("OLD-0", StringComparison.Ordinal)).Name;
+        foreach (var doc in docs)
+        {
+            fake.BrokenDocuments[doc.Id] = true;
+        }
+
+        await source.RefreshAndSayAsync(CancellationToken.None);
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+        StringAssert.Contains(context.HealthReports[^1].Detail, "could not be refreshed");
+
+        // a document opened gets through: 3DX is reached, and the list is no fresher for it
+        CollectionAssert.AreEqual(Bytes(8, 0), await ReadAllAsync(source, $"{folder}/a.txt"));
+        Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth);
+        StringAssert.Contains(context.HealthReports[^1].Detail, "could not be refreshed");
+
+        fake.BrokenDocuments.Clear();
+        await source.RefreshAndSayAsync(CancellationToken.None);
+        Assert.AreEqual(ComponentHealth.Ready, context.LastHealth);
+    }
+    [TestMethod]
     public async Task ARestartServesTheKeptListAndSessionAtOnce()
     {
         using var fake = new Fake3DX();

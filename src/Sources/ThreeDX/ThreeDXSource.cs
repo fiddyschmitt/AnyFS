@@ -190,20 +190,38 @@ public sealed class ThreeDXSource : SourceBase, ICountable
                     await Task.Delay(wait, ct).ConfigureAwait(false);
                 }
 
-                await RefreshAsync(report: false, ct).ConfigureAwait(false);
-                MarkHealthy();
+                await RefreshAndSayAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
-            catch (Exception ex)
-            {
-                Logger.LogWarning(ex, "3dx: listing the documents afresh failed; the last list is still served");
-                MarkDegraded($"the document list could not be refreshed: {ex.Message}");
-            }
 
             due = RefreshEvery > TimeSpan.Zero ? DateTimeOffset.UtcNow + RefreshEvery : null;
+        }
+    }
+
+    /// <summary>
+    /// One round of the loop: the list read afresh, and of a read that failed, what the tile says until one succeeds.
+    /// It was said as 3DX out of reach is, which the next call that got through unsaid: a document opened, and the tile
+    /// was Ready with a list no fresher for it (the review of 21-Nov-2026, R8).
+    /// </summary>
+    internal async Task RefreshAndSayAsync(CancellationToken ct)
+    {
+        try
+        {
+            await RefreshAsync(report: false, ct).ConfigureAwait(false);
+            MarkHealthy();
+            HoldDegraded("list", null);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "3dx: listing the documents afresh failed; the last list is still served");
+            HoldDegraded("list", $"the document list could not be refreshed, and the last one is still served: {ex.Message}");
         }
     }
 

@@ -570,7 +570,7 @@ public sealed class OutlookSource : SourceBase, ICountable
                 var file = _settings.File!;
                 if (!FileIsThere(file))
                 {
-                    MarkDegraded($"{file} is gone; the last listing is still served");
+                    HoldDegraded("refresh", $"{file} is gone; the last listing is still served");
                     return;
                 }
 
@@ -597,6 +597,7 @@ public sealed class OutlookSource : SourceBase, ICountable
             await KeepListingAsync(ct).ConfigureAwait(false);
             await KeepListingsAsync(now: true).ConfigureAwait(false);
             MarkHealthy();
+            HoldDegraded("refresh", null);
         }
         finally
         {
@@ -622,17 +623,34 @@ public sealed class OutlookSource : SourceBase, ICountable
                 }
 
                 refreshNow = false;
-                await RefreshAsync(ct).ConfigureAwait(false);
+                await RefreshAndSayAsync(ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
-            catch (Exception ex)
-            {
-                Logger.LogWarning("outlook: looking for changes failed; the last listing is still served: {Error}", ex.Message);
-                MarkDegraded(ex is SignInRequiredException ? ex.Message : $"looking for changes failed: {ex.Message}");
-            }
+        }
+    }
+
+    /// <summary>
+    /// One round of the loop: a refresh, and of one that failed, what the tile says until a refresh succeeds. It was said
+    /// as a mailbox out of reach is, which the next call that got through unsaid: a message opened, and the tile was Ready
+    /// with a listing that was no fresher for it, the sign-in still to be made again (the review of 21-Nov-2026, R8).
+    /// </summary>
+    internal async Task RefreshAndSayAsync(CancellationToken ct)
+    {
+        try
+        {
+            await RefreshAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning("outlook: looking for changes failed; the last listing is still served: {Error}", ex.Message);
+            HoldDegraded("refresh", ex is SignInRequiredException ? ex.Message : $"looking for changes failed, and the last listing is still served: {ex.Message}");
         }
     }
 
@@ -1545,6 +1563,15 @@ public sealed class OutlookSource : SourceBase, ICountable
     // --- health -----------------------------------------------------------------------------------------------------------
 
     /// <summary>
+    /// Whether Exchange's answer speaks of the one thing asked for and of nothing else: an item refused to the account,
+    /// one the store finds corrupt or cannot turn into MIME, an id it does not take. Only the answers known to be so:
+    /// any other may be the mailbox's own trouble (an answer that is no Exchange answer at all, a store that is not
+    /// there), and turns the tile as it did.
+    /// </summary>
+    private static bool OfTheOneAsked(EwsException ex)
+        => ex.Code is "ErrorAccessDenied" or "ErrorItemCorrupt" or "ErrorCorruptData" or "ErrorMimeContentConversionFailed" or "ErrorItemPropertyRequestFailed" or "ErrorInvalidIdMalformed";
+
+    /// <summary>
     /// Runs a read of the store: trouble upstream becomes Unavailable and Degraded, something gone NotFound; a success clears
     /// Degraded. A data file's item that does not read is an I/O error of that item's alone: the rest of the file reads.
     /// </summary>
@@ -1563,6 +1590,12 @@ public sealed class OutlookSource : SourceBase, ICountable
         catch (EwsException ex) when (ex.IsNotFound)
         {
             throw VfsException.NotFound(ex.Message);
+        }
+        catch (EwsException ex) when (OfTheOneAsked(ex))
+        {
+            // what the server said of the one thing asked for (refused to the account, corrupt): that thing's failure,
+            // and nothing of the mailbox's. Every such item turned the tile, as a mailbox out of reach does
+            throw new VfsException(ex.Code == "ErrorAccessDenied" ? VfsError.AccessDenied : VfsError.IoError, ex.Message, ex);
         }
         catch (EwsException ex)
         {

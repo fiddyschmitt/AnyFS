@@ -213,7 +213,7 @@ public abstract partial class SharePointSource
     private void SayWaiting()
     {
         var waiting = _pending.Values.Where(f => f.IsWaiting).OrderBy(f => f.Path, StringComparer.OrdinalIgnoreCase).ToList();
-        HoldDegraded(waiting.Count switch
+        HoldDegraded("uploads", waiting.Count switch
         {
             0 => null,
             1 => $"{waiting[0].Path} is not uploaded yet ({waiting[0].LastError}): it is kept and tried again",
