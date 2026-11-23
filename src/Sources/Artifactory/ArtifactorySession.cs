@@ -82,9 +82,7 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
     private readonly ISecretStore? _secrets;
     private readonly ArtifactoryStandIn? _standIn;
     private readonly HttpMessageHandler _handler;
-    private readonly SemaphoreSlim _renewGate = new(1, 1);
-    private DateTime _renewedAt;
-    private int _generation;
+    private readonly SignInRenewal _renewal;
     private bool _signedIn;
 
     // why the web session cannot be renewed any more, once Artifactory has refused a renewal
@@ -131,6 +129,8 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
         Http = new HttpClient(_handler, disposeHandler: false) { Timeout = RequestTimeout };
         Http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(ArtifactorySession).Assembly.GetName().Version?.ToString(3) ?? "0"}");
         Address = ArtifactoryAddress.Candidates(Url)[0];
+        _renewal = new SignInRenewal(RefreshAgainAsync, MinRenewalInterval);
+        _renewal.Renewed += () => Renewed?.Invoke();
     }
 
     public ArtifactorySettings Settings { get; }
@@ -171,7 +171,7 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
             : Method.ToString());
 
     /// <summary>How many times the sign-in has been renewed: a request remembers it, so one renewal serves every request that lapsed with it.</summary>
-    public int Generation => Volatile.Read(ref _generation);
+    public int Generation => _renewal.Generation;
 
     /// <summary>Whether a refused request may be signed in again: only the web session's, whose token renews.</summary>
     public bool CanRenew => Method == ArtifactorySignIn.WebSession;
@@ -766,51 +766,41 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
             throw new VfsException(VfsError.Unavailable, $"Artifactory ({Url.Host}) no longer takes {Settings.Who}: give a new one and Retry the source.");
         }
 
-        await _renewGate.WaitAsync(ct).ConfigureAwait(false);
-        try
+        if (!await _renewal.RenewAsync(seen, ct).ConfigureAwait(false))
         {
-            if (Generation != seen)
-            {
-                return;
-            }
-
-            // a renewal Artifactory has refused is not asked for again: only the person can sign in now
-            if (_lapsed is { } lapsed)
-            {
-                throw new VfsException(VfsError.Unavailable, lapsed);
-            }
-
-            if (DateTime.UtcNow - _renewedAt < MinRenewalInterval)
-            {
-                throw new VfsException(VfsError.Unavailable, $"Artifactory ({Url.Host}) refused the sign-in again just after it was renewed; Retry the source to sign in again.");
-            }
-
-            _renewedAt = DateTime.UtcNow;
-            bool renewed;
-            try
-            {
-                renewed = await RefreshAsync(ct).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (IsNoAnswer(ex, ct))
-            {
-                throw new VfsException(VfsError.Unavailable, $"Artifactory ({Url.Host}) did not answer: {ex.Message}", ex);
-            }
-
-            if (!renewed)
-            {
-                _lapsed = $"The Artifactory sign-in for {Url.Host} has lapsed, and only you can sign in again (the sign-in page asks you for a code): Retry the source to sign in.";
-                throw new VfsException(VfsError.Unavailable, _lapsed);
-            }
-
-            Interlocked.Increment(ref _generation);
-            Renewed?.Invoke();
-        }
-        finally
-        {
-            _renewGate.Release();
+            throw new VfsException(VfsError.Unavailable, $"Artifactory ({Url.Host}) refused the sign-in again just after it was renewed; Retry the source to sign in again.");
         }
     }
 
+    /// <summary>
+    /// The token renewed with its refresh token, as <see cref="SignInRenewal"/> runs it: once for all that were refused,
+    /// on the session's lifetime and no request's. A refresh token is good for one use: a renewal stopped with the
+    /// request that began it, after the platform had taken the token, lost the pair it answered with.
+    /// </summary>
+    private async Task RefreshAgainAsync(CancellationToken ct)
+    {
+        // a renewal Artifactory has refused is not asked for again: only the person can sign in now
+        if (_lapsed is { } lapsed)
+        {
+            throw new VfsException(VfsError.Unavailable, lapsed);
+        }
+
+        bool renewed;
+        try
+        {
+            renewed = await RefreshAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (IsNoAnswer(ex, ct))
+        {
+            throw new VfsException(VfsError.Unavailable, $"Artifactory ({Url.Host}) did not answer: {ex.Message}", ex);
+        }
+
+        if (!renewed)
+        {
+            _lapsed = $"The Artifactory sign-in for {Url.Host} has lapsed, and only you can sign in again (the sign-in page asks you for a code): Retry the source to sign in.";
+            throw new VfsException(VfsError.Unavailable, _lapsed);
+        }
+    }
     /// <summary>The sign-in was renewed: what failed for want of one may be asked again.</summary>
     public event Action? Renewed;
 
@@ -848,7 +838,7 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
     {
         Http.Dispose();
         _handler.Dispose();
-        _renewGate.Dispose();
+        _renewal.Dispose();
     }
 
     /// <summary>Notes how far the server's clock is from this computer's, from each answer's Date (a second's grain, which is finer than what it is used for), and the server's version, which every answer of Artifactory's names.</summary>

@@ -2220,7 +2220,10 @@ public class GitLabWebSessionTests
 
         public bool NeedsAPerson { get; set; }
 
-        public Task<IReadOnlyList<SessionCookie>> SignInAsync(bool interactive, CancellationToken ct)
+        /// <summary>What a sign-in without a window waits for before it ends: a browser that takes its time.</summary>
+        public TaskCompletionSource? Hold { get; set; }
+
+        public async Task<IReadOnlyList<SessionCookie>> SignInAsync(bool interactive, CancellationToken ct)
         {
             Calls.Add(interactive);
             if (NeedsAPerson && !interactive)
@@ -2228,7 +2231,12 @@ public class GitLabWebSessionTests
                 throw new SignInRequiredException("the browser sign-in for the server has lapsed; sign in again", permanent: false);
             }
 
-            return Task.FromResult(fake.SignInBrowser(fake.UserNamed("tester")));
+            if (!interactive && Hold is { } hold)
+            {
+                await hold.Task.WaitAsync(ct);
+            }
+
+            return fake.SignInBrowser(fake.UserNamed("tester"));
         }
     }
 
@@ -2346,6 +2354,56 @@ public class GitLabWebSessionTests
         CollectionAssert.Contains(await NamesAsync(source, "issues"), "#1 Install fails on Debian");
         CollectionAssert.AreEqual(new[] { true, false }, browser.Calls, "renewed headless");
         Assert.AreEqual(1, source.Session.Generation);
+    }
+
+    [TestMethod]
+    public async Task ARenewalOutlivesTheRequestThatBeganIt()
+    {
+        // The session lapses. The first request refused begins the sign-in again and is given up while the browser is
+        // still at it (a search stopped, a count cancelled, a call the host no longer waits for). The renewal was that
+        // request's own: it stopped with it, and for the next half minute every other request was told the session had
+        // been "refused again just after it was renewed" (the review of 21-Nov-2026, R9b)
+        var fake = Lab();
+        var browser = new Browser(fake);
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, browser, context);
+        fake.EndSessions();
+        browser.Hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var givenUp = new CancellationTokenSource();
+        var first = source.Session.RenewAsync(source.Session.Generation, givenUp.Token);
+        for (var waited = 0; browser.Calls.Count < 2 && waited < 500; waited++)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.AreEqual(2, browser.Calls.Count, "the sign-in again has begun");
+        var second = source.Session.RenewAsync(source.Session.Generation, CancellationToken.None);
+        givenUp.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => first);
+
+        browser.Hold.SetResult();
+        await second.WaitAsync(TimeSpan.FromSeconds(30));
+        CollectionAssert.AreEqual(new[] { true, false }, browser.Calls, "one sign-in again, for both");
+        Assert.AreEqual(1, source.Session.Generation);
+        CollectionAssert.Contains(await NamesAsync(source, "issues"), "#1 Install fails on Debian");
+    }
+    [TestMethod]
+    public async Task ARenewalThatFailedIsToldAsItFailedAndNotTriedAgainAtOnce()
+    {
+        // the time of a renewal was written down before it ran, so one that failed counted as made: the request after it
+        // was told the session had been renewed and refused again, and to Retry, whatever had really happened
+        var fake = Lab();
+        var browser = new Browser(fake);
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, browser, context);
+        fake.EndSessions();
+        browser.NeedsAPerson = true;
+        var first = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, "issues"));
+        StringAssert.Contains(first.Message, "could not sign in again without you");
+
+        var second = await Assert.ThrowsExactlyAsync<VfsException>(async () => await NamesAsync(source, "merge requests"));
+        Assert.AreEqual(first.Message, second.Message, "told what the first was told");
+        Assert.AreEqual(2, browser.Calls.Count, "and no browser started for it: " + string.Join(", ", browser.Calls));
     }
 
     [TestMethod]

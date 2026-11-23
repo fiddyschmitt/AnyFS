@@ -128,6 +128,60 @@ public class BrowserSessionHandlerTests
         }
     }
 
+    /// <summary>A session whose renewal is the test's to write; the site answers by the cookie a request carries.</summary>
+    private static HttpClient Renewing(Func<CancellationToken, Task<IReadOnlyList<SessionCookie>>> renew)
+    {
+        var online = new Online((_, cookie) => Task.FromResult(cookie == "new" ? Answered() : Refused(signedIn: false)));
+        var handler = new BrowserSessionHandler([new SessionCookie("FedAuth", "old", Site.Host, "/", true, true)], Site, renew, NullLogger.Instance, online);
+        online.Jar = handler.Cookies;
+        return new HttpClient(handler);
+    }
+
+    [TestMethod]
+    public async Task ARenewalOutlivesTheRequestThatBeganIt()
+    {
+        // The renewal was the first refused request's own. That request given up stopped the browser's sign-in for all the
+        // others, and since the time of the renewal was written down before it ran, the next two minutes every request
+        // was handed SharePoint's refusal: "access denied" to an account that had only to be signed in again (R9b)
+        var began = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var browser = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var renewals = 0;
+        using var http = Renewing(async ct =>
+        {
+            Interlocked.Increment(ref renewals);
+            began.TrySetResult();
+            await browser.Task.WaitAsync(ct);
+            return [new SessionCookie("FedAuth", "new", Site.Host, "/", true, true)];
+        });
+        using var givenUp = new CancellationTokenSource();
+        var first = http.GetAsync($"{Site}/_api/web/title", givenUp.Token);
+        await began.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var second = http.GetAsync($"{Site}/_api/web/lists");
+
+        givenUp.Cancel();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => first);
+        browser.SetResult();
+        using var answer = await second.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.AreEqual(HttpStatusCode.OK, answer.StatusCode, "sent again with the cookies of the renewal the other began");
+        Assert.AreEqual(1, renewals);
+    }
+
+    [TestMethod]
+    public async Task ARenewalThatFailedIsWhatTheNextRequestIsToldNotItsRefusal()
+    {
+        var renewals = 0;
+        using var http = Renewing(_ =>
+        {
+            Interlocked.Increment(ref renewals);
+            throw new TimeoutException("the browser did not start");
+        });
+        var first = await Assert.ThrowsExactlyAsync<TimeoutException>(() => http.GetAsync($"{Site}/_api/web/title"));
+
+        // it was handed the refusal, which the source reads as the account's: not allowed to open the site
+        var second = await Assert.ThrowsExactlyAsync<TimeoutException>(() => http.GetAsync($"{Site}/_api/web/lists"));
+        Assert.AreEqual(first.Message, second.Message);
+        Assert.AreEqual(1, renewals, "and no browser started for it");
+    }
     [TestMethod]
     public async Task ARenewalThatDidNotHelpIsNotTriedAgainAtOnce()
     {

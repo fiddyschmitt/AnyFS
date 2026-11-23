@@ -30,16 +30,14 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
     private readonly Func<CancellationToken, Task<IReadOnlyList<SessionCookie>>> _renew;
     private readonly ILogger _logger;
     private readonly TimeSpan _minRenewalInterval;
-    private readonly SemaphoreSlim _renewGate = new(1, 1);
-    private int _generation;
+    private readonly SignInRenewal _renewal;
 
-    // Stopwatch times: when the latest request SharePoint answered as signed in was sent; when the last renewal was tried
+    // Stopwatch time: when the latest request SharePoint answered as signed in was sent
     private long _signedInSend = long.MinValue;
-    private long _lastRenewal;
     private bool _waitSaid;
 
-    // why the last renewal failed, when it needed a person
-    private SignInRequiredException? _needsPerson;
+    // the refusal that last asked for a renewal, for the log's line when one begins
+    private string _refused = "";
 
     /// <param name="inner">
     /// What sends the requests: a handler that keeps the cookies, unless a test stands in for SharePoint, when the cookies
@@ -52,6 +50,7 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
         _renew = renew;
         _logger = logger;
         _minRenewalInterval = minRenewalInterval ?? DefaultMinRenewalInterval;
+        _renewal = new SignInRenewal(RenewNowAsync, _minRenewalInterval);
         _cookies = new CookieContainer();
         Apply(initial);
         InnerHandler = inner is not null ? new CookieCarrier(_cookies) { InnerHandler = UpstreamRequestsHandler.Around(inner, watcher) } : UpstreamRequestsHandler.Around(new SocketsHttpHandler
@@ -69,7 +68,7 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
     {
-        var generation = Volatile.Read(ref _generation);
+        var generation = _renewal.Generation;
         var sent = Stopwatch.GetTimestamp();
         var response = await base.SendAsync(request, ct).ConfigureAwait(false);
         if (!IsRefusal(response))
@@ -89,7 +88,7 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
             return response;
         }
 
-        if (Volatile.Read(ref _generation) == generation)
+        if (_renewal.Generation == generation)
         {
             if (SetsSessionCookie(response) || Volatile.Read(ref _signedInSend) >= sent)
             {
@@ -152,62 +151,46 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
     }
 
     /// <summary>
-    /// Renews once per generation: the first caller to see stale cookies renews; the rest reuse that result. False when the
-    /// last one was too recent to try again; the <see cref="SignInRequiredException"/> of one that needed a person, then.
+    /// Renews once per generation: the first caller to see stale cookies begins the renewal; the rest wait for that one,
+    /// each only as long as its own request lasts (<see cref="SignInRenewal"/>). False when the last one was too recent to
+    /// try again; the failure of one that failed (the <see cref="SignInRequiredException"/> of one that needed a person),
+    /// until another may be tried.
     /// </summary>
     private async Task<bool> RenewAsync(int seenGeneration, HttpRequestMessage request, HttpResponseMessage response, CancellationToken ct)
     {
-        await _renewGate.WaitAsync(ct).ConfigureAwait(false);
-        try
+        Volatile.Write(ref _refused, $"{(int)response.StatusCode} for {request.Method} {request.RequestUri?.AbsolutePath}");
+        if (await _renewal.RenewAsync(seenGeneration, ct).ConfigureAwait(false))
         {
-            if (Volatile.Read(ref _generation) != seenGeneration)
-            {
-                return true; // another request already renewed since this one started
-            }
-
-            if (_lastRenewal != 0 && Stopwatch.GetElapsedTime(_lastRenewal) < _minRenewalInterval)
-            {
-                if (_needsPerson is { } lapsed)
-                {
-                    // nothing has changed since the renewal that needed a person: this refusal is the lapsed sign-in's too
-                    throw new SignInRequiredException(lapsed.Message, lapsed, lapsed.Permanent);
-                }
-
-                if (!_waitSaid)
-                {
-                    _waitSaid = true;
-                    _logger.LogInformation("sharepoint: {Method} {Path} was refused ({Status}) {Seconds:F0} s after the browser session for {Host} was renewed; not renewing it again before {Minutes:F0} minutes have passed", request.Method, request.RequestUri?.AbsolutePath, (int)response.StatusCode, Stopwatch.GetElapsedTime(_lastRenewal).TotalSeconds, _site.Host, _minRenewalInterval.TotalMinutes);
-                }
-
-                return false;
-            }
-
-            _logger.LogInformation("sharepoint: the browser session for {Host} was refused ({Status} for {Method} {Path}); renewing it", _site.Host, (int)response.StatusCode, request.Method, request.RequestUri?.AbsolutePath);
-            _lastRenewal = Stopwatch.GetTimestamp();
-            _waitSaid = false;
-            IReadOnlyList<SessionCookie> fresh;
-            try
-            {
-                fresh = await _renew(ct).ConfigureAwait(false);
-            }
-            catch (SignInRequiredException ex)
-            {
-                _logger.LogInformation("sharepoint: the browser session for {Host} could not be renewed without a sign-in: {Message}", _site.Host, ex.Message);
-                _needsPerson = ex;
-                throw;
-            }
-
-            _needsPerson = null;
-            Apply(fresh);
-            Interlocked.Increment(ref _generation);
             return true;
         }
-        finally
+
+        if (!_waitSaid)
         {
-            _renewGate.Release();
+            _waitSaid = true;
+            _logger.LogInformation("sharepoint: {Method} {Path} was refused ({Status}) soon after the browser session for {Host} was renewed; not renewing it again before {Minutes:F0} minutes have passed", request.Method, request.RequestUri?.AbsolutePath, (int)response.StatusCode, _site.Host, _minRenewalInterval.TotalMinutes);
         }
+
+        return false;
     }
 
+    /// <summary>The renewal itself, on the handler's lifetime and no request's.</summary>
+    private async Task RenewNowAsync(CancellationToken ct)
+    {
+        _logger.LogInformation("sharepoint: the browser session for {Host} was refused ({Refused}); renewing it", _site.Host, Volatile.Read(ref _refused));
+        _waitSaid = false;
+        IReadOnlyList<SessionCookie> fresh;
+        try
+        {
+            fresh = await _renew(ct).ConfigureAwait(false);
+        }
+        catch (SignInRequiredException ex)
+        {
+            _logger.LogInformation("sharepoint: the browser session for {Host} could not be renewed without a sign-in: {Message}", _site.Host, ex.Message);
+            throw;
+        }
+
+        Apply(fresh);
+    }
     private void Apply(IReadOnlyList<SessionCookie> cookies)
     {
         foreach (var c in cookies)
@@ -289,7 +272,7 @@ internal sealed class BrowserSessionHandler : DelegatingHandler
     {
         if (disposing)
         {
-            _renewGate.Dispose();
+            _renewal.Dispose();
         }
 
         base.Dispose(disposing);

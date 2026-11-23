@@ -48,8 +48,7 @@ internal sealed class ThreeDXSession : IDisposable
     private readonly HttpClient _flowHttp;
     private readonly bool _singleSignOn;
     private readonly SemaphoreSlim _renewGate = new(1, 1);
-    private readonly ConcurrentDictionary<string, int> _generations = new(StringComparer.OrdinalIgnoreCase);
-    private readonly ConcurrentDictionary<string, long> _renewedAt = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, SignInRenewal> _renewals = new(StringComparer.OrdinalIgnoreCase);
     private BrowserSession? _browser;
 
     // why a server refused the Windows account, once one has: the account is not offered again (a lockout)
@@ -373,7 +372,10 @@ internal sealed class ThreeDXSession : IDisposable
     public Uri ServiceOf(Uri request) => Search is { } search && IsUnder(request, search) ? search : Space;
 
     /// <summary>How many times the service's session has been renewed: a request remembers it, so that one renewal serves every request that lapsed with it.</summary>
-    public int GenerationOf(Uri service) => _generations.GetValueOrDefault(service.AbsoluteUri);
+    public int GenerationOf(Uri service) => RenewalOf(service).Generation;
+
+    /// <summary>The renewals of one service's session: begun by the first request it sends to its sign-in, for all that were.</summary>
+    private SignInRenewal RenewalOf(Uri service) => _renewals.GetOrAdd(service.AbsoluteUri, _ => new SignInRenewal(ct => SignInAgainAsync(service, ct), _minRenewalInterval));
 
     /// <summary>
     /// The cookies came new as a whole (a single sign-on's, a browser's), so every service's session is new, not only the one
@@ -383,7 +385,7 @@ internal sealed class ThreeDXSession : IDisposable
     {
         foreach (var service in new[] { Space, Search }.OfType<Uri>())
         {
-            _generations.AddOrUpdate(service.AbsoluteUri, 1, (_, n) => n + 1);
+            RenewalOf(service).Moved();
         }
     }
 
@@ -423,22 +425,24 @@ internal sealed class ThreeDXSession : IDisposable
     /// </summary>
     public async Task<bool> RenewAsync(Uri service, int seen, CancellationToken ct)
     {
+        if (await RenewalOf(service).RenewAsync(seen, ct).ConfigureAwait(false))
+        {
+            return true;
+        }
+
+        _logger.LogInformation("3dx: {Service} sent AnyFS to its sign-in again soon after the session was renewed; not renewing it again yet", service.AbsolutePath);
+        return false;
+    }
+
+    /// <summary>
+    /// The sign-in again for one service, as <see cref="SignInRenewal"/> runs it: on the session's lifetime and no
+    /// request's, and one service at a time, since they share the cookies.
+    /// </summary>
+    private async Task SignInAgainAsync(Uri service, CancellationToken ct)
+    {
         await _renewGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var key = service.AbsoluteUri;
-            if (GenerationOf(service) != seen)
-            {
-                return true;
-            }
-
-            if (_renewedAt.TryGetValue(key, out var at) && Stopwatch.GetElapsedTime(at) < _minRenewalInterval)
-            {
-                _logger.LogInformation("3dx: {Service} sent AnyFS to its sign-in again {Seconds:F0} s after the session was renewed; not renewing it again yet", service.AbsolutePath, Stopwatch.GetElapsedTime(at).TotalSeconds);
-                return false;
-            }
-
-            _renewedAt[key] = Stopwatch.GetTimestamp();
             _logger.LogInformation("3dx: the session for {Host}{Path} has lapsed; signing in to it again", service.Host, service.AbsolutePath);
             var result = await FlowAsync(service, ct).ConfigureAwait(false);
             if (!result.SignedIn && await SignOnAsync(renewal: true, _ => { }, ct).ConfigureAwait(false) is { SignedIn: true })
@@ -461,16 +465,13 @@ internal sealed class ThreeDXSession : IDisposable
             }
 
             _logger.LogInformation("3dx: signed in to {Host}{Path} again: {Route}", service.Host, service.AbsolutePath, result.Route);
-            _generations.AddOrUpdate(key, 1, (_, n) => n + 1);
             Save();
-            return true;
         }
         finally
         {
             _renewGate.Release();
         }
     }
-
     // --- probes ---------------------------------------------------------------------------------------------------------
 
     /// <summary>What answers only a signed-in session, per service: 3DSearch's search (which answers a query-less GET with an error of its own), 3DSpace's CSRF token.</summary>
@@ -550,6 +551,11 @@ internal sealed class ThreeDXSession : IDisposable
         Http.Dispose();
         _flowHttp.Dispose();
         _handler.Dispose();
+        foreach (var renewal in _renewals.Values)
+        {
+            renewal.Dispose();
+        }
+
         _renewGate.Dispose();
     }
 

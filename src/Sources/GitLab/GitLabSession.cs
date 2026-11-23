@@ -38,13 +38,11 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
     private readonly ISecretStore? _secrets;
     private readonly GitLabStandIn? _standIn;
     private readonly HttpMessageHandler _handler;
-    private readonly SemaphoreSlim _renewGate = new(1, 1);
+    private readonly SignInRenewal _renewal;
     private BrowserSession? _browser;
-    private DateTime _renewedAt;
 
     // why every way in refused the account's password, once it has: it is not given again (a lockout)
     private string? _refused;
-    private int _generation;
 
     /// <param name="watcher">Who hears of each request made (<see cref="ISourceContext.UpstreamWatcher"/>).</param>
     public GitLabSession(GitLabSettings settings, ILogger logger, GitLabStandIn? standIn = null, ISecretStore? secrets = null, IUpstreamWatcher? watcher = null)
@@ -88,6 +86,7 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
         Http = new HttpClient(_handler, disposeHandler: false) { Timeout = RequestTimeout };
         Http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(GitLabSession).Assembly.GetName().Version?.ToString(3) ?? "0"}");
         Address = new GitLabAddress(new Uri($"{Url.Scheme}://{Url.Authority}"), "");
+        _renewal = new SignInRenewal(SignInAgainAsync, MinRenewalInterval);
     }
 
     public GitLabSettings Settings { get; }
@@ -112,7 +111,7 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
     public string How { get; private set; } = "";
 
     /// <summary>How many times the sign-in has been renewed: a request remembers it, so one renewal serves every request that lapsed with it.</summary>
-    public int Generation => Volatile.Read(ref _generation);
+    public int Generation => _renewal.Generation;
 
     /// <summary>Whether a refused request may be signed in again: not with a token, which only a person can replace.</summary>
     public bool CanRenew => Method != GitLabSignIn.AccessToken;
@@ -504,46 +503,34 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
             throw new VfsException(VfsError.Unavailable, $"GitLab ({Url.Host}) no longer takes {Settings.Who}: give a new one and Retry the source.");
         }
 
-        await _renewGate.WaitAsync(ct).ConfigureAwait(false);
-        try
+        if (!await _renewal.RenewAsync(seen, ct).ConfigureAwait(false))
         {
-            if (Generation != seen)
-            {
-                return;
-            }
-
-            if (DateTime.UtcNow - _renewedAt < MinRenewalInterval)
-            {
-                throw new VfsException(VfsError.Unavailable, $"GitLab ({Url.Host}) refused the session again just after it was renewed; Retry the source to sign in again.");
-            }
-
-            _renewedAt = DateTime.UtcNow;
-            _logger.LogInformation("gitlab: the session for {Host} was refused; signing in again without a window", Url.Host);
-            if (Method == GitLabSignIn.WebSession)
-            {
-                try
-                {
-                    await BrowserSignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false);
-                }
-                catch (SignInRequiredException ex)
-                {
-                    throw new VfsException(VfsError.Unavailable, $"The GitLab sign-in has lapsed and AnyFS could not sign in again without you ({ex.Message}); Retry the source to sign in.", ex);
-                }
-            }
-            else if (await WindowsSignInAsync(ct).ConfigureAwait(false) is { } problem)
-            {
-                throw new VfsException(VfsError.Unavailable, $"The GitLab sign-in has lapsed and signing in again did not get through: {problem}");
-            }
-
-            Interlocked.Increment(ref _generation);
-            Save();
-        }
-        finally
-        {
-            _renewGate.Release();
+            throw new VfsException(VfsError.Unavailable, $"GitLab ({Url.Host}) refused the session again just after it was renewed; Retry the source to sign in again.");
         }
     }
 
+    /// <summary>The sign-in again without a window, as <see cref="SignInRenewal"/> runs it: once for all that were refused, on the session's lifetime and no request's.</summary>
+    private async Task SignInAgainAsync(CancellationToken ct)
+    {
+        _logger.LogInformation("gitlab: the session for {Host} was refused; signing in again without a window", Url.Host);
+        if (Method == GitLabSignIn.WebSession)
+        {
+            try
+            {
+                await BrowserSignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false);
+            }
+            catch (SignInRequiredException ex)
+            {
+                throw new VfsException(VfsError.Unavailable, $"The GitLab sign-in has lapsed and AnyFS could not sign in again without you ({ex.Message}); Retry the source to sign in.", ex);
+            }
+        }
+        else if (await WindowsSignInAsync(ct).ConfigureAwait(false) is { } problem)
+        {
+            throw new VfsException(VfsError.Unavailable, $"The GitLab sign-in has lapsed and signing in again did not get through: {problem}");
+        }
+
+        Save();
+    }
     /// <summary>
     /// Keeps a signed-in web session's cookies: in the secret store for the next start, and for a source started from the
     /// dialog whose Test made them. A session that never signed in keeps nothing. A start that failed or was stopped before
@@ -573,7 +560,7 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
     {
         Http.Dispose();
         _handler.Dispose();
-        _renewGate.Dispose();
+        _renewal.Dispose();
     }
 
     /// <summary>

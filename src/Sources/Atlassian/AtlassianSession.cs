@@ -41,14 +41,12 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
     private readonly ISecretStore? _secrets;
     private readonly AtlassianStandIn? _standIn;
     private readonly HttpMessageHandler _handler;
-    private readonly SemaphoreSlim _renewGate = new(1, 1);
+    private readonly SignInRenewal _renewal;
     private BrowserSession? _browser;
-    private DateTime _renewedAt;
     private string? _basic;
 
     // why the server refused the account's password, once it has: it is not given again (a CAPTCHA, a lockout)
     private string? _refused;
-    private int _generation;
 
     // how the last who-am-I call that found nobody signed in was answered ("401", "302 to sso.example.com"), for the log
     private string? _nobody;
@@ -90,6 +88,8 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
         Http = new HttpClient(_handler, disposeHandler: false) { Timeout = RequestTimeout };
         Http.DefaultRequestHeaders.UserAgent.ParseAdd($"AnyFS/{typeof(AtlassianSession).Assembly.GetName().Version?.ToString(3) ?? "0"}");
         Address = AtlassianAddress.Candidates(Url).First();
+        _renewal = new SignInRenewal(SignInAgainAsync, MinRenewalInterval);
+        _renewal.Renewed += () => Renewed?.Invoke();
     }
 
     public AtlassianProduct Product { get; }
@@ -119,7 +119,7 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
     public string How { get; private set; } = "";
 
     /// <summary>How many times the sign-in has been renewed: a request remembers it, so one renewal serves every request that lapsed with it.</summary>
-    public int Generation => Volatile.Read(ref _generation);
+    public int Generation => _renewal.Generation;
 
     /// <summary>Raised when the sign-in has been renewed.</summary>
     public event Action? Renewed;
@@ -742,52 +742,39 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
             throw new VfsException(VfsError.Unavailable, $"{ProductName} ({Url.Host}) no longer takes {Who}: give a new one and Retry the source.");
         }
 
-        await _renewGate.WaitAsync(ct).ConfigureAwait(false);
-        try
+        if (!await _renewal.RenewAsync(seen, ct).ConfigureAwait(false))
         {
-            if (Generation != seen)
-            {
-                return;
-            }
-
-            if (DateTime.UtcNow - _renewedAt < MinRenewalInterval)
-            {
-                throw new VfsException(VfsError.Unavailable, $"{ProductName} ({Url.Host}) refused the session again just after it was renewed; Retry the source to sign in again.");
-            }
-
-            _renewedAt = DateTime.UtcNow;
-            _logger.LogInformation("{Product}: the session for {Host} was refused; signing in again without a window", LogName, Url.Host);
-            try
-            {
-                if (Method == AtlassianSignIn.WebSession)
-                {
-                    await BrowserSignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false);
-                }
-                else if (await PasswordSignInAsync(ct).ConfigureAwait(false) is { } problem)
-                {
-                    throw new VfsException(VfsError.Unavailable, $"The {ProductName} sign-in has lapsed and signing in again did not get through: {problem}");
-                }
-            }
-            catch (SignInRequiredException ex)
-            {
-                throw new VfsException(VfsError.Unavailable, $"The {ProductName} sign-in has lapsed and AnyFS could not sign in again without you ({ex.Message}); Retry the source to sign in.", ex);
-            }
-            catch (SourceFailedException ex)
-            {
-                // the who-am-I call could not be answered (a 500): the request's failure, as the API reports one
-                throw new VfsException(VfsError.Unavailable, $"The {ProductName} sign-in has lapsed and signing in again did not get through: {ex.Message}", ex);
-            }
-
-            Interlocked.Increment(ref _generation);
-            Save();
-            Renewed?.Invoke();
-        }
-        finally
-        {
-            _renewGate.Release();
+            throw new VfsException(VfsError.Unavailable, $"{ProductName} ({Url.Host}) refused the session again just after it was renewed; Retry the source to sign in again.");
         }
     }
 
+    /// <summary>The sign-in again without a window, as <see cref="SignInRenewal"/> runs it: once for all that were refused, on the session's lifetime and no request's.</summary>
+    private async Task SignInAgainAsync(CancellationToken ct)
+    {
+        _logger.LogInformation("{Product}: the session for {Host} was refused; signing in again without a window", LogName, Url.Host);
+        try
+        {
+            if (Method == AtlassianSignIn.WebSession)
+            {
+                await BrowserSignInAsync(interactive: false, _ => { }, ct).ConfigureAwait(false);
+            }
+            else if (await PasswordSignInAsync(ct).ConfigureAwait(false) is { } problem)
+            {
+                throw new VfsException(VfsError.Unavailable, $"The {ProductName} sign-in has lapsed and signing in again did not get through: {problem}");
+            }
+        }
+        catch (SignInRequiredException ex)
+        {
+            throw new VfsException(VfsError.Unavailable, $"The {ProductName} sign-in has lapsed and AnyFS could not sign in again without you ({ex.Message}); Retry the source to sign in.", ex);
+        }
+        catch (SourceFailedException ex)
+        {
+            // the who-am-I call could not be answered (a 500): the request's failure, as the API reports one
+            throw new VfsException(VfsError.Unavailable, $"The {ProductName} sign-in has lapsed and signing in again did not get through: {ex.Message}", ex);
+        }
+
+        Save();
+    }
     /// <summary>
     /// Keeps a signed-in session's cookies: in the secret store for the next start, and for a source started from the dialog
     /// whose Test made them. A session that never signed in keeps nothing. A start that failed or was stopped before its
@@ -818,7 +805,7 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
     {
         Http.Dispose();
         _handler.Dispose();
-        _renewGate.Dispose();
+        _renewal.Dispose();
     }
 
     /// <summary>
