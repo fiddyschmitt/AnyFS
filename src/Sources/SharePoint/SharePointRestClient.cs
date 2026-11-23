@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.SharePoint;
@@ -433,20 +434,20 @@ internal sealed partial class SharePointRestClient : IDisposable
 
     private async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response, string pathForErrors, CancellationToken ct)
     {
-        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            throw MapError(response.StatusCode, body, pathForErrors, Challenge(response));
+            throw MapError(response.StatusCode, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false), pathForErrors, Challenge(response));
         }
 
         try
         {
-            return JsonDocument.Parse(body.Length == 0 ? "{}" : body);
+            // from its bytes, not through a string (JsonBody)
+            return await JsonBody.ReadAsync(response.Content, ct).ConfigureAwait(false);
         }
         catch (JsonException)
         {
             // a sign-in page, a proxy's or a captive portal's: something answering in SharePoint's place
-            var title = ErrorDetails(body).Message;
+            var title = ErrorDetails(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false)).Message;
             throw VfsException.Unavailable($"'{pathForErrors}': SharePoint answered {(int)response.StatusCode} with something other than JSON ({response.Content.Headers.ContentType?.MediaType ?? "no content type"}{(title.Length > 0 ? $", \"{title}\"" : "")})");
         }
     }

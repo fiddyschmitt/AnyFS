@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.Microsoft365;
@@ -195,15 +196,15 @@ public sealed class GraphClient : IDisposable
     /// <summary>A Graph answer as JSON; a failed one as <see cref="MapError(HttpStatusCode, string, string, Microsoft365Service)"/> has it.</summary>
     public async Task<JsonDocument> ReadJsonAsync(HttpResponseMessage response, string pathForErrors, CancellationToken ct)
     {
-        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            throw MapError(response.StatusCode, body, pathForErrors, Service);
+            throw MapError(response.StatusCode, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false), pathForErrors, Service);
         }
 
         try
         {
-            return JsonDocument.Parse(body.Length == 0 ? "{}" : body);
+            // from its bytes, not through a string (JsonBody)
+            return await JsonBody.ReadAsync(response.Content, ct).ConfigureAwait(false);
         }
         catch (JsonException)
         {

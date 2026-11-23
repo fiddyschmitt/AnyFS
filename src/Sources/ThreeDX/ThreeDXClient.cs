@@ -6,6 +6,7 @@ using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.ThreeDX;
@@ -742,13 +743,20 @@ internal sealed partial class ThreeDXClient
     private async Task<JsonDocument> SendJsonAsync(Func<HttpRequestMessage> make, string what, CancellationToken ct)
     {
         using var response = await SendAsync(make, expectsJson: true, HttpCompletionOption.ResponseContentRead, what, ct).ConfigureAwait(false);
-        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
-            throw Error(response.StatusCode, body, what);
+            throw Error(response.StatusCode, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false), what);
         }
 
-        return Json(body, what);
+        try
+        {
+            // from its bytes, not through a string (JsonBody)
+            return await JsonBody.ReadAsync(response.Content, ct).ConfigureAwait(false);
+        }
+        catch (JsonException ex)
+        {
+            throw new VfsException(VfsError.IoError, $"3DX answered the request for {what} with something other than JSON: {ex.Message}");
+        }
     }
 
     private static JsonDocument Json(string body, string what)

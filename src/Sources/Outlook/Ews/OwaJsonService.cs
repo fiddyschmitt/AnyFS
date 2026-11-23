@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 using AnyFS.Sources.Outlook.Mail;
 using Microsoft.Extensions.Logging;
 
@@ -619,7 +620,6 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
 
             using (response)
             {
-                var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
                 {
                     if (attempt < Attempts && !renew)
@@ -646,11 +646,12 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
                 JsonDocument document;
                 try
                 {
-                    document = JsonDocument.Parse(text);
+                    // from its bytes, not through a string (JsonBody); the text is read only for an error's words
+                    document = await JsonBody.ReadAsync(response.Content, ct).ConfigureAwait(false);
                 }
                 catch (JsonException)
                 {
-                    throw new EwsException(((int)response.StatusCode).ToString(CultureInfo.InvariantCulture), $"{_origin.Host} answered {action} with something other than JSON ({(int)response.StatusCode} {response.ReasonPhrase}; {Trim(text)})", transient: (int)response.StatusCode >= 500);
+                    throw new EwsException(((int)response.StatusCode).ToString(CultureInfo.InvariantCulture), $"{_origin.Host} answered {action} with something other than JSON ({(int)response.StatusCode} {response.ReasonPhrase}; {Trim(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false))})", transient: (int)response.StatusCode >= 500);
                 }
 
                 using (document)
@@ -667,7 +668,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
                             continue;
                         }
 
-                        throw new EwsException(Str(fault, "ResponseCode") ?? ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture), $"{action}: {Str(fault, "FaultMessage") ?? Trim(text)}", transient);
+                        throw new EwsException(Str(fault, "ResponseCode") ?? ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture), $"{action}: {Str(fault, "FaultMessage") ?? Trim(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false))}", transient);
                     }
 
                     if (answer == Answer.Whole)
@@ -683,7 +684,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
 
                     if (!root.TryGetProperty("Body", out var responseBody) || !responseBody.TryGetProperty("ResponseMessages", out var messages) || !messages.TryGetProperty("Items", out var items) || items.GetArrayLength() == 0)
                     {
-                        throw new EwsException("NoResponse", $"{action}: {_origin.Host} answered without a response message ({Trim(text)})");
+                        throw new EwsException("NoResponse", $"{action}: {_origin.Host} answered without a response message ({Trim(await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false))})");
                     }
 
                     if (answer == Answer.All)
