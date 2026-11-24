@@ -22,7 +22,18 @@ public partial class App : Application
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            Host = GuiHost.Create(Options ?? new GuiOptions());
+            try
+            {
+                Host = GuiHost.Create(Options ?? new GuiOptions());
+            }
+            catch (Exception ex)
+            {
+                // another AnyFS has these settings, or they cannot be read: a window that says so, in place of none at all
+                desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                desktop.MainWindow = new StartupFailureWindow(ex, Options);
+                base.OnFrameworkInitializationCompleted();
+                return;
+            }
 
             // before the window is made: what throws on its thread from here on is logged, and the window and the mounts stay
             Dispatcher.UIThread.UnhandledException += Host.OnWindowThreadException;

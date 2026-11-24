@@ -18,16 +18,18 @@ public sealed record GuiOptions(string? SettingsDir = null, string? LogLevel = n
 public sealed class GuiHost : IAsyncDisposable
 {
     private readonly CancellationTokenSource _stop = new();
+    private readonly SettingsFolderLock _held;
     private Task? _run;
     private bool _shutDown;
 
-    private GuiHost(SettingsPaths paths, ILoggerFactory loggerFactory, AnyFsEngine engine, GuiPromptHandler prompts)
+    private GuiHost(SettingsPaths paths, ILoggerFactory loggerFactory, AnyFsEngine engine, GuiPromptHandler prompts, SettingsFolderLock held)
     {
         Paths = paths;
         LoggerFactory = loggerFactory;
         Logger = loggerFactory.CreateLogger("AnyFS");
         Engine = engine;
         Prompts = prompts;
+        _held = held;
     }
 
     public SettingsPaths Paths { get; }
@@ -42,28 +44,52 @@ public sealed class GuiHost : IAsyncDisposable
 
     public bool IsShutDown => _shutDown;
 
-    /// <summary>Resolves paths, opens the log, loads plugins and settings. Nothing starts until <see cref="Start"/>.</summary>
+    /// <summary>
+    /// Resolves paths, opens the log, loads plugins and settings. Nothing starts until <see cref="Start"/>. It throws what
+    /// kept it from that, for the app to show (<see cref="Views.StartupFailureWindow"/>): <see cref="SettingsInUseException"/> when
+    /// another AnyFS has these settings, with nothing of the folder read or written, its log neither.
+    /// </summary>
     public static GuiHost Create(GuiOptions options, PluginRegistry? registry = null)
     {
         var paths = SettingsPaths.Resolve(options.SettingsDir);
-        var level = LoggingSetup.ParseLevel(options.LogLevel ?? Commands.ReadConfiguredLevel(paths));
-        var loggerFactory = LoggingSetup.Create(level, paths.LogFile, console: false);
-        LoggingSetup.LogUnhandledExceptions(loggerFactory);
-        var logger = loggerFactory.CreateLogger("AnyFS");
-        logger.LogInformation("AnyFS {Version} window starting; settings in {Dir} ({Mode}); log at {Log}", AnyFsEngine.Version, paths.Settings, paths.Portable ? "portable" : "per user", paths.LogFile);
-        BundleExtraction.CleanUpInBackground(logger);
-
-        registry ??= BuiltIns.CreateRegistry();
-        var loaded = registry.LoadDirectory(paths.Plugins, logger);
-        if (loaded > 0)
+        var held = SettingsFolderLock.Take(paths);
+        ILoggerFactory? loggerFactory = null;
+        try
         {
-            logger.LogInformation("loaded {Count} plugin type(s) from {Dir}", loaded, paths.Plugins);
-        }
+            var level = LoggingSetup.ParseLevel(options.LogLevel ?? Commands.ReadConfiguredLevel(paths));
+            loggerFactory = LoggingSetup.Create(level, paths.LogFile, console: false);
+            LoggingSetup.LogUnhandledExceptions(loggerFactory);
+            var logger = loggerFactory.CreateLogger("AnyFS");
+            logger.LogInformation("AnyFS {Version} window starting; settings in {Dir} ({Mode}); log at {Log}", AnyFsEngine.Version, paths.Settings, paths.Portable ? "portable" : "per user", paths.LogFile);
+            BundleExtraction.CleanUpInBackground(logger);
 
-        var prompts = new GuiPromptHandler();
-        var engine = new AnyFsEngine(paths, registry, loggerFactory, prompts);
-        engine.Load();
-        return new GuiHost(paths, loggerFactory, engine, prompts);
+            registry ??= BuiltIns.CreateRegistry();
+            var loaded = registry.LoadDirectory(paths.Plugins, logger);
+            if (loaded > 0)
+            {
+                logger.LogInformation("loaded {Count} plugin type(s) from {Dir}", loaded, paths.Plugins);
+            }
+
+            var prompts = new GuiPromptHandler();
+            var engine = new AnyFsEngine(paths, registry, loggerFactory, prompts);
+            try
+            {
+                engine.Load();
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "the settings could not be loaded; AnyFS does not start");
+                throw;
+            }
+
+            return new GuiHost(paths, loggerFactory, engine, prompts, held);
+        }
+        catch
+        {
+            loggerFactory?.Dispose();
+            held.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Starts every enabled collection in the background; failures are logged, never thrown at the window.</summary>
@@ -144,6 +170,9 @@ public sealed class GuiHost : IAsyncDisposable
 
         Logger.LogInformation("window closed");
         LoggerFactory.Dispose();
+
+        // last: the folder is another AnyFS's to take once nothing of this one writes there
+        _held.Dispose();
     }
 
     public async ValueTask DisposeAsync() => await ShutdownAsync().ConfigureAwait(false);

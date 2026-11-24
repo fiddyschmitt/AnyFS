@@ -40,7 +40,7 @@ internal static class Commands
             Description = "Run only this collection (repeat for several).",
             AllowMultipleArgumentsPerToken = false,
         };
-        var serve = new Command("serve", "Run the enabled collections headless until Ctrl+C or SIGTERM.") { collectionOption };
+        var serve = new Command("serve", "Run the enabled collections headless until Ctrl+C or SIGTERM. Exit code 0 when stopped, 2 for a collection that does not exist, 3 when AnyFS already runs with these settings.") { collectionOption };
         serve.SetAction((parseResult, ct) => ServeAsync(parseResult.GetValue(settingsDir), parseResult.GetValue(logLevel), parseResult.GetValue(collectionOption), ct));
         root.Subcommands.Add(serve);
 
@@ -63,9 +63,24 @@ internal static class Commands
         return root;
     }
 
+    /// <summary><c>anyfs serve</c>. Exit code 0 when stopped, 2 for a collection that does not exist, 3 when another AnyFS has these settings.</summary>
     public static async Task<int> ServeAsync(string? settingsDir, string? logLevel, string[]? collections, CancellationToken ct)
     {
         var paths = SettingsPaths.Resolve(settingsDir);
+
+        // before anything of the folder is read or written, the log too: a second copy leaves the first one's alone
+        SettingsFolderLock held;
+        try
+        {
+            held = SettingsFolderLock.Take(paths);
+        }
+        catch (SettingsInUseException ex)
+        {
+            await Console.Error.WriteLineAsync(ex.Message);
+            return 3;
+        }
+
+        using var holding = held;
         var level = LoggingSetup.ParseLevel(logLevel ?? ReadConfiguredLevel(paths));
         using var loggerFactory = LoggingSetup.Create(level, paths.LogFile, console: true);
         LoggingSetup.LogUnhandledExceptions(loggerFactory);
