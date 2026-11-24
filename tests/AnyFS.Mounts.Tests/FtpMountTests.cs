@@ -281,6 +281,47 @@ public class FtpMountTests
         Assert.IsTrue((await client.UploadAsync("/log.txt", Encoding.UTF8.GetBytes("x"), "STOR")).Code >= 500, "the root takes no files");
     }
 
+    /// <summary>
+    /// A REST offset is for the transfer that follows it and for nothing else. It outlived a transfer that was refused
+    /// before it began, and any command that is no transfer, so the next file came or went from part way in (the review
+    /// of 21-Nov-2026, N16). The commands that only set a transfer up may come between, as they did.
+    /// </summary>
+    [TestMethod]
+    [Timeout(60000)]
+    public async Task ARestOffsetIsForTheTransferThatFollowsItAndForNoOther()
+    {
+        var source = Tree();
+        var (_, _, port) = await StartAsync(source);
+        var client = await ConnectAsync(port);
+
+        // a transfer that is refused before it begins takes the offset with it
+        Assert.AreEqual(350, (await client.CommandAsync("REST 50000")).Code);
+        Assert.AreEqual(550, (await client.CommandAsync("RETR /work/nope.bin")).Code);
+        CollectionAssert.AreEqual(Medium, await client.RetrieveAsync("/work/medium.bin"), "after a RETR of no such file, the next file comes whole");
+
+        Assert.AreEqual(350, (await client.CommandAsync("REST 50000")).Code);
+        Assert.AreEqual(425, (await client.CommandAsync("RETR /work/medium.bin")).Code);
+        CollectionAssert.AreEqual(Medium, await client.RetrieveAsync("/work/medium.bin"), "after a RETR with no data connection to go over");
+
+        Assert.AreEqual(350, (await client.CommandAsync("REST 3")).Code);
+        Assert.IsTrue((await client.UploadAsync("/nowhere.txt", Encoding.UTF8.GetBytes("x"), "STOR")).Code >= 500);
+        Assert.AreEqual(226, (await client.StoreAsync("/work/readme.txt", Encoding.UTF8.GetBytes("new"))).Code);
+        Assert.AreEqual("new", Encoding.UTF8.GetString(source.GetFile("readme.txt")!), "after a STOR that was refused, the next file is written from its start");
+
+        // and any other command that comes after it forgets it
+        foreach (var between in new[] { "CWD /work", "SIZE /work/medium.bin", "NOOP", "NLST /work/nope" })
+        {
+            Assert.AreEqual(350, (await client.CommandAsync("REST 50000")).Code);
+            await client.CommandAsync(between);
+            CollectionAssert.AreEqual(Medium, await client.RetrieveAsync("/work/medium.bin"), $"{between} is no transfer the offset was for");
+        }
+
+        // TYPE and PASV, which this client sends before each RETR, only set the transfer up: the offset is still its own
+        Assert.AreEqual(350, (await client.CommandAsync("REST 50000")).Code);
+        CollectionAssert.AreEqual(Medium[50_000..], await client.RetrieveAsync("/work/medium.bin"), "REST, then TYPE and PASV, then RETR");
+        CollectionAssert.AreEqual(Medium, await client.RetrieveAsync("/work/medium.bin"), "and the transfer after that one is whole");
+    }
+
     /// <summary>ABOR during a download: the transfer stops with 426 then 226 and the session carries on.</summary>
     [TestMethod]
     [Timeout(60000)]

@@ -259,6 +259,18 @@ internal sealed class FtpSession
         var verb = (space < 0 ? line : line[..space]).ToUpperInvariant();
         var arg = space < 0 ? "" : line[(space + 1)..].Trim();
         _logger.LogDebug("ftp {Peer} > {Verb} {Arg}", _peer, verb, verb == "PASS" ? "****" : arg);
+
+        // a REST offset is for the transfer that follows it and for nothing else: RETR or STOR takes it, whether or not it
+        // then begins, the commands that only set a transfer up (RFC 959's transfer parameters, and EPSV and EPRT) leave it
+        // be, and any other command forgets it. It outlived a transfer that was refused before it began, and the next file
+        // came or went from part way in (the review of 21-Nov-2026, N16)
+        var restart = 0L;
+        if (verb is not ("TYPE" or "MODE" or "STRU" or "PASV" or "EPSV" or "PORT" or "EPRT"))
+        {
+            restart = _restart;
+            _restart = 0;
+        }
+
         try
         {
             if (_login is null && verb is not ("USER" or "PASS" or "QUIT" or "FEAT" or "SYST" or "NOOP" or "OPTS" or "AUTH" or "HELP" or "CLNT"))
@@ -366,13 +378,13 @@ internal sealed class FtpSession
                     await MdtmAsync(arg, ct).ConfigureAwait(false);
                     break;
                 case "RETR":
-                    await RetrAsync(arg, ct).ConfigureAwait(false);
+                    await RetrAsync(arg, restart, ct).ConfigureAwait(false);
                     break;
                 case "STOR":
-                    await StorAsync(arg, append: false, ct).ConfigureAwait(false);
+                    await StorAsync(arg, append: false, restart, ct).ConfigureAwait(false);
                     break;
                 case "APPE":
-                    await StorAsync(arg, append: true, ct).ConfigureAwait(false);
+                    await StorAsync(arg, append: true, restart, ct).ConfigureAwait(false);
                     break;
                 case "ABOR":
                     await ReplyAsync(226, "No transfer to abort", ct).ConfigureAwait(false);
@@ -822,10 +834,6 @@ internal sealed class FtpSession
             var (code, text) = Translate(ex);
             await ReplyAsync(code == 550 ? 451 : code, text, ct).ConfigureAwait(false);
         }
-        finally
-        {
-            _restart = 0;
-        }
     }
 
     // ---- listings ------------------------------------------------------------------------------------------
@@ -965,7 +973,7 @@ internal sealed class FtpSession
 
     // ---- transfers -----------------------------------------------------------------------------------------
 
-    private async Task RetrAsync(string arg, CancellationToken ct)
+    private async Task RetrAsync(string arg, long offset, CancellationToken ct)
     {
         var target = NotRoot(Resolve(arg), "files are");
         var entry = await target.Fs.StatAsync(target.Path, ct).ConfigureAwait(false) ?? throw new FtpReplyException(550, "No such file or directory");
@@ -974,7 +982,6 @@ internal sealed class FtpSession
             throw new FtpReplyException(550, "Is a directory");
         }
 
-        var offset = _restart;
         var file = await target.Fs.OpenAsync(target.Path, VfsOpenMode.Read, ct).ConfigureAwait(false);
         try
         {
@@ -1010,7 +1017,7 @@ internal sealed class FtpSession
         }
     }
 
-    private async Task StorAsync(string arg, bool append, CancellationToken ct)
+    private async Task StorAsync(string arg, bool append, long offset, CancellationToken ct)
     {
         var target = NotRoot(Resolve(arg), "files go");
         if (!target.Fs.CanWrite(target.Path))
@@ -1018,7 +1025,6 @@ internal sealed class FtpSession
             throw new FtpReplyException(550, "Permission denied: the collection, the source or the mount is read-only");
         }
 
-        var offset = _restart;
         var mode = append ? VfsOpenMode.OpenOrCreate : offset > 0 ? VfsOpenMode.ReadWrite : VfsOpenMode.Create;
         var file = await target.Fs.OpenAsync(target.Path, mode, ct).ConfigureAwait(false);
         var closed = false;
