@@ -316,6 +316,29 @@ public class HttpMountTests
         Assert.AreEqual("/work/a%20b/c%23.txt", HttpServer.UrlFor("work", "a b/c#.txt", false));
     }
 
+    /// <summary>
+    /// An address other machines reach is warned of, as the WebDAV, FTP and SMB mounts warn of one that asks no password.
+    /// HTTP has no password to ask, and said nothing (the review of 21-Nov-2026, R14b).
+    /// </summary>
+    [TestMethod]
+    public void AnAddressTheLanReachesIsWarnedOf()
+    {
+        var provider = new HttpMountProvider();
+        foreach (var address in new[] { "0.0.0.0", "*", "::", "192.168.0.31" })
+        {
+            var warning = provider.Validate(new HttpMountSettings { BindAddress = address }).SingleOrDefault();
+            Assert.IsNotNull(warning, $"'{address}' serves other machines");
+            Assert.IsFalse(warning.IsError, "a warning: the mount is saved and runs");
+            Assert.AreEqual(nameof(HttpMountSettings.BindAddress), warning.Property, "the form shows a warning under the field it names, and one that names none nowhere");
+            StringAssert.Contains(warning.Message, "no password");
+        }
+
+        foreach (var address in new[] { "127.0.0.1", "localhost", "::1", "" })
+        {
+            Assert.AreEqual(0, provider.Validate(new HttpMountSettings { BindAddress = address }).Count(), $"'{address}' serves this machine only");
+        }
+    }
+
     private sealed record Info(string Name) : ICollectionInfo
     {
         public Guid Id { get; } = Guid.NewGuid();

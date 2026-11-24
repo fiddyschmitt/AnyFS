@@ -49,7 +49,17 @@ public sealed class HttpMountProvider : IMountProviderPlugin, IValidatable
     public IEnumerable<ValidationMessage> Validate(object settings)
     {
         var s = (HttpMountSettings)settings;
-        return BindAddress.Validate(s.BindAddress, s.Port, nameof(HttpMountSettings.BindAddress), nameof(HttpMountSettings.Port));
+        foreach (var message in BindAddress.Validate(s.BindAddress, s.Port, nameof(HttpMountSettings.BindAddress), nameof(HttpMountSettings.Port)))
+        {
+            yield return message;
+        }
+
+        // the warning the WebDAV, FTP and SMB mounts give for an address other machines reach with no password asked. HTTP
+        // has none to ask, so the address alone brings it on; there was no warning (the review of 21-Nov-2026, R14b)
+        if (BindAddress.TryParse(s.BindAddress, out var address) && BindAddress.IsLanExposed(address))
+        {
+            yield return new ValidationMessage("This serves the LAN, and HTTP has no password: anyone on the network can read the collection.", nameof(HttpMountSettings.BindAddress), IsError: false);
+        }
     }
 
     public static bool TryParseBindAddress(string? text, out IPAddress address) => BindAddress.TryParse(text, out address);
