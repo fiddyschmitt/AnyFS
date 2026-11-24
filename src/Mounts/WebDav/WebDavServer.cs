@@ -802,7 +802,8 @@ internal sealed partial class WebDavServer : IAsyncDisposable
     private static async Task CopyFileAsync(IVirtualFileSystem fs, string from, string to, CancellationToken ct)
     {
         await using var source = await fs.OpenAsync(from, VfsOpenMode.Read, ct).ConfigureAwait(false);
-        await using var target = await fs.OpenAsync(to, VfsOpenMode.Create, ct).ConfigureAwait(false);
+        var target = await fs.OpenAsync(to, VfsOpenMode.Create, ct).ConfigureAwait(false);
+        var whole = false;
         var buffer = ArrayPool<byte>.Shared.Rent(256 * 1024);
         try
         {
@@ -820,10 +821,21 @@ internal sealed partial class WebDavServer : IAsyncDisposable
             }
 
             await target.FlushAsync(ct).ConfigureAwait(false);
+            whole = true;
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
+            if (whole)
+            {
+                await target.DisposeAsync().ConfigureAwait(false);
+            }
+            else
+            {
+                // a copy that failed part way is no file, as a PUT whose body broke off is none: closed, the part that was
+                // read would have been kept as the target (the review of 21-Nov-2026, N16)
+                await target.AbandonAsync().ConfigureAwait(false);
+            }
         }
     }
 

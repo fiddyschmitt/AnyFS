@@ -121,6 +121,29 @@ public class WebDavMountTests
         }
     }
 
+    /// <summary>
+    /// A COPY whose read fails part way is no file either. The part that was read was closed as the target, which a source
+    /// that takes a file at its close put in place of the one that was there: a PUT was given up for that, and a COPY was
+    /// not (the review of 21-Nov-2026, N16). One that is read whole is closed as before.
+    /// </summary>
+    [TestMethod]
+    public async Task ACopyThatFailsPartWayIsGivenUpNotKeptAsFarAsItCame()
+    {
+        ClosesTold told = null!;
+        var source = Tree().AddFile("big.bin", new byte[1 << 20]);
+        var (_, _, client) = await StartAsync(source, wrap: vfs => told = new ClosesTold(new Faulty(vfs, (call, path, offset)
+            => call == "read" && path == "big.bin" && offset >= 200_000 ? VfsException.Unavailable("the source stopped answering") : null)));
+
+        var broken = await client.SendAsync(Request("COPY", "work/big.bin", null, ("Destination", "/work/part.bin")));
+        Assert.AreEqual(HttpStatusCode.ServiceUnavailable, broken.StatusCode, await broken.Content.ReadAsStringAsync());
+        CollectionAssert.AreEqual(new[] { "given up" }, told.Of("part.bin"), string.Join(", ", told.Of("part.bin")));
+
+        var whole = await client.SendAsync(Request("COPY", "work/medium.bin", null, ("Destination", "/work/whole.bin")));
+        Assert.AreEqual(HttpStatusCode.Created, whole.StatusCode, await whole.Content.ReadAsStringAsync());
+        CollectionAssert.AreEqual(new[] { "closed" }, told.Of("whole.bin"), string.Join(", ", told.Of("whole.bin")));
+        CollectionAssert.AreEqual(Medium, source.GetFile("whole.bin"));
+    }
+
     private static HttpRequestMessage Request(string method, string url, string? body = null, params (string Name, string Value)[] headers)
     {
         var request = new HttpRequestMessage(new HttpMethod(method), url);
