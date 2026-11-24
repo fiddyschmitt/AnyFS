@@ -1,4 +1,6 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Text.Json.Nodes;
 using AnyFS.Core.Model;
@@ -16,9 +18,10 @@ namespace AnyFS.Core.Runtime;
 /// <summary>
 /// The whole thing in process: settings, secrets, stats, plugin registry, one runner per source, one
 /// runner per collection. <c>anyfs serve</c> and the window both drive this. Everything can be changed
-/// while it runs (the Add/Edit/Delete/Enabled controls of the window): each change is applied to the
-/// running pieces and persisted to the settings files in one go, serialised so two changes never
-/// interleave.
+/// while it runs (the Add/Edit/Delete/Enabled controls of the window): each change is persisted to the
+/// settings files and made to the lists of runners in one go, serialised so two changes never
+/// interleave. What a change stops and starts follows in the turn of the source or the collection it
+/// is about (<see cref="Lane"/>), in the order of the changes, and holds up no change to another.
 /// </summary>
 public sealed class AnyFsEngine : IAsyncDisposable
 {
@@ -37,12 +40,18 @@ public sealed class AnyFsEngine : IAsyncDisposable
     private async Task EnterAsync() => await _mutations.WaitAsync().ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Dictionary<Guid, SourceHandle> _handles = [];
+
+    // one for each source and each collection, by its id: what a change stops and starts goes through them (see InTurn)
+    private readonly ConcurrentDictionary<Guid, Lane> _lanes = new();
+
+    // what the change now being made has asked for in turn, for it to wait for once it has let the lock go
+    private List<(string What, Task Done)>? _following;
     private SourceRunner[] _sources = [];
     private CollectionRunner[] _collections = [];
     private SecretStore? _secrets;
     private IReadOnlyCollection<string>? _filter;
-    private bool _started;
-    private bool _stopped;
+    private volatile bool _started;
+    private volatile bool _stopped;
 
     // status.json writes that failed in a row (every 2 s): a warning once they have for half a minute
     private int _statusFailures;
@@ -131,17 +140,18 @@ public sealed class AnyFsEngine : IAsyncDisposable
         // them and kept its runners, and ended with two runners or none. The gate is let go before the collections
         // start, which may wait long for a source; they are the ones made here, not whatever is there by then.
         await _mutations.WaitAsync(ct).ConfigureAwait(false);
-        CollectionRunner[] starting;
+        Task[] starting;
         try
         {
-            starting = Begin(collectionNames);
+            // each collection's start in its own turn, so that what a change asks of the collection meanwhile comes after it
+            starting = Begin(collectionNames).Select(c => LaneOf(c.Id).Then(() => c.StartAsync(ct))).ToArray();
         }
         finally
         {
             _mutations.Release();
         }
 
-        await Task.WhenAll(starting.Select(c => c.StartAsync(ct))).ConfigureAwait(false);
+        await Task.WhenAll(starting).ConfigureAwait(false);
         OnChanged();
     }
 
@@ -183,12 +193,28 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
     public async Task StopAsync()
     {
-        _stopped = true;
+        // with the gate a change takes: no change is part way through its lists while they are read here, and one that
+        // comes after finds the engine stopped
+        IReadOnlyList<CollectionRunner> collections;
+        IReadOnlyList<SourceRunner> sources;
+        await _mutations.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            _stopped = true;
+            collections = Collections;
+            sources = Sources;
+        }
+        finally
+        {
+            _mutations.Release();
+        }
+
         await _shutdown.CancelAsync().ConfigureAwait(false);
 
         // the mounts first, so nothing is asked of a source while it stops; then every source at once: one after another, a
-        // window closing gave its 15 s to the first, and the others were cut off before they had written what they kept
-        await Task.WhenAll(Collections.Select(async collection =>
+        // window closing gave its 15 s to the first, and the others were cut off before they had written what they kept.
+        // Each in its own turn: after what a change still has going on for it, which starts nothing more now
+        await Task.WhenAll(collections.Select(collection => LaneOf(collection.Id).Then(async () =>
         {
             try
             {
@@ -198,9 +224,9 @@ public sealed class AnyFsEngine : IAsyncDisposable
             {
                 _logger.LogWarning(ex, "collection {Collection}: stop failed", collection.Name);
             }
-        })).ConfigureAwait(false);
+        }))).ConfigureAwait(false);
 
-        await Task.WhenAll(Sources.Select(async source =>
+        await Task.WhenAll(sources.Select(source => LaneOf(source.Definition.Id).Then(async () =>
         {
             try
             {
@@ -210,7 +236,11 @@ public sealed class AnyFsEngine : IAsyncDisposable
             {
                 _logger.LogWarning(ex, "source {Source}: stop failed", source.Definition.Name);
             }
-        })).ConfigureAwait(false);
+        }))).ConfigureAwait(false);
+
+        // and what a change left going on for something no longer in the lists: a source deleted a moment ago still stops,
+        // and keeps what it keeps
+        await TurnsEndedAsync().ConfigureAwait(false);
 
         FlushStats();
         try
@@ -420,7 +450,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
         try
         {
-            return PluginSettingsBinder.Materialise(plugin.SettingsType, definition.Settings, name => Secrets.Get(definition.Id, name));
+            return Materialise(plugin.SettingsType, definition.Id, definition.Settings);
         }
         catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
         {
@@ -438,7 +468,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
         try
         {
-            return PluginSettingsBinder.Materialise(provider.SettingsType, definition.Settings, name => Secrets.Get(definition.Id, name));
+            return Materialise(provider.SettingsType, definition.Id, definition.Settings);
         }
         catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
         {
@@ -446,226 +476,465 @@ public sealed class AnyFsEngine : IAsyncDisposable
         }
     }
 
+    // ----- a plugin's settings and the secrets among them, the same for a source and a mount: its owner is either's id -----
+
+    /// <summary>A plugin's settings object from its JSON, the secrets filled in from the secret store.</summary>
+    private object Materialise([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)] Type settingsType, Guid owner, JsonObject? json)
+        => PluginSettingsBinder.Materialise(settingsType, json, name => Secrets.Get(owner, name));
+
+    /// <summary>The JSON of a settings object, its secrets put in the secret store and not in the JSON; whether one of them differs from what the store held.</summary>
+    private JsonObject Serialise([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)] Type settingsType, Guid owner, object settings, out bool secretsChanged)
+    {
+        var changed = false;
+        var json = PluginSettingsBinder.Serialise(settingsType, settings, (property, value) =>
+        {
+            changed |= !string.Equals(Secrets.Get(owner, property), string.IsNullOrEmpty(value) ? null : value, StringComparison.Ordinal);
+            Secrets.Set(owner, property, value);
+        });
+        secretsChanged = changed;
+        return json;
+    }
+
+    /// <summary>
+    /// JSON that came with secrets in it (a file written by hand, an import) without them, and the secrets in the secret
+    /// store. JSON the plugin cannot read is left as it is: the runner then says "Settings could not be read".
+    /// </summary>
+    private JsonObject? Rehome([DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)] Type settingsType, Guid owner, JsonObject? json)
+    {
+        if (json is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var settings = PluginSettingsBinder.Materialise(settingsType, json);
+            return PluginSettingsBinder.Serialise(settingsType, settings, (property, value) =>
+            {
+                if (!string.IsNullOrEmpty(value))
+                {
+                    Secrets.Set(owner, property, value);
+                }
+            });
+        }
+        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
+        {
+            return json;
+        }
+    }
+
+    /// <summary>Removes what the secret store holds for a source or a mount. The store is not made, nor its file, only to find nothing in it.</summary>
+    private void ForgetSecrets(Guid owner)
+    {
+        if (_secrets is not null || File.Exists(Paths.SecretsFile))
+        {
+            Secrets.RemoveAll(owner);
+        }
+    }
+
+    // ----- changes, one at a time; what they stop and start, in turn -----
+
+    /// <summary>
+    /// How long a change waits for what it stops and starts (a source disposed, a mount unmounted) before it comes back
+    /// with that still going on. The change is made by then, and what is left of it follows in its own time: a dialog is
+    /// busy for this long at most.
+    /// </summary>
+    public TimeSpan ChangePatience { get; set; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// One change: <paramref name="change"/> runs with the mutations' lock held and off the caller's thread, and does what
+    /// is quick, the settings and the lists of runners. What may take long, a source or a mount stopped or started, it asks
+    /// for with <see cref="InTurn"/>, and that is waited for with the lock let go, for <see cref="ChangePatience"/> at
+    /// most. The lock was held across the stops (the review of 21-Nov-2026, R7a): while one source took its time to stop,
+    /// and for ever when it never did, every other Add, Edit, Enable and Retry waited, its dialog busy.
+    /// </summary>
+    private async Task<T> MutateAsync<T>(Func<T> change)
+    {
+        List<(string What, Task Done)> following = [];
+        T result;
+        await EnterAsync().ConfigureAwait(false);
+        try
+        {
+            ThrowIfStopped();
+            _following = following;
+            result = change();
+        }
+        catch
+        {
+            // what it had asked for goes on all the same, and no one waits for it: a failure there is the log's
+            foreach (var (what, done) in following)
+            {
+                Watch(what, done);
+            }
+
+            throw;
+        }
+        finally
+        {
+            _following = null;
+            _mutations.Release();
+        }
+
+        await FollowAsync(following).ConfigureAwait(false);
+        return result;
+    }
+
+    private Task MutateAsync(Action change) => MutateAsync(() =>
+    {
+        change();
+        return true;
+    });
+
+    private Lane LaneOf(Guid id) => _lanes.GetOrAdd(id, static _ => new Lane());
+
+    /// <summary>Ends when everything asked for in turn so far has ended, however it ended.</summary>
+    internal async Task TurnsEndedAsync()
+        => await Task.WhenAll(_lanes.Values.Select(lane => lane.Last)).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+
+    /// <summary>
+    /// Asks for <paramref name="work"/> in the turn of a source or a collection, by its id: after whatever was asked of it
+    /// before, and never under the mutations' lock. Called with the lock held, so the turns are in the order of the
+    /// changes. What the work does is decided here, by the change; when its turn comes it stops and starts what it was
+    /// given, and starts nothing that has left the lists since or once the engine stops.
+    /// </summary>
+    private void InTurn(Guid id, string what, Func<Task> work)
+    {
+        var done = LaneOf(id).Then(async () =>
+        {
+            try
+            {
+                await work().ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (_stopped)
+            {
+                // the engine stopped while it started something
+            }
+            finally
+            {
+                OnChanged();
+            }
+        });
+        if (_following is { } following)
+        {
+            following.Add((what, done));
+        }
+        else
+        {
+            Watch(what, done);
+        }
+    }
+
+    /// <summary>Waits, with the lock let go, for what a change asked for in turn: until it is done or <see cref="ChangePatience"/> has passed.</summary>
+    private async Task FollowAsync(List<(string What, Task Done)> following)
+    {
+        if (following.Count == 0)
+        {
+            return;
+        }
+
+        var all = Task.WhenAll(following.Select(f => f.Done));
+        try
+        {
+            await all.WaitAsync(ChangePatience, _time).ConfigureAwait(false);
+        }
+        catch (TimeoutException) when (!all.IsCompleted)
+        {
+            foreach (var (what, done) in following.Where(f => !f.Done.IsCompleted))
+            {
+                _logger.LogWarning("{What} is taking longer than {Seconds:0.#} s over a change. The change is made and kept; what is left of it follows when that is done, and nothing else waits for it", what, ChangePatience.TotalSeconds);
+                Watch(what, done);
+            }
+        }
+    }
+
+    /// <summary>For work no one waits for: what it throws is a warning in the log.</summary>
+    private void Watch(string what, Task done)
+        => _ = done.ContinueWith(
+            t => _logger.LogWarning(t.Exception!.GetBaseException(), "{What}: what a change asked of it failed", what),
+            CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+
+    private static string Describe(SourceRunner runner) => $"source '{runner.Definition.Name}'";
+
+    private static string Describe(CollectionRunner runner) => $"collection '{runner.Name}'";
+
+    /// <summary>
+    /// Starts a source's runner, in the source's turn, when something started needs it (every enabled source without a
+    /// filter). Whether it is needed is decided now, with the lock held.
+    /// </summary>
+    private void StartInTurn(SourceRunner runner)
+    {
+        var needed = IsNeeded(runner.Definition.Id);
+        InTurn(runner.Definition.Id, Describe(runner), () =>
+        {
+            Start(runner, needed);
+            return Task.CompletedTask;
+        });
+    }
+
+    /// <summary>Stops a source's runner in the source's turn.</summary>
+    private void StopInTurn(SourceRunner runner) => InTurn(runner.Definition.Id, Describe(runner), runner.StopAsync);
+
+    /// <summary>Stops a source's runner and starts it again, as Retry does and a collection enabled over a failed source.</summary>
+    private void RestartInTurn(SourceRunner runner)
+    {
+        var needed = IsNeeded(runner.Definition.Id);
+        InTurn(runner.Definition.Id, Describe(runner), async () =>
+        {
+            await runner.StopAsync().ConfigureAwait(false);
+            Start(runner, needed);
+        });
+    }
+
+    /// <summary>
+    /// Puts a runner made from the definition as it is now in a running one's place, at once. In the source's turn the old
+    /// one is stopped, and the new one is started when that has stopped and not before: both work through one handle, and
+    /// in one state folder.
+    /// </summary>
+    private void ReplaceInTurn(SourceRunner runner, SourceDefinition definition)
+    {
+        var replacement = CreateSourceRunner(definition);
+        Volatile.Write(ref _sources, Sources.Select(s => ReferenceEquals(s, runner) ? replacement : s).ToArray());
+        var needed = IsNeeded(definition.Id);
+        InTurn(definition.Id, Describe(replacement), async () =>
+        {
+            await runner.StopAsync().ConfigureAwait(false);
+            Start(replacement, needed);
+        });
+    }
+
+    /// <summary>A source's turn has come to start it: not when it has left the list since (replaced, deleted), nor once the engine stops.</summary>
+    private void Start(SourceRunner runner, bool needed)
+    {
+        if (_stopped || !Sources.Contains(runner))
+        {
+            return;
+        }
+
+        if (!runner.Definition.Enabled)
+        {
+            runner.Handle.Status = ComponentStatus.DisabledStatus;
+        }
+        else if (needed)
+        {
+            runner.Start();
+        }
+        else
+        {
+            runner.Handle.Status = new ComponentStatus(ComponentState.Disabled, "Not in a started collection");
+        }
+    }
+
+    /// <summary>Starts a collection, in its turn: its mounts, when a source is usable or the grace has passed.</summary>
+    private void StartInTurn(CollectionRunner runner)
+        => InTurn(runner.Id, Describe(runner), async () =>
+        {
+            if (!_stopped && Collections.Contains(runner))
+            {
+                await runner.StartAsync(_shutdown.Token).ConfigureAwait(false);
+            }
+        });
+
+    /// <summary>Starts one mount in its collection's turn: not when it or the collection has left the lists since, nor once the engine stops.</summary>
+    private Task StartAsync(CollectionRunner runner, MountRunner mount)
+        => _stopped || !Collections.Contains(runner) || !runner.Mounts.Contains(mount)
+            ? Task.CompletedTask
+            : runner.StartMountAsync(mount, _shutdown.Token);
+
+    /// <summary>
+    /// Puts a runner made from the definition as it is now in a mount's place, at once. In the collection's turn the old
+    /// one is stopped and the new one started when that has stopped: both would hold one port, drive or folder.
+    /// </summary>
+    private void ReplaceInTurn(CollectionRunner runner, MountRunner old, MountDefinition definition)
+    {
+        var replacement = CreateMountRunner(definition, runner);
+        if (old.Mount is not null)
+        {
+            replacement.TakesOver();
+        }
+
+        runner.ReplaceMount(old, replacement);
+        InTurn(runner.Id, $"mount '{definition.Name}' of '{runner.Name}'", async () =>
+        {
+            await old.StopAsync().ConfigureAwait(false);
+            await StartAsync(runner, replacement).ConfigureAwait(false);
+        });
+    }
+
     // ----- sources -----
 
     /// <summary>Defines a source (sources are global, spec 9.4) and starts it. Secrets go to the secret store, never to sources.json.</summary>
     /// <param name="silenceLimitSeconds">The source's <see cref="SourceDefinition.SilenceLimitSeconds"/>; null for the default.</param>
-    public async Task<SourceDefinition> AddSourceAsync(string name, string typeId, bool enabled, bool countFilesOnStart, object settings, int? silenceLimitSeconds = null)
+    public Task<SourceDefinition> AddSourceAsync(string name, string typeId, bool enabled, bool countFilesOnStart, object settings, int? silenceLimitSeconds = null) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        name = RequireName(name, "A source");
+        RequireUniqueSourceName(name, null);
+        var plugin = Registry.FindSource(typeId) ?? throw new ArgumentException($"There is no source type '{typeId}'.");
+        var definition = new SourceDefinition { Name = name, Type = plugin.TypeId, Enabled = enabled, CountFilesOnStart = countFilesOnStart };
+        if (silenceLimitSeconds is { } silence)
         {
-            ThrowIfStopped();
-            name = RequireName(name, "A source");
-            RequireUniqueSourceName(name, null);
-            var plugin = Registry.FindSource(typeId) ?? throw new ArgumentException($"There is no source type '{typeId}'.");
-            var definition = new SourceDefinition { Name = name, Type = plugin.TypeId, Enabled = enabled, CountFilesOnStart = countFilesOnStart };
-            if (silenceLimitSeconds is { } silence)
-            {
-                definition.SilenceLimitSeconds = Math.Clamp(silence, 0, SourceDefinition.MostSilenceLimitSeconds);
-            }
-
-            plugin.NormaliseSettings(settings);
-            definition.Settings = PluginSettingsBinder.Serialise(plugin.SettingsType, settings, (property, value) => Secrets.Set(definition.Id, property, value));
-            Settings.Sources.Add(definition);
-            Settings.SaveSources();
-
-            if (_started)
-            {
-                var runner = CreateSourceRunner(definition);
-                Volatile.Write(ref _sources, [.. Sources, runner]);
-                StartIfNeeded(runner);
-            }
-
-            _logger.LogInformation("source {Source} ({Type}) added", name, plugin.TypeId);
-            OnChanged();
-            return definition;
+            definition.SilenceLimitSeconds = Math.Clamp(silence, 0, SourceDefinition.MostSilenceLimitSeconds);
         }
-        finally
+
+        plugin.NormaliseSettings(settings);
+        definition.Settings = Serialise(plugin.SettingsType, definition.Id, settings, out _);
+        Settings.Sources.Add(definition);
+        Settings.SaveSources();
+
+        if (_started)
         {
-            _mutations.Release();
+            var runner = CreateSourceRunner(definition);
+            Volatile.Write(ref _sources, [.. Sources, runner]);
+            StartInTurn(runner);
         }
-    }
+
+        _logger.LogInformation("source {Source} ({Type}) added", name, plugin.TypeId);
+        OnChanged();
+        return definition;
+    });
 
     /// <summary>Edits a source wherever it's used; it restarts when its settings changed (spec 11.1).</summary>
     /// <param name="silenceLimitSeconds">The source's <see cref="SourceDefinition.SilenceLimitSeconds"/>; null leaves it as it is. It takes effect at the next call, with no restart.</param>
-    public async Task UpdateSourceAsync(Guid id, string name, bool enabled, bool countFilesOnStart, object settings, int? silenceLimitSeconds = null)
+    public Task UpdateSourceAsync(Guid id, string name, bool enabled, bool countFilesOnStart, object settings, int? silenceLimitSeconds = null) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        var definition = Settings.FindSource(id) ?? throw new ArgumentException("That source no longer exists.");
+        name = RequireName(name, "A source");
+        RequireUniqueSourceName(name, id);
+        var plugin = Registry.FindSource(definition.Type) ?? throw new ArgumentException($"The source type '{definition.Type}' is not available, so its settings can't be edited.");
+
+        plugin.NormaliseSettings(settings);
+        var json = Serialise(plugin.SettingsType, id, settings, out var secretsChanged);
+        var settingsChanged = secretsChanged || !JsonNode.DeepEquals(definition.Settings, json);
+        var enabledChanged = definition.Enabled != enabled;
+        var countChanged = definition.CountFilesOnStart != countFilesOnStart;
+        var renamed = !definition.Name.Equals(name, StringComparison.Ordinal);
+
+        definition.Name = name;
+        definition.Enabled = enabled;
+        definition.CountFilesOnStart = countFilesOnStart;
+        if (silenceLimitSeconds is { } silence)
         {
-            ThrowIfStopped();
-            var definition = Settings.FindSource(id) ?? throw new ArgumentException("That source no longer exists.");
-            name = RequireName(name, "A source");
-            RequireUniqueSourceName(name, id);
-            var plugin = Registry.FindSource(definition.Type) ?? throw new ArgumentException($"The source type '{definition.Type}' is not available, so its settings can't be edited.");
-
-            var secretsChanged = false;
-            plugin.NormaliseSettings(settings);
-            var json = PluginSettingsBinder.Serialise(plugin.SettingsType, settings, (property, value) =>
-            {
-                secretsChanged |= !string.Equals(Secrets.Get(id, property), string.IsNullOrEmpty(value) ? null : value, StringComparison.Ordinal);
-                Secrets.Set(id, property, value);
-            });
-            var settingsChanged = secretsChanged || !JsonNode.DeepEquals(definition.Settings, json);
-            var enabledChanged = definition.Enabled != enabled;
-            var countChanged = definition.CountFilesOnStart != countFilesOnStart;
-            var renamed = !definition.Name.Equals(name, StringComparison.Ordinal);
-
-            definition.Name = name;
-            definition.Enabled = enabled;
-            definition.CountFilesOnStart = countFilesOnStart;
-            if (silenceLimitSeconds is { } silence)
-            {
-                definition.SilenceLimitSeconds = Math.Clamp(silence, 0, SourceDefinition.MostSilenceLimitSeconds);
-            }
-
-            definition.Settings = json;
-            Settings.SaveSources();
-
-            if (_started && FindSourceRunner(id) is { } runner)
-            {
-                runner.Handle.Name = name;
-                if (settingsChanged || countChanged || (runner.Plugin is null && plugin is not null))
-                {
-                    await runner.StopAsync().ConfigureAwait(false);
-                    var replacement = CreateSourceRunner(definition);
-                    Volatile.Write(ref _sources, Sources.Select(s => ReferenceEquals(s, runner) ? replacement : s).ToArray());
-                    StartIfNeeded(replacement);
-                }
-                else if (enabledChanged)
-                {
-                    if (enabled)
-                    {
-                        StartIfNeeded(runner);
-                    }
-                    else
-                    {
-                        await runner.StopAsync().ConfigureAwait(false);
-                    }
-                }
-
-                if (enabledChanged || renamed)
-                {
-                    RefreshCollectionsUsing(id);
-                }
-            }
-
-            _logger.LogInformation("source {Source} updated ({What})", name, settingsChanged ? "settings changed, restarted" : enabledChanged ? (enabled ? "enabled" : "disabled") : "no restart needed");
-            OnChanged();
+            definition.SilenceLimitSeconds = Math.Clamp(silence, 0, SourceDefinition.MostSilenceLimitSeconds);
         }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
 
-    /// <summary>The Enabled checkbox: a disabled source is absent from every tree; enabling starts it at once (spec 4.1, 6.4).</summary>
-    public async Task SetSourceEnabledAsync(Guid id, bool enabled)
-    {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        definition.Settings = json;
+        Settings.SaveSources();
+
+        if (_started && FindSourceRunner(id) is { } runner)
         {
-            ThrowIfStopped();
-            var definition = Settings.FindSource(id) ?? throw new ArgumentException("That source no longer exists.");
-            if (definition.Enabled == enabled)
+            runner.Handle.Name = name;
+            if (settingsChanged || countChanged || (runner.Plugin is null && plugin is not null))
             {
-                return;
+                ReplaceInTurn(runner, definition);
             }
-
-            definition.Enabled = enabled;
-            Settings.SaveSources();
-            if (_started && FindSourceRunner(id) is { } runner)
+            else if (enabledChanged)
             {
                 if (enabled)
                 {
-                    StartIfNeeded(runner);
+                    StartInTurn(runner);
                 }
                 else
                 {
-                    await runner.StopAsync().ConfigureAwait(false);
+                    StopInTurn(runner);
                 }
+            }
 
+            if (enabledChanged || renamed)
+            {
                 RefreshCollectionsUsing(id);
             }
+        }
 
-            OnChanged();
-        }
-        finally
+        _logger.LogInformation("source {Source} updated ({What})", name, settingsChanged ? "settings changed, restarted" : enabledChanged ? (enabled ? "enabled" : "disabled") : "no restart needed");
+        OnChanged();
+    });
+
+    /// <summary>The Enabled checkbox: a disabled source is absent from every tree; enabling starts it at once (spec 4.1, 6.4).</summary>
+    public Task SetSourceEnabledAsync(Guid id, bool enabled) => MutateAsync(() =>
+    {
+        var definition = Settings.FindSource(id) ?? throw new ArgumentException("That source no longer exists.");
+        if (definition.Enabled == enabled)
         {
-            _mutations.Release();
+            return;
         }
-    }
+
+        definition.Enabled = enabled;
+        Settings.SaveSources();
+        if (_started && FindSourceRunner(id) is { } runner)
+        {
+            if (enabled)
+            {
+                StartInTurn(runner);
+            }
+            else
+            {
+                StopInTurn(runner);
+            }
+
+            RefreshCollectionsUsing(id);
+        }
+
+        OnChanged();
+    });
 
     /// <summary>The Retry item: start again at once, forgetting the backoff.</summary>
-    public async Task RetrySourceAsync(Guid id)
+    public Task RetrySourceAsync(Guid id) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        if (FindSourceRunner(id) is { } runner && runner.Definition.Enabled)
         {
-            ThrowIfStopped();
-            if (FindSourceRunner(id) is { } runner && runner.Definition.Enabled)
-            {
-                await runner.StopAsync().ConfigureAwait(false);
-                StartIfNeeded(runner);
-                OnChanged();
-            }
-        }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
-
-    /// <summary>Deletes the definition everywhere: memberships, secrets, per-source state and cache.</summary>
-    public async Task DeleteSourceAsync(Guid id)
-    {
-        await EnterAsync().ConfigureAwait(false);
-        try
-        {
-            ThrowIfStopped();
-            var definition = Settings.FindSource(id) ?? throw new ArgumentException("That source no longer exists.");
-            if (FindSourceRunner(id) is { } runner)
-            {
-                await runner.StopAsync().ConfigureAwait(false);
-                Volatile.Write(ref _sources, Sources.Where(s => !ReferenceEquals(s, runner)).ToArray());
-            }
-
-            foreach (var collection in Collections)
-            {
-                collection.RemoveSource(id);
-            }
-
-            var touched = false;
-            foreach (var collection in Settings.Collections)
-            {
-                touched |= collection.Sources.RemoveAll(m => m.Id == id) > 0;
-            }
-
-            Settings.Sources.Remove(definition);
-            Settings.SaveSources();
-            if (touched)
-            {
-                Settings.SaveCollections();
-            }
-
-            _handles.Remove(id);
-            Operations.Forget(id);
-            if (_secrets is not null || File.Exists(Paths.SecretsFile))
-            {
-                Secrets.RemoveAll(id);
-            }
-
-            DeleteQuietly(Paths.SourceState(id));
-            DeleteQuietly(Paths.SourceCache(id));
-            _logger.LogInformation("source {Source} deleted", definition.Name);
+            RestartInTurn(runner);
             OnChanged();
         }
-        finally
+    });
+
+    /// <summary>
+    /// Deletes the definition everywhere: memberships, secrets, per-source state and cache. The definition goes at once;
+    /// what the source kept goes when it has stopped, with what it kept as it stopped.
+    /// </summary>
+    public Task DeleteSourceAsync(Guid id) => MutateAsync(() =>
+    {
+        var definition = Settings.FindSource(id) ?? throw new ArgumentException("That source no longer exists.");
+        var runner = FindSourceRunner(id);
+        if (runner is not null)
         {
-            _mutations.Release();
+            Volatile.Write(ref _sources, Sources.Where(s => !ReferenceEquals(s, runner)).ToArray());
         }
-    }
+
+        foreach (var collection in Collections)
+        {
+            collection.RemoveSource(id);
+        }
+
+        var touched = false;
+        foreach (var collection in Settings.Collections)
+        {
+            touched |= collection.Sources.RemoveAll(m => m.Id == id) > 0;
+        }
+
+        Settings.Sources.Remove(definition);
+        Settings.SaveSources();
+        if (touched)
+        {
+            Settings.SaveCollections();
+        }
+
+        _handles.Remove(id);
+        InTurn(id, $"source '{definition.Name}'", async () =>
+        {
+            if (runner is not null)
+            {
+                await runner.StopAsync().ConfigureAwait(false);
+            }
+
+            Operations.Forget(id);
+            ForgetSecrets(id);
+            DeleteQuietly(Paths.SourceState(id));
+            DeleteQuietly(Paths.SourceCache(id));
+        });
+        _logger.LogInformation("source {Source} deleted", definition.Name);
+        OnChanged();
+    });
 
     // ----- import and export (spec 9.5) -----
 
@@ -718,73 +987,54 @@ public sealed class AnyFsEngine : IAsyncDisposable
         return new ImportSummary(added, replaced, kept, copied);
     }
 
-    private async Task ImportNewAsync(SourceDefinition source, bool keepId)
+    private Task ImportNewAsync(SourceDefinition source, bool keepId) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        var definition = SourceTransfer.Copy(source);
+
+        // an id is not free while the source that had it still stops: its folders and secrets go when it has
+        if (!keepId || definition.Id == Guid.Empty || Settings.FindSource(definition.Id) is not null || (_lanes.TryGetValue(definition.Id, out var turn) && turn.Busy))
         {
-            ThrowIfStopped();
-            var definition = SourceTransfer.Copy(source);
-            if (!keepId || definition.Id == Guid.Empty || Settings.FindSource(definition.Id) is not null)
-            {
-                definition.Id = Guid.NewGuid();
-            }
-
-            definition.Name = UniqueSourceName(RequireName(definition.Name, "A source"), null);
-            definition.Settings = RehomeSecrets(definition);
-            Settings.Sources.Add(definition);
-            Settings.SaveSources();
-            if (_started)
-            {
-                var runner = CreateSourceRunner(definition);
-                Volatile.Write(ref _sources, [.. Sources, runner]);
-                StartIfNeeded(runner);
-            }
-
-            _logger.LogInformation("source {Source} ({Type}) imported", definition.Name, definition.Type);
-            OnChanged();
+            definition.Id = Guid.NewGuid();
         }
-        finally
+
+        definition.Name = UniqueSourceName(RequireName(definition.Name, "A source"), null);
+        definition.Settings = RehomeSecrets(definition);
+        Settings.Sources.Add(definition);
+        Settings.SaveSources();
+        if (_started)
         {
-            _mutations.Release();
+            var runner = CreateSourceRunner(definition);
+            Volatile.Write(ref _sources, [.. Sources, runner]);
+            StartInTurn(runner);
         }
-    }
 
-    private async Task ReplaceImportedAsync(Guid id, SourceDefinition source)
+        _logger.LogInformation("source {Source} ({Type}) imported", definition.Name, definition.Type);
+        OnChanged();
+    });
+
+    private Task ReplaceImportedAsync(Guid id, SourceDefinition source) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
-        {
-            ThrowIfStopped();
-            var definition = Settings.FindSource(id) ?? throw new ArgumentException("That source no longer exists.");
-            var incoming = SourceTransfer.Copy(source);
-            incoming.Id = id;
-            definition.Name = UniqueSourceName(RequireName(incoming.Name, "A source"), id);
-            definition.Type = incoming.Type;
-            definition.Enabled = incoming.Enabled;
-            definition.CountFilesOnStart = incoming.CountFilesOnStart;
-            definition.SilenceLimitSeconds = incoming.SilenceLimitSeconds;
-            definition.Settings = RehomeSecrets(incoming);
-            Settings.SaveSources();
+        var definition = Settings.FindSource(id) ?? throw new ArgumentException("That source no longer exists.");
+        var incoming = SourceTransfer.Copy(source);
+        incoming.Id = id;
+        definition.Name = UniqueSourceName(RequireName(incoming.Name, "A source"), id);
+        definition.Type = incoming.Type;
+        definition.Enabled = incoming.Enabled;
+        definition.CountFilesOnStart = incoming.CountFilesOnStart;
+        definition.SilenceLimitSeconds = incoming.SilenceLimitSeconds;
+        definition.Settings = RehomeSecrets(incoming);
+        Settings.SaveSources();
 
-            if (_started && FindSourceRunner(id) is { } runner)
-            {
-                runner.Handle.Name = definition.Name;
-                await runner.StopAsync().ConfigureAwait(false);
-                var replacement = CreateSourceRunner(definition);
-                Volatile.Write(ref _sources, Sources.Select(s => ReferenceEquals(s, runner) ? replacement : s).ToArray());
-                StartIfNeeded(replacement);
-                RefreshCollectionsUsing(id);
-            }
-
-            _logger.LogInformation("source {Source} replaced from an import", definition.Name);
-            OnChanged();
-        }
-        finally
+        if (_started && FindSourceRunner(id) is { } runner)
         {
-            _mutations.Release();
+            runner.Handle.Name = definition.Name;
+            ReplaceInTurn(runner, definition);
+            RefreshCollectionsUsing(id);
         }
-    }
+
+        _logger.LogInformation("source {Source} replaced from an import", definition.Name);
+        OnChanged();
+    });
 
     /// <summary>
     /// A secret written into sources.json or collections.json by hand, or by a script (the E2E lab's settings), moves
@@ -808,7 +1058,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
         {
             if (Registry.FindMountProvider(mount.Provider) is { } provider && HasSecretsInJson(provider.SettingsType, mount.Settings))
             {
-                mount.Settings = RehomeMountSecrets(provider, mount);
+                mount.Settings = Rehome(provider.SettingsType, mount.Id, mount.Settings);
                 mountsChanged++;
             }
         }
@@ -829,56 +1079,9 @@ public sealed class AnyFsEngine : IAsyncDisposable
     private static bool HasSecretsInJson([System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties)] Type settingsType, JsonObject? settings)
         => settings is not null && PluginSettingsBinder.Describe(settingsType).Any(p => p.IsSecret && (settings.ContainsKey(p.JsonName) || settings.ContainsKey(p.Name)));
 
-    private JsonObject? RehomeMountSecrets(IMountProviderPlugin provider, MountDefinition mount)
-    {
-        if (mount.Settings is null)
-        {
-            return null;
-        }
-
-        try
-        {
-            var settings = PluginSettingsBinder.Materialise(provider.SettingsType, mount.Settings);
-            return PluginSettingsBinder.Serialise(provider.SettingsType, settings, (property, value) =>
-            {
-                if (!string.IsNullOrEmpty(value))
-                {
-                    Secrets.Set(mount.Id, property, value);
-                }
-            });
-        }
-        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
-        {
-            return mount.Settings;
-        }
-    }
-
     /// <summary>A sources file normally carries no secrets; one that does (hand-written) has them moved to the secret store here.</summary>
     private JsonObject? RehomeSecrets(SourceDefinition definition)
-    {
-        var plugin = Registry.FindSource(definition.Type);
-        if (plugin is null || definition.Settings is null)
-        {
-            return definition.Settings;
-        }
-
-        try
-        {
-            var settings = PluginSettingsBinder.Materialise(plugin.SettingsType, definition.Settings);
-            return PluginSettingsBinder.Serialise(plugin.SettingsType, settings, (property, value) =>
-            {
-                if (!string.IsNullOrEmpty(value))
-                {
-                    Secrets.Set(definition.Id, property, value);
-                }
-            });
-        }
-        catch (Exception ex) when (ex is System.Text.Json.JsonException or InvalidOperationException or NotSupportedException)
-        {
-            // unreadable settings start the source with the runner's "Settings could not be read" instead
-            return definition.Settings;
-        }
-    }
+        => Registry.FindSource(definition.Type) is { } plugin ? Rehome(plugin.SettingsType, definition.Id, definition.Settings) : definition.Settings;
 
     private string UniqueSourceName(string name, Guid? except)
     {
@@ -893,396 +1096,291 @@ public sealed class AnyFsEngine : IAsyncDisposable
 
     // ----- collections -----
 
-    public async Task<CollectionDefinition> AddCollectionAsync(string name)
+    public Task<CollectionDefinition> AddCollectionAsync(string name) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        name = RequireCollectionName(name, null);
+        var definition = new CollectionDefinition { Name = name };
+        Settings.Collections.Add(definition);
+        Settings.SaveCollections();
+        if (_started && (_filter is null || _filter.Contains(name, StringComparer.OrdinalIgnoreCase)))
         {
-            ThrowIfStopped();
-            name = RequireCollectionName(name, null);
-            var definition = new CollectionDefinition { Name = name };
-            Settings.Collections.Add(definition);
-            Settings.SaveCollections();
-            if (_started && (_filter is null || _filter.Contains(name, StringComparer.OrdinalIgnoreCase)))
-            {
-                var runner = CreateCollectionRunner(definition);
-                Volatile.Write(ref _collections, [.. Collections, runner]);
-                await runner.StartAsync(_shutdown.Token).ConfigureAwait(false);
-            }
+            var runner = CreateCollectionRunner(definition);
+            Volatile.Write(ref _collections, [.. Collections, runner]);
+            StartInTurn(runner);
+        }
 
-            _logger.LogInformation("collection {Collection} added", name);
-            OnChanged();
-            return definition;
-        }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
+        _logger.LogInformation("collection {Collection} added", name);
+        OnChanged();
+        return definition;
+    });
 
     /// <summary>Renaming restarts the collection's mounts: the prefix, URL or export changes (spec 8.8).</summary>
-    public async Task RenameCollectionAsync(Guid id, string name)
+    public Task RenameCollectionAsync(Guid id, string name) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        var definition = FindCollectionDefinition(id);
+        name = RequireCollectionName(name, id);
+        if (definition.Name.Equals(name, StringComparison.Ordinal))
         {
-            ThrowIfStopped();
-            var definition = FindCollectionDefinition(id);
-            name = RequireCollectionName(name, id);
-            if (definition.Name.Equals(name, StringComparison.Ordinal))
-            {
-                return;
-            }
-
-            var old = definition.Name;
-            definition.Name = name;
-            Settings.SaveCollections();
-            Stats.RenameCollection(old, name);
-            if (FindCollectionRunner(id) is { } runner)
-            {
-                runner.Rename(name);
-                await runner.RestartMountsAsync(_shutdown.Token).ConfigureAwait(false);
-            }
-
-            _logger.LogInformation("collection {Old} renamed to {New}", old, name);
-            OnChanged();
+            return;
         }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
 
-    public async Task SetCollectionEnabledAsync(Guid id, bool enabled)
-    {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        var old = definition.Name;
+        definition.Name = name;
+        Settings.SaveCollections();
+        Stats.RenameCollection(old, name);
+        if (FindCollectionRunner(id) is { } runner)
         {
-            ThrowIfStopped();
-            var definition = FindCollectionDefinition(id);
-            if (definition.Enabled == enabled)
+            runner.Rename(name);
+            InTurn(id, Describe(runner), async () =>
             {
-                return;
-            }
-
-            definition.Enabled = enabled;
-            Settings.SaveCollections();
-            if (FindCollectionRunner(id) is { } runner)
-            {
-                if (enabled)
+                if (!_stopped && Collections.Contains(runner))
                 {
-                    foreach (var member in runner.Sources)
+                    await runner.RestartMountsAsync(_shutdown.Token).ConfigureAwait(false);
+                }
+            });
+        }
+
+        _logger.LogInformation("collection {Old} renamed to {New}", old, name);
+        OnChanged();
+    });
+
+    public Task SetCollectionEnabledAsync(Guid id, bool enabled) => MutateAsync(() =>
+    {
+        var definition = FindCollectionDefinition(id);
+        if (definition.Enabled == enabled)
+        {
+            return;
+        }
+
+        definition.Enabled = enabled;
+        Settings.SaveCollections();
+        if (FindCollectionRunner(id) is { } runner)
+        {
+            if (enabled)
+            {
+                foreach (var member in runner.Sources)
+                {
+                    if (FindSourceRunner(member.Handle.Id) is { } source)
                     {
-                        if (FindSourceRunner(member.Handle.Id) is { } source)
-                        {
-                            StartIfNeeded(source);
-                        }
+                        StartInTurn(source);
                     }
+                }
 
-                    await runner.StartAsync(_shutdown.Token).ConfigureAwait(false);
-                }
-                else
-                {
-                    await runner.StopAsync().ConfigureAwait(false);
-                }
+                StartInTurn(runner);
             }
-
-            OnChanged();
+            else
+            {
+                InTurn(id, Describe(runner), runner.StopAsync);
+            }
         }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
 
-    /// <summary>Deletes the collection and its mounts; its sources stay defined (the window asks about orphans, spec 9.4).</summary>
-    public async Task DeleteCollectionAsync(Guid id)
+        OnChanged();
+    });
+
+    /// <summary>
+    /// Deletes the collection and its mounts; its sources stay defined (the window asks about orphans, spec 9.4). The
+    /// collection goes at once; what its mounts kept goes when they have stopped.
+    /// </summary>
+    public Task DeleteCollectionAsync(Guid id) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        var definition = FindCollectionDefinition(id);
+        var runner = FindCollectionRunner(id);
+        if (runner is not null)
         {
-            ThrowIfStopped();
-            var definition = FindCollectionDefinition(id);
-            if (FindCollectionRunner(id) is { } runner)
+            Volatile.Write(ref _collections, Collections.Where(c => !ReferenceEquals(c, runner)).ToArray());
+        }
+
+        Settings.Collections.Remove(definition);
+        Settings.SaveCollections();
+        Stats.RemoveCollection(definition.Name);
+        var mounts = definition.Mounts.Select(m => m.Id).ToArray();
+        InTurn(id, $"collection '{definition.Name}'", async () =>
+        {
+            if (runner is not null)
             {
                 await runner.StopAsync().ConfigureAwait(false);
-                Volatile.Write(ref _collections, Collections.Where(c => !ReferenceEquals(c, runner)).ToArray());
             }
 
-            Settings.Collections.Remove(definition);
-            Settings.SaveCollections();
-            Stats.RemoveCollection(definition.Name);
-            foreach (var mount in definition.Mounts)
+            foreach (var mount in mounts)
             {
-                if (_secrets is not null || File.Exists(Paths.SecretsFile))
-                {
-                    Secrets.RemoveAll(mount.Id);
-                }
-
-                DeleteQuietly(Paths.MountState(mount.Id));
+                ForgetSecrets(mount);
+                DeleteQuietly(Paths.MountState(mount));
             }
-
-            _logger.LogInformation("collection {Collection} deleted", definition.Name);
-            OnChanged();
-        }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
+        });
+        _logger.LogInformation("collection {Collection} deleted", definition.Name);
+        OnChanged();
+    });
 
     // ----- memberships (a source's place in a collection) -----
 
-    public async Task AddMembershipAsync(Guid collectionId, Guid sourceId, string path, bool readOnly)
+    public Task AddMembershipAsync(Guid collectionId, Guid sourceId, string path, bool readOnly) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        var collection = FindCollectionDefinition(collectionId);
+        var source = Settings.FindSource(sourceId) ?? throw new ArgumentException("That source no longer exists.");
+        if (collection.Sources.Any(m => m.Id == sourceId))
         {
-            ThrowIfStopped();
-            var collection = FindCollectionDefinition(collectionId);
-            var source = Settings.FindSource(sourceId) ?? throw new ArgumentException("That source no longer exists.");
-            if (collection.Sources.Any(m => m.Id == sourceId))
-            {
-                throw new ArgumentException($"'{source.Name}' is already in '{collection.Name}'.");
-            }
-
-            var membership = new SourceMembership { Id = sourceId, Path = NormalisePath(path), ReadOnly = readOnly };
-            collection.Sources.Add(membership);
-            Settings.SaveCollections();
-            if (FindCollectionRunner(collectionId) is { } runner && _handles.TryGetValue(sourceId, out var handle))
-            {
-                runner.AddSource(new CollectionSource(handle, membership, source));
-                if (FindSourceRunner(sourceId) is { } sourceRunner)
-                {
-                    StartIfNeeded(sourceRunner);
-                }
-            }
-
-            OnChanged();
+            throw new ArgumentException($"'{source.Name}' is already in '{collection.Name}'.");
         }
-        finally
+
+        var membership = new SourceMembership { Id = sourceId, Path = NormalisePath(path), ReadOnly = readOnly };
+        collection.Sources.Add(membership);
+        Settings.SaveCollections();
+        if (FindCollectionRunner(collectionId) is { } runner && _handles.TryGetValue(sourceId, out var handle))
         {
-            _mutations.Release();
+            runner.AddSource(new CollectionSource(handle, membership, source));
+            if (FindSourceRunner(sourceId) is { } sourceRunner)
+            {
+                StartInTurn(sourceRunner);
+            }
         }
-    }
+
+        OnChanged();
+    });
 
     /// <summary>The path and Read-only of a source in one collection only (spec 4.2, 11.1).</summary>
-    public async Task UpdateMembershipAsync(Guid collectionId, Guid sourceId, string path, bool readOnly)
+    public Task UpdateMembershipAsync(Guid collectionId, Guid sourceId, string path, bool readOnly) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        var collection = FindCollectionDefinition(collectionId);
+        var membership = collection.Sources.FirstOrDefault(m => m.Id == sourceId) ?? throw new ArgumentException("That source is not in this collection.");
+        var normalised = NormalisePath(path);
+        if (membership.Path == normalised && membership.ReadOnly == readOnly)
         {
-            ThrowIfStopped();
-            var collection = FindCollectionDefinition(collectionId);
-            var membership = collection.Sources.FirstOrDefault(m => m.Id == sourceId) ?? throw new ArgumentException("That source is not in this collection.");
-            var normalised = NormalisePath(path);
-            if (membership.Path == normalised && membership.ReadOnly == readOnly)
-            {
-                return;
-            }
-
-            membership.Path = normalised;
-            membership.ReadOnly = readOnly;
-            Settings.SaveCollections();
-            FindCollectionRunner(collectionId)?.RefreshMembers();
-            OnChanged();
+            return;
         }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
 
-    public async Task RemoveMembershipAsync(Guid collectionId, Guid sourceId)
+        membership.Path = normalised;
+        membership.ReadOnly = readOnly;
+        Settings.SaveCollections();
+        FindCollectionRunner(collectionId)?.RefreshMembers();
+        OnChanged();
+    });
+
+    public Task RemoveMembershipAsync(Guid collectionId, Guid sourceId) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        var collection = FindCollectionDefinition(collectionId);
+        if (collection.Sources.RemoveAll(m => m.Id == sourceId) == 0)
         {
-            ThrowIfStopped();
-            var collection = FindCollectionDefinition(collectionId);
-            if (collection.Sources.RemoveAll(m => m.Id == sourceId) == 0)
-            {
-                return;
-            }
+            return;
+        }
 
-            Settings.SaveCollections();
-            FindCollectionRunner(collectionId)?.RemoveSource(sourceId);
-            if (_filter is not null && FindSourceRunner(sourceId) is { } runner && !IsNeeded(sourceId))
+        Settings.SaveCollections();
+        FindCollectionRunner(collectionId)?.RemoveSource(sourceId);
+        if (_filter is not null && FindSourceRunner(sourceId) is { } runner && !IsNeeded(sourceId))
+        {
+            InTurn(sourceId, Describe(runner), async () =>
             {
                 await runner.StopAsync().ConfigureAwait(false);
                 runner.Handle.Status = new ComponentStatus(ComponentState.Disabled, "Not in a started collection");
-            }
+            });
+        }
 
-            OnChanged();
-        }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
+        OnChanged();
+    });
 
     // ----- mounts -----
 
-    public async Task<MountDefinition> AddMountAsync(Guid collectionId, string name, string providerId, bool enabled, bool readOnly, object settings)
+    public Task<MountDefinition> AddMountAsync(Guid collectionId, string name, string providerId, bool enabled, bool readOnly, object settings) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        var collection = FindCollectionDefinition(collectionId);
+        var provider = Registry.FindMountProvider(providerId) ?? throw new ArgumentException($"There is no mount provider '{providerId}'.");
+        name = RequireMountName(collection, name, null);
+        var definition = new MountDefinition { Name = name, Provider = provider.TypeId, Enabled = enabled, ReadOnly = readOnly || !provider.SupportsWrites };
+        definition.Settings = Serialise(provider.SettingsType, definition.Id, settings, out _);
+        collection.Mounts.Add(definition);
+        Settings.SaveCollections();
+        if (FindCollectionRunner(collectionId) is { } runner)
         {
-            ThrowIfStopped();
-            var collection = FindCollectionDefinition(collectionId);
-            var provider = Registry.FindMountProvider(providerId) ?? throw new ArgumentException($"There is no mount provider '{providerId}'.");
-            name = RequireMountName(collection, name, null);
-            var definition = new MountDefinition { Name = name, Provider = provider.TypeId, Enabled = enabled, ReadOnly = readOnly || !provider.SupportsWrites };
-            definition.Settings = PluginSettingsBinder.Serialise(provider.SettingsType, settings, (property, value) => Secrets.Set(definition.Id, property, value));
-            collection.Mounts.Add(definition);
-            Settings.SaveCollections();
-            if (FindCollectionRunner(collectionId) is { } runner)
-            {
-                var mount = CreateMountRunner(definition, runner);
-                runner.AddMount(mount);
-                await runner.StartMountAsync(mount, _shutdown.Token).ConfigureAwait(false);
-            }
+            var mount = CreateMountRunner(definition, runner);
+            runner.AddMount(mount);
+            InTurn(collectionId, $"mount '{name}' of '{collection.Name}'", () => StartAsync(runner, mount));
+        }
 
-            _logger.LogInformation("mount {Mount} ({Provider}) added to {Collection}", name, provider.TypeId, collection.Name);
-            OnChanged();
-            return definition;
-        }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
+        _logger.LogInformation("mount {Mount} ({Provider}) added to {Collection}", name, provider.TypeId, collection.Name);
+        OnChanged();
+        return definition;
+    });
 
     /// <summary>Editing a mount restarts it (spec 8.8); a name-only edit doesn't.</summary>
-    public async Task UpdateMountAsync(Guid collectionId, Guid mountId, string name, bool enabled, bool readOnly, object settings)
+    public Task UpdateMountAsync(Guid collectionId, Guid mountId, string name, bool enabled, bool readOnly, object settings) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        var collection = FindCollectionDefinition(collectionId);
+        var definition = collection.Mounts.FirstOrDefault(m => m.Id == mountId) ?? throw new ArgumentException("That mount no longer exists.");
+        var provider = Registry.FindMountProvider(definition.Provider) ?? throw new ArgumentException($"The mount provider '{definition.Provider}' is not available, so its settings can't be edited.");
+        name = RequireMountName(collection, name, mountId);
+        readOnly |= !provider.SupportsWrites;
+
+        var json = Serialise(provider.SettingsType, mountId, settings, out var secretsChanged);
+        var restart = secretsChanged || !JsonNode.DeepEquals(definition.Settings, json) || definition.ReadOnly != readOnly || definition.Enabled != enabled;
+        definition.Name = name;
+        definition.Enabled = enabled;
+        definition.ReadOnly = readOnly;
+        definition.Settings = json;
+        Settings.SaveCollections();
+
+        if (restart && FindCollectionRunner(collectionId) is { } runner && runner.Mounts.FirstOrDefault(m => m.Definition.Id == mountId) is { } old)
         {
-            ThrowIfStopped();
-            var collection = FindCollectionDefinition(collectionId);
-            var definition = collection.Mounts.FirstOrDefault(m => m.Id == mountId) ?? throw new ArgumentException("That mount no longer exists.");
-            var provider = Registry.FindMountProvider(definition.Provider) ?? throw new ArgumentException($"The mount provider '{definition.Provider}' is not available, so its settings can't be edited.");
-            name = RequireMountName(collection, name, mountId);
-            readOnly |= !provider.SupportsWrites;
-
-            var secretsChanged = false;
-            var json = PluginSettingsBinder.Serialise(provider.SettingsType, settings, (property, value) =>
-            {
-                secretsChanged |= !string.Equals(Secrets.Get(mountId, property), string.IsNullOrEmpty(value) ? null : value, StringComparison.Ordinal);
-                Secrets.Set(mountId, property, value);
-            });
-            var restart = secretsChanged || !JsonNode.DeepEquals(definition.Settings, json) || definition.ReadOnly != readOnly || definition.Enabled != enabled;
-            definition.Name = name;
-            definition.Enabled = enabled;
-            definition.ReadOnly = readOnly;
-            definition.Settings = json;
-            Settings.SaveCollections();
-
-            if (restart && FindCollectionRunner(collectionId) is { } runner && runner.Mounts.FirstOrDefault(m => m.Definition.Id == mountId) is { } old)
-            {
-                await old.StopAsync().ConfigureAwait(false);
-                var replacement = CreateMountRunner(definition, runner);
-                runner.ReplaceMount(old, replacement);
-                await runner.StartMountAsync(replacement, _shutdown.Token).ConfigureAwait(false);
-            }
-
-            _logger.LogInformation("mount {Mount} of {Collection} updated ({What})", name, collection.Name, restart ? "restarted" : "no restart needed");
-            OnChanged();
+            ReplaceInTurn(runner, old, definition);
         }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
+
+        _logger.LogInformation("mount {Mount} of {Collection} updated ({What})", name, collection.Name, restart ? "restarted" : "no restart needed");
+        OnChanged();
+    });
 
     /// <summary>Stops and starts a mount again now (after a failure, or after its provider was installed).</summary>
-    public async Task RetryMountAsync(Guid collectionId, Guid mountId)
+    public Task RetryMountAsync(Guid collectionId, Guid mountId) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        if (FindCollectionRunner(collectionId) is { } runner && runner.Mounts.FirstOrDefault(m => m.Definition.Id == mountId) is { } old && old.Definition.Enabled)
         {
-            ThrowIfStopped();
-            if (FindCollectionRunner(collectionId) is { } runner && runner.Mounts.FirstOrDefault(m => m.Definition.Id == mountId) is { } old && old.Definition.Enabled)
-            {
-                await old.StopAsync().ConfigureAwait(false);
-                var replacement = CreateMountRunner(old.Definition, runner);
-                runner.ReplaceMount(old, replacement);
-                await runner.StartMountAsync(replacement, _shutdown.Token).ConfigureAwait(false);
-                OnChanged();
-            }
-        }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
-
-    public async Task SetMountEnabledAsync(Guid collectionId, Guid mountId, bool enabled)
-    {
-        await EnterAsync().ConfigureAwait(false);
-        try
-        {
-            ThrowIfStopped();
-            var collection = FindCollectionDefinition(collectionId);
-            var definition = collection.Mounts.FirstOrDefault(m => m.Id == mountId) ?? throw new ArgumentException("That mount no longer exists.");
-            if (definition.Enabled == enabled)
-            {
-                return;
-            }
-
-            definition.Enabled = enabled;
-            Settings.SaveCollections();
-            if (FindCollectionRunner(collectionId) is { } runner && runner.Mounts.FirstOrDefault(m => m.Definition.Id == mountId) is { } mount)
-            {
-                if (enabled)
-                {
-                    await runner.StartMountAsync(mount, _shutdown.Token).ConfigureAwait(false);
-                }
-                else
-                {
-                    await mount.StopAsync().ConfigureAwait(false);
-                }
-            }
-
+            ReplaceInTurn(runner, old, old.Definition);
             OnChanged();
         }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
+    });
 
-    public async Task DeleteMountAsync(Guid collectionId, Guid mountId)
+    public Task SetMountEnabledAsync(Guid collectionId, Guid mountId, bool enabled) => MutateAsync(() =>
     {
-        await EnterAsync().ConfigureAwait(false);
-        try
+        var collection = FindCollectionDefinition(collectionId);
+        var definition = collection.Mounts.FirstOrDefault(m => m.Id == mountId) ?? throw new ArgumentException("That mount no longer exists.");
+        if (definition.Enabled == enabled)
         {
-            ThrowIfStopped();
-            var collection = FindCollectionDefinition(collectionId);
-            var definition = collection.Mounts.FirstOrDefault(m => m.Id == mountId) ?? throw new ArgumentException("That mount no longer exists.");
-            if (FindCollectionRunner(collectionId) is { } runner && runner.Mounts.FirstOrDefault(m => m.Definition.Id == mountId) is { } mount)
+            return;
+        }
+
+        definition.Enabled = enabled;
+        Settings.SaveCollections();
+        if (FindCollectionRunner(collectionId) is { } runner && runner.Mounts.FirstOrDefault(m => m.Definition.Id == mountId) is { } mount)
+        {
+            InTurn(collectionId, $"mount '{definition.Name}' of '{collection.Name}'", enabled ? () => StartAsync(runner, mount) : mount.StopAsync);
+        }
+
+        OnChanged();
+    });
+
+    /// <summary>Deletes a mount. It goes at once; what it kept goes when it has stopped.</summary>
+    public Task DeleteMountAsync(Guid collectionId, Guid mountId) => MutateAsync(() =>
+    {
+        var collection = FindCollectionDefinition(collectionId);
+        var definition = collection.Mounts.FirstOrDefault(m => m.Id == mountId) ?? throw new ArgumentException("That mount no longer exists.");
+        var mount = FindCollectionRunner(collectionId) is { } runner ? runner.Mounts.FirstOrDefault(m => m.Definition.Id == mountId) : null;
+        if (mount is not null)
+        {
+            FindCollectionRunner(collectionId)!.RemoveMount(mount);
+        }
+
+        collection.Mounts.Remove(definition);
+        Settings.SaveCollections();
+        InTurn(collectionId, $"mount '{definition.Name}' of '{collection.Name}'", async () =>
+        {
+            if (mount is not null)
             {
                 await mount.StopAsync().ConfigureAwait(false);
-                runner.RemoveMount(mount);
             }
 
-            collection.Mounts.Remove(definition);
-            Settings.SaveCollections();
-            if (_secrets is not null || File.Exists(Paths.SecretsFile))
-            {
-                Secrets.RemoveAll(mountId);
-            }
-
+            ForgetSecrets(mountId);
             DeleteQuietly(Paths.MountState(mountId));
-            _logger.LogInformation("mount {Mount} of {Collection} deleted", definition.Name, collection.Name);
-            OnChanged();
-        }
-        finally
-        {
-            _mutations.Release();
-        }
-    }
+        });
+        _logger.LogInformation("mount {Mount} of {Collection} deleted", definition.Name, collection.Name);
+        OnChanged();
+    });
 
     // ----- building blocks -----
 
@@ -1302,7 +1400,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
         {
             try
             {
-                settings = PluginSettingsBinder.Materialise(plugin.SettingsType, definition.Settings, name => Secrets.Get(definition.Id, name));
+                settings = Materialise(plugin.SettingsType, definition.Id, definition.Settings);
             }
             catch (Exception ex)
             {
@@ -1359,7 +1457,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
         {
             try
             {
-                settings = PluginSettingsBinder.Materialise(provider.SettingsType, definition.Settings, name => Secrets.Get(definition.Id, name));
+                settings = Materialise(provider.SettingsType, definition.Id, definition.Settings);
             }
             catch (Exception ex)
             {
@@ -1372,25 +1470,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
         return runner;
     }
 
-    /// <summary>Starts a source runner when something started needs it (every enabled source without a filter).</summary>
-    private void StartIfNeeded(SourceRunner runner)
-    {
-        if (!runner.Definition.Enabled)
-        {
-            runner.Handle.Status = ComponentStatus.DisabledStatus;
-            return;
-        }
-
-        if (IsNeeded(runner.Definition.Id))
-        {
-            runner.Start();
-        }
-        else
-        {
-            runner.Handle.Status = new ComponentStatus(ComponentState.Disabled, "Not in a started collection");
-        }
-    }
-
+    /// <summary>Whether something started needs a source: every source without a filter. Asked with the mutations' lock held.</summary>
     private bool IsNeeded(Guid sourceId)
         => _filter is null || Collections.Any(c => c.Definition.Enabled && c.Definition.Sources.Any(m => m.Id == sourceId));
 

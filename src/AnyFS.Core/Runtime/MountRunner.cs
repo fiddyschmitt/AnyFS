@@ -65,6 +65,13 @@ public sealed class MountRunner
 
     public TimeSpan StopTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// For a runner put in the place of one that is up: "Stopping" until its own start has its turn, which is when the one
+    /// before it has stopped. A new runner says "Disabled", which someone who has just edited the mount would take for
+    /// what came of it.
+    /// </summary>
+    public void TakesOver() => Status = new ComponentStatus(ComponentState.Stopping, "Stopping");
+
     public async Task StartAsync(IVirtualFileSystem fs, CancellationToken ct)
     {
         if (!Definition.Enabled)

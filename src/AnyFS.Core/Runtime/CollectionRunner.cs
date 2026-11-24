@@ -93,9 +93,9 @@ public sealed class CollectionRunner : ICollectionInfo
         await Task.WhenAll(Mounts.Select(m => StartMountAsync(m, ct))).ConfigureAwait(false);
     }
 
-    /// <summary>Starts one mount against this collection's tree (a no-op while the collection isn't running).</summary>
+    /// <summary>Starts one mount against this collection's tree (a no-op while the collection isn't running, or is disabled and about to be stopped).</summary>
     public Task StartMountAsync(MountRunner mount, CancellationToken ct)
-        => IsRunning ? mount.StartAsync(Vfs.ForMount(mount.Definition.ReadOnly), ct) : Task.CompletedTask;
+        => IsRunning && Definition.Enabled ? mount.StartAsync(Vfs.ForMount(mount.Definition.ReadOnly), ct) : Task.CompletedTask;
 
     public async Task RestartMountsAsync(CancellationToken ct)
     {
