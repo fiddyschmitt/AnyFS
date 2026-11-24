@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Security.AccessControl;
@@ -45,6 +46,27 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
     // the handles that hold a file of the collection's open, for <see cref="CloseOpenFiles"/>
     private readonly ConcurrentDictionary<Desc, bool> _open = new();
 
+    // What GetSecurityByName learned of a name, for the Open or Create that WinFsp makes next in the same request, on
+    // the same dispatcher thread: asked again there, every open was two looks at the file before anything was done
+    [ThreadStatic]
+    private static Look _looked;
+
+    // the host, which says which request a callback belongs to
+    private FileSystemHost? _host;
+
+    /// <summary>What one request learned of one path of one file system, and when.</summary>
+    private readonly record struct Look(WinFspFileSystem? Owner, ulong Request, string? Path, VfsEntry? Entry, long At);
+
+    // a look serves the open of its own request, which follows at once; WinFsp's numbers for requests come round again,
+    // so one older than what Windows itself keeps of a file (the volume's FileInfoTimeout) is not taken for this request's
+    private static readonly TimeSpan LookGoodFor = TimeSpan.FromSeconds(1);
+
+    public override int Init(object host)
+    {
+        _host = host as FileSystemHost;
+        return STATUS_SUCCESS;
+    }
+
     public override int GetVolumeInfo(out VolumeInfo volumeInfo)
     {
         volumeInfo = default;
@@ -58,6 +80,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
     public override int GetSecurityByName(string fileName, out uint fileAttributes, ref byte[] securityDescriptor)
     {
         fileAttributes = 0;
+        _looked = default;
         if (!TryPath(fileName, out var path))
         {
             logger.LogDebug("winfsp: security by name '{Name}': invalid", fileName);
@@ -71,6 +94,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             return status;
         }
 
+        _looked = new Look(this, Request(), path, entry, Stopwatch.GetTimestamp());
         fileAttributes = Attributes(entry);
         if (securityDescriptor is not null)
         {
@@ -91,7 +115,9 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             return STATUS_OBJECT_NAME_INVALID;
         }
 
-        var parent = Stat(VfsPath.Parent(path), out var parentStatus);
+        // the folder it goes into: WinFsp has just asked for that folder's security, in this request
+        var parentStatus = STATUS_SUCCESS;
+        var parent = Looked(VfsPath.Parent(path)) ?? Stat(VfsPath.Parent(path), out parentStatus);
         if (parent is null)
         {
             return parentStatus == STATUS_OBJECT_NAME_NOT_FOUND ? STATUS_OBJECT_PATH_NOT_FOUND : parentStatus;
@@ -127,9 +153,17 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             return status;
         }
 
+        // What the handle has made is what it holds of it. The source is not asked what the new file is: it may not know
+        // until the file is closed, and an answer that failed here left the file open with no Close to follow, since
+        // the caller was refused the handle (the review of 21-Nov-2026, P3)
+        var now = DateTimeOffset.UtcNow;
+        var name = VfsPath.Name(path);
+        desc.Made = true;
+        desc.Entry = desc.IsDirectory ? VfsEntry.Directory(name, now, now) : VfsEntry.File(name, 0, now, now);
         fileDesc = desc;
-        normalizedName = Normalized(fileName, VfsPath.Name(path));
-        return InfoFor(desc, out fileInfo);
+        normalizedName = Normalized(fileName, name);
+        fileInfo = InfoOf(desc, desc.Entry);
+        return STATUS_SUCCESS;
     }
 
     public override int Open(string fileName, uint createOptions, uint grantedAccess, out object fileNode, out object fileDesc, out FileInfo fileInfo, out string normalizedName)
@@ -144,7 +178,8 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             return STATUS_OBJECT_NAME_NOT_FOUND;
         }
 
-        var entry = Stat(path, out var status);
+        var status = STATUS_SUCCESS;
+        var entry = Looked(path) ?? Stat(path, out status);
         if (entry is null)
         {
             logger.LogDebug("winfsp: open '{Name}' (access 0x{Access:X8}, options 0x{Options:X8}): 0x{Status:X8}", fileName, grantedAccess, createOptions, status);
@@ -169,7 +204,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             return WriteRefusal();
         }
 
-        var desc = new Desc(path, _open) { IsDirectory = entry.IsDirectory };
+        var desc = new Desc(path, _open) { IsDirectory = entry.IsDirectory, Entry = entry };
 
         // an open only to look at the file (its attributes, its security), as Explorer and search tools make by the thousand,
         // reaches nothing of its data: the source is not asked for it until a read through this handle wants it, if one does
@@ -187,9 +222,12 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             }
         }
 
+        // answered from what the open has just learnt of the file: asked a third time here, an answer that failed left
+        // the file open with no Close to follow
         fileDesc = desc;
         normalizedName = Normalized(fileName, path.Length == 0 ? "" : entry.Name);
-        return InfoFor(desc, out fileInfo);
+        fileInfo = InfoOf(desc, entry);
+        return STATUS_SUCCESS;
     }
 
     public override int Overwrite(object fileNode, object fileDesc, uint fileAttributes, bool replaceFileAttributes, ulong allocationSize, out FileInfo fileInfo)
@@ -209,7 +247,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
                 // a supersede asks for no access to the data, only to replace the file: opened for it now
                 desc.File ??= Wait(fs.OpenAsync(desc.Path, VfsOpenMode.ReadWrite, CancellationToken.None));
                 Wait(desc.File.SetLengthAsync(0, CancellationToken.None).AsTask());
-                desc.Written = true;
+                desc.Changed();
                 return STATUS_SUCCESS;
             });
             desc.ForgetReadAhead();
@@ -424,7 +462,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
                     Marshal.Copy(buffer, rented, 0, count);
                     Wait(file.WriteAsync(at, rented.AsMemory(0, count), CancellationToken.None).AsTask());
                     written = count;
-                    desc.Written = true;
+                    desc.Changed();
                     return STATUS_SUCCESS;
                 });
                 desc.ForgetReadAhead();
@@ -494,6 +532,12 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             {
                 return status;
             }
+
+            if (status >= 0 && desc.Entry is { } entry)
+            {
+                // for a handle that answers from what it holds (InfoFor): the times it was given
+                desc.Entry = entry with { Created = created ?? entry.Created, Modified = modified ?? entry.Modified };
+            }
         }
 
         return InfoFor(desc, out fileInfo);
@@ -516,7 +560,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
                 status = Guard(() =>
                 {
                     Wait(desc.File.SetLengthAsync((long)newSize, CancellationToken.None).AsTask());
-                    desc.Written = true;
+                    desc.Changed();
                     return STATUS_SUCCESS;
                 });
                 desc.ForgetReadAhead();
@@ -571,6 +615,11 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         {
             Wait(fs.RenameAsync(desc.Path, target, replaceIfExists, CancellationToken.None));
             desc.Path = target;
+            if (desc.Entry is { } entry)
+            {
+                desc.Entry = entry with { Name = VfsPath.Name(target) };
+            }
+
             return STATUS_SUCCESS;
         });
         logger.LogDebug("winfsp: rename '{From}' (file name '{FileName}') to '{To}' (raw '{Raw}', replace {Replace}): 0x{Status:X8}", desc.Path, fileName, target, newFileName, replaceIfExists, status);
@@ -590,7 +639,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         {
             var status = Guard(() =>
             {
-                desc.Entries = Snapshot(desc.Path);
+                desc.Entries = Snapshot(desc);
                 return STATUS_SUCCESS;
             });
             if (status != STATUS_SUCCESS)
@@ -605,12 +654,14 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
     }
 
     /// <summary>A folder's entries as a directory handle hands them over, in name order, with "." and ".." below the root; a listing that fails throws.</summary>
-    private List<(string Name, FileInfo Info)> Snapshot(string path)
+    private List<(string Name, FileInfo Info)> Snapshot(Desc desc)
     {
+        var path = desc.Path;
         var list = new List<(string Name, FileInfo Info)>();
         if (path.Length > 0)
         {
-            if (Stat(path, out _) is { } self)
+            // the folder itself as its handle's open found it, a moment ago as a rule
+            if ((desc.Entry ?? Stat(path, out _)) is { } self)
             {
                 list.Add((".", Info(self)));
             }
@@ -671,16 +722,34 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
 
     // ----- helpers -----
 
+    /// <summary>
+    /// What a handle says of its file after its open. A handle that made the file, or wrote to it, cut it or replaced
+    /// it, answers from what it holds: the source may know nothing of the change until the file is closed (one that
+    /// uploads then), and it was asked after every write, a stat a write and two through a collection (the review of
+    /// 21-Nov-2026, P3). Any other handle asks the source, as it did: what it learnt at its open may be old by now.
+    /// </summary>
     private int InfoFor(Desc desc, out FileInfo fileInfo)
     {
-        fileInfo = default;
-        var entry = Stat(desc.Path, out var status);
-        if (entry is null)
+        if (!desc.HoldsItsOwn || desc.Entry is not { } entry)
         {
-            return status;
+            fileInfo = default;
+            var asked = Stat(desc.Path, out var status);
+            if (asked is null)
+            {
+                return status;
+            }
+
+            desc.Entry = entry = asked;
         }
 
-        fileInfo = Info(entry);
+        fileInfo = InfoOf(desc, entry);
+        return STATUS_SUCCESS;
+    }
+
+    /// <summary>The file info of an entry, as a handle holds it: with the length the open file has now.</summary>
+    private FileInfo InfoOf(Desc desc, VfsEntry entry)
+    {
+        var fileInfo = Info(entry);
         if (desc.File is { } file && !entry.IsDirectory)
         {
             // the handle knows the current length better than a cached stat might
@@ -688,8 +757,22 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             fileInfo.AllocationSize = (fileInfo.FileSize + AllocationUnit - 1) / AllocationUnit * AllocationUnit;
         }
 
-        return STATUS_SUCCESS;
+        return fileInfo;
     }
+
+    /// <summary>What this request's look at a name learned (GetSecurityByName), if that was of this path: taken, so it serves once.</summary>
+    private VfsEntry? Looked(string path)
+    {
+        var looked = _looked;
+        _looked = default;
+        return ReferenceEquals(looked.Owner, this) && looked.Request != 0 && looked.Request == Request() && string.Equals(looked.Path, path, StringComparison.Ordinal)
+            && Stopwatch.GetElapsedTime(looked.At) < LookGoodFor
+            ? looked.Entry
+            : null;
+    }
+
+    /// <summary>The request the callback under way belongs to, as WinFsp numbers it; 0 where nothing says.</summary>
+    private ulong Request() => _host?.GetOperationRequestHint() ?? 0;
 
     private FileInfo Info(VfsEntry entry)
     {
@@ -898,7 +981,26 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         }
 
         /// <summary>Something was written, cut or replaced through this handle.</summary>
-        public bool Written { get; set; }
+        public bool Written { get; private set; }
+
+        /// <summary>The handle made the file or folder.</summary>
+        public bool Made { get; set; }
+
+        /// <summary>What the path was when this handle last learnt it: at its open, or as the handle has made and changed it since.</summary>
+        public VfsEntry? Entry { get; set; }
+
+        /// <summary>Whether what the handle holds says more of the file than its source can: it made the file or changed it, and the source may not know until the close.</summary>
+        public bool HoldsItsOwn => Written || Made;
+
+        /// <summary>Something was written, cut or replaced through this handle, now.</summary>
+        public void Changed()
+        {
+            Written = true;
+            if (Entry is { } entry)
+            {
+                Entry = entry with { Modified = DateTimeOffset.UtcNow };
+            }
+        }
 
         /// <summary>The handle's holder has closed it (Cleanup came), so what it wrote is all it meant to.</summary>
         public bool CleanedUp { get; set; }

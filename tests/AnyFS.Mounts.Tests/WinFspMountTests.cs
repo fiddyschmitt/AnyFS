@@ -390,6 +390,260 @@ public class WinFspMountTests
         public Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct) => inner.GetSpaceAsync(path, ct);
     }
 
+    /// <summary>A file system that counts what it is asked of a path and the files open in it, and whose answer about one path fails from the moment a file is opened there.</summary>
+    private sealed class Watching(IVirtualFileSystem inner) : IVirtualFileSystem
+    {
+        private int _stats;
+        private int _held;
+        private volatile bool _failing;
+
+        /// <summary>How often it was asked what a path is.</summary>
+        public int Stats => Volatile.Read(ref _stats);
+
+        /// <summary>The files open now.</summary>
+        public int Held => Volatile.Read(ref _held);
+
+        /// <summary>A path the source can no longer say anything of once a file has been opened at it, as one that stops answering then.</summary>
+        public string? FailsOnceOpen { get; init; }
+
+        public string CollectionName => inner.CollectionName;
+
+        public bool ReadOnly => inner.ReadOnly;
+
+        public bool CanWrite(string path) => inner.CanWrite(path);
+
+        public Task<VfsEntry?> StatAsync(string path, CancellationToken ct)
+        {
+            Interlocked.Increment(ref _stats);
+            if (_failing && string.Equals(VfsPath.Normalize(path), FailsOnceOpen, StringComparison.OrdinalIgnoreCase))
+            {
+                throw VfsException.Unavailable("the source stopped answering");
+            }
+
+            return inner.StatAsync(path, ct);
+        }
+
+        public IAsyncEnumerable<VfsEntry> ListAsync(string path, CancellationToken ct) => inner.ListAsync(path, ct);
+
+        public async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct)
+        {
+            var file = await inner.OpenAsync(path, mode, ct).ConfigureAwait(false);
+            Interlocked.Increment(ref _held);
+            if (string.Equals(VfsPath.Normalize(path), FailsOnceOpen, StringComparison.OrdinalIgnoreCase))
+            {
+                _failing = true;
+            }
+
+            return new HeldFile(file, this);
+        }
+
+        public Task CreateDirectoryAsync(string path, CancellationToken ct) => inner.CreateDirectoryAsync(path, ct);
+
+        public Task DeleteAsync(string path, CancellationToken ct) => inner.DeleteAsync(path, ct);
+
+        public Task RenameAsync(string fromPath, string toPath, bool replace, CancellationToken ct) => inner.RenameAsync(fromPath, toPath, replace, ct);
+
+        public Task SetTimesAsync(string path, DateTimeOffset? created, DateTimeOffset? modified, CancellationToken ct) => inner.SetTimesAsync(path, created, modified, ct);
+
+        public Task<VfsSpace?> GetSpaceAsync(string path, CancellationToken ct) => inner.GetSpaceAsync(path, ct);
+
+        private sealed class HeldFile(IVfsFile file, Watching owner) : IVfsFile
+        {
+            private int _released;
+
+            public long Length => file.Length;
+
+            public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct) => file.ReadAsync(offset, buffer, ct);
+
+            public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> data, CancellationToken ct) => file.WriteAsync(offset, data, ct);
+
+            public ValueTask SetLengthAsync(long length, CancellationToken ct) => file.SetLengthAsync(length, ct);
+
+            public ValueTask FlushAsync(CancellationToken ct) => file.FlushAsync(ct);
+
+            public ValueTask AbandonAsync()
+            {
+                Release();
+                return file.AbandonAsync();
+            }
+
+            public ValueTask DisposeAsync()
+            {
+                Release();
+                return file.DisposeAsync();
+            }
+
+            private void Release()
+            {
+                if (Interlocked.Exchange(ref _released, 1) == 0)
+                {
+                    Interlocked.Decrement(ref owner._held);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// What a file is, is asked once for an open, and not again for what is written through the handle. An open asked
+    /// three times (WinFsp's own look at the name, the open, and the info the open answers with), a folder's listing
+    /// five, and every write once more (the review of 21-Nov-2026, P3).
+    /// </summary>
+    [TestMethod]
+    public async Task AnOpenAsksWhatTheFileIsOnceAndAWriteNotAtAll()
+    {
+        RequireWinFsp();
+        var watching = default(Watching);
+        var (_, unc, source) = await MountAsync(wrap: vfs => watching = new Watching(vfs));
+
+        // each on a file nothing has looked at yet: Windows keeps what it was told of one for a second
+        var asked = watching!.Stats;
+        _ = File.GetAttributes(Path.Combine(unc, "docs", "a.txt"));
+        Assert.AreEqual(1, watching.Stats - asked, "a file's attributes");
+
+        asked = watching.Stats;
+        Assert.AreEqual("c", File.ReadAllText(Path.Combine(unc, "docs", "sub", "c.txt")));
+        Assert.AreEqual(1, watching.Stats - asked, "a file read whole");
+
+        asked = watching.Stats;
+        Assert.AreEqual(1, Directory.GetFileSystemEntries(Path.Combine(unc, "unicode")).Length);
+        Assert.AreEqual(2, watching.Stats - asked, "a folder listed: the folder, and the one it is in for its '..'");
+
+        var chunk = new byte[4096];
+        using (var stream = new FileStream(Path.Combine(unc, "docs", "written.bin"), FileMode.CreateNew, FileAccess.Write, FileShare.None, bufferSize: 1))
+        {
+            asked = watching.Stats;
+            for (var i = 0; i < 50; i++)
+            {
+                stream.Write(chunk);
+            }
+
+            stream.Flush(flushToDisk: true);
+            Assert.AreEqual(0, watching.Stats - asked, "fifty writes and a flush");
+            Assert.AreEqual(50 * 4096, stream.Length, "and the handle says how long the file is");
+        }
+
+        Assert.AreEqual(50 * 4096, source.GetFile("docs/written.bin")!.Length);
+        Assert.AreEqual(50 * 4096, new FileInfo(Path.Combine(unc, "docs", "written.bin")).Length);
+    }
+
+    /// <summary>
+    /// An open leaves no file open behind it. Having opened the file, the open asked once more what it was, and where
+    /// that failed (a source that had just stopped answering) the caller was refused and so never closed what it did
+    /// not have: the file stayed open in the source until the volume went. A new file was the same.
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "a file that is there")]
+    [DataRow(true, DisplayName = "a new file")]
+    public async Task AnOpenLeavesNoFileOpenBehindIt(bool create)
+    {
+        RequireWinFsp();
+        var watching = default(Watching);
+        var name = create ? "new.txt" : "a.txt";
+        var (_, unc, source) = await MountAsync(wrap: vfs => watching = new Watching(vfs) { FailsOnceOpen = "docs/" + name });
+        var done = false;
+        try
+        {
+            if (create)
+            {
+                using var stream = new FileStream(Path.Combine(unc, "docs", name), FileMode.CreateNew, FileAccess.Write, FileShare.None, bufferSize: 1);
+                stream.Write("made"u8);
+                stream.Write(" here"u8);
+            }
+            else
+            {
+                Assert.AreEqual("aaa", File.ReadAllText(Path.Combine(unc, "docs", name)));
+            }
+
+            done = true;
+        }
+        catch (IOException)
+        {
+            // refused, as it was: what the open left behind is asked below
+        }
+
+        // the close comes a moment after the handle has gone
+        for (var i = 0; i < 50 && watching!.Held > 0; i++)
+        {
+            await Task.Delay(100);
+        }
+
+        Assert.AreEqual(0, watching!.Held, "nothing is left open in the source");
+        Assert.IsTrue(done, "and the open went through: once the file is open nothing more is asked that could fail it");
+        if (create)
+        {
+            Assert.AreEqual("made here", Encoding.UTF8.GetString(source.GetFile("docs/" + name)!), "what was written landed, though the source could say nothing of the file meanwhile");
+        }
+    }
+
+    /// <summary>
+    /// A handle that wrote says of the file what it knows itself: how long the file is now, and the times it was given
+    /// (a copy in sets the file's time through the handle it wrote with, and reads it back).
+    /// </summary>
+    [TestMethod]
+    public async Task AHandleThatWroteSaysWhatItKnowsOfTheFile()
+    {
+        RequireWinFsp();
+        var (_, unc, source) = await MountAsync();
+        var path = Path.Combine(unc, "docs", "copied.bin");
+        var time = new DateTime(2020, 2, 2, 2, 2, 2, DateTimeKind.Utc);
+        var local = Path.Combine(Path.GetTempPath(), "anyfs-copy-in-" + Guid.NewGuid().ToString("N") + ".bin");
+        File.WriteAllBytes(local, new byte[3000]);
+        File.SetLastWriteTimeUtc(local, time);
+        try
+        {
+            File.Copy(local, path);
+        }
+        finally
+        {
+            File.Delete(local);
+        }
+
+        Assert.AreEqual(time, File.GetLastWriteTimeUtc(path), "the copy's time, as Windows was told through the handle");
+        Assert.AreEqual(3000, new FileInfo(path).Length);
+        Assert.AreEqual(new DateTimeOffset(time), (await source.StatAsync("docs/copied.bin", CancellationToken.None))!.Modified, "and as the source has it");
+
+        using (var stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite, bufferSize: 1))
+        {
+            var handle = stream.SafeFileHandle.DangerousGetHandle();
+            stream.SetLength(1000);
+            Assert.IsTrue(Native.GetFileSizeEx(handle, out var size));
+            Assert.AreEqual(1000, size, "cut through the handle");
+            stream.Seek(0, SeekOrigin.End);
+            stream.Write(new byte[500]);
+            Assert.IsTrue(Native.GetFileSizeEx(handle, out size));
+            Assert.AreEqual(1500, size, "and written on");
+            Assert.IsTrue(File.GetLastWriteTimeUtc(path) > time.AddYears(1), "a write is the file's last write");
+        }
+
+        Assert.AreEqual(1500, source.GetFile("docs/copied.bin")!.Length);
+        Assert.AreEqual(1500, new FileInfo(path).Length);
+    }
+
+    /// <summary>A handle that has written nothing still learns of a change made elsewhere: the source is asked again when Windows asks again, as it was.</summary>
+    [TestMethod]
+    public async Task AHandleThatOnlyLooksLearnsThatTheFileGrewElsewhere()
+    {
+        RequireWinFsp();
+        var (_, unc, source) = await MountAsync();
+        var handle = Native.CreateFileW(Path.Combine(unc, "docs", "a.txt"), Native.FileReadAttributes, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        Assert.AreNotEqual(new IntPtr(-1), handle);
+        try
+        {
+            Assert.IsTrue(Native.GetFileSizeEx(handle, out var size));
+            Assert.AreEqual(3, size);
+            source.AddFile("docs/a.txt", "aaa, and more");
+
+            // what Windows was told of the file stands for a second
+            await Task.Delay(1500);
+            Assert.IsTrue(Native.GetFileSizeEx(handle, out size));
+            Assert.AreEqual(13, size, "its length as it is now");
+        }
+        finally
+        {
+            Native.CloseHandle(handle);
+        }
+    }
+
     /// <summary>A file system whose listing of one folder fails as given, the rest as the inner one has it.</summary>
     private sealed class FailingListing(IVirtualFileSystem inner, string folder, Func<Exception> failure) : IVirtualFileSystem
     {
