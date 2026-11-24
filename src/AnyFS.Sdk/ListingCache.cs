@@ -33,6 +33,10 @@ public sealed class ListingCache
     private readonly bool _packed;
     private readonly ConcurrentDictionary<string, Failure> _failures = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Fetch> _fetches = new(StringComparer.Ordinal);
+
+    // in a cache that keeps its listings: the folders named by a listing that was let go (Invalidate), until the folder is
+    // listed again and what went meanwhile can be told (under the gate)
+    private readonly Dictionary<string, List<string>> _letGo = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, HotListing> _hot = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _hotOrder = new();
     private int _hotCount;
@@ -363,14 +367,25 @@ public sealed class ListingCache
             return;
         }
 
-        if (_packed && held is { Folders: > 0 })
+        if (_packed)
         {
-            var still = new HashSet<string>(listing.FolderNames(), StringComparer.Ordinal);
-            foreach (var name in held.FolderNames())
+            // the folders the listing named before: those of the one held, or of one let go since (Invalidate), which
+            // left nothing held to tell by
+            _letGo.Remove(path, out var before);
+            if (held is { Folders: > 0 })
             {
-                if (!still.Contains(name))
+                before = [.. held.FolderNames(), .. before ?? []];
+            }
+
+            if (before is not null)
+            {
+                var still = new HashSet<string>(listing.FolderNames(), StringComparer.Ordinal);
+                foreach (var name in before)
                 {
-                    InvalidateTreeLocked(VfsPath.Join(path, name));
+                    if (!still.Contains(name))
+                    {
+                        InvalidateTreeLocked(VfsPath.Join(path, name));
+                    }
                 }
             }
         }
@@ -436,6 +451,9 @@ public sealed class ListingCache
             foreach (var (path, listing) in made)
             {
                 _failures.TryRemove(path, out _);
+
+                // what is below the root is gone through whole, below: nothing more to tell by what a listing let go named
+                _letGo.Remove(path);
                 if (held.Remove(path, out var was))
                 {
                     if (was.SameAs(listing))
@@ -703,11 +721,22 @@ public sealed class ListingCache
         }
     }
 
-    /// <summary>Forgets the listing of a directory; one on its way is handed to those waiting for it but not kept.</summary>
+    /// <summary>
+    /// Forgets the listing of a directory; one on its way is handed to those waiting for it but not kept. In a cache that
+    /// keeps its listings, the folders the listing named are remembered until it is listed again: one that has gone by then
+    /// is let go with everything below it (<see cref="StoreLocked"/>). With the listing gone there was nothing to tell
+    /// that by, and what was below a folder that went meanwhile stayed held, and saved, for ever, where no listing
+    /// reaches it (the review of 21-Nov-2026, N19).
+    /// </summary>
     public void Invalidate(string directoryPath)
     {
         lock (_gate)
         {
+            if (_packed && _store.Get(directoryPath) is { Folders: > 0 } held)
+            {
+                _letGo[directoryPath] = [.. held.FolderNames()];
+            }
+
             RemoveLocked(directoryPath);
             _failures.TryRemove(directoryPath, out _);
             if (_fetches.TryGetValue(directoryPath, out var fetch))
@@ -745,6 +774,14 @@ public sealed class ListingCache
             }
         }
 
+        if (_letGo.Count > 0)
+        {
+            foreach (var key in _letGo.Keys.Where(key => VfsPath.IsUnder(key, directoryPath)).ToList())
+            {
+                _letGo.Remove(key);
+            }
+        }
+
         foreach (var (key, fetch) in _fetches)
         {
             if (VfsPath.IsUnder(key, directoryPath))
@@ -772,6 +809,7 @@ public sealed class ListingCache
             }
 
             _failures.Clear();
+            _letGo.Clear();
             foreach (var fetch in _fetches.Values)
             {
                 fetch.Invalidated = true;

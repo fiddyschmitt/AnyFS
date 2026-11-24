@@ -220,6 +220,34 @@ public class KeptListingsOnDiskTests
     }
 
     [TestMethod]
+    [DataRow(true, DisplayName = "in the database")]
+    [DataRow(false, DisplayName = "in memory")]
+    public async Task AFolderGoneWhileItsParentsListingWasLetGoIsLetGoWithAllBelowIt(bool onDisk)
+    {
+        // A folder whose listing is let go (a write through the mount) and listed again had nothing to tell what it held
+        // before by: a folder gone from it meanwhile stayed held with everything below it, for ever, where no listing
+        // reaches it (the review of 21-Nov-2026, N19)
+        var folder = TempFolder();
+        await using var kept = Kept(Options(folder, onDisk));
+        await kept.CountAsync(CancellationToken.None);
+        Assert.AreEqual(41, kept.Cache.Count);
+
+        kept.Cache.Invalidate("d05");
+        _tree["d05"] = [.. _tree["d05"].Where(e => e.Name != "sub")];
+        _tree.TryRemove("d05/sub", out _);
+        Assert.AreEqual(5, (await kept.Cache.GetAsync("d05", CancellationToken.None)).Count);
+        Assert.IsNull(kept.Cache.Held("d05/sub"), "nothing reaches it any more");
+        Assert.AreEqual(40, kept.Cache.Count);
+        Assert.IsFalse(kept.Cache.Under("d05").ContainsKey("d05/sub"), "nor is it among what is held below its parent");
+
+        // one that is still there is kept, with what is held below it
+        kept.Cache.Invalidate("d06");
+        Assert.AreEqual(6, (await kept.Cache.GetAsync("d06", CancellationToken.None)).Count);
+        Assert.IsNotNull(kept.Cache.Held("d06/sub"));
+        Assert.AreEqual(40, kept.Cache.Count);
+    }
+
+    [TestMethod]
     public async Task AFolderNotHeldBelowOneKeptByItsStampIsWalked()
     {
         // the names sort among each other's paths: "big/a b" lies between "big/a" and "big/a/x"
