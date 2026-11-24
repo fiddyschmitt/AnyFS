@@ -143,6 +143,27 @@ internal sealed record SitePage(string Name, byte[] Markdown, DateTimeOffset? Cr
 /// <param name="DownloadUrl">A pre-authenticated URL for the content, when the flavour has one.</param>
 internal sealed record ItemRef(string? Id, string? Version, string? DownloadUrl, long Size, bool IsFolder);
 
+/// <summary>One item a library's change feed names (<see cref="IDocumentStore.ChangesAsync"/>).</summary>
+/// <param name="Id">The item's id, as a listing's entry carries it (<see cref="VfsEntry.Key"/>).</param>
+/// <param name="Folder">The path, in the library, of the folder the item is in now ("" for the library's own); null for one that is gone.</param>
+/// <param name="MayBeElsewhere">
+/// Whether a listing kept may name the item in another folder than <paramref name="Folder"/>: it was renamed, moved or
+/// deleted, or the feed does not say which of these happened. The source then looks for where it holds the item, by its id.
+/// </param>
+internal readonly record struct LibraryChange(string Id, string? Folder, bool MayBeElsewhere);
+
+/// <summary>What changed in a library since a token (<see cref="IDocumentStore.ChangesAsync"/>).</summary>
+/// <param name="Token">The token for now: what a later call may be given in place of the one this call was.</param>
+/// <param name="Everything">The store cannot say what changed since the token it was given (none, or one too old): every folder is to be listed.</param>
+/// <param name="Items">The items added, changed, renamed, moved or deleted since; none with <paramref name="Everything"/>.</param>
+/// <param name="Why">With <paramref name="Everything"/>, why, for the log.</param>
+/// <param name="MoveOn">
+/// With no items: whether <paramref name="Token"/> is to take the place of the one given all the same. The services
+/// give another token at every call (they count what happens anywhere in a site), and taking each would list the
+/// library's own folder at every walk; so the one held stands until it is old, unless the store says it must not.
+/// </param>
+internal sealed record LibraryChanges(string Token, bool Everything, IReadOnlyList<LibraryChange> Items, string? Why = null, bool MoveOn = false);
+
 /// <summary>
 /// The operations <see cref="SharePointSource"/> needs from a flavour, on paths inside a library. Every
 /// method maps failures to <see cref="VfsException"/> and may throw <see cref="SignInRequiredException"/>
@@ -173,6 +194,15 @@ internal interface IDocumentStore : IDisposable
     /// same string back while nothing has; null where the store cannot tell, and the library is then walked every time.
     /// </summary>
     Task<string?> LibraryStampAsync(LibraryInfo library, CancellationToken ct) => Task.FromResult<string?>(null);
+
+    /// <summary>
+    /// What changed in a library since <paramref name="since"/>, a token an earlier call gave (null for none: the answer
+    /// is then the token for now, and that everything is to be listed). A walk then lists the folders the changes are
+    /// in, and keeps the rest: a library was listed whole, a request a folder, for one changed file (the review of
+    /// 21-Nov-2026, P7). Null where the store has no way to tell: the library's stamp is gone by instead
+    /// (<see cref="LibraryStampAsync"/>). Throws where it could not be asked now.
+    /// </summary>
+    Task<LibraryChanges?> ChangesAsync(LibraryInfo library, string? since, CancellationToken ct) => Task.FromResult<LibraryChanges?>(null);
 
     /// <summary>The subsites of the source's site or of a subsite, those the account may open; none where there are no sites (containers).</summary>
     Task<IReadOnlyList<WebInfo>> ListSubsitesAsync(WebInfo? web, CancellationToken ct);

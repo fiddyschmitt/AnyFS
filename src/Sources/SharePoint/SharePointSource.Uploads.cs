@@ -192,7 +192,7 @@ public abstract partial class SharePointSource
                 // what the folder holds is SharePoint's to say now: the name this had here, or the file that is there
                 // in its place
                 _items.TryRemove(file.Path, out _);
-                Listings.InvalidateParentOf(file.Path);
+                ForgetListing(VfsPath.Parent(file.Path));
             }
         }
 

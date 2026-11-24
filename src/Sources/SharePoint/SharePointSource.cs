@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Runtime.CompilerServices;
 using AnyFS.Sdk;
@@ -277,6 +278,9 @@ public abstract partial class SharePointSource : SourceBase, ICountable
     /// </summary>
     internal Task WalkAsync(SourceCounters counters, CancellationToken ct) => Kept.WalkAsync(counters, ct);
 
+    /// <summary>One walk now (a test's: the walks after the first come by the clock), stamps kept unless <paramref name="full"/>.</summary>
+    internal Task<bool> WalkAsync(SourceCounters counters, bool full, CancellationToken ct) => Kept.WalkAsync(counters, full, ct);
+
     /// <summary>The sign-in was renewed: what was refused for want of one may be answered now, and is asked again when next asked for.</summary>
     protected void SignInRenewed() => _kept?.Cache.ForgetFailures();
 
@@ -533,7 +537,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         if (asked && item.Size != length)
         {
             length = item.Size;
-            Listings.Update(path, entry with { Length = length, ETag = item.Version ?? entry.ETag }, StringComparison.OrdinalIgnoreCase);
+            Listings.Update(path, entry with { Length = length, ETag = item.Version ?? entry.ETag, Key = KeyOf(item) ?? entry.Key }, StringComparison.OrdinalIgnoreCase);
         }
 
         if (length <= SpoolBelowBytes && _spool is { } spool)
@@ -622,7 +626,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
                 // Once, with the close's own try, and for a failure the server answered, which may have left something
                 // there. A try that never reached it changed nothing: the listing stays, and with listings kept the
                 // folder still opens while the server is away.
-                Listings.InvalidateParentOf(path);
+                ForgetListing(VfsPath.Parent(path));
             }
 
             throw;
@@ -644,7 +648,8 @@ public abstract partial class SharePointSource : SourceBase, ICountable
             }
         }
 
-        Listings.Update(path, VfsEntry.File(VfsPath.SplitLast(path).Name, item.Size, modified ?? now, created ?? now, etag: item.Version), StringComparison.OrdinalIgnoreCase);
+        // with the item's id, as an entry listed has it: what SharePoint later says of the item, it says by that
+        Listings.Update(path, VfsEntry.File(VfsPath.SplitLast(path).Name, item.Size, modified ?? now, created ?? now, etag: item.Version) with { Key = KeyOf(item) }, StringComparison.OrdinalIgnoreCase);
     }
 
     // --- writes --------------------------------------------------------------------------------------------------
@@ -686,18 +691,18 @@ public abstract partial class SharePointSource : SourceBase, ICountable
 
         try
         {
-            await Run(() => Store.CreateFolderAsync(library, itemPath, ct)).ConfigureAwait(false);
+            var made = await Run(() => Store.CreateFolderAsync(library, itemPath, ct)).ConfigureAwait(false);
             var now = DateTimeOffset.UtcNow;
-            Listings.Update(path, VfsEntry.Directory(VfsPath.SplitLast(path).Name, now, now), StringComparison.OrdinalIgnoreCase);
+            Listings.Update(path, VfsEntry.Directory(VfsPath.SplitLast(path).Name, now, now) with { Key = KeyOf(made) }, StringComparison.OrdinalIgnoreCase);
         }
         catch (VfsException ex) when (ex.Error == VfsError.NotFound)
         {
-            Listings.InvalidateParentOf(path);
+            ForgetListing(VfsPath.Parent(path));
             throw VfsException.NotFound(VfsPath.Parent(path));
         }
         catch
         {
-            Listings.InvalidateParentOf(path);
+            ForgetListing(VfsPath.Parent(path));
             throw;
         }
     }
@@ -755,7 +760,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
                 }
                 catch
                 {
-                    Listings.InvalidateParentOf(path);
+                    ForgetListing(VfsPath.Parent(path));
                     throw;
                 }
 
@@ -783,14 +788,14 @@ public abstract partial class SharePointSource : SourceBase, ICountable
             }
             catch
             {
-                Listings.InvalidateParentOf(path);
+                ForgetListing(VfsPath.Parent(path));
                 throw;
             }
 
             if (held > 0)
             {
                 Logger.LogInformation("sharepoint: '{Path}' was listed empty and holds {Count} now: not deleted, and listed again", path, held);
-                Listings.Invalidate(path);
+                ForgetListing(path);
                 throw VfsException.DirectoryNotEmpty(path);
             }
         }
@@ -801,7 +806,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         }
         catch
         {
-            Listings.InvalidateParentOf(path);
+            ForgetListing(VfsPath.Parent(path));
             throw;
         }
 
@@ -868,8 +873,8 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         }
         catch
         {
-            Listings.InvalidateParentOf(fromPath);
-            Listings.InvalidateParentOf(toPath);
+            ForgetListing(VfsPath.Parent(fromPath));
+            ForgetListing(VfsPath.Parent(toPath));
             throw;
         }
 
@@ -879,7 +884,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         }
 
         Forget(fromPath, from.IsDirectory);
-        Listings.Update(toPath, @from with { Name = VfsPath.SplitLast(toPath).Name }, StringComparison.OrdinalIgnoreCase);
+        Listings.Update(toPath, @from with { Name = VfsPath.SplitLast(toPath).Name, Key = KeyOf(moved) ?? @from.Key }, StringComparison.OrdinalIgnoreCase);
         if (from.IsDirectory)
         {
             Listings.InvalidateTree(toPath);
@@ -929,7 +934,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         catch
         {
             // what SharePoint made of it is not known: its folder is listed afresh
-            Listings.InvalidateParentOf(path);
+            ForgetListing(VfsPath.Parent(path));
             throw;
         }
 
@@ -944,7 +949,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         }
         else
         {
-            Listings.InvalidateParentOf(path);
+            ForgetListing(VfsPath.Parent(path));
         }
     }
 
@@ -996,15 +1001,230 @@ public abstract partial class SharePointSource : SourceBase, ICountable
 
     private ListingCache Listings => Kept.Cache;
 
+    // --- what changed in a library ---------------------------------------------------------------------------------
+
     /// <summary>
-    /// A folder's stamp for the walks (<see cref="KeptListingsOptions.StampOf"/>): a library's root has what its store tells
-    /// of the library's last change (<see cref="IDocumentStore.LibraryStampAsync"/>), so a library nothing changed in is
-    /// kept whole, folders and all; any other folder (a site's own, Subsites, Sites, a folder in a library) none.
+    /// What a walk knows of a library it has come to: whether every folder of it is to be listed, else the folders something
+    /// changed in (each with those above it, down from the library's own), and the stamp a folder listed in this walk gets.
+    /// </summary>
+    private sealed class LibraryWalk(string generation, bool everything, HashSet<string>? changed)
+    {
+        public string Generation { get; } = generation;
+
+        public bool IsChanged(string folder) => everything || changed?.Contains(folder) == true;
+    }
+
+    /// <summary>The stamp of a library's own folder where the store says what changed: the store's token, and when it was taken.</summary>
+    private sealed record TokenStamp(string Token, DateTimeOffset At)
+    {
+        private const string Prefix = "t|";
+
+        public static string Of(string token) => $"{Prefix}{DateTimeOffset.UtcNow.UtcTicks:x}|{token}";
+
+        /// <summary>Null for no stamp, and for one of another kind (the library's last change, as a store that says no more gives it).</summary>
+        public static TokenStamp? Parse(string? stamp)
+        {
+            if (stamp is null || !stamp.StartsWith(Prefix, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            var bar = stamp.IndexOf('|', Prefix.Length);
+            return bar > 0 && long.TryParse(stamp.AsSpan(Prefix.Length, bar - Prefix.Length), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out var ticks)
+                && ticks > 0 && ticks <= DateTimeOffset.MaxValue.UtcTicks
+                ? new TokenStamp(stamp[(bar + 1)..], new DateTimeOffset(ticks, TimeSpan.Zero))
+                : null;
+        }
+    }
+
+    // By the path of a library's own folder: what the walk under way (or the last) knows of the library; and the stamp its
+    // folder had when a walk last asked, which is the last one a walk got through everything below.
+    private readonly ConcurrentDictionary<string, LibraryWalk> _libraryWalks = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, string> _settled = new(StringComparer.OrdinalIgnoreCase);
+    private long _generation;
+
+    /// <summary>
+    /// A token that nothing has changed since is still exchanged for the one the store gives for now once it is this
+    /// old: the services keep their record of changes for so long and no longer, and a token from before it begins
+    /// cannot be answered.
+    /// </summary>
+    internal TimeSpan TokenRenewedAfter { get; set; } = TimeSpan.FromHours(12);
+
+    /// <summary>
+    /// A folder's stamp for the walks (<see cref="KeptListingsOptions.StampOf"/>). A site's own folder, Subsites and Sites
+    /// have none.
+    /// <para>
+    /// Where the store says what changed in a library since a token (<see cref="IDocumentStore.ChangesAsync"/>), every
+    /// folder of the library is stamped, and a stamp says that nothing in the folder or below it has changed. The
+    /// library's own folder has the token: a walk asks what changed since the one held, and answers the stamp held where
+    /// nothing has (the library is kept whole), else one with the new token, which is kept only once the walk has been
+    /// through everything below (a walk that stops, or cannot list a folder, leaves the token it began from, and the next
+    /// is told the same changes again). A folder in the library has the stamp held, unless something changed in it or
+    /// below it: then another, and the walk lists it and goes on below. So a walk lists the folders the changes are in
+    /// and those on the way down to them. It listed a changed library whole, a request a folder: one new file in a
+    /// library of 200,000 folders was 200,000 requests (the review of 21-Nov-2026, P7).
+    /// </para>
+    /// <para>
+    /// Asked for a listing a person waits for, and not by a walk, a stamp is answered as it is held: only a walk that
+    /// goes through everything a token covers may move it on.
+    /// </para>
+    /// <para>
+    /// Where the store cannot say what changed, the library's own folder has what the store tells of its last change
+    /// (<see cref="IDocumentStore.LibraryStampAsync"/>), no folder in it has a stamp, and a changed library is listed whole.
+    /// </para>
     /// </summary>
     private async ValueTask<string?> StampAsync(string path, string? held, CancellationToken ct)
-        => await ResolveAsync(path, ct).ConfigureAwait(false) is { Library: { } library, ItemPath.Length: 0 }
-            ? await Store.LibraryStampAsync(library, ct).ConfigureAwait(false)
-            : null;
+    {
+        if (await ResolveAsync(path, ct).ConfigureAwait(false) is not { Library: { } library } place)
+        {
+            return null;
+        }
+
+        var root = place.ItemPath.Length == 0 ? path : path.Length == place.ItemPath.Length ? "" : path[..(path.Length - place.ItemPath.Length - 1)];
+        if (place.ItemPath.Length > 0)
+        {
+            if (!Walks.Current)
+            {
+                return held;
+            }
+
+            return _libraryWalks.TryGetValue(root, out var walk) ? walk.IsChanged(path) ? walk.Generation : held ?? walk.Generation : null;
+        }
+
+        if (!Walks.Current)
+        {
+            // forgotten with the folder's listing (a write into it that failed): the one the last walk was given
+            return held ?? _settled.GetValueOrDefault(root);
+        }
+
+        held ??= _settled.GetValueOrDefault(root);
+        var since = TokenStamp.Parse(held);
+        var generation = NextGeneration();
+        if (since is not null)
+        {
+            // the token this walk begins from: kept here too, for a listing of the folder that loses it (one that fails)
+            _settled[root] = held!;
+        }
+
+        LibraryChanges? changes;
+        try
+        {
+            changes = await Run(() => Store.ChangesAsync(library, since?.Token, ct)).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            if (since is null)
+            {
+                // no token, and none to be had now: nothing says what is as it was, and every folder is listed
+                _libraryWalks.TryRemove(root, out _);
+                throw;
+            }
+
+            _libraryWalks[root] = new LibraryWalk(generation, everything: false, changed: null);
+            if (ex is not VfsException { Error: VfsError.Unavailable })
+            {
+                // refused, or gone: as for any folder whose stamp cannot be read, its own listing is asked for, and says so
+                throw;
+            }
+
+            // not to be asked now: the library stays as it is, with the token it has, and the next walk asks again. Listed
+            // whole for it, a library of many folders would cost what the token is there to save, each time a request failed
+            Logger.LogInformation("sharepoint: what changed in '{Library}' could not be asked ({Error}); it stays as it is until the next walk", path, ex.Message);
+            return held;
+        }
+
+        if (changes is null)
+        {
+            _libraryWalks.TryRemove(root, out _);
+            _settled.TryRemove(root, out _);
+            return await Store.LibraryStampAsync(library, ct).ConfigureAwait(false);
+        }
+
+        if (changes.Everything || since is null)
+        {
+            Logger.LogInformation("sharepoint: every folder of '{Library}' is listed ({Why})", path, changes.Why ?? "nothing says what changed since it was last walked");
+            _libraryWalks[root] = new LibraryWalk(generation, everything: true, changed: null);
+            return TokenStamp.Of(changes.Token);
+        }
+
+        if (changes.Items.Count == 0)
+        {
+            // nothing to list. The token held stands, though the store gave another, unless the store says it must not
+            // or the one held is old: then the library's own folder is listed for the new one, and no folder below
+            _libraryWalks[root] = new LibraryWalk(generation, everything: false, changed: null);
+            return changes.Token != since.Token && (changes.MoveOn || DateTimeOffset.UtcNow - since.At > TokenRenewedAfter) ? TokenStamp.Of(changes.Token) : held;
+        }
+
+        // the folders the changed items are in now, as the store says; and, for those that may have been somewhere else
+        // (renamed, moved, deleted: the services say what an item is now, not what it was), the folders whose listings
+        // kept here still name them, found by their ids
+        var changed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var sought = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in changes.Items)
+        {
+            if (item.Folder is { } folder)
+            {
+                Mark(changed, root, VfsPath.Join(root, folder));
+            }
+
+            if (item.Folder is null || item.MayBeElsewhere)
+            {
+                sought.Add(item.Id);
+            }
+        }
+
+        if (sought.Count > 0)
+        {
+            foreach (var (folder, _, _) in Listings.HeldWithKeys(root, sought))
+            {
+                Mark(changed, root, folder);
+            }
+        }
+
+        Logger.LogDebug("sharepoint: {Items:N0} items of '{Library}' changed since the last walk, in {Folders:N0} folders, which are listed", changes.Items.Count, path, changed.Count);
+        _libraryWalks[root] = new LibraryWalk(generation, everything: false, changed);
+        return TokenStamp.Of(changes.Token);
+    }
+
+    /// <summary>
+    /// Forgets a folder's listing, so that it is listed again when next asked for. With a library's own folder's goes the
+    /// token a walk left on it: that is remembered here, and goes onto the listing that takes its place
+    /// (<see cref="StampAsync"/>), or the next walk would have none and list the library whole for a write that failed.
+    /// </summary>
+    private void ForgetListing(string folder)
+    {
+        if (Listings.StampHeld(folder) is { } stamp && TokenStamp.Parse(stamp) is not null)
+        {
+            _settled[folder] = stamp;
+        }
+
+        Listings.Invalidate(folder);
+    }
+
+    /// <summary>An item's id for the entry that names it in a listing (<see cref="VfsEntry.Key"/>): what the store later says of the item, it says by that. None where the store gave none.</summary>
+    private static string? KeyOf(ItemRef? item) => item?.Id is { Length: > 0 } id ? id : null;
+
+    /// <summary>A folder something changed in, and each folder above it down from the library's own, which the walk goes through to come to it.</summary>
+    private static void Mark(HashSet<string> changed, string root, string folder)
+    {
+        for (var at = folder; at.Length > root.Length && changed.Add(at); at = VfsPath.Parent(at))
+        {
+        }
+    }
+
+    /// <summary>A stamp for the folders a walk lists: unlike any given before, in this run and, by the clock, in any other.</summary>
+    private string NextGeneration()
+    {
+        long last, now;
+        do
+        {
+            last = Volatile.Read(ref _generation);
+            now = Math.Max(DateTime.UtcNow.Ticks, last + 1);
+        }
+        while (Interlocked.CompareExchange(ref _generation, now, last) != last);
+
+        return now.ToString("x", CultureInfo.InvariantCulture);
+    }
 
     /// <summary>
     /// Where a source path leads: a site's own folder (the source's site at the root, a subsite's or another site's
@@ -1717,7 +1937,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
 
         if (_listedNow.ContainsKey(VfsPath.Parent(path)))
         {
-            return (new ItemRef(null, entry.ETag, null, entry.Length, entry.IsDirectory), false);
+            return (new ItemRef(entry.Key, entry.ETag, null, entry.Length, entry.IsDirectory), false);
         }
 
         var item = await Run(() => Store.GetItemAsync(library, itemPath, ct)).ConfigureAwait(false) ?? throw VfsException.NotFound(path);

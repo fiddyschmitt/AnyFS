@@ -506,6 +506,70 @@ internal sealed class MemoryDocumentStore : IDocumentStore
 
     public Task<string?> LibraryStampAsync(LibraryInfo library, CancellationToken ct) => Task.FromResult(Stamps.GetValueOrDefault(library.Key));
 
+    /// <summary>Whether the store says what changed in a library since a token (<see cref="ChangesAsync"/>); off, its stamps are gone by.</summary>
+    public bool TellsChanges { get; set; }
+
+    /// <summary>Makes asking what changed fail as a server that does not answer.</summary>
+    public bool ChangesUnavailable { get; set; }
+
+    /// <summary>How often what changed was asked.</summary>
+    public int ChangeQueries => Volatile.Read(ref _changeQueries);
+
+    // what happened in the libraries, in order (the id of the item, and whether it may have been somewhere else before),
+    // and the tokens' own number: a token is that and how far the log had got
+    private readonly List<(string Library, string Id, bool Elsewhere)> _log = [];
+    private int _epoch = 1;
+    private int _changeQueries;
+
+    /// <summary>Makes every token given so far one the store no longer knows, as a change log trimmed past it.</summary>
+    public void ForgetTokens()
+    {
+        lock (_gate)
+        {
+            _epoch++;
+        }
+    }
+
+    public Task<LibraryChanges?> ChangesAsync(LibraryInfo library, string? since, CancellationToken ct)
+    {
+        if (!TellsChanges)
+        {
+            return Task.FromResult<LibraryChanges?>(null);
+        }
+
+        Interlocked.Increment(ref _changeQueries);
+        if (ChangesUnavailable)
+        {
+            throw VfsException.Unavailable("the change log is not answering");
+        }
+
+        lock (_gate)
+        {
+            Check(library);
+            var now = $"{_epoch}:{_log.Count}";
+            var parts = since?.Split(':');
+            if (parts is not { Length: 2 } || !int.TryParse(parts[0], out var epoch) || !int.TryParse(parts[1], out var from) || epoch != _epoch || from > _log.Count)
+            {
+                return Task.FromResult<LibraryChanges?>(new LibraryChanges(now, true, [], since is null ? "no token" : "a token the store no longer knows"));
+            }
+
+            var where = _items.Where(kv => kv.Key.Library == library.Key).ToDictionary(kv => kv.Value.Id, kv => kv.Key.Path);
+            var elsewhere = new Dictionary<string, bool>();
+            foreach (var (changed, id, mayBe) in _log.Skip(from))
+            {
+                if (changed == library.Key)
+                {
+                    elsewhere[id] = elsewhere.GetValueOrDefault(id) || mayBe;
+                }
+            }
+
+            var items = elsewhere.Select(e => new LibraryChange(e.Key, where.TryGetValue(e.Key, out var path) ? VfsPath.Parent(path) : null, e.Value || !where.ContainsKey(e.Key))).ToList();
+
+            // the log is the store's, and its token goes on with what happens in any library, as the services' do
+            return Task.FromResult<LibraryChanges?>(new LibraryChanges(now, false, items));
+        }
+    }
+
     public int SubsiteListings => Volatile.Read(ref _subsiteListings);
 
     /// <summary>How often the tenant's other sites were searched for.</summary>
@@ -592,7 +656,7 @@ internal sealed class MemoryDocumentStore : IDocumentStore
         }
     }
 
-    /// <summary>A file, or a folder for no contents, with the folders above it.</summary>
+    /// <summary>A file, or a folder for no contents, with the folders above it. One already there keeps its id: it is that item, changed.</summary>
     public void Seed(string library, string path, byte[]? contents)
     {
         lock (_gate)
@@ -603,9 +667,55 @@ internal sealed class MemoryDocumentStore : IDocumentStore
                 Seed(library, parent, null);
             }
 
-            _items[(library, path)] = new Item(contents is null, contents ?? [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 1);
+            var id = _items.TryGetValue((library, path), out var old) ? old.Id : NewId();
+            _items[(library, path)] = new Item(id, contents is null, contents ?? [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 1);
+            _log.Add((library, id, false));
         }
     }
+
+    /// <summary>Takes an item away, a folder with all it holds, as someone else does: the log names the item alone.</summary>
+    public void Remove(string library, string path)
+    {
+        lock (_gate)
+        {
+            var item = _items.TryGetValue((library, path), out var found) ? found : throw VfsException.NotFound(path);
+            foreach (var key in _items.Keys.Where(k => k.Library == library && (k.Path == path || VfsPath.IsUnder(k.Path, path))).ToList())
+            {
+                _items.Remove(key);
+            }
+
+            _log.Add((library, item.Id, true));
+        }
+    }
+
+    /// <summary>Moves or renames an item, a folder with all it holds, as someone else does: the log names the item alone.</summary>
+    public void Move(string library, string fromPath, string toPath)
+    {
+        lock (_gate)
+        {
+            var moving = _items.Where(kv => kv.Key.Library == library && (kv.Key.Path == fromPath || VfsPath.IsUnder(kv.Key.Path, fromPath))).ToList();
+            if (moving.Count == 0)
+            {
+                throw VfsException.NotFound(fromPath);
+            }
+
+            var parent = VfsPath.Parent(toPath);
+            if (parent.Length > 0 && !_items.ContainsKey((library, parent)))
+            {
+                Seed(library, parent, null);
+            }
+
+            foreach (var (key, item) in moving)
+            {
+                _items.Remove(key);
+                _items[(library, toPath + key.Path[fromPath.Length..])] = item;
+            }
+
+            _log.Add((library, _items[(library, toPath)].Id, true));
+        }
+    }
+
+    private static string NewId() => Guid.NewGuid().ToString("D");
 
     public bool Has(string library, string path)
     {
@@ -833,8 +943,9 @@ internal sealed class MemoryDocumentStore : IDocumentStore
                 throw VfsException.AlreadyExists(itemPath);
             }
 
-            var item = new Item(false, data, old?.Created ?? DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, (old?.Version ?? 0) + 1);
+            var item = new Item(old?.Id ?? NewId(), false, data, old?.Created ?? DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, (old?.Version ?? 0) + 1);
             _items[(library.Key, itemPath)] = item;
+            _log.Add((library.Key, item.Id, false));
             return Describe(library, itemPath, item).Item;
         }
     }
@@ -850,8 +961,9 @@ internal sealed class MemoryDocumentStore : IDocumentStore
             }
 
             RequireParent(library, itemPath);
-            var item = new Item(true, [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 1);
+            var item = new Item(NewId(), true, [], DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 1);
             _items[(library.Key, itemPath)] = item;
+            _log.Add((library.Key, item.Id, false));
             return Task.FromResult(Describe(library, itemPath, item).Item);
         }
     }
@@ -870,7 +982,7 @@ internal sealed class MemoryDocumentStore : IDocumentStore
         lock (_gate)
         {
             Check(library);
-            if (!_items.Remove((library.Key, itemPath)))
+            if (!_items.Remove((library.Key, itemPath), out var gone))
             {
                 throw VfsException.NotFound(itemPath);
             }
@@ -879,6 +991,8 @@ internal sealed class MemoryDocumentStore : IDocumentStore
             {
                 _items.Remove(key);
             }
+
+            _log.Add((library.Key, gone.Id, true));
         }
 
         return Task.CompletedTask;
@@ -907,6 +1021,7 @@ internal sealed class MemoryDocumentStore : IDocumentStore
                 _items[(library.Key, toPath + key.Path[fromPath.Length..])] = item;
             }
 
+            _log.Add((library.Key, _items[(library.Key, toPath)].Id, true));
             return Task.FromResult(Describe(library, toPath, _items[(library.Key, toPath)]).Item);
         }
     }
@@ -926,6 +1041,7 @@ internal sealed class MemoryDocumentStore : IDocumentStore
             Check(library);
             var item = _items.TryGetValue((library.Key, itemPath), out var found) ? found : throw VfsException.NotFound(itemPath);
             _items[(library.Key, itemPath)] = item with { Created = created ?? item.Created, Modified = modified ?? item.Modified };
+            _log.Add((library.Key, item.Id, false));
         }
 
         return Task.CompletedTask;
@@ -954,8 +1070,8 @@ internal sealed class MemoryDocumentStore : IDocumentStore
         var name = VfsPath.SplitLast(path).Name;
         var version = item.Version.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var entry = item.IsFolder ? VfsEntry.Directory(name, item.Modified, item.Created) : VfsEntry.File(name, item.Data.Length, item.Modified, item.Created, etag: version);
-        return (entry, new ItemRef($"{library.Key}|{path}", version, null, item.Data.Length, item.IsFolder));
+        return (entry with { Key = item.Id }, new ItemRef(item.Id, version, null, item.Data.Length, item.IsFolder));
     }
 
-    private sealed record Item(bool IsFolder, byte[] Data, DateTimeOffset Created, DateTimeOffset Modified, int Version);
+    private sealed record Item(string Id, bool IsFolder, byte[] Data, DateTimeOffset Created, DateTimeOffset Modified, int Version);
 }

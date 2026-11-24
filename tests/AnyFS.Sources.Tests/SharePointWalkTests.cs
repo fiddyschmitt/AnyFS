@@ -94,6 +94,238 @@ public class SharePointWalkTests
         Assert.AreEqual(4, (await source.StatAsync("Documents/fixture/made.txt", None))?.Length);
     }
 
+    // --- a changed library is walked by what changed in it (the review of 21-Nov-2026, P7) -----------------------------
+    // A library whose stamp had moved was listed whole, a request a folder, whatever had changed in it: one new file in a
+    // library of 200,000 folders cost 200,000 requests. The store says what changed since the last walk (Graph's delta,
+    // SharePoint's change log), and the walk lists the folders the changes are in and those on the way down to them.
+
+    private const string Documents = "/Shared Documents";
+
+    /// <summary>A store that says what changed, its Documents holding three areas of four folders, two files in each, and one folder two deeper: 17 folders, 25 files.</summary>
+    private static MemoryDocumentStore ChangingLibrary()
+    {
+        var store = MemoryDocumentStore.Sample();
+        store.TellsChanges = true;
+        for (var area = 0; area < 3; area++)
+        {
+            for (var folder = 0; folder < 4; folder++)
+            {
+                store.Seed(Documents, $"area{area}/folder{folder}/one.txt", Encoding.UTF8.GetBytes("one"));
+                store.Seed(Documents, $"area{area}/folder{folder}/two.txt", Encoding.UTF8.GetBytes("two"));
+            }
+        }
+
+        store.Seed(Documents, "area1/folder2/deep/deeper/old.txt", Encoding.UTF8.GetBytes("old"));
+        return store;
+    }
+
+    /// <summary>A walk that keeps what the stamps say has not changed: how many folders it listed, and what it counted.</summary>
+    private static async Task<(int Listed, long Files, long Folders)> WalkAsync(MemorySharePointSource source, MemoryDocumentStore store)
+    {
+        var before = store.FolderListings;
+        var counters = new SourceCounters();
+        Assert.IsTrue(await source.WalkAsync(counters, full: false, None), "the walk went everywhere");
+        return (store.FolderListings - before, counters.FilesKnown, counters.DirectoriesKnown);
+    }
+
+    [TestMethod]
+    public async Task AWalkAfterAChangeListsTheFoldersOnTheWayToItAndNoOthers()
+    {
+        var store = ChangingLibrary();
+        await using var source = await MemorySharePointSource.StartAsync(store, walkEvery: TimeSpan.FromHours(1));
+        await source.CountFilesAsync(None);
+        var (files, folders) = (source.Counters.FilesKnown, source.Counters.DirectoriesKnown);
+        Assert.AreEqual(25, files);
+
+        // nothing changed: nothing of any library is listed
+        Assert.AreEqual((0, files, folders), await WalkAsync(source, store));
+
+        // one new file, four folders down: the library's own folder and the four on the way, of its 18
+        store.Seed(Documents, "area1/folder2/deep/deeper/new.txt", Encoding.UTF8.GetBytes("new"));
+        Assert.AreEqual((5, files + 1, folders), await WalkAsync(source, store));
+        Assert.AreEqual(3, (await source.StatAsync("Documents/area1/folder2/deep/deeper/new.txt", None))?.Length);
+
+        // one changed where it is
+        store.Seed(Documents, "area0/folder1/two.txt", Encoding.UTF8.GetBytes("two, and more"));
+        Assert.AreEqual((3, files + 1, folders), await WalkAsync(source, store));
+        Assert.AreEqual(13, (await source.StatAsync("Documents/area0/folder1/two.txt", None))?.Length);
+
+        // and nothing again
+        Assert.AreEqual((0, files + 1, folders), await WalkAsync(source, store));
+    }
+
+    [TestMethod]
+    public async Task WhatWasDeletedOrMovedOutsideIsFoundByItsIdAndLeavesNothingBehind()
+    {
+        var store = ChangingLibrary();
+        await using var source = await MemorySharePointSource.StartAsync(store, walkEvery: TimeSpan.FromHours(1));
+        await source.CountFilesAsync(None);
+        var (files, folders) = (source.Counters.FilesKnown, source.Counters.DirectoriesKnown);
+
+        // a file deleted: the change says its id and nothing of where it was
+        store.Remove(Documents, "area2/folder3/two.txt");
+        Assert.AreEqual((3, files - 1, folders), await WalkAsync(source, store));
+        Assert.IsNull(await source.StatAsync("Documents/area2/folder3/two.txt", None));
+
+        // a file moved to another folder, with another name: listed where it is, and gone from where it was
+        store.Move(Documents, "area0/folder0/one.txt", "area2/folder1/moved.txt");
+        Assert.AreEqual((5, files - 1, folders), await WalkAsync(source, store));
+        Assert.IsNull(await source.StatAsync("Documents/area0/folder0/one.txt", None), "nothing left where it was");
+        Assert.IsNotNull(await source.StatAsync("Documents/area2/folder1/moved.txt", None));
+
+        // a folder moved with what it holds: the folders it left and came to, and the folder itself where it is now
+        store.Move(Documents, "area0/folder3", "area2/folder3b");
+        Assert.AreEqual((4, files - 1, folders), await WalkAsync(source, store));
+        Assert.IsNull(await source.StatAsync("Documents/area0/folder3", None));
+        Assert.IsNull(await source.StatAsync("Documents/area0/folder3/one.txt", None));
+        Assert.IsNotNull(await source.StatAsync("Documents/area2/folder3b/one.txt", None));
+
+        // a folder renamed where it is
+        store.Move(Documents, "area1/folder0", "area1/folder0 renamed");
+        Assert.AreEqual((3, files - 1, folders), await WalkAsync(source, store));
+        Assert.IsNull(await source.StatAsync("Documents/area1/folder0/one.txt", None));
+        Assert.IsNotNull(await source.StatAsync("Documents/area1/folder0 renamed/one.txt", None));
+
+        // a folder deleted with all it holds: its folder is listed, and what was held below it is let go
+        store.Remove(Documents, "area1/folder2");
+        Assert.AreEqual((2, files - 1 - 3, folders - 3), await WalkAsync(source, store));
+        Assert.IsNull(await source.StatAsync("Documents/area1/folder2/deep/deeper/old.txt", None));
+        Assert.AreEqual((0, files - 4, folders - 3), await WalkAsync(source, store));
+    }
+
+    [TestMethod]
+    public async Task WhatWasWrittenThroughTheSourceIsFoundByItsIdToo()
+    {
+        // the entry put into a listing for a file uploaded or a folder made here carries the item's id, as one listed does
+        var store = ChangingLibrary();
+        await using var source = await MemorySharePointSource.StartAsync(store, walkEvery: TimeSpan.FromHours(1));
+        await source.CountFilesAsync(None);
+        var files = source.Counters.FilesKnown;
+        await using (var file = await source.OpenAsync("Documents/area0/folder2/mine.txt", VfsOpenMode.CreateNew, None))
+        {
+            await file.WriteAsync(0, "mine"u8.ToArray(), None);
+        }
+
+        await source.CreateDirectoryAsync("Documents/area0/made here", None);
+        Assert.IsNotNull(await source.StatAsync("Documents/area0/folder2/mine.txt", None));
+
+        // both gone again, outside, before any walk has listed them
+        store.Remove(Documents, "area0/folder2/mine.txt");
+        store.Remove(Documents, "area0/made here");
+        var (_, counted, _) = await WalkAsync(source, store);
+        Assert.AreEqual(files, counted);
+        Assert.IsNull(await source.StatAsync("Documents/area0/folder2/mine.txt", None));
+        Assert.IsNull(await source.StatAsync("Documents/area0/made here", None));
+    }
+
+    [TestMethod]
+    public async Task TheNextStartAsksWhatChangedSinceTheLastWalkOfTheOneBefore()
+    {
+        var store = ChangingLibrary();
+        using var context = new TestSourceContext("sharepoint");
+        long files;
+        await using (var first = await MemorySharePointSource.StartAsync(store, walkEvery: TimeSpan.FromHours(1), context: context))
+        {
+            await first.CountFilesAsync(None);
+            files = first.Counters.FilesKnown;
+        }
+
+        store.Seed(Documents, "area2/folder0/while away.txt", Encoding.UTF8.GetBytes("away"));
+        var before = store.FolderListings;
+        await using var source = await MemorySharePointSource.StartAsync(store, walkEvery: TimeSpan.FromHours(1), context: context);
+        await source.CountFilesAsync(None);
+        Assert.AreEqual(files + 1, source.Counters.FilesKnown);
+        Assert.AreEqual(3, store.FolderListings - before, "the library's own folder and the two on the way: the token came with the listings kept");
+        Assert.IsNotNull(await source.StatAsync("Documents/area2/folder0/while away.txt", None));
+    }
+
+    [TestMethod]
+    public async Task WhereTheStoreNoLongerKnowsTheTokenEveryFolderIsListed()
+    {
+        var store = ChangingLibrary();
+        await using var source = await MemorySharePointSource.StartAsync(store, walkEvery: TimeSpan.FromHours(1));
+        await source.CountFilesAsync(None);
+        var (files, folders) = (source.Counters.FilesKnown, source.Counters.DirectoriesKnown);
+        store.Seed(Documents, "area0/folder0/three.txt", Encoding.UTF8.GetBytes("three"));
+        store.ForgetTokens();
+        var (listed, counted, _) = await WalkAsync(source, store);
+        Assert.AreEqual(files + 1, counted);
+        Assert.IsTrue(listed >= 18, $"every folder of the library, and of the others: {listed}");
+
+        // and from the token that walk was given, by what changed again
+        store.Seed(Documents, "area0/folder0/four.txt", Encoding.UTF8.GetBytes("four"));
+        Assert.AreEqual((3, files + 2, folders), await WalkAsync(source, store));
+    }
+
+    [TestMethod]
+    public async Task WhereWhatChangedCannotBeAskedTheLibraryStaysAsItIsUntilItCan()
+    {
+        var store = ChangingLibrary();
+        await using var source = await MemorySharePointSource.StartAsync(store, walkEvery: TimeSpan.FromHours(1));
+        await source.CountFilesAsync(None);
+        var (files, folders) = (source.Counters.FilesKnown, source.Counters.DirectoriesKnown);
+        store.Seed(Documents, "area0/folder0/three.txt", Encoding.UTF8.GetBytes("three"));
+        store.ChangesUnavailable = true;
+        Assert.AreEqual((0, files, folders), await WalkAsync(source, store), "kept as it is: not listed whole, and the token not lost");
+        Assert.IsNull(await source.StatAsync("Documents/area0/folder0/three.txt", None));
+
+        store.ChangesUnavailable = false;
+        Assert.AreEqual((3, files + 1, folders), await WalkAsync(source, store));
+    }
+
+    [TestMethod]
+    public async Task AListingAPersonAsksForBetweenWalksLosesNoToken()
+    {
+        // the library's own folder is forgotten (a write into it that failed) and listed again for a person: the token
+        // the last walk left with it must still be there for the next walk, or that walk lists the library whole
+        var store = ChangingLibrary();
+        store.Seed(Documents, "top.txt", Encoding.UTF8.GetBytes("top"));
+        await using var source = await MemorySharePointSource.StartAsync(store, walkEvery: TimeSpan.FromHours(1));
+        await source.CountFilesAsync(None);
+        var (files, folders) = (source.Counters.FilesKnown, source.Counters.DirectoriesKnown);
+        store.FailSetTimes = true;
+        await Assert.ThrowsExactlyAsync<VfsException>(() => source.SetTimesAsync("Documents/top.txt", null, DateTimeOffset.UtcNow, None));
+        store.FailSetTimes = false;
+        Assert.IsNotNull(await source.StatAsync("Documents/top.txt", None), "listed again for the one who asked");
+
+        // and a folder further down, forgotten and listed again the same way
+        store.FailSetTimes = true;
+        await Assert.ThrowsExactlyAsync<VfsException>(() => source.SetTimesAsync("Documents/area2/folder2/one.txt", null, DateTimeOffset.UtcNow, None));
+        store.FailSetTimes = false;
+        Assert.IsNotNull(await source.StatAsync("Documents/area2/folder2/one.txt", None));
+
+        store.Seed(Documents, "area1/folder2/deep/deeper/new.txt", Encoding.UTF8.GetBytes("new"));
+        var (listed, counted, _) = await WalkAsync(source, store);
+        Assert.AreEqual(files + 1, counted);
+        Assert.IsTrue(listed <= 7, $"the folders on the way to what changed, and the one a person had listed: {listed} of the library's 18");
+        Assert.AreEqual((0, files + 1, folders), await WalkAsync(source, store));
+    }
+
+    [TestMethod]
+    public async Task ASourceOfOneLibraryListsTheFoldersOnTheWayToAChangeToo()
+    {
+        // the library is the source's root: its own folder has the token, and paths have no library's name before them
+        var store = ChangingLibrary();
+        await using var source = await MemorySharePointSource.StartAsync(store, pinned: "Documents", walkEvery: TimeSpan.FromHours(1));
+        await source.CountFilesAsync(None);
+        var (files, folders) = (source.Counters.FilesKnown, source.Counters.DirectoriesKnown);
+        Assert.AreEqual((0, files, folders), await WalkAsync(source, store));
+
+        store.Seed(Documents, "area1/folder2/deep/deeper/new.txt", Encoding.UTF8.GetBytes("new"));
+        Assert.AreEqual((5, files + 1, folders), await WalkAsync(source, store));
+        Assert.AreEqual(3, (await source.StatAsync("area1/folder2/deep/deeper/new.txt", None))?.Length);
+
+        store.Move(Documents, "area0/folder0/one.txt", "area2/folder1/moved.txt");
+        Assert.AreEqual((5, files + 1, folders), await WalkAsync(source, store));
+        Assert.IsNull(await source.StatAsync("area0/folder0/one.txt", None), "nothing left where it was");
+        Assert.IsNotNull(await source.StatAsync("area2/folder1/moved.txt", None));
+
+        store.Remove(Documents, "area2/folder3");
+        Assert.AreEqual((2, files - 1, folders - 1), await WalkAsync(source, store));
+        Assert.IsNull(await source.StatAsync("area2/folder3/one.txt", None));
+        Assert.AreEqual((0, files - 1, folders - 1), await WalkAsync(source, store));
+    }
+
     private static async Task<string> ReadAsync(ISource source, string path)
     {
         await using var file = await source.OpenAsync(path, VfsOpenMode.Read, None);
