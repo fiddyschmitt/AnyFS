@@ -39,8 +39,13 @@ public sealed class OperationTracker
 
     public int KeepFinishedAtMost { get; }
 
-    /// <summary>Raised on the thread that ended the operation, with it as it ended: for logging and tests.</summary>
-    public event Action<OperationRecord>? Finished;
+    /// <summary>
+    /// Raised on the thread that ended the operation, with the operation as it ended: for logging and tests. A listener
+    /// that wants it as a record makes one (<see cref="Snapshot"/>). One was made for every operation, whoever listened:
+    /// the cost of a record on each stat of every source, for a log that wants the few that failed or were slow, and
+    /// those only at Debug (the review of 21-Nov-2026, P3).
+    /// </summary>
+    public event Action<Operation>? Finished;
 
     /// <summary>Records an operation that has just begun; end it on the <see cref="Operation"/> returned.</summary>
     /// <param name="what">What a server is being asked, in a word or two (GET, SFTP list); null for what is named by its kind alone.</param>
@@ -160,7 +165,7 @@ public sealed class OperationTracker
             counters.For(op.Kind).Ended(op, _time.GetElapsedTime(op.StartedAt, op.FinishedAt));
         }
 
-        Finished?.Invoke(op.Snapshot(_time));
+        Finished?.Invoke(op);
     }
 
     // under _gate: each finished queue is in the order the operations ended, so the expired ones are at its head

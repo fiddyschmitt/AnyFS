@@ -17,7 +17,7 @@ public class OperationTrackerTests
         var time = new FakeTime();
         var tracker = new OperationTracker(time);
         var finished = new List<OperationRecord>();
-        tracker.Finished += finished.Add;
+        tracker.Finished += op => finished.Add(tracker.Snapshot(op));
 
         var op = tracker.Begin(Alpha, "alpha", OperationKind.List, "docs");
         time.Advance(TimeSpan.FromMilliseconds(300));
@@ -92,7 +92,7 @@ public class OperationTrackerTests
     {
         var tracker = new OperationTracker(new FakeTime());
         var finished = new List<OperationRecord>();
-        tracker.Finished += finished.Add;
+        tracker.Finished += op => finished.Add(tracker.Snapshot(op));
         var counters = new SourceCounters();
         var op = tracker.Begin(Alpha, "alpha", OperationKind.Count, "");
         op.Follow(counters);

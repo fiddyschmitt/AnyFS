@@ -1314,13 +1314,14 @@ public sealed class AnyFsEngine : IAsyncDisposable
     }
 
     /// <summary>A failed or slow operation is worth a debug line: with the log at debug, a sluggish mount says which source and call.</summary>
-    private void OnOperationFinished(OperationRecord op)
+    private void OnOperationFinished(Operation ended)
     {
         if (!_logger.IsEnabled(LogLevel.Debug))
         {
             return;
         }
 
+        var op = Operations.Snapshot(ended);
         if (op.Outcome == OperationOutcome.Failed)
         {
             _logger.LogDebug("source {Source}: {Operation} '{Path}' failed after {Seconds:F2} s: {Error}", op.Source, op.What ?? op.Kind.Describe().ToLowerInvariant(), op.Path, op.Duration.TotalSeconds, op.Error);
