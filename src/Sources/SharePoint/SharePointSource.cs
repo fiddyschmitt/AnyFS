@@ -189,6 +189,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         _kept = new KeptListings(ListRemoteAsync, Counters, Logger, new KeptListingsOptions
         {
             Keep = KeepListings,
+            Unsaved = why => HoldDegraded("listings", why),
             WalkEvery = WalkEvery,
             Parallelism = Math.Clamp(WalkPerSite, 1, 64),
             MaxInFlight = int.MaxValue,

@@ -111,6 +111,7 @@ public sealed class JiraSource : SourceBase, ICountable
         _kept = new KeptListings(ListFolderAsync, Counters, Logger, new KeptListingsOptions
         {
             Keep = _settings.Keeps,
+            Unsaved = why => HoldDegraded("listings", why),
             UnkeptFor = TimeSpan.Zero,
             WalkEvery = _settings.WalkEvery,
             Parallelism = walking,

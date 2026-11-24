@@ -94,6 +94,10 @@ public sealed class KeptListings : IAsyncDisposable
                 try
                 {
                     _disk = new SqliteListingStore(Path.Combine(Path.GetDirectoryName(saved) ?? "", "listings.db"), _options.SaveKey ?? "", _logger, _options.Name);
+                    if (_options.Unsaved is { } unsaved)
+                    {
+                        _disk.Unsaved = why => unsaved(why is null ? null : $"What is listed cannot be kept on disk, and is asked for again as it is needed: {why}");
+                    }
                 }
                 catch (IOException ex)
                 {
@@ -239,7 +243,22 @@ public sealed class KeptListings : IAsyncDisposable
                 if (_disk is not null)
                 {
                     // the listings are in the database as they are stored: what is in flight is committed, with the rest
-                    _disk.Save(_fullWalkAt, fullWalk, leftOut);
+                    try
+                    {
+                        _disk.Save(_fullWalkAt, fullWalk, leftOut);
+                    }
+                    catch (IOException)
+                    {
+                        // not written: owed at the next save, where it was taken for written and the next run had neither
+                        _fullWalkChanged |= fullWalk;
+                        foreach (var (folder, _) in leftOut)
+                        {
+                            _leftOutChanged[folder] = 0;
+                        }
+
+                        throw;
+                    }
+
                     return;
                 }
 
@@ -1231,6 +1250,14 @@ public sealed record KeptListingsOptions
     /// environment says <c>ANYFS_LISTINGS_ON_DISK=0</c>. Nothing moves between the two: a file beside the database is deleted unread.
     /// </summary>
     public bool? OnDisk { get; init; }
+
+    /// <summary>
+    /// Told when what is listed cannot be written to the database (<see cref="OnDisk"/>: the disk full, the file held by
+    /// another program), with a sentence for the source's tile, and with null when it can again. A source holds itself
+    /// Degraded by it (<c>HoldDegraded("listings", why)</c>): it was a warning in the log, and the tile said Ready. Called
+    /// under the listings' own lock: it must ask nothing of them.
+    /// </summary>
+    public Action<string?>? Unsaved { get; init; }
 
     /// <summary>
     /// Whether the folders in a folder are each walked as a part of their own, <see cref="Parallelism"/> folders of each at a

@@ -46,6 +46,17 @@ internal sealed class SqliteListingStore : IListingStore
     private readonly Dictionary<string, StoredListing?> _written = new(StringComparer.Ordinal);
     private readonly SortedSet<string> _writtenOrder = new(DatabaseOrder.Instance);
     private bool _clearedSinceCommit;
+
+    // The paths whose row in the database is not what was last asked of it, a write of theirs not having landed: nothing
+    // is held for them until one does. And a Clear the database did not take, owed before the next write: nothing in
+    // the database is held until then. Both under _writtenGate. What a write left behind it answered from then on: a
+    // listing let go after a file was made in its folder still listed the folder without it (the review of
+    // 21-Nov-2026, R15a)
+    private readonly HashSet<string> _lost = new(StringComparer.Ordinal);
+    private bool _clearOwed;
+
+    // whether the database has refused a write since the last commit that landed (under _gate)
+    private bool _unsaved;
     private long _commits;
     private Checkpointer? _checkpointer;
     private SqliteConnection _db = null!;
@@ -225,6 +236,13 @@ internal sealed class SqliteListingStore : IListingStore
     /// <summary>When the last walk that listed every folder was, as the last run left it.</summary>
     public DateTimeOffset? FullWalkAt { get; private set; }
 
+    /// <summary>
+    /// Told when the database does not take what it is given, with what it said, and with null when a commit has landed
+    /// again: for the source's tile. It was a line in the log and nothing else. Called under the store's own lock: it
+    /// must ask nothing of the listings.
+    /// </summary>
+    public Action<string?>? Unsaved { get; set; }
+
     public int Count => Volatile.Read(ref _count);
 
     /// <summary>What the store has done since it was opened, as of now; readable after it is disposed too.</summary>
@@ -251,7 +269,7 @@ internal sealed class SqliteListingStore : IListingStore
                 return written;
             }
 
-            if (_clearedSinceCommit)
+            if (_clearedSinceCommit || _clearOwed || _lost.Contains(path))
             {
                 _meter.Note(Meter.Read, asked);
                 return null;
@@ -332,6 +350,7 @@ internal sealed class SqliteListingStore : IListingStore
             }
             catch (SqliteException ex)
             {
+                Lose(path);
                 Failed("write", ex);
                 return false;
             }
@@ -376,6 +395,7 @@ internal sealed class SqliteListingStore : IListingStore
             }
             catch (SqliteException ex)
             {
+                Lose(path);
                 Failed("write", ex);
             }
             finally
@@ -400,6 +420,12 @@ internal sealed class SqliteListingStore : IListingStore
                 _delete.Parameters[0].Value = path;
                 if (_delete.ExecuteNonQuery() == 0)
                 {
+                    // no row, which the database has now said itself: one lost there is lost no longer
+                    lock (_writtenGate)
+                    {
+                        _lost.Remove(path);
+                    }
+
                     return false;
                 }
 
@@ -412,8 +438,10 @@ internal sealed class SqliteListingStore : IListingStore
             }
             catch (SqliteException ex)
             {
+                // let go all the same, as far as anyone asking is told: true, so that what was made of the listing goes too
+                Lose(path);
                 Failed("write", ex);
-                return false;
+                return true;
             }
             finally
             {
@@ -433,18 +461,21 @@ internal sealed class SqliteListingStore : IListingStore
             {
                 Begin();
                 Run("DELETE FROM listing");
+                Cleared();
+                Wrote();
+            }
+            catch (SqliteException ex)
+            {
+                // not taken: nothing in the database is held from here on, and it is emptied before the next write
                 Volatile.Write(ref _count, 0);
                 lock (_writtenGate)
                 {
                     _written.Clear();
                     _writtenOrder.Clear();
-                    _clearedSinceCommit = true;
+                    _lost.Clear();
+                    _clearOwed = true;
                 }
 
-                Wrote();
-            }
-            catch (SqliteException ex)
-            {
                 Failed("write", ex);
             }
         }
@@ -543,9 +574,11 @@ internal sealed class SqliteListingStore : IListingStore
     {
         List<(string Path, StoredListing? Listing)> written = [];
         bool cleared;
+        bool anyLost;
         lock (_writtenGate)
         {
-            cleared = _clearedSinceCommit;
+            cleared = _clearedSinceCommit || _clearOwed;
+            anyLost = _lost.Count > 0;
             if (_writtenOrder.Count > 0)
             {
                 // with no end, as far as the last of them: the set gives no view without an upper bound
@@ -597,6 +630,12 @@ internal sealed class SqliteListingStore : IListingStore
                         }
 
                         at++;
+                        continue;
+                    }
+
+                    if (anyLost && IsLost(row.Path))
+                    {
+                        // a write of it did not land: the row is not what is held
                         continue;
                     }
 
@@ -719,6 +758,7 @@ internal sealed class SqliteListingStore : IListingStore
             }
             catch (SqliteException ex)
             {
+                Failed("write", ex);
                 throw new IOException($"the listings database could not be written: {ex.Message}", ex);
             }
         }
@@ -762,6 +802,27 @@ internal sealed class SqliteListingStore : IListingStore
             _inTransaction = true;
             _pending = 0;
         }
+
+        if (_clearOwed)
+        {
+            // a Clear the database did not take when it was asked: first in the transaction that follows it
+            Run("DELETE FROM listing");
+            Cleared();
+        }
+    }
+
+    /// <summary>Every row has gone in the transaction under way: until the commit lands, nothing in the database is held.</summary>
+    private void Cleared()
+    {
+        Volatile.Write(ref _count, 0);
+        lock (_writtenGate)
+        {
+            _written.Clear();
+            _writtenOrder.Clear();
+            _lost.Clear();
+            _clearOwed = false;
+            _clearedSinceCommit = true;
+        }
     }
 
     private void Wrote()
@@ -776,7 +837,6 @@ internal sealed class SqliteListingStore : IListingStore
     {
         if (_inTransaction)
         {
-            _inTransaction = false;
             var started = Stopwatch.GetTimestamp();
             try
             {
@@ -784,9 +844,22 @@ internal sealed class SqliteListingStore : IListingStore
                 SetMeta("count", Volatile.Read(ref _count).ToString(CultureInfo.InvariantCulture));
                 Run("COMMIT");
             }
+            catch (SqliteException)
+            {
+                GiveUpTransaction();
+                throw;
+            }
             finally
             {
                 _meter.Note(Meter.Commit, started);
+            }
+
+            _inTransaction = false;
+            if (_unsaved)
+            {
+                _unsaved = false;
+                _logger.LogInformation("{Name}: the listings database {Path} is written again", _name, _path);
+                Unsaved?.Invoke(null);
             }
 
             // the readers see it now: what was kept beside for them goes, and a read under way that saw neither asks again
@@ -809,6 +882,82 @@ internal sealed class SqliteListingStore : IListingStore
         }
     }
 
+    /// <summary>
+    /// A commit that did not land (the disk full, an I/O error). The transaction is given up, since one left open took
+    /// every write after it down with it: the next BEGIN was refused inside it, and so was the one after. What was stored
+    /// in it is lost with it: nothing is held for those paths until a write of them lands, and the count is the
+    /// database's own again.
+    /// </summary>
+    private void GiveUpTransaction()
+    {
+        try
+        {
+            Run("ROLLBACK");
+        }
+        catch (SqliteException)
+        {
+            // rolled back already by the failure itself, or the connection is beyond it: nothing of it is kept either way
+        }
+
+        _inTransaction = false;
+        _pending = 0;
+        lock (_writtenGate)
+        {
+            foreach (var path in _writtenOrder)
+            {
+                _lost.Add(path);
+            }
+
+            _written.Clear();
+            _writtenOrder.Clear();
+            if (_clearedSinceCommit)
+            {
+                // a Clear was in it: owed again
+                _clearedSinceCommit = false;
+                _clearOwed = true;
+                _lost.Clear();
+            }
+        }
+
+        try
+        {
+            if (_clearOwed)
+            {
+                Volatile.Write(ref _count, 0);
+            }
+            else if (Meta("count") is { } counted && int.TryParse(counted, CultureInfo.InvariantCulture, out var rows))
+            {
+                Volatile.Write(ref _count, rows);
+            }
+        }
+        catch (SqliteException)
+        {
+            // the count stays as it was: it is right again at the next commit that lands
+        }
+    }
+
+    private bool IsLost(string path)
+    {
+        lock (_writtenGate)
+        {
+            return _lost.Contains(path);
+        }
+    }
+
+    /// <summary>A write of <paramref name="path"/> did not land: whatever row the database has for it is not what is held.</summary>
+    private void Lose(string path)
+    {
+        lock (_writtenGate)
+        {
+            if (_written.Remove(path))
+            {
+                _writtenOrder.Remove(path);
+            }
+
+            _lost.Add(path);
+        }
+    }
+
     /// <summary>Stored, or let go (null), in the transaction under way: answered from here until the commit lands.</summary>
     private void Written(string path, StoredListing? listing)
     {
@@ -816,6 +965,7 @@ internal sealed class SqliteListingStore : IListingStore
         {
             _written[path] = listing;
             _writtenOrder.Add(path);
+            _lost.Remove(path);
         }
     }
 
@@ -904,6 +1054,34 @@ internal sealed class SqliteListingStore : IListingStore
         if (_failures++ % 1000 == 0)
         {
             _logger.LogWarning("{Name}: the listings database {Path} could not be {What} ({Error})", _name, _path, what == "read" ? "read" : "written", ex.Message);
+        }
+
+        if (what == "read")
+        {
+            return;
+        }
+
+        // A transaction with nothing written in it yet is ended. One that was refused the write lock may be held to the
+        // view of the database it had then, and be refused for that at every write after, though the lock is free again
+        if (_inTransaction && _pending == 0)
+        {
+            try
+            {
+                Run("ROLLBACK");
+            }
+            catch (SqliteException)
+            {
+                // none to end
+            }
+
+            _inTransaction = false;
+        }
+
+        // said to whoever shows the source, once, until a commit lands again (under the gate, as every write is)
+        if (!_unsaved)
+        {
+            _unsaved = true;
+            Unsaved?.Invoke(ex.Message);
         }
     }
 

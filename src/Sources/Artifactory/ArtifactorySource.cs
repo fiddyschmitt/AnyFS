@@ -116,6 +116,7 @@ public sealed partial class ArtifactorySource : SourceBase, ICountable
         _kept = new KeptListings(ListFolderAsync, Counters, Logger, new KeptListingsOptions
         {
             Keep = _settings.Keeps,
+            Unsaved = why => HoldDegraded("listings", why),
 
             // not kept, a listing lasts the refresh interval: a path is found through its folders' listings
             UnkeptFor = Refresh,

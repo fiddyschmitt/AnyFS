@@ -72,7 +72,7 @@ public class KeptListingsOnDiskTests
         return folder;
     }
 
-    private static KeptListingsOptions Options(string folder, bool onDisk = true, string key = Key, Func<string, CancellationToken, ValueTask<IReadOnlySet<string>?>>? leftOut = null) => new()
+    private static KeptListingsOptions Options(string folder, bool onDisk = true, string key = Key, Func<string, CancellationToken, ValueTask<IReadOnlySet<string>?>>? leftOut = null, Action<string?>? unsaved = null) => new()
     {
         WalkEvery = TimeSpan.Zero,
         SaveTo = Path.Combine(folder, "listings.json.gz"),
@@ -82,6 +82,7 @@ public class KeptListingsOnDiskTests
         SaveEvery = TimeSpan.Zero,
         OnDisk = onDisk,
         LeftOut = leftOut,
+        Unsaved = unsaved,
     };
 
     private KeptListings Kept(KeptListingsOptions options, SourceCounters? counters = null) => new(ListAsync, counters ?? new SourceCounters(), NullLogger.Instance, options);
@@ -245,6 +246,61 @@ public class KeptListingsOnDiskTests
         Assert.AreEqual(6, (await kept.Cache.GetAsync("d06", CancellationToken.None)).Count);
         Assert.IsNotNull(kept.Cache.Held("d06/sub"));
         Assert.AreEqual(40, kept.Cache.Count);
+    }
+
+    [TestMethod]
+    public async Task AListingLetGoWhileTheDatabaseCannotBeWrittenIsNotAnsweredFromIt()
+    {
+        // A write the database did not take left what it held in place, and that answered from then on: a file made
+        // through the mount was not in its folder's listing (the review of 21-Nov-2026, R15a)
+        var folder = TempFolder();
+        var said = new ConcurrentQueue<string?>();
+        var kept = Kept(Options(folder, unsaved: said.Enqueue));
+        await using var closing = kept;
+        await kept.CountAsync(CancellationToken.None);
+        Assert.AreEqual(0, said.Count, "nothing to say while the database takes what it is given");
+
+        // another program holds the database for writing: what is written now waits two seconds and fails
+        using (var other = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = Path.Combine(folder, "listings.db"), Pooling = false }.ToString()))
+        {
+            other.Open();
+            using (var begin = other.CreateCommand())
+            {
+                begin.CommandText = "BEGIN IMMEDIATE";
+                begin.ExecuteNonQuery();
+            }
+
+            _tree["d05"] = [.. _tree["d05"], VfsEntry.File("new.txt", 3)];
+            kept.Cache.Invalidate("d05");
+            var listed = await kept.Cache.GetAsync("d05", CancellationToken.None);
+            Assert.IsTrue(listed.Any(e => e.Name == "new.txt"), "listed again from the source: " + string.Join(", ", listed.Select(e => e.Name)));
+
+            // and what could not be stored is not answered from the row the database still has, at the next ask
+            _tree["d05"] = [.. _tree["d05"], VfsEntry.File("newer.txt", 4)];
+            listed = await kept.Cache.GetAsync("d05", CancellationToken.None);
+            Assert.IsTrue(listed.Any(e => e.Name == "newer.txt"), "nothing is held for a folder whose listing could not be stored: " + string.Join(", ", listed.Select(e => e.Name)));
+
+            // said once, for the tile, in words for a person and with what the database said
+            StringAssert.Contains(said.Single(), "cannot be kept on disk");
+            StringAssert.Contains(said.Single(), "locked");
+
+            using var end = other.CreateCommand();
+            end.CommandText = "ROLLBACK";
+            end.ExecuteNonQuery();
+        }
+
+        // the database free again, a listing is stored and answers as ever
+        _listed.Clear();
+        Assert.AreEqual(8, (await kept.Cache.GetAsync("d05", CancellationToken.None)).Count);
+        Assert.AreEqual(8, (await kept.Cache.GetAsync("d05", CancellationToken.None)).Count);
+        Assert.AreEqual(1, Listed("d05"), "asked once, and held from then on");
+
+        // and with the next commit that lands (every half minute as a source runs; here, as the listings are closed), the
+        // tile is told it is over
+        Assert.AreEqual(1, said.Count);
+        await kept.DisposeAsync();
+        Assert.AreEqual(2, said.Count);
+        Assert.IsNull(said.Last(), "over");
     }
 
     [TestMethod]
