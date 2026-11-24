@@ -240,6 +240,11 @@ internal sealed class SharePointTarget
         try
         {
             Assert.AreEqual(0, (await SpsTestServer.NamesAsync(source, folder)).Count, "listed while empty");
+
+            // The walk that began with the source is let end first. It lists every folder that changed, this one too: one
+            // passing between the colleague's file and mine lists that file, and the open is then refused where the close
+            // was meant to be (met on Ubuntu in CI, 24-Nov-2026, run 45405880085)
+            await source.CountFilesAsync(CancellationToken.None);
             File.WriteAllText(local, "a colleague's");
             var theirs = new FileInfo(local).Length;
             foreach (var size in new[] { 11L, simpleLimit + 1 })
