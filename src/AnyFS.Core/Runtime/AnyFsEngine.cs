@@ -1465,7 +1465,7 @@ public sealed class AnyFsEngine : IAsyncDisposable
             }
         }
 
-        var runner = new MountRunner(definition, provider, settings, error, collection, Paths, Shared, Stats, _loggerFactory.CreateLogger($"AnyFS.Mount.{collection.Name}.{definition.Name}"));
+        var runner = new MountRunner(definition, provider, settings, error, collection, Paths, Shared, Stats, _loggerFactory.CreateLogger($"AnyFS.Mount.{collection.Name}.{definition.Name}"), _time);
         runner.Changed += _ => OnChanged();
         return runner;
     }

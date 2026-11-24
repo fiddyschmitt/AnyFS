@@ -8,7 +8,11 @@ using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Core.Runtime;
 
-/// <summary>Runs one mount of one collection. A mount never crashes the app: exceptions become Failed (spec 8.8).</summary>
+/// <summary>
+/// Runs one mount of one collection. A mount never crashes the app: exceptions become Failed (spec 8.8). A start that
+/// failed is tried again in its own time, as a source's is (spec 6.4), until the mount is up or the runner is stopped: a
+/// port still held as AnyFS started again left the mount down until someone looked (the review of 21-Nov-2026, R7e).
+/// </summary>
 public sealed class MountRunner
 {
     private readonly IMountProviderPlugin? _provider;
@@ -19,7 +23,16 @@ public sealed class MountRunner
     private readonly SharedResources _shared;
     private readonly StatsCollector _stats;
     private readonly ILogger _logger;
+    private readonly TimeProvider _time;
+    private readonly object _gate = new();
     private ComponentStatus _status = ComponentStatus.DisabledStatus;
+
+    // the tries that follow a start that failed, and what stops them
+    private CancellationTokenSource? _retrying;
+    private Task? _retries;
+
+    // what the last try that failed said, so that the log says it once and not at every try
+    private string? _lastFailure;
 
     public MountRunner(
         MountDefinition definition,
@@ -30,7 +43,8 @@ public sealed class MountRunner
         SettingsPaths paths,
         SharedResources shared,
         StatsCollector stats,
-        ILogger logger)
+        ILogger logger,
+        TimeProvider? time = null)
     {
         Definition = definition;
         _provider = provider;
@@ -41,6 +55,7 @@ public sealed class MountRunner
         _shared = shared;
         _stats = stats;
         _logger = logger;
+        _time = time ?? TimeProvider.System;
     }
 
     public MountDefinition Definition { get; }
@@ -63,7 +78,17 @@ public sealed class MountRunner
 
     public IReadOnlyList<AccessPath> AccessPaths => Mount?.AccessPaths ?? [];
 
+    /// <summary>How long a mount is given to stop what is under way: its provider's token is cancelled when this has passed (spec 8.8).</summary>
     public TimeSpan StopTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// How much longer than <see cref="StopTimeout"/> a stop is waited for. No provider is trusted to read the token it is
+    /// given (none of the built-in ones did): past this the runner goes on, and the provider's stop ends in its own time.
+    /// </summary>
+    public TimeSpan StopGrace { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>How long after a start that failed the next is tried, by how many have failed: a source's schedule (spec 6.4). Overridable for tests.</summary>
+    public Func<int, TimeSpan> RetryDelay { get; set; } = RetryPolicy.Delay;
 
     /// <summary>
     /// For a runner put in the place of one that is up: "Stopping" until its own start has its turn, which is when the one
@@ -74,11 +99,15 @@ public sealed class MountRunner
 
     public async Task StartAsync(IVirtualFileSystem fs, CancellationToken ct)
     {
-        // Up already. The collection's start and a change may both come to start a mount: one added while its collection
-        // still waited for a first source was started by each, and the first of the two was left up with no one to stop it
-        if (Mount is not null)
+        // Up already, or being tried. The collection's start and a change may both come to start a mount: one added while
+        // its collection still waited for a first source was started by each, and the first of the two was left up with no
+        // one to stop it
+        lock (_gate)
         {
-            return;
+            if (Mount is not null || _retries is not null)
+            {
+                return;
+            }
         }
 
         if (!Definition.Enabled)
@@ -113,13 +142,48 @@ public sealed class MountRunner
             return;
         }
 
-        Status = new ComponentStatus(ComponentState.Starting, "Starting");
+        _lastFailure = null;
+        if (await TryStartAsync(fs, 0, ct).ConfigureAwait(false))
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            _retrying = new CancellationTokenSource();
+            var stopped = _retrying.Token;
+            _retries = Task.Run(() => RetryAsync(fs, stopped), CancellationToken.None);
+        }
+    }
+
+    /// <summary>The tries after the first, each after its wait, until one comes up or the runner is stopped.</summary>
+    private async Task RetryAsync(IVirtualFileSystem fs, CancellationToken stopped)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            await Task.Delay(RetryDelay(attempt - 1), _time, stopped).ConfigureAwait(false);
+            if (await TryStartAsync(fs, attempt, stopped).ConfigureAwait(false))
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>One try: true when the mount is up. A try that failed says so, with when the next one is.</summary>
+    private async Task<bool> TryStartAsync(IVirtualFileSystem fs, int attempt, CancellationToken ct)
+    {
+        Status = new ComponentStatus(ComponentState.Starting, attempt == 0 ? "Starting" : $"Retrying ({attempt})");
         IMount? mount = null;
+        var up = false;
         try
         {
-            mount = _provider.CreateMount(_settings ?? _provider.CreateDefaultSettings(_collection), _collection);
+            mount = _provider!.CreateMount(_settings ?? _provider.CreateDefaultSettings(_collection), _collection);
             var context = new MountContextImpl(this, Definition, _collection, _paths, _shared, _stats, _logger);
             await mount.StartAsync(fs, context, ct).ConfigureAwait(false);
+            up = true;
+
+            // one that came up after it was told to stop, its provider not having looked at the token, is not kept
+            ct.ThrowIfCancellationRequested();
             Mount = mount;
             if (Status.State == ComponentState.Starting)
             {
@@ -128,10 +192,11 @@ public sealed class MountRunner
             }
 
             _logger.LogInformation("mount {Mount} of {Collection} ({Provider}) is up at {Paths}", Definition.Name, _collection.Name, Definition.Provider, string.Join(", ", mount.AccessPaths.Select(p => p.Value)));
+            return true;
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            await DisposeQuietlyAsync(mount).ConfigureAwait(false);
+            await (up ? StopAndDisposeAsync(mount!) : DisposeQuietlyAsync(mount)).ConfigureAwait(false);
             Status = new ComponentStatus(ComponentState.Disabled, "Stopped");
             throw;
         }
@@ -139,18 +204,52 @@ public sealed class MountRunner
         {
             await DisposeQuietlyAsync(mount).ConfigureAwait(false);
             var message = ex is VfsException ? ex.Message : ex.GetBaseException().Message;
-            Status = new ComponentStatus(ComponentState.Failed, message);
-            _logger.LogError(ex, "mount {Mount} of {Collection} failed to start", Definition.Name, _collection.Name);
+            var delay = RetryDelay(attempt);
+            Status = new ComponentStatus(ComponentState.Failed, $"{message} (retrying in {RetryPolicy.Describe(delay)})");
+
+            // said once: a mount whose settings are wrong fails the same way every five minutes until they are edited
+            if (attempt == 0)
+            {
+                _logger.LogError(ex, "mount {Mount} of {Collection} failed to start; it is tried again in {Delay}, and from then on by a source's schedule", Definition.Name, _collection.Name, RetryPolicy.Describe(delay));
+            }
+            else
+            {
+                _logger.Log(message == _lastFailure ? LogLevel.Debug : LogLevel.Warning, "mount {Mount} of {Collection} failed to start again (try {Attempt}): {Error}; it is tried again in {Delay}", Definition.Name, _collection.Name, attempt + 1, message, RetryPolicy.Describe(delay));
+            }
+
+            _lastFailure = message;
+            return false;
         }
     }
 
     public async Task StopAsync()
     {
+        // the tries first: none may bring the mount up behind this stop
+        CancellationTokenSource? retrying;
+        Task? retries;
+        lock (_gate)
+        {
+            retrying = _retrying;
+            retries = _retries;
+            _retrying = null;
+            _retries = null;
+        }
+
+        if (retrying is not null)
+        {
+            await retrying.CancelAsync().ConfigureAwait(false);
+            if (!await EndsInTimeAsync(retries!).ConfigureAwait(false))
+            {
+                _logger.LogWarning("mount {Mount} of {Collection}: a start under way has not ended {Seconds:0.#} s after it was told to stop, and is waited for no longer; what it brings up is stopped again", Definition.Name, _collection.Name, (StopTimeout + StopGrace).TotalSeconds);
+            }
+        }
+
         var mount = Mount;
         Mount = null;
         if (mount is null)
         {
-            if (Status.State != ComponentState.Failed)
+            // one that was being tried again is tried no more; one that could not be tried at all goes on saying why
+            if (retrying is not null || Status.State != ComponentState.Failed)
             {
                 Status = new ComponentStatus(ComponentState.Disabled, "Stopped");
             }
@@ -159,6 +258,26 @@ public sealed class MountRunner
         }
 
         Status = new ComponentStatus(ComponentState.Stopping, "Stopping");
+        var stopping = StopAndDisposeAsync(mount);
+        if (!await EndsInTimeAsync(stopping).ConfigureAwait(false))
+        {
+            // A stop took as long as it took: a mapped drive's removal a minute, and a window closing gave the mounts the time
+            // its sources needed to keep what they keep (the review of 21-Nov-2026, R7e)
+            var since = _time.GetTimestamp();
+            _logger.LogWarning("mount {Mount} of {Collection}: has not stopped after {Seconds:0.#} s and is waited for no longer. What it holds (a port, a drive, a folder) it holds until it has", Definition.Name, _collection.Name, (StopTimeout + StopGrace).TotalSeconds);
+            _ = stopping.ContinueWith(
+                _ => _logger.LogInformation("mount {Mount} of {Collection}: stopped, {Seconds:0.#} s after it was no longer waited for", Definition.Name, _collection.Name, _time.GetElapsedTime(since).TotalSeconds),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
+        Status = new ComponentStatus(ComponentState.Disabled, "Stopped");
+    }
+
+    /// <summary>The provider's stop, told to give up what is under way after <see cref="StopTimeout"/>, and its dispose. Nothing is thrown.</summary>
+    private async Task StopAndDisposeAsync(IMount mount)
+    {
         try
         {
             using var cts = new CancellationTokenSource(StopTimeout);
@@ -170,7 +289,29 @@ public sealed class MountRunner
         }
 
         await DisposeQuietlyAsync(mount).ConfigureAwait(false);
-        Status = new ComponentStatus(ComponentState.Disabled, "Stopped");
+    }
+
+    /// <summary>Waits for something of this mount to end, for as long as a stop may take; false when it has not ended by then.</summary>
+    private async Task<bool> EndsInTimeAsync(Task work)
+    {
+        try
+        {
+            await work.WaitAsync(StopTimeout + StopGrace, _time).ConfigureAwait(false);
+        }
+        catch (TimeoutException) when (!work.IsCompleted)
+        {
+            return false;
+        }
+        catch (OperationCanceledException)
+        {
+            // the tries, told to stop
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "mount {Mount} of {Collection}: what was stopped ended with a failure", Definition.Name, _collection.Name);
+        }
+
+        return true;
     }
 
     internal void OnHealth(ComponentHealth health, string? detail)
