@@ -59,8 +59,22 @@ public partial class MainWindow : Window
             ViewModel.Refresh();
             _timer.Start();
             _watchdog.Change(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+            SayStartupNotices();
         };
         Closing += OnClosing;
+    }
+
+    /// <summary>What went wrong with the settings files as AnyFS started, said over the window once it is open.</summary>
+    private async void SayStartupNotices()
+    {
+        try
+        {
+            await ViewModel.SayStartupNoticesAsync();
+        }
+        catch (Exception ex)
+        {
+            _host.Logger.LogWarning(ex, "window: what went wrong with the settings as AnyFS started could not be shown; the log has it");
+        }
     }
 
     public MainViewModel ViewModel { get; }

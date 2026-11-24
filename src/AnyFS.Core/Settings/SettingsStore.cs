@@ -13,6 +13,8 @@ namespace AnyFS.Core.Settings;
 public sealed class SettingsStore
 {
     private readonly ILogger _logger;
+    private readonly List<string> _notices = [];
+    private readonly HashSet<string> _setAside = new(StringComparer.Ordinal);
 
     public SettingsStore(SettingsPaths paths, ILogger logger)
     {
@@ -31,8 +33,24 @@ public sealed class SettingsStore
     /// <summary>True when collections.json did not exist (so Collection 1 gets created).</summary>
     public bool FirstStart { get; private set; }
 
+    /// <summary>
+    /// What went wrong with the settings files as they were loaded, in words for the person: a file that would not parse
+    /// and was set aside, an entry left out. The window says them as it opens. The log has each as well, and was the only
+    /// place that did: the window opened without the person's collections and did not say why (the review of
+    /// 21-Nov-2026, R7g).
+    /// </summary>
+    public IReadOnlyList<string> Notices => _notices;
+
+    /// <summary>
+    /// True when collections.json would not parse and was set aside. The collections are out of this run and not gone:
+    /// no "Collection 1" is made in their place, and what is kept by their names (the stats) is kept for their return.
+    /// </summary>
+    public bool CollectionsSetAside => _setAside.Contains(Paths.CollectionsFile);
+
     public void Load()
     {
+        _notices.Clear();
+        _setAside.Clear();
         Directory.CreateDirectory(Paths.Settings);
         App = ReadOrQuarantine(Paths.AppSettingsFile, CoreJsonContext.Default.AppSettings) ?? new AppSettings();
         CheckVersion(Paths.AppSettingsFile, App.Version);
@@ -51,7 +69,7 @@ public sealed class SettingsStore
             CheckVersion(Paths.CollectionsFile, collections.Version);
         }
 
-        FirstStart = collections is null;
+        FirstStart = collections is null && !CollectionsSetAside;
         Collections = collections?.Collections ?? [];
         Tidy();
     }
@@ -131,7 +149,7 @@ public sealed class SettingsStore
 
     private void Tidy()
     {
-        var seen = new HashSet<Guid>();
+        var seen = new Dictionary<Guid, string>();
         foreach (var source in Sources.ToList())
         {
             if (source.Id == Guid.Empty)
@@ -139,9 +157,10 @@ public sealed class SettingsStore
                 source.Id = Guid.NewGuid();
             }
 
-            if (!seen.Add(source.Id))
+            if (!seen.TryAdd(source.Id, source.Name))
             {
                 _logger.LogWarning("sources.json: duplicate source id {Id} ({Name}); the second one was ignored", source.Id, source.Name);
+                _notices.Add($"sources.json has two sources with one id, '{seen[source.Id]}' and '{source.Name}' ({source.Id}). The second is left out, and is gone from the file when AnyFS next saves it.");
                 Sources.Remove(source);
             }
         }
@@ -153,9 +172,21 @@ public sealed class SettingsStore
                 collection.Id = Guid.NewGuid();
             }
 
+            var members = new HashSet<Guid>();
             foreach (var membership in collection.Sources.ToList())
             {
-                if (!seen.Contains(membership.Id))
+                // One source, one place in a collection: a file edited by hand may name it twice, which nothing in the
+                // window can make. Its lists are kept by the source's id, and with two of one id every refresh of them threw
+                if (!members.Add(membership.Id))
+                {
+                    var name = seen.GetValueOrDefault(membership.Id, membership.Id.ToString());
+                    _logger.LogWarning("collections.json: collection '{Collection}' has the source {Source} twice; its second place, '{Path}', is left out", collection.Name, name, membership.Path);
+                    _notices.Add($"collections.json has the source '{name}' twice in the collection '{collection.Name}'. Its second place there ('{membership.Path}') is left out, and is gone from the file when AnyFS next saves it.");
+                    collection.Sources.Remove(membership);
+                    continue;
+                }
+
+                if (!seen.ContainsKey(membership.Id))
                 {
                     // kept in the list (so a save doesn't lose it) but never started; the engine skips it
                     _logger.LogWarning("collections.json: collection '{Collection}' references a source {Id} that isn't in sources.json; it is ignored", collection.Name, membership.Id);
@@ -199,6 +230,8 @@ public sealed class SettingsStore
         {
             var moved = JsonFiles.Quarantine(path);
             _logger.LogError(ex, "{File} could not be read and was moved to {Moved}; starting with defaults", Path.GetFileName(path), moved);
+            _setAside.Add(path);
+            _notices.Add($"{Path.GetFileName(path)} could not be read, and is set aside as {Path.GetFileName(moved)} in {Path.GetDirectoryName(path)}. AnyFS has started without what was in it. To have it back: close AnyFS, correct the file and give it its name again.\n\nWhat is wrong with it: {ex.Message}");
             return null;
         }
     }

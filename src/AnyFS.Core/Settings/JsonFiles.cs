@@ -7,8 +7,14 @@ namespace AnyFS.Core.Settings;
 public static class JsonFiles
 {
     private const int ReplaceAttempts = 6;
+    private const int OpenAttempts = 7;
 
-    /// <summary>Null when the file doesn't exist. A corrupt file throws <see cref="JsonException"/>; callers back it up and start afresh.</summary>
+    /// <summary>
+    /// Null when the file doesn't exist. A corrupt file throws <see cref="JsonException"/>; callers back it up and start
+    /// afresh. A file another program holds for itself (an editor saving it, an antivirus scanning it) is tried again for
+    /// two thirds of a second, and throws the <see cref="IOException"/> when it is still held then: at a start that
+    /// meant no window at all for a file held a moment (the review of 21-Nov-2026, R7g).
+    /// </summary>
     public static T? Read<T>(string path, JsonTypeInfo<T> typeInfo)
         where T : class
     {
@@ -18,13 +24,22 @@ public static class JsonFiles
         }
 
         FileStream stream;
-        try
+        for (var attempt = 1; ; attempt++)
         {
-            stream = OpenToRead(path);
-        }
-        catch (FileNotFoundException)
-        {
-            return null;
+            try
+            {
+                stream = OpenToRead(path);
+                break;
+            }
+            catch (FileNotFoundException)
+            {
+                return null;
+            }
+            catch (IOException) when (attempt < OpenAttempts)
+            {
+                // 10, 20, 40, 80, 160 and 320 ms
+                Thread.Sleep(10 << (attempt - 1));
+            }
         }
 
         using (stream)

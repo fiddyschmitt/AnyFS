@@ -2,9 +2,19 @@
 
 AnyFS keeps three JSON files under `settings/`, plus state beside it. Everything is UTF-8,
 indented, with stable property order and a `version` field (currently 1); files are written
-atomically (temp file + rename). A file that fails to parse is moved aside as
-`<name>.bad-<timestamp>` and AnyFS starts with defaults for it. Edits made by hand while AnyFS
-runs are picked up on the next start.
+atomically (temp file + rename). Edits made by hand while AnyFS runs are picked up on the next
+start.
+
+A file that fails to parse is set aside as `<name>.bad-<timestamp>` beside it, and AnyFS starts
+without what was in it. The window says so as it opens, with what the parser said and its line
+number; `anyfs serve` says it on its console. To have the file back, close AnyFS, correct it and
+give it its name again. With `collections.json` set aside the window is empty: no "Collection 1" is
+made in the collections' place, and their stats are kept for their return. A source listed twice in
+one collection keeps its first place there, and the second is left out and said.
+
+One AnyFS runs on a settings folder at a time: it holds `state/anyfs.lock` while it runs. A second
+one says which process has the folder and ends (`anyfs serve` with exit code 3). `--settings-dir`
+gives a second one a folder of its own.
 
 ## Where
 

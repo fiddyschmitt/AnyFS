@@ -10,11 +10,14 @@ namespace AnyFS.App.Gui.ViewModels;
 public sealed partial class MainViewModel : ObservableObject
 {
     private readonly AnyFsEngine _engine;
+    private readonly IDialogs _dialogs;
     private readonly IOpener _opener;
+    private bool _noticesSaid;
 
     public MainViewModel(AnyFsEngine engine, IDialogs dialogs, IOpener opener, ITextClipboard clipboard)
     {
         _engine = engine;
+        _dialogs = dialogs;
         _opener = opener;
         Operations = new Operations(dialogs);
         Collections = new CollectionsViewModel(engine, dialogs, opener, clipboard, Operations);
@@ -36,6 +39,23 @@ public sealed partial class MainViewModel : ObservableObject
     public StatsViewModel Stats { get; }
 
     public string Title { get; }
+
+    /// <summary>
+    /// Says, once, what went wrong with the settings files as AnyFS started: a file that would not parse and is set aside, an
+    /// entry left out. It was in the log only, and the window opened without the person's collections and did not say why
+    /// (the review of 21-Nov-2026, R7g).
+    /// </summary>
+    public Task SayStartupNoticesAsync()
+    {
+        var notices = _engine.Settings.Notices;
+        if (_noticesSaid || notices.Count == 0)
+        {
+            return Task.CompletedTask;
+        }
+
+        _noticesSaid = true;
+        return _dialogs.ShowMessageAsync("Settings", string.Join("\n\n", notices));
+    }
 
     [ObservableProperty]
     public partial StatusColour OverallColour { get; set; } = StatusColour.Grey;

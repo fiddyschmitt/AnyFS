@@ -127,8 +127,12 @@ public sealed class AnyFsEngine : IAsyncDisposable
             Stats.LoadLifetime(null);
         }
 
-        // rows of collections deleted while anyfs wasn't running (or before deletes pruned them) go
-        Stats.KeepOnly(Settings.Collections.Select(c => c.Name));
+        // rows of collections deleted while anyfs wasn't running (or before deletes pruned them) go. Not when the collections
+        // are only set aside, their file unreadable: their rows went with them, and were not there when the file was put right
+        if (!Settings.CollectionsSetAside)
+        {
+            Stats.KeepOnly(Settings.Collections.Select(c => c.Name));
+        }
     }
 
     /// <summary>Starts sources, then collections (whose mounts wait for a usable source). <paramref name="collectionNames"/> null means every enabled collection.</summary>
