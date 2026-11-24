@@ -41,7 +41,8 @@ internal static class GraphDrives
 
         created ??= ReadTime(item, "createdDateTime");
         modified ??= ReadTime(item, "lastModifiedDateTime");
-        var entry = new VfsEntry(name, isFolder, isFolder ? 0 : size, created, modified, VfsAttributes.None, cTag ?? eTag);
+        // with the item's id, which is how Graph names what changed (GraphDocumentStore.ChangesAsync)
+        var entry = new VfsEntry(name, isFolder, isFolder ? 0 : size, created, modified, VfsAttributes.None, cTag ?? eTag) { Key = id.Length > 0 ? id : null };
         return (entry, new ItemRef(id, cTag, downloadUrl, size, isFolder));
     }
 

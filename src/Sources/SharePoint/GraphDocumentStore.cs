@@ -140,6 +140,124 @@ internal sealed class GraphDocumentStore : IDocumentStore
         return doc is not null && doc.RootElement.TryGetProperty("lastModifiedDateTime", out var modified) && modified.ValueKind == JsonValueKind.String ? modified.GetString() : null;
     }
 
+    // what a delta is asked to say of each item: its id, where it is, and whether it is gone
+    private const string DeltaSelect = "$select=id,name,parentReference,deleted,root";
+
+    /// <summary>
+    /// What changed in the drive since a token, by Graph's delta (asked of a tenant on 24-Nov-2026). With none, the token
+    /// for now (<c>token=latest</c>: a link and no items). An item that exists comes with its parent's path, which says
+    /// the folder it is in, and with every folder above it; one renamed or moved comes as it is now, with nothing of
+    /// where it was, and a folder with nothing of what it holds; a deleted one is its id alone, and so is each thing a
+    /// deleted folder held. So each may be held somewhere else than Graph says, and the source looks for it by its id.
+    /// A token Graph no longer takes (410) answers that everything is to be listed, from now. Null where the drive has
+    /// no delta to ask.
+    /// </summary>
+    public async Task<LibraryChanges?> ChangesAsync(LibraryInfo library, string? since, CancellationToken ct)
+    {
+        var delta = $"drives/{Uri.EscapeDataString(library.Key)}/root/delta";
+        if (since is null)
+        {
+            JsonDocument? latest;
+            try
+            {
+                latest = await _graph.TryGetJsonAsync($"{delta}?token=latest&{DeltaSelect}", library.Shown, ct).ConfigureAwait(false);
+            }
+            catch (VfsException ex) when (ex.Error is not VfsError.Unavailable)
+            {
+                // refused, or no such thing for this drive: the library's own stamp is gone by
+                return null;
+            }
+
+            using (latest)
+            {
+                return latest is not null && DeltaToken(latest.RootElement) is { } now ? new LibraryChanges(now, true, [], "it has no token yet") : null;
+            }
+        }
+
+        var items = new Dictionary<string, LibraryChange>(StringComparer.Ordinal);
+        var url = $"{delta}?token={Uri.EscapeDataString(since)}&{DeltaSelect}";
+        while (true)
+        {
+            JsonDocument page;
+            try
+            {
+                page = await _graph.GetJsonAsync(url, library.Shown, ct).ConfigureAwait(false);
+            }
+            catch (VfsException ex) when (ex.Error is not VfsError.Unavailable)
+            {
+                // a token Graph no longer takes: from now, and everything listed
+                return await AfreshAsync(library, $"Graph no longer takes its token: {ex.Message}", ct).ConfigureAwait(false);
+            }
+
+            using (page)
+            {
+                if (!page.RootElement.TryGetProperty("value", out var told) || told.ValueKind != JsonValueKind.Array)
+                {
+                    return await AfreshAsync(library, "Graph answered with something other than changes", ct).ConfigureAwait(false);
+                }
+
+                foreach (var item in told.EnumerateArray())
+                {
+                    if (item.TryGetProperty("root", out _) || !item.TryGetProperty("id", out var idElement) || idElement.GetString() is not { Length: > 0 } id)
+                    {
+                        continue;
+                    }
+
+                    if (item.TryGetProperty("deleted", out _))
+                    {
+                        items[id] = new LibraryChange(id, null, true);
+                        continue;
+                    }
+
+                    // where it is: its parent's path, "/drives/{id}/root:/a/b", as Graph writes names (not encoded)
+                    var path = item.TryGetProperty("parentReference", out var parent) && parent.TryGetProperty("path", out var p) ? p.GetString() : null;
+                    var at = path?.IndexOf("root:", StringComparison.Ordinal) ?? -1;
+                    if (at < 0)
+                    {
+                        // Graph's own page says a delta gives no paths. It gave them when asked; where it does not,
+                        // nothing says where the item is, and the library is listed as one that says nothing
+                        return await AfreshAsync(library, "Graph did not say where a changed item is", ct).ConfigureAwait(false);
+                    }
+
+                    items[id] = new LibraryChange(id, path![(at + 5)..].Trim('/'), true);
+                }
+
+                if (page.RootElement.TryGetProperty("@odata.nextLink", out var next) && next.GetString() is { Length: > 0 } more)
+                {
+                    url = more;
+                    continue;
+                }
+
+                return DeltaToken(page.RootElement) is { } token
+                    ? new LibraryChanges(token, false, [.. items.Values])
+                    : await AfreshAsync(library, "Graph gave no token for the next time", ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>The token for now and everything to be listed, where what changed since a token cannot be told.</summary>
+    private async Task<LibraryChanges?> AfreshAsync(LibraryInfo library, string why, CancellationToken ct)
+        => await ChangesAsync(library, null, ct).ConfigureAwait(false) is { } now ? now with { Why = why } : null;
+
+    /// <summary>The token in a delta's last page (<c>@odata.deltaLink</c>'s <c>token</c>), which the next call is made with; null where there is none.</summary>
+    private static string? DeltaToken(JsonElement page)
+    {
+        if (!page.TryGetProperty("@odata.deltaLink", out var link) || link.GetString() is not { } text)
+        {
+            return null;
+        }
+
+        var at = text.IndexOf("token=", StringComparison.Ordinal);
+        if (at < 0)
+        {
+            return null;
+        }
+
+        var end = text.IndexOf('&', at);
+        var token = Uri.UnescapeDataString(end < 0 ? text[(at + 6)..] : text[(at + 6)..end]);
+        return token.Length > 0 ? token : null;
+    }
+
     /// <summary>None: Graph reaches the files in lists and drives only, not those in a site's own folder.</summary>
     public Task<IReadOnlyList<SitePage>> ListSitePagesAsync(WebInfo? web, CancellationToken ct) => Task.FromResult<IReadOnlyList<SitePage>>([]);
 
@@ -384,7 +502,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
         var markdown = SharePointPages.Markdown(fields, pageUrl);
         var version = SharePointPages.Version(markdown);
         _pages.Remember(item.Id ?? version, version, markdown);
-        return (VfsEntry.File(SharePointPages.Shown(entry.Name), markdown.Length, entry.Modified, entry.Created, VfsAttributes.ReadOnly, version), item with { Version = version, DownloadUrl = null, Size = markdown.Length });
+        return (VfsEntry.File(SharePointPages.Shown(entry.Name), markdown.Length, entry.Modified, entry.Created, VfsAttributes.ReadOnly, version) with { Key = entry.Key }, item with { Version = version, DownloadUrl = null, Size = markdown.Length });
     }
 
     public async Task<ItemRef?> GetItemAsync(LibraryInfo library, string itemPath, CancellationToken ct)
