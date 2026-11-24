@@ -372,6 +372,20 @@ public sealed class CollectionVfs : IVirtualFileSystem
         }
 
         var remaining = string.Join('/', segments, depth, segments.Length - depth);
+        if (node.Attachments.Count == 1)
+        {
+            // one source here: the path is its or no one's, and it is asked for it once. It was asked for the path's
+            // first name and then for the path, as below, at every call a mount made (the review of 21-Nov-2026, P3)
+            var only = node.Attachments[0];
+            if (only.Source.Current is not { } its || !only.Source.IsUsable)
+            {
+                throw VfsException.Unavailable(Describe(node.Attachments));
+            }
+
+            var found = await StatInSourceAsync(only, its, remaining, ct).ConfigureAwait(false);
+            return found is null ? null : new Target(node, only, found.Value.Path, found.Value.Entry);
+        }
+
         var head = segments[depth];
         var usable = 0;
         foreach (var attachment in node.Attachments)
@@ -456,7 +470,10 @@ public sealed class CollectionVfs : IVirtualFileSystem
         throw usable == 0 ? VfsException.Unavailable(Describe(node.Attachments)) : VfsException.ReadOnly(path, refusal!);
     }
 
-    /// <summary>Exact stat first; then, for a case-sensitive source, a walk accepting a unique case-insensitive match per segment.</summary>
+    /// <summary>
+    /// Exact stat first; then, for a case-sensitive source, a walk accepting a unique case-insensitive match per segment.
+    /// After a name found in another case, what follows it is asked for as typed before the walk lists further down.
+    /// </summary>
     private async Task<(string Path, VfsEntry Entry)?> StatInSourceAsync(SyntheticTree.Attachment attachment, ISource source, string remaining, CancellationToken ct)
     {
         var entry = await source.StatAsync(remaining, ct).ConfigureAwait(false);
@@ -472,8 +489,10 @@ public sealed class CollectionVfs : IVirtualFileSystem
 
         var current = "";
         VfsEntry? last = null;
-        foreach (var segment in VfsPath.Split(remaining))
+        var names = VfsPath.Split(remaining);
+        for (var i = 0; i < names.Length; i++)
         {
+            var segment = names[i];
             IReadOnlyList<VfsEntry> listing;
             try
             {
@@ -485,6 +504,7 @@ public sealed class CollectionVfs : IVirtualFileSystem
             }
 
             var match = listing.FirstOrDefault(e => e.Name.Equals(segment, StringComparison.Ordinal));
+            var inAnotherCase = match is null;
             if (match is null)
             {
                 var candidates = listing.Where(e => e.Name.Equals(segment, StringComparison.OrdinalIgnoreCase)).Take(2).ToList();
@@ -498,6 +518,16 @@ public sealed class CollectionVfs : IVirtualFileSystem
 
             current = VfsPath.Join(current, match.Name);
             last = match;
+            if (inAnotherCase && i < names.Length - 1)
+            {
+                // the one name that was typed in another case, as likely as not: the rest is asked for as it is, and
+                // only where that is not there does the walk go on, a folder's listing a name
+                var rest = VfsPath.Join(current, string.Join('/', names, i + 1, names.Length - i - 1));
+                if (await source.StatAsync(rest, ct).ConfigureAwait(false) is { } whole)
+                {
+                    return (rest, whole);
+                }
+            }
         }
 
         return last is null ? null : (current, last);

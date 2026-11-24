@@ -1,3 +1,5 @@
+using AnyFS.Core.Operations;
+using AnyFS.Core.Runtime;
 using AnyFS.Core.Stats;
 using AnyFS.Core.Status;
 using AnyFS.Core.Vfs;
@@ -307,5 +309,85 @@ public class CollectionVfsTests
         var ro = Handles.Vfs("work", new CollectionMember(rw, "", true));
         Assert.IsFalse(ro.CanWrite(""), "a read-only membership at the root refuses");
         Assert.IsFalse(ro.CanWrite("x"));
+    }
+
+    /// <summary>A source whose stats are counted as the Operations tab counts them.</summary>
+    private static async Task<(SourceHandle Handle, Func<long> Stats)> CountedAsync(string name, MemorySource source)
+    {
+        var tracker = new OperationTracker();
+        var handle = new SourceHandle(Guid.NewGuid(), name, "memory");
+        await source.InitialiseAsync(new TestSourceContext(name), CancellationToken.None);
+        handle.Current = new TrackedSource(source, handle, tracker);
+        handle.Status = ComponentStatus.ReadyStatus;
+        return (handle, () => tracker.Stats().Sources.SelectMany(s => s.Operations).Where(o => o.Kind == OperationKind.Stat).Sum(o => o.Finished));
+    }
+
+    /// <summary>
+    /// A path below a folder that holds one source is that source's or no one's, and the source is asked for it once.
+    /// It was asked for the path's first name and then for the path, at every call: each thing a mount did with a file
+    /// cost its source two stats (the review of 21-Nov-2026, P3).
+    /// </summary>
+    [TestMethod]
+    public async Task APathInAFolderOfOneSourceIsAskedOfTheSourceOnce()
+    {
+        var (files, stats) = await CountedAsync("files", new MemorySource(caseInsensitive: true).AddFile("a/b/c.txt", "c"));
+        var vfs = Handles.Vfs("work", new CollectionMember(files, "files", false));
+
+        Assert.AreEqual(1, (await vfs.StatAsync("files/a/b/c.txt", CancellationToken.None))!.Length);
+        Assert.AreEqual(1, stats(), "a file three names down");
+        Assert.IsNull(await vfs.StatAsync("files/a/b/none.txt", CancellationToken.None));
+        Assert.AreEqual(2, stats(), "one that is not there");
+        Assert.AreEqual("c", await Handles.ReadTextAsync(vfs, "files/a/b/c.txt"));
+        Assert.AreEqual(3, stats(), "an open");
+        await Handles.WriteTextAsync(vfs, "files/a/b/new.txt", "new", VfsOpenMode.CreateNew);
+        Assert.AreEqual(5, stats(), "a new file: that it is not there yet, and the folder it goes into");
+        Assert.IsTrue((await vfs.StatAsync("files/a", CancellationToken.None))!.IsDirectory);
+        Assert.AreEqual(6, stats(), "a path of one name, asked once as it was before");
+    }
+
+    /// <summary>With two sources in one folder the first that has a path's first name owns what is below it, so each is asked for that name first, as before.</summary>
+    [TestMethod]
+    public async Task InAFolderOfTwoSourcesEachIsAskedForTheFirstNameFirst()
+    {
+        var (alpha, alphaStats) = await CountedAsync("alpha", new MemorySource(caseInsensitive: true).AddFile("a/from-alpha.txt", "alpha"));
+        var (beta, betaStats) = await CountedAsync("beta", new MemorySource(caseInsensitive: true).AddFile("a/from-beta.txt", "beta").AddFile("b/only-beta.txt", "ob"));
+        var vfs = Handles.Vfs("work", new CollectionMember(alpha, "files", false), new CollectionMember(beta, "files", false));
+
+        Assert.IsNull(await vfs.StatAsync("files/a/from-beta.txt", CancellationToken.None), "alpha has 'a', so beta's is hidden with all in it");
+        Assert.AreEqual((2L, 0L), (alphaStats(), betaStats()));
+        Assert.IsNotNull(await vfs.StatAsync("files/b/only-beta.txt", CancellationToken.None));
+        Assert.AreEqual((3L, 2L), (alphaStats(), betaStats()), "alpha has no 'b'; beta has, and the file");
+    }
+
+    /// <summary>
+    /// On a source that tells names apart by their case, a name typed in another case is found by its folder's
+    /// listing; what follows it is then asked for as typed, before any folder further down is listed. The folders on
+    /// the way to a file may be large, and each was listed.
+    /// </summary>
+    [TestMethod]
+    public async Task AfterANameFoundInAnotherCaseTheRestIsAskedForAsTyped()
+    {
+        var source = new MemorySource(caseInsensitive: false).AddFile("Docs/sub/deep/readme.txt", "readme");
+        var (files, stats) = await CountedAsync("files", source);
+        var vfs = Handles.Vfs("work", new CollectionMember(files, "files", false));
+
+        // the first name in another case
+        Assert.AreEqual("readme", await Handles.ReadTextAsync(vfs, "files/docs/sub/deep/readme.txt"));
+        Assert.AreEqual(2, stats(), "the path as typed, and the path with its first name as the source has it");
+        Assert.AreEqual(1, source.ListCalls, "the one folder whose listing gave the name");
+
+        // a name further in (the listings are kept for two seconds: another collection of the same source)
+        var again = Handles.Vfs("again", new CollectionMember(files, "files", false));
+        var (asked, listed) = (stats(), source.ListCalls);
+        Assert.AreEqual("readme", await Handles.ReadTextAsync(again, "files/Docs/SUB/deep/readme.txt"));
+        Assert.AreEqual(2, stats() - asked, "the path as typed, and the path with that name as the source has it");
+        Assert.AreEqual(2, source.ListCalls - listed, "the source's own folder, and the one whose listing gave the name");
+
+        // and one that is nowhere, in any case: the folders on the way to where it would be
+        var third = Handles.Vfs("third", new CollectionMember(files, "files", false));
+        (asked, listed) = (stats(), source.ListCalls);
+        Assert.IsNull(await third.StatAsync("files/Docs/sub/deep/none.txt", CancellationToken.None));
+        Assert.AreEqual(1, stats() - asked);
+        Assert.AreEqual(4, source.ListCalls - listed);
     }
 }
