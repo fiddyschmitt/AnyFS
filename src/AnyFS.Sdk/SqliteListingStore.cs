@@ -502,7 +502,7 @@ internal sealed class SqliteListingStore : IListingStore
             yield return new ListingOutline(folder, own.Count, own.Folders, own);
         }
 
-        // a page at a time, none of it held once the caller has gone on; in ordinal order every "folder/â€¦" lies between
+        // a page at a time, none of it held once the caller has gone on; in ordinal order every "folder/…" lies between
         // "folder/" and "folder0", '0' being the character after '/'
         foreach (var (path, listing) in folder.Length == 0 ? Range("", null, Entries.OfFolders) : Range(folder + "/", folder + "0", Entries.OfFolders))
         {

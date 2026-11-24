@@ -1845,7 +1845,7 @@ public class GitLabTicketTests
         var fake = GitLabSeed.Lab();
         var docs = fake.ProjectAt("anyfs/docs");
         var tester = fake.UserNamed("tester");
-        var titles = new[] { "", "   ", "CON", "ends with a dot.", "a/b:c*?", new string('x', 200), "two\nlines", "Twin", "twin", "#7 not its number", "Ã¼nÃ¯cÃ¶dÃ© âœ“" };
+        var titles = new[] { "", "   ", "CON", "ends with a dot.", "a/b:c*?", new string('x', 200), "two\nlines", "Twin", "twin", "#7 not its number", "ünïcödé ✓" };
         foreach (var title in titles)
         {
             docs.IssueList.Add(new FakeGitLab.Ticket(docs.IssueList.Count + 1, title, "Text.", tester, GitLabSeed.Opened.AddDays(docs.IssueList.Count)));

@@ -34,7 +34,7 @@ internal sealed class TicketsFolder(GlProject project, bool mergeRequests, strin
 
     private string NameOf(GlTicket ticket) => mergeRequests ? GitLabNames.MergeRequest(ticket.Iid, ticket.Title) : GitLabNames.Issue(ticket.Iid, ticket.Title);
 
-    /// <summary>The number a folder's name starts with (<c>#12 â€¦</c>, <c>!7 â€¦</c>), or null where it starts with none.</summary>
+    /// <summary>The number a folder's name starts with (<c>#12 …</c>, <c>!7 …</c>), or null where it starts with none.</summary>
     private long? NumberIn(string name)
     {
         if (name.Length < 2 || name[0] != (mergeRequests ? '!' : '#'))
