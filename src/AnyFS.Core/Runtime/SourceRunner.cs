@@ -265,7 +265,18 @@ public sealed class SourceRunner : IAsyncDisposable
                 // a source that counts itself is asked even when it says Complete: it learns the option is on
                 if (Definition.CountFilesOnStart && (created is ICountable || source.Counters.State != EnumerationState.Complete))
                 {
-                    await CountAsync(source, created as ICountable, ct).ConfigureAwait(false);
+                    try
+                    {
+                        await CountAsync(source, created as ICountable, ct).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                    {
+                        // The count is not the start. What it throws ends the count, which then says it is a lower bound,
+                        // and the source stays up. Taken for a failed start, a fault in one folder's listing took a working
+                        // source down: it signed in again, counted again and failed at that folder again, for as long as
+                        // it ran (the review of 21-Nov-2026, R7b)
+                        _logger.LogWarning(ex, "source {Source}: the count of its files stopped part way and is a lower bound; the source stays up", Definition.Name);
+                    }
                 }
 
                 return;

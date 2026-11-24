@@ -444,6 +444,80 @@ public class SourceRunnerTests
         await Wait.UntilAsync(() => runner.Handle.Current?.Counters.FilesKnown == 2 && runner.Handle.Status.State == ComponentState.Ready, what: "the count over");
         Assert.AreEqual((2L, false), runner.Handle.FileCount(), "what it could count, and not said to be all there is");
     }
+
+    /// <summary>A source one of whose folders throws what no listing should, as a fault in a plugin does; or whose own count does.</summary>
+    private sealed class OneFolderBrokenPlugin(bool countsItself) : ISourcePlugin
+    {
+        public int Made;
+
+        public string TypeId => "onebroken";
+
+        public string DisplayName => "One folder broken";
+
+        public string Description => "";
+
+        public string TypeFolder => "onebroken";
+
+        public Stream? OpenIcon() => null;
+
+        public Type SettingsType => typeof(MemoryPluginSettings);
+
+        public object CreateDefaultSettings() => new MemoryPluginSettings();
+
+        public ISource CreateSource(object settings)
+        {
+            Interlocked.Increment(ref Made);
+            return countsItself ? new BrokenCountSource() : new OneFolderBrokenSource();
+        }
+    }
+
+    private class OneFolderBrokenSource : SourceBase
+    {
+        public override async IAsyncEnumerable<VfsEntry> ListAsync(string path, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            await Task.CompletedTask;
+            switch (VfsPath.Normalize(path))
+            {
+                case "":
+                    yield return VfsEntry.File("a.txt", 1, null, null);
+                    yield return VfsEntry.Directory("broken");
+                    break;
+                default:
+                    throw new InvalidOperationException("a fault in the plugin");
+            }
+        }
+
+        public override Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct) => throw VfsException.NotFound(path);
+    }
+
+    private sealed class BrokenCountSource : OneFolderBrokenSource, ICountable
+    {
+        public Task CountFilesAsync(CancellationToken ct)
+        {
+            Counters.Set(1, 1, EnumerationState.InProgress);
+            throw new InvalidOperationException("a fault in the plugin's count");
+        }
+    }
+
+    [TestMethod]
+    [DataRow(false, DisplayName = "the host's walk")]
+    [DataRow(true, DisplayName = "the source's own count")]
+    public async Task ACountThatThrowsLeavesTheSourceUp(bool countsItself)
+    {
+        // The count ran inside the start. What it threw took a working source down, "Failed (retrying in 10 s)": the source
+        // signed in again, counted again and failed at the same folder again, for as long as it ran (the review of
+        // 21-Nov-2026, R7b)
+        var plugin = new OneFolderBrokenPlugin(countsItself);
+        await using var runner = Runner(new MemoryPluginSettings(), countOnStart: true, plugin: plugin);
+        runner.Start();
+        await Wait.UntilAsync(() => runner.Handle.Current?.Counters is { FilesKnown: 1, State: EnumerationState.Unknown }, what: "the count over");
+
+        // the retry delay is 20 ms here: time for some restarts
+        await Task.Delay(200);
+        Assert.AreEqual(ComponentState.Ready, runner.Handle.Status.State, runner.Handle.Status.Text);
+        Assert.AreEqual(1, plugin.Made, "the source was not started again");
+        Assert.AreEqual((1L, false), runner.Handle.FileCount(), "what it had counted, and not said to be all there is");
+    }
     [TestMethod]
     public async Task CountOnStartWalksTheTree()
     {
