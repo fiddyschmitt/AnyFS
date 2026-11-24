@@ -272,6 +272,8 @@ internal sealed partial class FakeSharePoint
         {
             case "title":
                 return Response.Json(200, new JsonObject { ["value"] = web.Title });
+            case "lists" when calls[0].Args.TryGetValue("", out var listId):
+                return ListApi(request, web, listId, calls.Skip(1).ToList());
             case "lists":
                 return Lists(request, web);
             case "getsubwebsfilteredforcurrentuser":
@@ -314,17 +316,33 @@ internal sealed partial class FakeSharePoint
             }
         }
 
+        // a list's token for its change log, where it is asked for; a server that knows no such property says so
+        var withToken = request.Query.TryGetValue("$select", out var select) && select.Contains("CurrentChangeToken", StringComparison.OrdinalIgnoreCase);
+        if (withToken && !ChangeTokens)
+        {
+            return Response.Json(400, RestError("-1, Microsoft.SharePoint.Client.InvalidClientQueryException", "The field or property 'CurrentChangeToken' does not exist."));
+        }
+
         return Response.Json(200, new JsonObject
         {
-            ["value"] = new JsonArray(lists.Select(l => (JsonNode)new JsonObject
+            ["value"] = new JsonArray(lists.Select(l =>
             {
-                ["Title"] = l.Title,
-                ["BaseTemplate"] = l.BaseTemplate,
-                ["Hidden"] = l.Hidden,
-                ["Id"] = l.Id.ToString(),
-                ["LastItemModifiedDate"] = l.LastItemModified.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
-                ["ItemCount"] = l.ItemCount,
-                ["RootFolder"] = new JsonObject { ["ServerRelativeUrl"] = l.Url },
+                var json = new JsonObject
+                {
+                    ["Title"] = l.Title,
+                    ["BaseTemplate"] = l.BaseTemplate,
+                    ["Hidden"] = l.Hidden,
+                    ["Id"] = l.Id.ToString(),
+                    ["LastItemModifiedDate"] = l.LastItemModified.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+                    ["ItemCount"] = l.ItemCount,
+                    ["RootFolder"] = new JsonObject { ["ServerRelativeUrl"] = l.Url },
+                };
+                if (withToken)
+                {
+                    json["CurrentChangeToken"] = new JsonObject { ["StringValue"] = ChangeTokenOf(l) };
+                }
+
+                return (JsonNode)json;
             }).ToArray()),
         });
     }
@@ -685,6 +703,7 @@ internal sealed partial class FakeSharePoint
             return Locked();
         }
 
+        Removing(item);
         item.Parent.Children.Remove(item);
         item.Parent.Touch();
         return new Response { Status = 200 };
@@ -713,6 +732,7 @@ internal sealed partial class FakeSharePoint
 
         if (existing is not null)
         {
+            Removing(existing);
             existing.Parent?.Children.Remove(existing);
         }
 

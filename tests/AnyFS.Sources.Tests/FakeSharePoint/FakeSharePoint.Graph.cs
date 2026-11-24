@@ -435,6 +435,8 @@ internal sealed partial class FakeSharePoint
                 return item is FolderItem folder ? GraphPaged(request, folder.Children.Select(c => (JsonNode)ItemJson(request, c, request.Query.TryGetValue("$select", out var cs) ? cs : null)).ToList(), $"drives/{library.DriveId}/items/{folder.GraphId}/children") : ItemNotFound();
             case ("children", "POST"):
                 return item is FolderItem parent ? CreateFolder(request, parent) : ItemNotFound();
+            case ("delta", "GET"):
+                return ReferenceEquals(item, library.Root) ? Delta(request, library) : GraphJson(400, GraphError("invalidRequest", "delta is asked of a drive's root."));
             case ("content", "PUT"):
                 return PutContent(request, library, item, missingPath);
             case ("createUploadSession", "POST"):
@@ -447,6 +449,7 @@ internal sealed partial class FakeSharePoint
                     return ItemNotFound();
                 }
 
+                Removing(item);
                 item.Parent.Children.Remove(item);
                 item.Parent.Touch();
                 return Response.Empty(204);
@@ -640,6 +643,7 @@ internal sealed partial class FakeSharePoint
                     return GraphJson(423, GraphError("resourceLocked", "The resource you are attempting to access is locked"));
                 }
 
+                Removing(there);
                 target.Children.Remove(there);
             }
 
