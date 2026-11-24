@@ -170,8 +170,9 @@ open `ftp://<host>:<port>/<collection>/`; `curl`, `lftp` and friends resume with
 mode uses any free port unless a range is set (Advanced), handed out round robin, with a public
 address for servers behind NAT; active mode (`PORT`, `EPRT`) connects back to the client's own
 address only, on a port of 1024 or above. Anonymous logins see the collections that allow them; a
-named login sees the collections configured with that user name. Names are UTF-8 from the first
-byte, whether or not a client sends `OPTS UTF8 ON` (curl, wget and lftp don't).
+named login sees the collections configured with that user name and that password, and no other
+that only shares the name. Names are UTF-8 from the first byte, whether or not a client sends
+`OPTS UTF8 ON` (curl, wget and lftp don't).
 
 The server is AnyFS's own: RFC 959 with what today's clients use on top (`FEAT`, `OPTS UTF8`,
 `REST STREAM`, `SIZE`, `MDTM`, `MLSD`/`MLST`, `STAT`, `EPSV`/`EPRT`, `APPE`, `ABOR` during a

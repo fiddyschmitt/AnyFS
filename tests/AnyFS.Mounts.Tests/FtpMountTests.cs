@@ -172,6 +172,40 @@ public class FtpMountTests
         Assert.AreEqual(530, (await wrong.LoginAsync("alice", "nope")).Code);
     }
 
+    /// <summary>
+    /// A login sees the collections whose own user name and password it gave. One collection's password showed every
+    /// collection with that user name, whatever password each of them asks (the review of 21-Nov-2026, R14c).
+    /// </summary>
+    [TestMethod]
+    [Timeout(60000)]
+    public async Task ALoginSeesOnlyTheCollectionsWhosePasswordItGave()
+    {
+        var port = FreePort();
+        var (_, context, _) = await StartAsync(Tree(), "mine", port, user: "alice", password: "s3cret", anonymous: false);
+        var (_, _, _) = await StartAsync(new MemorySource().AddFile("t.txt", "theirs"), "theirs", port, shareWith: context, user: "alice", password: "an0ther", anonymous: false);
+
+        var mine = await ConnectAsync(port, "alice", "s3cret");
+        var seen = (await mine.ListAsync("/")).Select(l => l.Name).ToList();
+        CollectionAssert.AreEqual(new[] { "mine" }, seen, "with the one password: " + string.Join(", ", seen));
+        Assert.IsTrue((await mine.RetrieveReplyAsync("/theirs/t.txt")).Code >= 500, "and reaches nothing of the other");
+        Assert.AreEqual("hello readme", Encoding.UTF8.GetString(await mine.RetrieveAsync("/mine/readme.txt")));
+
+        var theirs = await ConnectAsync(port, "alice", "an0ther");
+        seen = (await theirs.ListAsync("/")).Select(l => l.Name).ToList();
+        CollectionAssert.AreEqual(new[] { "theirs" }, seen, "with the other: " + string.Join(", ", seen));
+        Assert.AreEqual("theirs", Encoding.UTF8.GetString(await theirs.RetrieveAsync("/theirs/t.txt")));
+
+        // collections that ask the same of a login are seen together, as before
+        var (_, _, _) = await StartAsync(new MemorySource().AddFile("s.txt", "s"), "shared", port, shareWith: context, user: "alice", password: "s3cret", anonymous: false);
+        var both = await ConnectAsync(port, "alice", "s3cret");
+        seen = (await both.ListAsync("/")).Select(l => l.Name).ToList();
+        CollectionAssert.AreEqual(new[] { "mine", "shared" }, seen, "two with one login: " + string.Join(", ", seen));
+
+        var wrong = await FtpClient.ConnectAsync(port);
+        _cleanup.Add(wrong);
+        Assert.AreEqual(530, (await wrong.LoginAsync("alice", "nope")).Code, "a password that is no collection's");
+    }
+
     /// <summary>Active mode (PORT: the server connects back to the client), MLSD facts, MDTM, and the modern-client dance of FEAT and OPTS.</summary>
     [TestMethod]
     [Timeout(60000)]

@@ -93,8 +93,10 @@ internal sealed class FtpServer : IAsyncDisposable
             return open.Count == 0 ? null : open;
         }
 
-        var match = all.Any(c => c.User is not null && c.User.Equals(user, StringComparison.Ordinal) && string.Equals(c.Password ?? "", password, StringComparison.Ordinal));
-        return match ? all.Where(c => c.User is not null && c.User.Equals(user, StringComparison.Ordinal)).ToList() : null;
+        // the collections whose own user name and password these are. One collection's password showed every collection with
+        // that user name, whatever password each of them asks (the review of 21-Nov-2026, R14c)
+        var own = all.Where(c => c.User is not null && c.User.Equals(user, StringComparison.Ordinal) && string.Equals(c.Password ?? "", password, StringComparison.Ordinal)).ToList();
+        return own.Count == 0 ? null : own;
     }
 
     private async Task AcceptAsync()
