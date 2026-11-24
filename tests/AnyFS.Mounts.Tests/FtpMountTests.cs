@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -44,7 +45,7 @@ public class FtpMountTests
         public Guid Id { get; } = Guid.NewGuid();
     }
 
-    private async Task<(IMount Mount, TestMountContext Context, int Port)> StartAsync(ISource source, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool readOnly = false, string? user = null, string? password = null, bool anonymous = true, Func<IVirtualFileSystem, IVirtualFileSystem>? wrap = null)
+    private async Task<(IMount Mount, TestMountContext Context, int Port)> StartAsync(ISource source, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool readOnly = false, string? user = null, string? password = null, bool anonymous = true, Func<IVirtualFileSystem, IVirtualFileSystem>? wrap = null, ILogger? logger = null)
     {
         await source.InitialiseAsync(new TestSourceContext(collection), CancellationToken.None);
         var p = port ?? FreePort();
@@ -55,7 +56,7 @@ public class FtpMountTests
         settings.Password = password;
         settings.AllowAnonymous = anonymous;
         var mount = provider.CreateMount(settings, new Collection(collection));
-        var context = new TestMountContext(collection, "ftp", logger: new ConsoleLogger(), shareWith: shareWith);
+        var context = new TestMountContext(collection, "ftp", logger: logger ?? new ConsoleLogger(), shareWith: shareWith);
         Console.WriteLine($"[test] starting ftp mount '{collection}' on {p}");
         IVirtualFileSystem vfs = new SingleSourceVfs(source, collection, readOnly);
         await mount.StartAsync(wrap?.Invoke(vfs) ?? vfs, context, CancellationToken.None);
@@ -391,6 +392,138 @@ public class FtpMountTests
         Assert.AreEqual(200, (await client.CommandAsync("NOOP")).Code, "the control connection is still good");
     }
 
+    /// <summary>
+    /// A command that fails in a way no handler expected is answered and logged, and the session goes on. A source's own
+    /// fault (an I/O error, a call it gave up, a bug) ended the session with no reply, and for the first two with no line
+    /// in the log that a person is shown; an I/O error of the source's part way through a transfer was taken for the data
+    /// connection's (the review of 21-Nov-2026, R14c).
+    /// </summary>
+    [TestMethod]
+    [Timeout(60000)]
+    public async Task AnExceptionNoHandlerExpectedIsAnsweredAndLoggedAndTheSessionGoesOn()
+    {
+        var log = new Recorded();
+        var source = Tree().AddFile("bug.bin", new byte[3 << 20]).AddFile("io.bin", new byte[3 << 20]).AddFile("late.txt", "late");
+        var (_, _, port) = await StartAsync(source, logger: log, wrap: vfs => new Faulty(vfs, (call, path, offset) => (call, path) switch
+        {
+            ("stat", "io.txt") => new IOException("the disk said no"),
+            ("stat", "given-up.txt") => new TaskCanceledException("the source gave the call up"),
+            ("stat", "bug.txt") => new InvalidOperationException("a bug in the source"),
+            ("read", "bug.bin") when offset >= 2 << 20 => new InvalidOperationException("a bug part way through"),
+            ("read", "io.bin") when offset >= 2 << 20 => new IOException("the source's own connection broke"),
+            ("close", "late.txt") => new InvalidOperationException("a bug at the close"),
+            _ => null,
+        }));
+        var client = await ConnectAsync(port);
+
+        void Warned(int before, string command, Type thrown)
+        {
+            var warnings = log.Warnings;
+            Assert.AreEqual(before + 1, warnings.Count, $"{command}: one warning, and no other: {string.Join(" | ", warnings.Skip(before).Select(w => w.Message))}");
+            var (level, message, exception) = warnings[^1];
+            Assert.AreEqual(LogLevel.Warning, level);
+            StringAssert.Contains(message, command, "the line names the command");
+            Assert.IsInstanceOfType(exception, thrown, "with what was thrown");
+            Assert.IsFalse(string.IsNullOrEmpty(exception.StackTrace), "and where");
+        }
+
+        foreach (var (name, thrown) in new[] { ("io.txt", typeof(IOException)), ("given-up.txt", typeof(TaskCanceledException)), ("bug.txt", typeof(InvalidOperationException)) })
+        {
+            var before = log.Warnings.Count;
+            var reply = await client.CommandAsync("SIZE /work/" + name);
+            Assert.AreEqual(451, reply.Code, reply.Text);
+            Warned(before, "SIZE /work/" + name, thrown);
+            Assert.AreEqual(200, (await client.CommandAsync("NOOP")).Code, "the session goes on");
+        }
+
+        // a transfer that fails before it begins is answered the same, with no 150 before it
+        var count = log.Warnings.Count;
+        Assert.AreEqual(451, (await client.RetrieveReplyAsync("/work/io.txt")).Code);
+        Warned(count, "RETR /work/io.txt", typeof(IOException));
+
+        // one that fails part way has had its 150: the 451 ends it, and the session transfers again. So with an I/O error
+        // of the source's, which looks like the data connection's own and was told as that: a 426, and nothing in the log
+        foreach (var (name, thrown) in new[] { ("bug.bin", typeof(InvalidOperationException)), ("io.bin", typeof(IOException)) })
+        {
+            count = log.Warnings.Count;
+            using (var data = await client.PassiveAsync())
+            {
+                Assert.AreEqual(150, (await client.CommandAsync("RETR /work/" + name)).Code);
+                await data.GetStream().CopyToAsync(Stream.Null);
+                var ended = await client.ReadReplyAsync();
+                Assert.AreEqual(451, ended.Code, ended.Text);
+            }
+
+            Warned(count, "RETR /work/" + name, thrown);
+            Assert.AreEqual("hello readme", Encoding.UTF8.GetString(await client.RetrieveAsync("/work/readme.txt")));
+        }
+
+        // one that fails when its command has been answered (the file's close, after the 226) is logged, and not answered again
+        count = log.Warnings.Count;
+        Assert.AreEqual("late", Encoding.UTF8.GetString(await client.RetrieveAsync("/work/late.txt")));
+        Assert.AreEqual(200, (await client.CommandAsync("NOOP")).Code, "the next command's reply is its own");
+        Warned(count, "RETR /work/late.txt", typeof(InvalidOperationException));
+    }
+
+    /// <summary>
+    /// The control connection breaking is no surprise of that kind. Its session ends with nothing in the log that a person
+    /// is shown, as it did: whether a reply could not be written, or the next command could not be read during a transfer.
+    /// </summary>
+    [TestMethod]
+    [Timeout(60000)]
+    public async Task ASessionWhoseControlConnectionBreaksEndsWithNoWarning()
+    {
+        var log = new Recorded();
+        var reached = new SemaphoreSlim(0);
+        var held = new ManualResetEventSlim();
+        var (_, _, port) = await StartAsync(Tree().AddFile("big.bin", new byte[64 << 20]), logger: log, wrap: vfs => new Faulty(vfs, (call, path, _) =>
+        {
+            if (call == "stat" && path == "docs/a.txt")
+            {
+                reached.Release();
+                held.Wait(TimeSpan.FromSeconds(30));
+            }
+
+            return null;
+        }));
+
+        async Task ClosedAsync(IPEndPoint session)
+        {
+            var until = System.Diagnostics.Stopwatch.StartNew();
+            while (!log.Lines.Any(l => l.Message == $"ftp {session}: closed") && until.Elapsed < TimeSpan.FromSeconds(15))
+            {
+                await Task.Delay(50);
+            }
+
+            Assert.IsTrue(log.Lines.Any(l => l.Message == $"ftp {session}: closed"), "the session ended");
+        }
+
+        // the client goes while its command is in hand: the reply has nowhere to go
+        var gone = await FtpClient.ConnectAsync(port);
+        Assert.AreEqual(230, (await gone.LoginAsync("anonymous", "x@y")).Code);
+        var session = gone.Local;
+        await gone.SendAsync("SIZE /work/docs/a.txt");
+        Assert.IsTrue(await reached.WaitAsync(TimeSpan.FromSeconds(15)), "the command is in hand");
+        gone.Reset();
+        await Task.Delay(300);
+        held.Set();
+        await ClosedAsync(session);
+
+        // the client goes during a transfer: the control connection is read all the while, and that read fails
+        var cut = await FtpClient.ConnectAsync(port);
+        Assert.AreEqual(230, (await cut.LoginAsync("anonymous", "x@y")).Code);
+        session = cut.Local;
+        using (var data = await cut.PassiveAsync())
+        {
+            Assert.AreEqual(150, (await cut.CommandAsync("RETR /work/big.bin")).Code);
+            Assert.IsTrue(await data.GetStream().ReadAsync(new byte[65536]) > 0);
+            cut.Reset();
+            await ClosedAsync(session);
+        }
+
+        Assert.AreEqual(0, log.Warnings.Count, string.Join(" | ", log.Warnings.Select(w => w.Message)));
+    }
+
     [TestMethod]
     public void SettingsValidation()
     {
@@ -415,6 +548,30 @@ public class FtpMountTests
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
             => Console.WriteLine($"[server {logLevel}] {formatter(state, exception)}{(exception is null ? "" : " " + exception)}");
+    }
+
+    /// <summary>The server's log lines kept for a test to read, and into the test output as well.</summary>
+    private sealed class Recorded : ILogger
+    {
+        private readonly ConcurrentQueue<(LogLevel Level, string Message, Exception? Exception)> _lines = new();
+        private readonly ConsoleLogger _console = new();
+
+        public List<(LogLevel Level, string Message, Exception? Exception)> Lines => _lines.ToList();
+
+        /// <summary>The lines a person is shown without asking for more: warnings and worse.</summary>
+        public List<(LogLevel Level, string Message, Exception? Exception)> Warnings => _lines.Where(l => l.Level >= LogLevel.Warning).ToList();
+
+        public IDisposable? BeginScope<TState>(TState state)
+            where TState : notnull
+            => null;
+
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            _lines.Enqueue((logLevel, formatter(state, exception), exception));
+            _console.Log(logLevel, eventId, state, exception, formatter);
+        }
     }
 
     /// <summary>Just enough FTP (RFC 959) to exercise the server: passive mode, LIST, RETR with REST, STOR, SIZE and the simple commands.</summary>
@@ -585,6 +742,23 @@ public class FtpMountTests
         {
             Console.WriteLine("[ftp] > " + command);
             return _writer.WriteLineAsync(command);
+        }
+
+        /// <summary>This end of the control connection, as the server's log names the session.</summary>
+        public IPEndPoint Local
+        {
+            get
+            {
+                var local = (IPEndPoint)_control.Client.LocalEndPoint!;
+                return local.Address.IsIPv4MappedToIPv6 ? new IPEndPoint(local.Address.MapToIPv4(), local.Port) : local;
+            }
+        }
+
+        /// <summary>Ends the control connection with a reset and no QUIT, as a client that died does.</summary>
+        public void Reset()
+        {
+            _control.Client.LingerState = new LingerOption(true, 0);
+            _control.Client.Close();
         }
 
         public async Task<long> SizeAsync(string path)

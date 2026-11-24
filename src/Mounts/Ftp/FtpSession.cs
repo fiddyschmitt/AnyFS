@@ -48,6 +48,9 @@ internal sealed class FtpSession
     private bool _epsvAll;
     private bool _quit;
 
+    /// <summary>The command in hand is a transfer that has been told how it ended: what fails after that (its file's close) is not answered again.</summary>
+    private bool _answered;
+
     public FtpSession(FtpServer server, TcpClient client)
     {
         _server = server;
@@ -271,6 +274,7 @@ internal sealed class FtpSession
             _restart = 0;
         }
 
+        _answered = false;
         try
         {
             if (_login is null && verb is not ("USER" or "PASS" or "QUIT" or "FEAT" or "SYST" or "NOOP" or "OPTS" or "AUTH" or "HELP" or "CLNT"))
@@ -422,6 +426,18 @@ internal sealed class FtpSession
         {
             var (code, text) = Translate(ex);
             await ReplyAsync(code, text, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested && _client.Connected)
+        {
+            // what no handler expected, a source's own fault: an I/O error, a call it gave up, a bug. It ended the session,
+            // with no reply and for some with no line in the log. The command is answered now and the fault logged, and
+            // the session goes on (the review of 21-Nov-2026, R14c). The control connection failing is no such surprise:
+            // it leaves the socket disconnected, and ends the session quietly as before
+            _logger.LogWarning(ex, "ftp {Peer}: {Command} failed", _peer, verb == "PASS" ? "PASS ****" : line);
+            if (!_answered)
+            {
+                await ReplyAsync(451, "Requested action aborted: local error in processing", ct).ConfigureAwait(false);
+            }
         }
     }
 
@@ -824,8 +840,10 @@ internal sealed class FtpSession
             await ReplyAsync(426, "Transfer aborted", ct).ConfigureAwait(false);
             await ReplyAsync(226, "Abort complete", ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is IOException or SocketException or ObjectDisposedException)
+        catch (Exception ex) when (ex is (IOException or SocketException or ObjectDisposedException) && !data.Connected)
         {
+            // the data connection's own failure, which leaves its socket disconnected. An I/O error with the socket still
+            // connected is the source's, and is told as what no handler expected, not as the client's doing
             _logger.LogDebug("ftp {Peer}: data connection ended: {Message}", _peer, ex.GetBaseException().Message);
             await ReplyAsync(426, "Data connection closed; transfer aborted", ct).ConfigureAwait(false);
         }
@@ -834,6 +852,8 @@ internal sealed class FtpSession
             var (code, text) = Translate(ex);
             await ReplyAsync(code == 550 ? 451 : code, text, ct).ConfigureAwait(false);
         }
+
+        _answered = true;
     }
 
     // ---- listings ------------------------------------------------------------------------------------------
