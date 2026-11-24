@@ -512,6 +512,18 @@ internal sealed class SqliteListingStore : IListingStore
 
     public IEnumerable<(string Path, StoredListing Listing)> All() => Range("", null);
 
+    public IEnumerable<(string Path, StoredListing Listing)> Each(string folder)
+    {
+        if (folder.Length == 0)
+        {
+            return Range("", null);
+        }
+
+        // in ordinal order every "folder/…" lies between "folder/" and "folder0", '0' being the character after '/'
+        var below = Range(folder + "/", folder + "0");
+        return Get(folder) is { } own ? below.Prepend((folder, own)) : below;
+    }
+
     /// <summary>Which rows' entries a range reads: all (the default), those of a listing with folders in it, none.</summary>
     private enum Entries
     {

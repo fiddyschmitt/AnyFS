@@ -291,6 +291,48 @@ public sealed class ListingCache
         return under;
     }
 
+    /// <summary>
+    /// The entries held at <paramref name="folder"/> and below it whose <see cref="VfsEntry.Key"/> is one of
+    /// <paramref name="keys"/>, each with the folder whose listing names it. For a source whose upstream tells it what
+    /// changed by its own ids and not where (SharePoint's change log; a deleted item in Graph's): it finds where it holds
+    /// each, and lists those folders again. Every listing held below the folder is gone through, one at a time, from
+    /// its bytes; a database is read as this goes, and nothing waits for it.
+    /// </summary>
+    public IReadOnlyList<(string Folder, string Name, string Key)> HeldWithKeys(string folder, IReadOnlyCollection<string> keys)
+    {
+        ArgumentNullException.ThrowIfNull(folder);
+        ArgumentNullException.ThrowIfNull(keys);
+        var found = new List<(string Folder, string Name, string Key)>();
+        if (keys.Count == 0)
+        {
+            return found;
+        }
+
+        var wanted = new HashSet<string>(keys, StringComparer.Ordinal).GetAlternateLookup<ReadOnlySpan<char>>();
+        IEnumerable<(string Path, StoredListing Listing)> held;
+        if (_store.ReadsAlone)
+        {
+            held = _store.Each(folder);
+        }
+        else
+        {
+            lock (_gate)
+            {
+                held = [.. _store.Each(folder)];
+            }
+        }
+
+        foreach (var (path, listing) in held)
+        {
+            if (!IsExpired(listing))
+            {
+                listing.WithKeys(wanted, path, found);
+            }
+        }
+
+        return found;
+    }
+
     /// <summary>Every path held, in order: for a walk that counts what is held below each folder.</summary>
     internal List<string> Paths()
     {

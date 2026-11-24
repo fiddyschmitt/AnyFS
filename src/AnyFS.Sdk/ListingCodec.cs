@@ -89,6 +89,69 @@ internal static class ListingCodec
         return names;
     }
 
+    /// <summary>
+    /// The entries whose key is one of <paramref name="keys"/>, each as the folder given, its name and its key, added to
+    /// <paramref name="found"/>; nothing else made of the listing. For a source whose upstream says what changed by its
+    /// ids alone, which looks for where it holds each (<see cref="ListingCache.HeldWithKeys"/>).
+    /// </summary>
+    public static void WithKeys(ReadOnlySpan<byte> packed, int count, HashSet<string>.AlternateLookup<ReadOnlySpan<char>> keys, string folder, List<(string Folder, string Name, string Key)> found)
+    {
+        Span<char> text = stackalloc char[256];
+        var reader = new ByteReader(packed);
+        for (var i = 0; i < count; i++)
+        {
+            var flags = (EntryFlags)reader.Read7BitInt();
+            var name = reader.ReadStringBytes();
+            if (flags.HasFlag(EntryFlags.HasLength))
+            {
+                reader.Read7BitLong();
+            }
+
+            if (flags.HasFlag(EntryFlags.HasCreated))
+            {
+                reader.Skip(10);
+            }
+
+            if (flags.HasFlag(EntryFlags.HasModified))
+            {
+                reader.Skip(10);
+            }
+
+            if (flags.HasFlag(EntryFlags.HasAttributes))
+            {
+                reader.Read7BitInt();
+            }
+
+            if (flags.HasFlag(EntryFlags.HasETag))
+            {
+                reader.Skip(reader.Read7BitInt());
+            }
+
+            if (!flags.HasFlag(EntryFlags.HasKey))
+            {
+                continue;
+            }
+
+            // a key as characters with no string made of it, unless it is one of those looked for (a key of more than
+            // the buffer takes, in bytes, is made into one)
+            var key = reader.ReadStringBytes();
+            string? wanted;
+            if (key.Length <= text.Length)
+            {
+                keys.TryGetValue(text[..Encoding.UTF8.GetChars(key, text)], out wanted);
+            }
+            else
+            {
+                keys.TryGetValue(Encoding.UTF8.GetString(key), out wanted);
+            }
+
+            if (wanted is not null)
+            {
+                found.Add((folder, Encoding.UTF8.GetString(name), wanted));
+            }
+        }
+    }
+
     private static void WriteEntry(ref ByteWriter writer, VfsEntry entry)
     {
         var flags = EntryFlags.None;

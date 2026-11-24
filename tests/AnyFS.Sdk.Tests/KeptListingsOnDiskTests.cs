@@ -159,6 +159,39 @@ public class KeptListingsOnDiskTests
     }
 
     [TestMethod]
+    public async Task EntriesAreFoundByTheirKeysUnderAFolderAndNowhereElse()
+    {
+        // a source whose upstream says what changed by its ids alone looks for where it holds each (SharePoint's change
+        // log, which gives no paths; the review of 21-Nov-2026, P7)
+        _tree.Clear();
+        _tree[""] = [VfsEntry.Directory("big") with { Key = "k-big" }, VfsEntry.Directory("big2") with { Key = "k-big2" }, VfsEntry.File("top.txt", 1) with { Key = "k-top" }];
+        _tree["big"] = [VfsEntry.Directory("a") with { Key = "k-a" }, VfsEntry.File("f.txt", 1) with { Key = "k-f" }, VfsEntry.File("no key.txt", 1)];
+        _tree["big/a"] = [VfsEntry.File("g.txt", 2) with { Key = "k-g" }, VfsEntry.File("ключ 文件.txt", 2) with { Key = "ключ-1" }, VfsEntry.File("long.txt", 2) with { Key = new string('k', 300) }];
+        _tree["big2"] = [VfsEntry.File("h.txt", 3) with { Key = "k-h" }, VfsEntry.File("twin.txt", 3) with { Key = "k-g" }];
+        foreach (var onDisk in new[] { true, false })
+        {
+            var folder = TempFolder();
+            await using (var first = Kept(Options(folder, onDisk)))
+            {
+                await first.CountAsync(CancellationToken.None);
+                Assert.AreEqual(4, first.Cache.Count);
+            }
+
+            // from what the last run kept: the database's rows, or the file's
+            await using var kept = Kept(Options(folder, onDisk));
+            var found = kept.Cache.HeldWithKeys("big", new HashSet<string> { "k-g", "k-f", "k-h", "k-big", "ключ-1", new string('k', 300), "none has this" });
+            CollectionAssert.AreEquivalent(
+                new[] { ("big", "f.txt", "k-f"), ("big/a", "g.txt", "k-g"), ("big/a", "ключ 文件.txt", "ключ-1"), ("big/a", "long.txt", new string('k', 300)) },
+                found.ToList(), $"on disk: {onDisk}: under big, and not in the root's listing nor in big2: {string.Join("; ", found)}");
+
+            found = kept.Cache.HeldWithKeys("", ["k-g", "k-big"]);
+            CollectionAssert.AreEquivalent(new[] { ("", "big", "k-big"), ("big/a", "g.txt", "k-g"), ("big2", "twin.txt", "k-g") }, found.ToList(), $"on disk: {onDisk}: under the root, everywhere");
+            Assert.AreEqual(0, kept.Cache.HeldWithKeys("big", []).Count);
+            Assert.AreEqual(0, kept.Cache.HeldWithKeys("nowhere", ["k-g"]).Count);
+        }
+    }
+
+    [TestMethod]
     public async Task LettingGoOfAFolderAndAllBelowItReadsTheirPathsAlone()
     {
         // what is held below a folder was read whole, every listing's entries with it, to learn the paths to let go of;

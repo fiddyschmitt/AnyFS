@@ -104,6 +104,24 @@ internal sealed class StoredListing
         return names;
     }
 
+    /// <summary>The entries whose key is one of <paramref name="keys"/>, each as the folder given, its name and its key, added to <paramref name="found"/>.</summary>
+    public void WithKeys(HashSet<string>.AlternateLookup<ReadOnlySpan<char>> keys, string folder, List<(string Folder, string Name, string Key)> found)
+    {
+        if (List is null)
+        {
+            ListingCodec.WithKeys(Packed ?? throw NoEntries(), Count, keys, folder, found);
+            return;
+        }
+
+        foreach (var entry in List)
+        {
+            if (entry.Key is { } key && keys.TryGetValue(key, out var wanted))
+            {
+                found.Add((folder, entry.Name, wanted));
+            }
+        }
+    }
+
     /// <summary>Whether it says what <paramref name="other"/> says: the same stamp and the same entries.</summary>
     public bool SameAs(StoredListing other)
     {
@@ -176,6 +194,12 @@ internal interface IListingStore : IDisposable
     /// <summary>What is held at <paramref name="folder"/> and below it, the folder's own first, then the rest in path order; everything for the root.</summary>
     List<(string Path, StoredListing Listing)> Under(string folder);
 
+    /// <summary>
+    /// What <see cref="Under"/> gives, a listing at a time: for going through every entry held below a folder without
+    /// holding them all. Called without the gate where the store <see cref="ReadsAlone"/>.
+    /// </summary>
+    IEnumerable<(string Path, StoredListing Listing)> Each(string folder);
+
     /// <summary>The paths of what is held at <paramref name="folder"/> and below it, the folder's own first, then the rest in order; every path for the root. Nothing of the listings is read for them.</summary>
     List<string> Paths(string folder);
 
@@ -247,6 +271,9 @@ internal sealed class MemoryListingStore : IListingStore
     }
 
     public List<string> Paths(string folder) => [.. KeysUnder(folder)];
+
+    // the listings are here as they are
+    public IEnumerable<(string Path, StoredListing Listing)> Each(string folder) => Under(folder);
 
     // the listings are here as they are: nothing is read for them
     public IEnumerable<ListingOutline> Outline(string folder)
