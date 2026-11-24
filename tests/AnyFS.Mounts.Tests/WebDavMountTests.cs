@@ -404,6 +404,163 @@ public class WebDavMountTests
         Assert.AreEqual("hello readme", await client.GetStringAsync("work/readme.txt"));
     }
 
+    /// <summary>
+    /// The root tells a client of the collections it may see and of no other: those with no login, and those whose login
+    /// it sent. It listed every collection to anyone, the names of those behind a login among them (the review of
+    /// 21-Nov-2026, R14b). With none to show a client that has not signed in, it asks for the sign-in as any other path
+    /// does. OPTIONS, which says nothing of the collections and is what Windows asks first, answers as it did.
+    /// </summary>
+    [TestMethod]
+    public async Task TheRootTellsNothingOfACollectionToAClientThatHasNotSignedIn()
+    {
+        var port = FreePort();
+        var (_, context, client) = await StartAsync(Tree(), "private", port, user: "alice", password: "s3cret");
+        const string alice = "alice:s3cret";
+
+        HttpRequestMessage Root(string method, string? login = null, string depth = "1")
+            => login is null
+                ? Request(method, "", null, ("Depth", depth))
+                : Request(method, "", null, ("Depth", depth), ("Authorization", "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes(login))));
+
+        async Task<string[]> ListedAsync(string? login)
+            => (await XmlAsync(await client.SendAsync(Root("PROPFIND", login)))).Root!.Elements(D + "response").Select(r => r.Element(D + "href")!.Value).ToArray();
+
+        // a collection behind a login and no other: the root says nothing of it to a client that has not signed in, and asks
+        foreach (var (method, depth) in new[] { ("PROPFIND", "1"), ("PROPFIND", "0"), ("GET", "1"), ("HEAD", "1") })
+        {
+            var asked = await client.SendAsync(Root(method, depth: depth));
+            Assert.AreEqual(HttpStatusCode.Unauthorized, asked.StatusCode, $"{method}, depth {depth}, not signed in");
+            StringAssert.StartsWith(asked.Headers.WwwAuthenticate.Single().ToString(), "Basic");
+            Assert.IsFalse((await asked.Content.ReadAsStringAsync()).Contains("private", StringComparison.Ordinal), $"{method}, depth {depth}: the name is not told");
+        }
+
+        Assert.AreEqual(HttpStatusCode.Unauthorized, (await client.SendAsync(Root("PROPFIND", "alice:wrong"))).StatusCode, "a wrong password is no sign-in");
+
+        var options = await client.SendAsync(Root("OPTIONS"));
+        Assert.AreEqual(HttpStatusCode.OK, options.StatusCode, "OPTIONS needs no sign-in");
+        Assert.AreEqual("1, 2", string.Join(", ", options.Headers.GetValues("DAV")));
+        Assert.AreEqual("DAV", options.Headers.GetValues("MS-Author-Via").Single());
+        StringAssert.Contains(string.Join(", ", options.Content.Headers.Allow), "PROPFIND");
+
+        CollectionAssert.AreEqual(new[] { "/", "/private/" }, await ListedAsync(alice), "signed in, the collection is listed");
+        StringAssert.Contains(await (await client.SendAsync(Root("GET", alice))).Content.ReadAsStringAsync(), "<a href=\"/private/\">private/</a>");
+
+        // beside it a collection with no login: anyone is told of that one, as before, and of it alone
+        await StartAsync(new MemorySource().AddFile("b.txt", "b"), "open", port, shareWith: context);
+        CollectionAssert.AreEqual(new[] { "/", "/open/" }, await ListedAsync(null), "not signed in");
+        CollectionAssert.AreEqual(new[] { "/", "/open/" }, await ListedAsync("alice:wrong"), "a wrong password");
+        var page = await (await client.SendAsync(Root("GET"))).Content.ReadAsStringAsync();
+        StringAssert.Contains(page, "<a href=\"/open/\">open/</a>");
+        Assert.IsFalse(page.Contains("private", StringComparison.Ordinal), "the page names no collection behind a login");
+        CollectionAssert.AreEqual(new[] { "/", "/open/", "/private/" }, await ListedAsync(alice), "signed in");
+
+        // and one behind another login: each is told of their own
+        await StartAsync(new MemorySource().AddFile("c.txt", "c"), "theirs", port, shareWith: context, user: "bob", password: "pa55");
+        CollectionAssert.AreEqual(new[] { "/", "/open/", "/private/" }, await ListedAsync(alice));
+        CollectionAssert.AreEqual(new[] { "/", "/open/", "/theirs/" }, await ListedAsync("bob:pa55"));
+        CollectionAssert.AreEqual(new[] { "/", "/open/" }, await ListedAsync(null));
+    }
+
+    /// <summary>
+    /// A body that is XML is refused where it passes the limit, as it is read. All of it was taken into memory first,
+    /// whatever its size, and only then held against the limit (the review of 21-Nov-2026, R14b). A PUT's body has no
+    /// limit: a file is big.
+    /// </summary>
+    [TestMethod]
+    [Timeout(120000)]
+    public async Task AnXmlBodyPastTheLimitIsRefusedAsItIsReadNotTakenWhole()
+    {
+        const int limit = 1 << 20;
+        var source = Tree();
+        var (_, _, client) = await StartAsync(source);
+        var port = client.BaseAddress!.Port;
+
+        // said to be eight megabytes, and a little of it has come: the answer does not wait for the rest
+        var head = $"PROPFIND /work/ HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nDepth: 0\r\nContent-Type: text/xml\r\n";
+        var declared = await AnswerBeforeTheBodyEndsAsync(port, head + $"Content-Length: {8 << 20}\r\n\r\n", Encoding.ASCII.GetBytes(PropfindOf(4096)));
+        StringAssert.StartsWith(declared, "HTTP/1.1 413", "a body whose length says it is over the limit");
+
+        // not said how long (chunked), two megabytes in and no end sent: refused where it passed the limit
+        var chunk = Encoding.ASCII.GetBytes($"{65536:X}\r\n{new string(' ', 65536)}\r\n");
+        var chunked = await AnswerBeforeTheBodyEndsAsync(port, head + "Transfer-Encoding: chunked\r\n\r\n", Enumerable.Repeat(chunk, 32).SelectMany(c => c).ToArray());
+        StringAssert.StartsWith(chunked, "HTTP/1.1 413", "a body that passes the limit as it comes");
+
+        // sent whole by a client that sends to the end, to everything that reads a body as XML
+        foreach (var (method, url) in new[] { ("PROPFIND", "work/readme.txt"), ("PROPPATCH", "work/readme.txt"), ("LOCK", "work/readme.txt"), ("PROPFIND", "") })
+        {
+            var over = await client.SendAsync(Request(method, url, PropfindOf(limit + 1), ("Depth", "0")));
+            Assert.AreEqual(HttpStatusCode.RequestEntityTooLarge, over.StatusCode, $"{method} /{url} with a byte over the limit");
+        }
+
+        // at the limit it is read as it was, and so is one within it that does not say how long it is
+        var within = await XmlAsync(await client.SendAsync(Request("PROPFIND", "work/readme.txt", PropfindOf(limit), ("Depth", "0"))));
+        Assert.AreEqual("12", Prop(within.Root!.Element(D + "response")!, "getcontentlength")!.Value);
+        var unsized = Request("PROPFIND", "work/readme.txt", PropfindOf(4096), ("Depth", "0"));
+        unsized.Headers.TransferEncodingChunked = true;
+        within = await XmlAsync(await client.SendAsync(unsized));
+        Assert.AreEqual("12", Prop(within.Root!.Element(D + "response")!, "getcontentlength")!.Value);
+
+        var big = new byte[3 << 20];
+        new Random(7).NextBytes(big);
+        Assert.AreEqual(HttpStatusCode.Created, (await client.PutAsync("work/big.bin", new ByteArrayContent(big))).StatusCode, "a PUT past that limit is a file like any other");
+        CollectionAssert.AreEqual(big, source.GetFile("big.bin"));
+    }
+
+    /// <summary>A well-formed PROPFIND body of exactly so many bytes: the question is short, and blanks fill it out.</summary>
+    private static string PropfindOf(int bytes)
+    {
+        const string open = "<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:prop><D:getcontentlength/></D:prop>";
+        const string close = "</D:propfind>";
+        return open + new string(' ', bytes - open.Length - close.Length) + close;
+    }
+
+    /// <summary>
+    /// Sends a request's head and the start of its body over a connection of its own, and no more: the first line of what
+    /// the server answers while the rest of the body is still owed, or what happened in its place.
+    /// </summary>
+    private static async Task<string> AnswerBeforeTheBodyEndsAsync(int port, string head, byte[] bodySoFar)
+    {
+        using var tcp = new TcpClient();
+        await tcp.ConnectAsync(IPAddress.Loopback, port);
+        var stream = tcp.GetStream();
+        var sending = SendAsync();
+        string answer;
+        using (var patience = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+        {
+            try
+            {
+                using var reader = new StreamReader(stream, Encoding.ASCII, detectEncodingFromByteOrderMarks: false, bufferSize: 1024, leaveOpen: true);
+                answer = await reader.ReadLineAsync(patience.Token) ?? "the connection closed with no answer";
+            }
+            catch (OperationCanceledException)
+            {
+                answer = "no answer in 15 s";
+            }
+            catch (IOException ex)
+            {
+                answer = "the connection broke with no answer: " + ex.Message;
+            }
+        }
+
+        tcp.Close();
+        await sending;
+        return answer;
+
+        async Task SendAsync()
+        {
+            try
+            {
+                await stream.WriteAsync(Encoding.ASCII.GetBytes(head));
+                await stream.WriteAsync(bodySoFar);
+                await stream.FlushAsync();
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                // answered, and closed, before all of it was taken
+            }
+        }
+    }
+
     [TestMethod]
     public async Task TwoCollectionsShareOneServer()
     {

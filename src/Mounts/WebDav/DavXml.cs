@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Globalization;
 using System.Text;
 using System.Xml;
@@ -43,7 +44,15 @@ internal static class DavXml
     public static readonly XName QuotaAvailable = D + "quota-available-bytes";
     public static readonly XName QuotaUsed = D + "quota-used-bytes";
 
-    /// <summary>Reads a request body as XML; null when the body is empty. Throws <see cref="XmlException"/> on bad XML.</summary>
+    /// <summary>The most a request body that is XML may come to. What asks for properties or for a lock is a few hundred bytes.</summary>
+    public const int MaxBodyBytes = 1 << 20;
+
+    /// <summary>
+    /// Reads a request body as XML; null when the body is empty. Throws <see cref="XmlException"/> on bad XML, and
+    /// <see cref="DavBodyTooLargeException"/> for a body over <see cref="MaxBodyBytes"/>: by the length it gives, before any of
+    /// it is read, or else where it passes the limit as it is read. All of it was taken into memory first, whatever its
+    /// size, and only then held against a limit (the review of 21-Nov-2026, R14b).
+    /// </summary>
     public static async Task<XDocument?> ReadAsync(Stream body, long? contentLength, CancellationToken ct)
     {
         if (contentLength == 0)
@@ -51,8 +60,31 @@ internal static class DavXml
             return null;
         }
 
+        if (contentLength > MaxBodyBytes)
+        {
+            throw new DavBodyTooLargeException();
+        }
+
         using var buffer = new MemoryStream();
-        await body.CopyToAsync(buffer, ct).ConfigureAwait(false);
+        var chunk = ArrayPool<byte>.Shared.Rent(16 * 1024);
+        try
+        {
+            int n;
+            while ((n = await body.ReadAsync(chunk, ct).ConfigureAwait(false)) > 0)
+            {
+                if (buffer.Length + n > MaxBodyBytes)
+                {
+                    throw new DavBodyTooLargeException();
+                }
+
+                buffer.Write(chunk, 0, n);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(chunk);
+        }
+
         if (buffer.Length == 0)
         {
             return null;
@@ -258,3 +290,6 @@ internal static class DavXml
         }
     }
 }
+
+/// <summary>A request body that is XML came to more than <see cref="DavXml.MaxBodyBytes"/>: the request's 413.</summary>
+internal sealed class DavBodyTooLargeException() : Exception($"A request body that is XML may be {DavXml.MaxBodyBytes} bytes at most.");

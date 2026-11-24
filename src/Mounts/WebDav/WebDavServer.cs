@@ -144,7 +144,15 @@ internal sealed partial class WebDavServer : IAsyncDisposable
 
         if (collectionName.Length == 0)
         {
-            await HandleRootAsync(ctx, method, ct).ConfigureAwait(false);
+            try
+            {
+                await HandleRootAsync(ctx, method, ct).ConfigureAwait(false);
+            }
+            catch (DavBodyTooLargeException ex) when (!ctx.Response.HasStarted)
+            {
+                await ErrorAsync(ctx, StatusCodes.Status413PayloadTooLarge, ex.Message, ct).ConfigureAwait(false);
+            }
+
             return;
         }
 
@@ -156,8 +164,7 @@ internal sealed partial class WebDavServer : IAsyncDisposable
 
         if (!Authorised(ctx, registration))
         {
-            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-            ctx.Response.Headers.WWWAuthenticate = "Basic realm=\"AnyFS\", charset=\"UTF-8\"";
+            Challenge(ctx);
             return;
         }
 
@@ -226,21 +233,43 @@ internal sealed partial class WebDavServer : IAsyncDisposable
         {
             await ErrorAsync(ctx, StatusCodes.Status400BadRequest, "The request body is not well-formed XML: " + ex.Message, ct).ConfigureAwait(false);
         }
+        catch (DavBodyTooLargeException ex) when (!ctx.Response.HasStarted)
+        {
+            await ErrorAsync(ctx, StatusCodes.Status413PayloadTooLarge, ex.Message, ct).ConfigureAwait(false);
+        }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
         }
     }
 
-    /// <summary>The server root: a virtual collection listing the collections served here (no auth, no writes).</summary>
+    /// <summary>
+    /// The server root: a virtual collection that lists the collections served here, to each client the ones it may see
+    /// (no writes): those with no login, and those whose login it sent. Every collection was listed to anyone, the names
+    /// of those behind a login among them (the review of 21-Nov-2026, R14b).
+    /// </summary>
     private async Task HandleRootAsync(HttpContext ctx, string method, CancellationToken ct)
     {
-        var names = _collections.Keys.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        if (method == "OPTIONS")
+        {
+            // what the server can do and nothing of what it holds, so answered with no sign-in: it is what the Windows
+            // redirector asks first, before it has been asked to sign in
+            ctx.Response.Headers.Allow = "OPTIONS, GET, HEAD, PROPFIND";
+            ctx.Response.ContentLength = 0;
+            return;
+        }
+
+        var all = _collections.Values;
+        var names = all.Where(r => Authorised(ctx, r)).Select(r => r.Name).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        if (names.Count == 0 && all.Count > 0)
+        {
+            // none to show, and every collection here is behind a login: the client is asked to sign in, as at any other
+            // path, and nothing of a body is read for it
+            Challenge(ctx);
+            return;
+        }
+
         switch (method)
         {
-            case "OPTIONS":
-                ctx.Response.Headers.Allow = "OPTIONS, GET, HEAD, PROPFIND";
-                ctx.Response.ContentLength = 0;
-                return;
             case "PROPFIND":
             {
                 var request = DavXml.ParsePropfind(await DavXml.ReadAsync(ctx.Request.Body, ctx.Request.ContentLength, ct).ConfigureAwait(false));
@@ -838,6 +867,13 @@ internal sealed partial class WebDavServer : IAsyncDisposable
         {
             return false;
         }
+    }
+
+    /// <summary>The answer to a client that has not signed in: one realm for the root and every path, so a client signs in once.</summary>
+    private static void Challenge(HttpContext ctx)
+    {
+        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        ctx.Response.Headers.WWWAuthenticate = "Basic realm=\"AnyFS\", charset=\"UTF-8\"";
     }
 
     /// <summary>Depth header: 0, 1, or -1 for infinity. Absent means 1 here (RFC says infinity, which we don't serve).</summary>
