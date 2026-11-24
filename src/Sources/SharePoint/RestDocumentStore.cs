@@ -170,9 +170,46 @@ internal sealed class RestDocumentStore : IDocumentStore
         return libraries;
     }
 
-    // each site's lists' stamps, one call a site, kept a moment so a walk's libraries (stamped together) share it
-    private readonly ConcurrentDictionary<string, (long At, Task<Dictionary<string, string>> Stamps)> _listStamps = new(StringComparer.OrdinalIgnoreCase);
+    // each site's lists as they stand, one call a site, kept a moment so a walk's libraries (stamped together) share it
+    private readonly Dictionary<string, ListStates> _listStamps = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan ListStampsKept = TimeSpan.FromSeconds(3);
+
+    // the sites (by key) whose SharePoint tells no change token of a list: found out once each, and their libraries then
+    // go by their stamps alone
+    private readonly ConcurrentDictionary<string, bool> _noChangeTokens = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>One answer of a site's lists, and the libraries a walk has gone by it for.</summary>
+    private sealed class ListStates(Task<Dictionary<string, ListState>> lists)
+    {
+        public long At { get; } = Stopwatch.GetTimestamp();
+
+        public Task<Dictionary<string, ListState>> Lists { get; } = lists;
+
+        public HashSet<string> GoneBy { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public bool Usable => Stopwatch.GetElapsedTime(At) <= ListStampsKept && !Lists.IsFaulted && !Lists.IsCanceled;
+    }
+
+    /// <summary>A list as <c>web/lists</c> tells it: its stamp (its last item change and its count), its id, and its change log's token for now where the server tells one.</summary>
+    private sealed record ListState(string Stamp, string Id, string? ChangeToken);
+
+    /// <summary>A change log is kept for a time (sixty days, as SharePoint Server is set up; the service does not say). A token older than this is not asked of it: one from before the log begins is answered with what the log has, and no word that more happened.</summary>
+    private static readonly TimeSpan ChangeLogTrusted = TimeSpan.FromDays(30);
+
+    /// <summary>
+    /// A list's stamp names its last item change to the second, so a change in that same second, after the stamp was
+    /// read, leaves it as it was. The stamp is believed to say "nothing changed" only once the token it is held with was
+    /// taken this long after that change (well past the second, and past any difference between the clocks of the
+    /// servers that write the two); until then the change log itself is asked.
+    /// </summary>
+    internal static readonly TimeSpan StampBelievedAfter = TimeSpan.FromMinutes(1);
+
+    // how many changes the log gives at once at the least: fewer in an answer, and that was all of them
+    private const int ChangesAtOnce = 1000;
+
+    // how many items are asked where they are in one query: as many as a query's In takes (asked of a library of 5,151
+    // items, above the view threshold, on 24-Nov-2026: 500 numbers answered in 0.3 s)
+    private const int PlacedAtOnce = 500;
 
     /// <summary>
     /// A library's stamp: its list's <c>LastItemModifiedDate</c> (which moves when any item in it is added, changed or
@@ -180,35 +217,270 @@ internal sealed class RestDocumentStore : IDocumentStore
     /// a moment; null for a library the call does not name.
     /// </summary>
     public async Task<string?> LibraryStampAsync(LibraryInfo library, CancellationToken ct)
-    {
-        var key = library.Web?.Key ?? "";
-        var now = Stopwatch.GetTimestamp();
-        if (!_listStamps.TryGetValue(key, out var kept) || Stopwatch.GetElapsedTime(kept.At) > ListStampsKept || kept.Stamps.IsFaulted)
-        {
-            kept = (now, ListStampsAsync(library.Web, ct));
-            _listStamps[key] = kept;
-        }
+        => (await ListStateAsync(library, goesBy: true, held: null, ct).ConfigureAwait(false))?.Stamp;
 
-        return (await kept.Stamps.WaitAsync(ct).ConfigureAwait(false)).GetValueOrDefault(library.Key.TrimEnd('/'));
-    }
-
-    private async Task<Dictionary<string, string>> ListStampsAsync(WebInfo? web, CancellationToken ct)
+    /// <summary>
+    /// A library's list as its site's lists say it now: from the answer the site's other libraries were just given,
+    /// where there is one (a walk stamps a site's libraries together, and one call covers them all). A new answer is
+    /// asked for a library that has gone by that one before (<paramref name="goesBy"/>: it is the next walk asking), and
+    /// for one whose token held (<paramref name="held"/>) is that answer's own, which cannot say what happened after it.
+    /// </summary>
+    private async Task<ListState?> ListStateAsync(LibraryInfo library, bool goesBy, string? held, CancellationToken ct)
     {
-        using var doc = await Client(web).GetJsonAsync("web/lists?$select=LastItemModifiedDate,ItemCount,RootFolder/ServerRelativeUrl&$expand=RootFolder", web?.Key ?? Description, ct).ConfigureAwait(false);
-        var stamps = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var list in doc.RootElement.GetProperty("value").EnumerateArray())
+        var site = library.Web?.Key ?? "";
+        var mine = library.Key.TrimEnd('/');
+        ListStates? kept;
+        lock (_listStamps)
         {
-            var root = list.TryGetProperty("RootFolder", out var rf) && rf.TryGetProperty("ServerRelativeUrl", out var sru) ? sru.GetString() : null;
-            var modified = list.TryGetProperty("LastItemModifiedDate", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null;
-            var count = list.TryGetProperty("ItemCount", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetRawText() : "";
-            if (!string.IsNullOrEmpty(root) && modified is not null)
+            if (!_listStamps.TryGetValue(site, out kept) || !kept.Usable || kept.GoneBy.Contains(mine))
             {
-                stamps[root.TrimEnd('/')] = $"{modified}|{count}";
+                kept = null;
             }
         }
 
-        return stamps;
+        if (kept is not null)
+        {
+            var state = (await kept.Lists.WaitAsync(ct).ConfigureAwait(false)).GetValueOrDefault(mine);
+            if (held is null || state?.ChangeToken != held)
+            {
+                if (goesBy)
+                {
+                    lock (_listStamps)
+                    {
+                        kept.GoneBy.Add(mine);
+                    }
+                }
+
+                return state;
+            }
+        }
+
+        lock (_listStamps)
+        {
+            // another of the site's libraries may have asked meanwhile: its answer is as new
+            if (!_listStamps.TryGetValue(site, out var latest) || ReferenceEquals(latest, kept) || !latest.Usable || latest.GoneBy.Contains(mine))
+            {
+                latest = new ListStates(ListStatesAsync(library.Web, ct));
+                _listStamps[site] = latest;
+            }
+
+            if (goesBy)
+            {
+                latest.GoneBy.Add(mine);
+            }
+
+            kept = latest;
+        }
+
+        return (await kept.Lists.WaitAsync(ct).ConfigureAwait(false)).GetValueOrDefault(mine);
     }
+
+    private async Task<Dictionary<string, ListState>> ListStatesAsync(WebInfo? web, CancellationToken ct)
+    {
+        const string Select = "web/lists?$select=Id,LastItemModifiedDate,ItemCount,{0}RootFolder/ServerRelativeUrl&$expand=RootFolder";
+        var site = web?.Key ?? "";
+        var tokens = !_noChangeTokens.ContainsKey(site);
+        JsonDocument doc;
+        try
+        {
+            doc = await Client(web).GetJsonAsync(string.Format(CultureInfo.InvariantCulture, Select, tokens ? "CurrentChangeToken," : ""), web?.Key ?? Description, ct).ConfigureAwait(false);
+        }
+        catch (VfsException ex) when (tokens && ex.Error is not (VfsError.Unavailable or VfsError.AccessDenied or VfsError.NotFound))
+        {
+            // a SharePoint that knows no such property of a list (it says so, as for any name it does not know), or
+            // that will not tell it: asked without it, and where that is answered the site's libraries go by their
+            // stamps from here on, as they did
+            doc = await Client(web).GetJsonAsync(string.Format(CultureInfo.InvariantCulture, Select, ""), web?.Key ?? Description, ct).ConfigureAwait(false);
+            _noChangeTokens[site] = true;
+        }
+
+        using (doc)
+        {
+            var lists = new Dictionary<string, ListState>(StringComparer.OrdinalIgnoreCase);
+            foreach (var list in doc.RootElement.GetProperty("value").EnumerateArray())
+            {
+                var root = list.TryGetProperty("RootFolder", out var rf) && rf.TryGetProperty("ServerRelativeUrl", out var sru) ? sru.GetString() : null;
+                var modified = list.TryGetProperty("LastItemModifiedDate", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null;
+                var count = list.TryGetProperty("ItemCount", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetRawText() : "";
+                var id = list.TryGetProperty("Id", out var i) ? i.GetString() : null;
+                var token = list.TryGetProperty("CurrentChangeToken", out var t) && t.ValueKind == JsonValueKind.Object && t.TryGetProperty("StringValue", out var sv) ? sv.GetString() : null;
+                if (!string.IsNullOrEmpty(root) && modified is not null)
+                {
+                    lists[root.TrimEnd('/')] = new ListState($"{modified}|{count}", id ?? "", string.IsNullOrEmpty(id) ? null : token);
+                }
+            }
+
+            return lists;
+        }
+    }
+
+    /// <summary>
+    /// What changed in the library since a token, by SharePoint's change log (asked of a tenant on 24-Nov-2026). The
+    /// token is the library's stamp and the log's own token for then, as one answer gave them together. With none,
+    /// those for now. Where the stamp is still the one in the token, and can be believed
+    /// (<see cref="StampBelievedAfter"/>), nothing has changed and the log is not asked: one call a site covers all its
+    /// libraries. Else the log says each change by its kind and the item's number and id, and nothing of where: so the
+    /// items that still exist are asked for by their numbers, which gives the folder each is in, and one renamed, moved
+    /// or deleted may be held somewhere else, where the source looks for it by its id. A token older than the log is
+    /// trusted to be kept, a log that would not answer, or one that names no ids, answers that everything is to be
+    /// listed. Null where the server tells no token.
+    /// </summary>
+    public async Task<LibraryChanges?> ChangesAsync(LibraryInfo library, string? since, CancellationToken ct)
+    {
+        // the token held: the stamp, and the log's own token
+        var space = since?.IndexOf(' ', StringComparison.Ordinal) ?? -1;
+        var start = since is not null && space > 0 && space < since.Length - 1 ? since[(space + 1)..] : null;
+        if (await ListStateAsync(library, goesBy: since is not null, held: start, ct).ConfigureAwait(false) is not { ChangeToken: { Length: > 0 } current } list)
+        {
+            return null;
+        }
+
+        LibraryChanges Everything(string why) => new($"{list.Stamp} {current}", true, [], why);
+        if (since is null)
+        {
+            return Everything("it has no token yet");
+        }
+
+        if (start is null || TakenAt(start) is not { } taken)
+        {
+            return Everything("its token is of another kind");
+        }
+
+        var same = since.AsSpan(0, space).SequenceEqual(list.Stamp);
+        if (same && Believed(list.Stamp, taken))
+        {
+            // the list says nothing in it was added, changed or removed, and the log is not asked. The stamp and the
+            // token for now came in one answer, so the one may take the other's place when that one is old
+            return new LibraryChanges($"{list.Stamp} {current}", false, []);
+        }
+
+        if (DateTime.UtcNow.Ticks - taken > ChangeLogTrusted.Ticks)
+        {
+            return Everything($"its token is more than {ChangeLogTrusted.TotalDays:N0} days old, and the change log may not go back so far");
+        }
+
+        var client = Client(library);
+        var changed = new Dictionary<string, (int Number, bool Elsewhere, bool Gone)>(StringComparer.Ordinal);
+        string? last = null;
+        while (true)
+        {
+            var count = 0;
+            var from = last ?? start;
+            var query = "{\"query\":{\"Item\":true,\"Add\":true,\"Update\":true,\"DeleteObject\":true,\"Rename\":true,\"Move\":true,\"Restore\":true,\"SystemUpdate\":true,\"ChangeTokenStart\":{\"StringValue\":" + Json.Quote(from) + "}}}";
+            JsonDocument answer;
+            try
+            {
+                answer = await client.PostJsonAsync($"web/lists(guid'{list.Id}')/getchanges", query, Display(library, ""), ct).ConfigureAwait(false);
+            }
+            catch (VfsException ex) when (ex.Error is not VfsError.Unavailable)
+            {
+                return Everything($"SharePoint would not say what changed: {ex.Message}");
+            }
+
+            using (answer)
+            {
+                if (!answer.RootElement.TryGetProperty("value", out var told) || told.ValueKind != JsonValueKind.Array)
+                {
+                    return Everything("the change log answered with something other than changes");
+                }
+
+                foreach (var change in told.EnumerateArray())
+                {
+                    count++;
+                    var kind = change.TryGetProperty("ChangeType", out var k) && k.TryGetInt32(out var type) ? type : 0;
+                    var id = change.TryGetProperty("UniqueId", out var u) && u.ValueKind == JsonValueKind.String ? Id(u.GetString()) : null;
+                    if (id is null || !change.TryGetProperty("ItemId", out var n) || !n.TryGetInt32(out var number))
+                    {
+                        return Everything("the change log does not name the items that changed");
+                    }
+
+                    if (change.TryGetProperty("ChangeToken", out var ct2) && ct2.ValueKind == JsonValueKind.Object && ct2.TryGetProperty("StringValue", out var tv) && tv.GetString() is { Length: > 0 } token)
+                    {
+                        last = token;
+                    }
+
+                    // 3 deleted, 5 moved away: gone, unless a later change brings it back; 4 renamed or moved (within the
+                    // list: the log has one word for both), and those two, may be held somewhere else
+                    var was = changed.GetValueOrDefault(id);
+                    changed[id] = (number, was.Elsewhere || kind is 3 or 4 or 5, kind is 3 or 5);
+                }
+            }
+
+            // a full answer: more may follow, from the last change told (one that tells no further is the end)
+            if (count < ChangesAtOnce || last is null || last == from)
+            {
+                break;
+            }
+        }
+
+        // where each is now: the items of those numbers, which the list is asked for some at a time
+        var folders = new Dictionary<string, string>(StringComparer.Ordinal);
+        var prefix = library.Key.TrimEnd('/');
+        foreach (var some in changed.Where(c => !c.Value.Gone).Select(c => c.Value.Number).Distinct().Chunk(PlacedAtOnce))
+        {
+            var view = "<View Scope='RecursiveAll'><Query><Where><In><FieldRef Name='ID'/><Values>"
+                + string.Concat(some.Select(number => $"<Value Type='Counter'>{number.ToString(CultureInfo.InvariantCulture)}</Value>"))
+                + $"</Values></In></Where></Query><RowLimit>{some.Length.ToString(CultureInfo.InvariantCulture)}</RowLimit></View>";
+            JsonDocument placed;
+            try
+            {
+                placed = await client.PostJsonAsync($"web/lists(guid'{list.Id}')/GetItems?$select=Id,FileRef,FileDirRef,FSObjType,UniqueId", "{\"query\":{\"ViewXml\":" + Json.Quote(view) + "}}", Display(library, ""), ct).ConfigureAwait(false);
+            }
+            catch (VfsException ex) when (ex.Error is not VfsError.Unavailable)
+            {
+                return Everything($"SharePoint would not say where the changed items are: {ex.Message}");
+            }
+
+            using (placed)
+            {
+                if (!placed.RootElement.TryGetProperty("value", out var found) || found.ValueKind != JsonValueKind.Array)
+                {
+                    return Everything("SharePoint answered where the changed items are with something other than items");
+                }
+
+                foreach (var item in found.EnumerateArray())
+                {
+                    var id = item.TryGetProperty("UniqueId", out var u) && u.ValueKind == JsonValueKind.String ? Id(u.GetString()) : null;
+                    var folder = item.TryGetProperty("FileDirRef", out var d) ? d.GetString() : null;
+                    if (id is not null && folder is not null && folder.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && (folder.Length == prefix.Length || folder[prefix.Length] == '/'))
+                    {
+                        folders[id] = folder[prefix.Length..].Trim('/');
+                    }
+                }
+            }
+        }
+
+        // one the list did not give back is gone since, or not this account's to see: wherever it is held, that is listed
+        var items = changed.Select(c => folders.TryGetValue(c.Key, out var folder) ? new LibraryChange(c.Key, folder, c.Value.Elsewhere) : new LibraryChange(c.Key, null, true)).ToList();
+
+        // From now on: the stamp and the token the one answer gave together, before the log was asked. What changed
+        // between the two is told again the next time, and listed twice; nothing is left out. With nothing changed and
+        // a stamp that cannot be believed yet (the same one, and the token for now still too close to its change), the
+        // token given stands and the log is asked again at the next walk; once the one for now can be believed, or the
+        // stamp is another, it takes the other's place, and the stamp alone answers from then on
+        return items.Count == 0 && same && !(TakenAt(current) is { } now && Believed(list.Stamp, now))
+            ? new LibraryChanges(since, false, [])
+            : new LibraryChanges($"{list.Stamp} {current}", false, items, MoveOn: true);
+    }
+
+    /// <summary>When a change token was given, in ticks: the fourth part of "1;3;{list};{ticks};{number}". Null for what is no such token.</summary>
+    private static long? TakenAt(string token)
+    {
+        var parts = token.Split(';');
+        return parts.Length == 5 && long.TryParse(parts[3], NumberStyles.None, CultureInfo.InvariantCulture, out var ticks) ? ticks : null;
+    }
+
+    /// <summary>Whether a token taken then came long enough after the last change a stamp names (<see cref="StampBelievedAfter"/>).</summary>
+    private static bool Believed(string stamp, long taken)
+    {
+        var bar = stamp.IndexOf('|', StringComparison.Ordinal);
+        return bar > 0
+            && DateTime.TryParse(stamp.AsSpan(0, bar), CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var changed)
+            && taken - changed.Ticks >= StampBelievedAfter.Ticks;
+    }
+
+    /// <summary>An item's unique id as entries and changes both carry it: its GUID in one form.</summary>
+    private static string? Id(string? unique) => string.IsNullOrEmpty(unique) ? null : Guid.TryParse(unique, out var guid) ? guid.ToString("D") : unique.ToLowerInvariant();
 
     /// <summary>The subsites the account may open, as SharePoint filters them for the current user (-1: of every template and configuration), each by its address.</summary>
     public async Task<IReadOnlyList<WebInfo>> ListSubsitesAsync(WebInfo? web, CancellationToken ct)
@@ -419,7 +691,7 @@ internal sealed class RestDocumentStore : IDocumentStore
         var markdown = SharePointPages.Markdown(fields, pageUrl);
         var version = SharePointPages.Version(markdown);
         _pages.Remember(item.Id ?? version, version, markdown);
-        return (VfsEntry.File(SharePointPages.Shown(entry.Name), markdown.Length, entry.Modified, entry.Created, VfsAttributes.ReadOnly, version), item with { Version = version, Size = markdown.Length });
+        return (VfsEntry.File(SharePointPages.Shown(entry.Name), markdown.Length, entry.Modified, entry.Created, VfsAttributes.ReadOnly, version) with { Key = entry.Key }, item with { Version = version, Size = markdown.Length });
     }
 
     public async Task<ItemRef?> GetItemAsync(LibraryInfo library, string itemPath, CancellationToken ct)
@@ -675,9 +947,11 @@ internal sealed class RestDocumentStore : IDocumentStore
         var length = file.TryGetProperty("Length", out var l) && TryLong(l, out var len) ? len : 0;
         var created = ReadTime(file, "TimeCreated");
         var modified = ReadTime(file, "TimeLastModified");
-        var id = file.TryGetProperty("UniqueId", out var u) ? u.GetString() ?? "" : "";
+        var id = file.TryGetProperty("UniqueId", out var u) ? Id(u.GetString()) ?? "" : "";
         var etag = file.TryGetProperty("ETag", out var e) ? e.GetString() : null;
-        return (new VfsEntry(name, false, length, created, modified, VfsAttributes.None, etag), new ItemRef(id, etag, null, length, false));
+
+        // with the item's id, which is how the change log names what changed (ChangesAsync)
+        return (new VfsEntry(name, false, length, created, modified, VfsAttributes.None, etag) { Key = id.Length > 0 ? id : null }, new ItemRef(id, etag, null, length, false));
     }
 
     internal static (VfsEntry Entry, ItemRef Item) ParseFolder(JsonElement folder)
@@ -685,8 +959,8 @@ internal sealed class RestDocumentStore : IDocumentStore
         var name = folder.GetProperty("Name").GetString() ?? "";
         var created = ReadTime(folder, "TimeCreated");
         var modified = ReadTime(folder, "TimeLastModified");
-        var id = folder.TryGetProperty("UniqueId", out var u) ? u.GetString() ?? "" : "";
-        return (VfsEntry.Directory(name, modified, created), new ItemRef(id, modified?.ToString("O"), null, 0, true));
+        var id = folder.TryGetProperty("UniqueId", out var u) ? Id(u.GetString()) ?? "" : "";
+        return (VfsEntry.Directory(name, modified, created) with { Key = id.Length > 0 ? id : null }, new ItemRef(id, modified?.ToString("O"), null, 0, true));
     }
 
     private static bool TryLong(JsonElement element, out long value)

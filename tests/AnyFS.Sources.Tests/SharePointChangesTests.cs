@@ -85,6 +85,7 @@ public class SharePointChangesTests
     private static async Task<long?> LengthAsync(ISource source, string path) => (await source.StatAsync(path, None))?.Length;
 
     [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
     [DataRow(true, DisplayName = "tenant, Graph")]
     public async Task AWalkAfterAChangeListsTheFoldersOnTheWayToItAndNoOthers(bool tenant)
     {
@@ -113,6 +114,7 @@ public class SharePointChangesTests
     }
 
     [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
     [DataRow(true, DisplayName = "tenant, Graph")]
     public async Task WhatWasDeletedOrMovedOutsideIsFoundByItsIdAndLeavesNothingBehind(bool tenant)
     {
@@ -159,6 +161,7 @@ public class SharePointChangesTests
 
     /// <summary>What the source itself wrote is in the services' record of changes as anything else is: its folder is listed once more, and no other.</summary>
     [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
     [DataRow(true, DisplayName = "tenant, Graph")]
     public async Task WhatWasWrittenThroughTheSourceIsToldAsAChangeAndItsFolderListed(bool tenant)
     {
@@ -185,6 +188,7 @@ public class SharePointChangesTests
     /// between two asks as deleted (both did, asked on 24-Nov-2026).
     /// </summary>
     [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
     [DataRow(true, DisplayName = "tenant, Graph")]
     public async Task WhatWasWrittenThroughTheSourceAndDeletedOutsideLeavesNothingBehind(bool tenant)
     {
@@ -218,6 +222,7 @@ public class SharePointChangesTests
     }
 
     [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
     [DataRow(true, DisplayName = "tenant, Graph")]
     public async Task TheNextStartAsksWhatChangedSinceTheLastWalkOfTheOneBefore(bool tenant)
     {
@@ -293,12 +298,79 @@ public class SharePointChangesTests
         }
     }
 
+    /// <summary>The farm's change log gives a thousand changes at once: more are asked for from the last one told.</summary>
+    [TestMethod]
+    public async Task WhatChangedOnAFarmIsReadThroughEveryAnswerOfTheLog()
+    {
+        using var fake = Fake(tenant: false);
+        var documents = Seeded(fake);
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant: false, context);
+        await source.CountFilesAsync(None);
+
+        for (var file = 0; file < 1100; file++)
+        {
+            fake.Seed(documents, $"area{file % 3}/folder{file % 4}/many{file}.txt", Encoding.UTF8.GetBytes("many"));
+        }
+
+        var asked = fake.Count(s => Asks(s, documents));
+        var counters = new SourceCounters();
+        Assert.IsTrue(await source.WalkAsync(counters, full: false, None));
+        Assert.AreEqual(2, fake.Count(s => Asks(s, documents)) - asked, "a full answer, and the rest");
+        Assert.AreEqual(4, await LengthAsync(source, "Documents/area0/folder0/many0.txt"));
+        Assert.AreEqual(4, await LengthAsync(source, "Documents/area2/folder3/many1091.txt"));
+        Assert.AreEqual(4, await LengthAsync(source, "Documents/area1/folder3/many1099.txt"));
+    }
+
+    /// <summary>
+    /// A list's stamp names its last change to the second. Held with a token taken within a minute of that change it is
+    /// not believed, and the log is asked; held with one taken later, it is, and one call a site says that nothing
+    /// changed in any of its libraries.
+    /// </summary>
+    [TestMethod]
+    public async Task AListsStampIsBelievedOnceItsTokenCameWellAfterItsLastChange()
+    {
+        using var fake = Fake(tenant: false);
+        var documents = Seeded(fake);
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant: false, context);
+        await source.CountFilesAsync(None);
+
+        // walked the moment after the libraries were made: their stamps say nothing yet, and each one's log is asked
+        var asked = fake.Count(s => Asks(s));
+        Assert.AreEqual((0, 0), await WalkAsync(source, fake));
+        var libraries = fake.Count(s => Asks(s)) - asked;
+        Assert.IsTrue(libraries >= 4, $"each library's log asked ({libraries})");
+
+        // the same libraries, last changed ten minutes ago: the stamps are other ones, the logs say nothing changed, and
+        // each library's own folder is listed for its new token
+        foreach (var library in fake.WebAt(FakeSharePoint.TestSitePath)!.Libraries)
+        {
+            fake.Age(library, TimeSpan.FromMinutes(10));
+        }
+
+        var (listed, mine) = await WalkAsync(source, fake);
+        Assert.AreEqual(1, mine, "the library's own folder");
+        Assert.AreEqual(libraries, listed, "and each other library's");
+
+        // now the stamps are believed: no log is asked, and nothing listed
+        asked = fake.Count(s => Asks(s));
+        Assert.AreEqual((0, 0), await WalkAsync(source, fake));
+        Assert.AreEqual(0, fake.Count(s => Asks(s)) - asked, "the lists' stamps said it");
+
+        // a change in one: its log alone
+        fake.Seed(documents, "area0/folder0/more.txt", Encoding.UTF8.GetBytes("more"));
+        Assert.AreEqual((3, 3), await WalkAsync(source, fake));
+        Assert.AreEqual(1, fake.Count(s => Asks(s)) - asked, "the log of the library that changed");
+    }
+
     /// <summary>
     /// The services give another token at every call. With nothing changed the one held stands, and no folder is
     /// listed for the new one; once it is old it is exchanged, with the library's own folder listed and none below: a
     /// record of changes goes back only so far.
     /// </summary>
     [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
     [DataRow(true, DisplayName = "tenant, Graph")]
     public async Task AnOldTokenIsExchangedForANewOneWhereNothingChanged(bool tenant)
     {
@@ -331,6 +403,64 @@ public class SharePointChangesTests
         fake.Seed(documents, "area2/folder2/more.txt", Encoding.UTF8.GetBytes("more"));
         Assert.AreEqual((3, 3), await WalkAsync(source, fake));
         Assert.AreEqual(4, await LengthAsync(source, "Documents/area2/folder2/more.txt"));
+    }
+
+    /// <summary>A SharePoint whose lists tell no change token: its libraries go by their stamps, as they did, and a changed one is listed whole.</summary>
+    [TestMethod]
+    public async Task WhereAFarmTellsNoTokenALibraryGoesByItsStamp()
+    {
+        using var fake = Fake(tenant: false);
+        fake.ChangeTokens = false;
+        var documents = Seeded(fake);
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant: false, context);
+        await source.CountFilesAsync(None);
+        Assert.AreEqual((0, 0), await WalkAsync(source, fake));
+
+        fake.Seed(documents, "area0/folder0/more.txt", Encoding.UTF8.GetBytes("more"));
+        var (listed, mine) = await WalkAsync(source, fake);
+        Assert.AreEqual(Folders(documents.Root, forms: false), mine, "every folder of the library that changed");
+        Assert.AreEqual(mine, listed, "and of no other");
+        Assert.AreEqual(0, fake.Count(s => Asks(s)), "no log to ask");
+    }
+
+    /// <summary>What the farm's store answers for tokens it cannot go by: everything is to be listed, from a token for now.</summary>
+    [TestMethod]
+    public async Task ATokenTheLogCannotAnswerSaysEverythingIsToBeListed()
+    {
+        using var fake = Fake(tenant: false);
+        Seeded(fake);
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant: false, context);
+        var library = (await source.Store.ListLibrariesAsync(null, None)).First(l => l.Name == "Documents");
+
+        var now = await source.Store.ChangesAsync(library, null, None);
+        Assert.IsNotNull(now);
+        Assert.IsTrue(now.Everything, "no token: one for now");
+        var (stamp, token) = (now.Token[..now.Token.IndexOf(' ')], now.Token[(now.Token.IndexOf(' ') + 1)..]);
+
+        // one of another kind (a library's stamp alone, as the listings held before had)
+        var other = await source.Store.ChangesAsync(library, stamp, None);
+        Assert.IsTrue(other!.Everything, other.Why);
+
+        // one from before the log is trusted to begin: it would answer what it has, and say nothing of the rest
+        var parts = token.Split(';');
+        parts[3] = (DateTime.UtcNow - TimeSpan.FromDays(45)).Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var old = await source.Store.ChangesAsync(library, $"1999-01-01T00:00:00Z|3 {string.Join(';', parts)}", None);
+        Assert.IsTrue(old!.Everything, old.Why);
+        StringAssert.Contains(old.Why, "days old");
+
+        // one the log refuses
+        parts[4] = "not a number";
+        parts[3] = DateTime.UtcNow.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var refused = await source.Store.ChangesAsync(library, $"1999-01-01T00:00:00Z|3 {string.Join(';', parts)}", None);
+        Assert.IsTrue(refused!.Everything, refused.Why);
+        StringAssert.Contains(refused.Why, "would not say");
+
+        // and the one for now, with nothing changed since: nothing to list
+        var nothing = await source.Store.ChangesAsync(library, now.Token, None);
+        Assert.IsFalse(nothing!.Everything);
+        Assert.AreEqual(0, nothing.Items.Count);
     }
 
     /// <summary>Where Graph does not say which folder a changed item is in, nothing says what to list: everything is, from a token for now.</summary>
