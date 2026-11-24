@@ -74,6 +74,13 @@ public sealed class MountRunner
 
     public async Task StartAsync(IVirtualFileSystem fs, CancellationToken ct)
     {
+        // Up already. The collection's start and a change may both come to start a mount: one added while its collection
+        // still waited for a first source was started by each, and the first of the two was left up with no one to stop it
+        if (Mount is not null)
+        {
+            return;
+        }
+
         if (!Definition.Enabled)
         {
             Status = ComponentStatus.DisabledStatus;

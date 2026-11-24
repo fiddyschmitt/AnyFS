@@ -78,6 +78,35 @@ public class EngineMutationTests
             Assert.AreEqual(1, engine.Collections.Count(c => c.Id == added.Id), $"round {round}: the collection's runners");
         }
     }
+
+    [TestMethod]
+    public async Task AMountAddedWhileItsCollectionWaitsForASourceIsStartedOnce()
+    {
+        // A collection starts its mounts when a source of its is ready, or after a grace. A mount added in that wait was
+        // started at once by the change, and again with the rest when the wait ended: two mounts on one port or drive, the
+        // first left up with no one to stop it.
+        await using var engine = new AnyFsEngine(_paths, Registry(), NullLoggerFactory.Instance);
+        engine.Load();
+        var work = await engine.AddCollectionAsync("work");
+        var flaky = await engine.AddSourceAsync("flaky", "memory", true, false, new MemoryPluginSettings { FailTimes = 1000 });
+        await engine.AddMembershipAsync(work.Id, flaky.Id, "", false);
+
+        var starting = engine.StartAsync(null, CancellationToken.None);
+        await Wait.UntilAsync(() => engine.FindCollectionRunner(work.Id) is { IsRunning: true }, what: "the collection waiting for a source");
+        var adding = engine.AddMountAsync(work.Id, "fake", "fake", true, false, new FakeMountSettings { Port = 41 });
+        await Wait.UntilAsync(() => engine.FindCollectionRunner(work.Id)!.Mounts.Count == 1, what: "the mount in the collection");
+        engine.FindCollectionRunner(work.Id)!.MountStartGrace = TimeSpan.FromMilliseconds(100);
+        await adding;
+        await starting;
+
+        lock (FakeMountProvider.Mounts)
+        {
+            Assert.AreEqual(1, FakeMountProvider.Mounts.Count(m => m.Collection.Name == "work" && m.Fs is not null), "the mounts started for it");
+        }
+
+        Assert.AreEqual(ComponentState.Ready, engine.FindCollectionRunner(work.Id)!.Mounts.Single().Status.State);
+    }
+
     private SettingsStore Reload()
     {
         var store = new SettingsStore(_paths, NullLogger.Instance);
