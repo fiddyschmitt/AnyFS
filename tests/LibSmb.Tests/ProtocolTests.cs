@@ -607,8 +607,50 @@ public class ProtocolTests
     }
 
     /// <summary>
-    /// FileAllocationInformation is accepted and changes nothing (Windows sends it before the end of file when it sets a
-    /// length; refused, every truncate from Windows failed); FileEndOfFileInformation truncates and extends.
+    /// FileAllocationInformation is the room a file is given: below the end of file it cuts the file to it, which is how
+    /// Windows makes TRUNCATE_EXISTING (an open, then an allocation of zero); at or beyond it, nothing changes. An open
+    /// that may not write may not cut.
+    /// </summary>
+    [TestMethod]
+    public async Task AnAllocationBelowTheEndOfFileCutsTheFile()
+    {
+        var dir = Dir();
+        await File.WriteAllTextAsync(Path.Combine(dir, "f.txt"), "second, and longer");
+        var c = Connection(NewServer(dir));
+        var tree = await TreeConnectAsync(c);
+        var reader = await OpenAsync(c, tree, "f.txt", Access.FileReadData);
+        var allocation = new byte[8];
+        var (status, reply) = await c.SetInfoAsync(SmbTestClient.SetInfoBody(reader, FileInfoClass.Allocation, allocation), None);
+        reply.Dispose();
+        Assert.AreEqual(Status.AccessDenied, status, "an open for reading");
+        Assert.AreEqual(18, new FileInfo(Path.Combine(dir, "f.txt")).Length);
+        (status, reply) = await c.CloseAsync(SmbTestClient.CloseBody(reader), None);
+        reply.Dispose();
+
+        var fileId = await OpenAsync(c, tree, "f.txt", Access.FileWriteData);
+        Wire.Put64(allocation, 0, 18);
+        (status, reply) = await c.SetInfoAsync(SmbTestClient.SetInfoBody(fileId, FileInfoClass.Allocation, allocation), None);
+        reply.Dispose();
+        Assert.AreEqual(Status.Success, status);
+        Assert.AreEqual(18, new FileInfo(Path.Combine(dir, "f.txt")).Length, "room for all of it");
+
+        Wire.Put64(allocation, 0, 6);
+        (status, reply) = await c.SetInfoAsync(SmbTestClient.SetInfoBody(fileId, FileInfoClass.Allocation, allocation), None);
+        reply.Dispose();
+        Assert.AreEqual(Status.Success, status);
+        Wire.Put64(allocation, 0, 0);
+        (status, reply) = await c.SetInfoAsync(SmbTestClient.SetInfoBody(fileId, FileInfoClass.Allocation, allocation), None);
+        reply.Dispose();
+        Assert.AreEqual(Status.Success, status);
+        (status, reply) = await c.CloseAsync(SmbTestClient.CloseBody(fileId), None);
+        reply.Dispose();
+        Assert.AreEqual(0, new FileInfo(Path.Combine(dir, "f.txt")).Length, "cut to six, then to nothing");
+    }
+
+    /// <summary>
+    /// FileAllocationInformation beyond the end of file is accepted and changes nothing (Windows sends it before the end
+    /// of file when it sets a length; refused, every truncate from Windows failed); FileEndOfFileInformation truncates
+    /// and extends.
     /// </summary>
     [TestMethod]
     public async Task AllocationIsAcceptedAndEndOfFileSetsTheLength()

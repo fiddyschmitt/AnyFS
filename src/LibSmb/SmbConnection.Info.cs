@@ -288,7 +288,7 @@ internal sealed partial class SmbConnection
             {
                 FileInfoClass.Disposition => await SetDispositionAsync(open, buffer, ct).ConfigureAwait(false),
                 FileInfoClass.EndOfFile => await SetEndOfFileAsync(open, buffer, ct).ConfigureAwait(false),
-                FileInfoClass.Allocation => await SetAllocationAsync(open, ct).ConfigureAwait(false),
+                FileInfoClass.Allocation => await SetAllocationAsync(open, buffer, ct).ConfigureAwait(false),
                 FileInfoClass.Rename => await RenameAsync(open, buffer, ct).ConfigureAwait(false),
                 FileInfoClass.Basic => await SetBasicAsync(open, buffer, ct).ConfigureAwait(false),
 
@@ -393,18 +393,44 @@ internal sealed partial class SmbConnection
     }
 
     /// <summary>
-    /// FileAllocationInformation reserves space and never changes the end of file; a plain file system has no allocation
-    /// of its own to set, so it does nothing. Windows sends it before FileEndOfFileInformation when it sets a length, and
-    /// refusing it surfaced as "the specified file length was too large for the file system" on every truncate.
+    /// FileAllocationInformation: the room a file is given. A plain file system keeps no allocation of its own, so room
+    /// at or beyond the end of file changes nothing: Windows sends it before FileEndOfFileInformation when it sets a
+    /// length, and refusing it surfaced as "the specified file length was too large for the file system" on every
+    /// truncate. But a file is never longer than its room: an allocation below the end of file cuts the file to it
+    /// ([MS-FSA] 2.1.5.14.1, as NTFS does). Windows makes TRUNCATE_EXISTING of an open and an allocation of zero, and
+    /// with nothing done here a shorter text written over a longer one kept the longer one's end.
     /// </summary>
-    private async ValueTask<uint> SetAllocationAsync(OpenFile open, CancellationToken ct)
+    private async ValueTask<uint> SetAllocationAsync(OpenFile open, Memory<byte> buffer, CancellationToken ct)
     {
         if (open.Share.ReadOnly)
         {
             return Status.MediaWriteProtected;
         }
 
-        return await ReadOnlyFileAsync(open, ct).ConfigureAwait(false) ? Status.AccessDenied : Status.Success;
+        if (await ReadOnlyFileAsync(open, ct).ConfigureAwait(false))
+        {
+            return Status.AccessDenied;
+        }
+
+        if (buffer.Length < 8 || open.File is not { } file)
+        {
+            return Status.Success;
+        }
+
+        var room = Wire.U64(buffer.Span, 0);
+        if (room >= (ulong)file.Length)
+        {
+            return Status.Success;
+        }
+
+        if (!open.CanWrite)
+        {
+            return Status.AccessDenied;
+        }
+
+        open.Written = true;
+        await file.SetLengthAsync((long)room, ct).ConfigureAwait(false);
+        return Status.Success;
     }
 
     /// <summary>

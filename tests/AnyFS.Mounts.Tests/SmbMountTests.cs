@@ -338,6 +338,28 @@ public class SmbMountTests
         Assert.IsFalse(source.Exists("docs/moved.txt"));
         Assert.IsTrue(source.Exists("made"));
 
+        // An open that cuts the file to nothing does. Windows makes TRUNCATE_EXISTING of an open and an allocation size
+        // of zero, and an allocation size below a file's length cuts the file; the server took the size for a hint and
+        // did nothing, so a shorter text written over a longer one kept the longer one's end (found by a probe for the
+        // review of 21-Nov-2026, P3)
+        var cut = Path.Combine(root, "docs", "a.txt");
+        File.WriteAllText(cut, "second, and longer");
+        using (var stream = new FileStream(cut, FileMode.Truncate, FileAccess.Write, FileShare.Read))
+        {
+            stream.Write("third"u8);
+        }
+
+        Assert.AreEqual("third", Encoding.UTF8.GetString(source.GetFile("docs/a.txt")!), "TRUNCATE_EXISTING cuts the file");
+        Assert.AreEqual("third", File.ReadAllText(cut));
+
+        // and room asked for beyond a file's length is not its length
+        using (var stream = new FileStream(Path.Combine(root, "docs", "roomy.bin"), new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, PreallocationSize = 1 << 20 }))
+        {
+            stream.Write("five!"u8);
+        }
+
+        Assert.AreEqual(5, source.GetFile("docs/roomy.bin")!.Length);
+
         await mount.StopAsync(CancellationToken.None);
         Assert.IsNull(WindowsDriveMapping.CurrentTarget(letter + ":"), "the letter is gone once the mount stops");
     }
