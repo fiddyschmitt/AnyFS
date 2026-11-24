@@ -619,6 +619,38 @@ public class WinFspMountTests
         Assert.AreEqual(1500, new FileInfo(path).Length);
     }
 
+    /// <summary>
+    /// An open that cuts the file to nothing does. Windows makes TRUNCATE_EXISTING of an open and an allocation size of
+    /// zero, and a file is never longer than the room it has: an allocation size below its length cuts it. The size was
+    /// taken for a hint and nothing done, so a shorter text written over a longer one kept the longer one's end (found
+    /// by a probe for the review of 21-Nov-2026, P3).
+    /// </summary>
+    [TestMethod]
+    public async Task AnOpenThatTruncatesCutsTheFile()
+    {
+        RequireWinFsp();
+        var (_, unc, source) = await MountAsync();
+        var path = Path.Combine(unc, "docs", "a.txt");
+        File.WriteAllText(path, "second, and longer");
+        using (var stream = new FileStream(path, FileMode.Truncate, FileAccess.Write, FileShare.Read))
+        {
+            stream.Write("third"u8);
+        }
+
+        Assert.AreEqual("third", Encoding.UTF8.GetString(source.GetFile("docs/a.txt")!));
+        Assert.AreEqual("third", File.ReadAllText(path));
+
+        // room asked for beyond the file's length is not the file's length
+        var roomy = Path.Combine(unc, "docs", "roomy.bin");
+        using (var stream = new FileStream(roomy, new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, PreallocationSize = 1 << 20 }))
+        {
+            stream.Write("five!"u8);
+        }
+
+        Assert.AreEqual(5, source.GetFile("docs/roomy.bin")!.Length);
+        Assert.AreEqual(5, new FileInfo(roomy).Length);
+    }
+
     /// <summary>A handle that has written nothing still learns of a change made elsewhere: the source is asked again when Windows asks again, as it was.</summary>
     [TestMethod]
     public async Task AHandleThatOnlyLooksLearnsThatTheFileGrewElsewhere()

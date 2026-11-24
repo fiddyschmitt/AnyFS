@@ -552,7 +552,11 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             return STATUS_INVALID_DEVICE_REQUEST;
         }
 
-        if (!setAllocationSize)
+        // An allocation size is the room a file is given, which nothing here keeps. But a file is never longer than its
+        // room: an allocation size below the file's length cuts the file to it, as NTFS does. Windows makes
+        // TRUNCATE_EXISTING of an open and an allocation size of zero, and with the size taken for a hint and nothing
+        // done, a shorter text written over a longer one kept the longer one's end.
+        if (!setAllocationSize || newSize < (ulong)desc.File.Length)
         {
             int status;
             lock (desc.ReadLock)
