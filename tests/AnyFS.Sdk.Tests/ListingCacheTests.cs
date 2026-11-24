@@ -601,4 +601,97 @@ public class ListingCacheTests
 
         Assert.IsTrue(cache.Count <= 10, $"count was {cache.Count}");
     }
+    /// <summary>A person's call under the host's limit, on a flow of its own: asks for a folder, and is given up when told to.</summary>
+    private static (Task<Exception?> Asked, Action GiveUp) AskedByAPerson(ListingCache cache, string path)
+    {
+        var waiting = new UpstreamPatience.Waiting(TimeSpan.FromSeconds(1));
+        var call = new CancellationTokenSource();
+        var asked = Task.Run(async () =>
+        {
+            UpstreamPatience.Put(waiting);
+            try
+            {
+                await cache.GetAsync(path, call.Token);
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return ex;
+            }
+        });
+        return (asked, () =>
+        {
+            waiting.GiveUp();
+            call.Cancel();
+        });
+    }
+
+    private static async Task UntilAsync(Func<bool> condition, string what)
+    {
+        for (var waited = 0; !condition(); waited += 10)
+        {
+            Assert.IsTrue(waited < 5000, "timed out waiting for " + what);
+            await Task.Delay(10);
+        }
+    }
+
+    [TestMethod]
+    public async Task AListingNoOneWaitsForAfterItsAskerWasGivenUpIsStopped()
+    {
+        // The host gives a person's call up for a server that says nothing. The listing the call waited on gave up its
+        // place, so the next to ask began one of its own, and then went on to the end of its request's own time: a source
+        // whose every place was held by such requests answered again only as they timed out (the review of
+        // 21-Nov-2026, R6)
+        var started = new SemaphoreSlim(0);
+        var stopped = 0;
+        async IAsyncEnumerable<VfsEntry> NeverAnswers(string path, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            started.Release();
+            try
+            {
+                await Task.Delay(Timeout.Infinite, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                Interlocked.Increment(ref stopped);
+                throw;
+            }
+
+            yield break;
+        }
+
+        var cache = new ListingCache(TimeSpan.FromMinutes(1), NeverAnswers);
+
+        // one asker, given up: no one waits for the listing any more
+        var (alone, giveUp) = AskedByAPerson(cache, "alone");
+        Assert.IsTrue(await started.WaitAsync(TimeSpan.FromSeconds(10)));
+        giveUp();
+        Assert.IsInstanceOfType<OperationCanceledException>(await alone);
+        await UntilAsync(() => Volatile.Read(ref stopped) == 1, what: "the listing no one waits for stopped");
+
+        // two askers of one listing: the first given up, the second (a walk, under no limit) waits on, and so does the listing
+        var (first, giveUpFirst) = AskedByAPerson(cache, "shared");
+        Assert.IsTrue(await started.WaitAsync(TimeSpan.FromSeconds(10)));
+        using var walk = new CancellationTokenSource();
+        var second = cache.RefreshAsync("shared", walk.Token).AsTask();
+        giveUpFirst();
+        Assert.IsInstanceOfType<OperationCanceledException>(await first);
+        await Task.Delay(200);
+        Assert.AreEqual(1, Volatile.Read(ref stopped), "a listing someone still waits for goes on");
+        Assert.IsFalse(second.IsCompleted);
+
+        // the second leaves too (its walk stopped): the listing had given up its place, so no one can come to wait for it
+        await walk.CancelAsync();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => second);
+        await UntilAsync(() => Volatile.Read(ref stopped) == 2, what: "the listing stopped once the last has left");
+
+        // an asker that goes away of itself (its client did) leaves the listing to whoever asks next, as before
+        using var client = new CancellationTokenSource();
+        var gone = cache.GetAsync("kept", client.Token).AsTask();
+        Assert.IsTrue(await started.WaitAsync(TimeSpan.FromSeconds(10)));
+        await client.CancelAsync();
+        await Assert.ThrowsAsync<OperationCanceledException>(() => gone);
+        await Task.Delay(200);
+        Assert.AreEqual(2, Volatile.Read(ref stopped), "a listing that kept its place goes on for the next to ask");
+    }
 }

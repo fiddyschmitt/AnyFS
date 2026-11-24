@@ -835,6 +835,8 @@ public sealed class ListingCache
                 started = true;
             }
 
+            fetch.Waiting++;
+
             // a walk's: also where it joins a listing a client's asking began, which would keep the stamp it reads itself at once
             if (unsettled && stamp?.Value is { } read)
             {
@@ -855,22 +857,42 @@ public sealed class ListingCache
     /// A caller's wait for a listing on its way. Its token ends its own wait and not the listing, which others may wait
     /// on. Where the host gave the caller up for an upstream that says nothing (<see cref="UpstreamPatience.GivenUp"/>),
     /// the listing also gives up its place: the next to ask begins one of its own, which is how an upstream that answers
-    /// again is found. Joined, the one that hung held every later caller until its own request's time was up.
+    /// again is found. Joined, the one that hung held every later caller until its own request's time was up. And once
+    /// it has given up its place and the last who waited for it has left, it is stopped: no one can come to wait for it
+    /// any more, and the request it has out held a place of the source's to the end of that request's own time, so a
+    /// source whose every place was held so answered again only as they timed out (the review of 21-Nov-2026, R6).
     /// </summary>
     private async Task<IReadOnlyList<VfsEntry>> JoinAsync(string path, Fetch fetch, CancellationToken ct)
     {
+        var givenUp = false;
         try
         {
             return await fetch.Result.Task.WaitAsync(ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (UpstreamPatience.GivenUp && !fetch.Result.Task.IsCompleted)
         {
+            givenUp = true;
+            throw;
+        }
+        finally
+        {
+            var stop = false;
             lock (_gate)
             {
-                Forget(path, fetch);
+                if (givenUp)
+                {
+                    Forget(path, fetch);
+                    fetch.GaveUpItsPlace = true;
+                }
+
+                stop = --fetch.Waiting == 0 && fetch.GaveUpItsPlace && !fetch.Result.Task.IsCompleted;
             }
 
-            throw;
+            if (stop)
+            {
+                // outside the gate: what the stop ends goes on from here
+                fetch.Stop.Cancel();
+            }
         }
     }
 
@@ -885,7 +907,7 @@ public sealed class ListingCache
                 var held = _store.Get(path)?.Stamp;
                 try
                 {
-                    stamp = await stampOf(path, held, CancellationToken.None).ConfigureAwait(false);
+                    stamp = await stampOf(path, held, fetch.Stop.Token).ConfigureAwait(false);
                 }
                 catch (Exception)
                 {
@@ -893,9 +915,10 @@ public sealed class ListingCache
                 }
             }
 
-            // the shared listing must outlive any one caller's cancellation, so it runs with no token
+            // the shared listing must outlive any one caller's cancellation, so it runs with a token of its own: stopped only
+            // when it has given up its place and no one waits for it any more (JoinAsync)
             var list = new List<VfsEntry>();
-            await foreach (var entry in _lister(path, CancellationToken.None).ConfigureAwait(false))
+            await foreach (var entry in _lister(path, fetch.Stop.Token).ConfigureAwait(false))
             {
                 list.Add(entry);
             }
@@ -1098,5 +1121,14 @@ public sealed class ListingCache
 
         /// <summary>The stamp a walk read for the folder, to keep once it has been through everything below (<see cref="RefreshUnsettledAsync"/>); null for any other listing.</summary>
         public string? Settles { get; set; }
+
+        /// <summary>How many wait for it now (under the gate).</summary>
+        public int Waiting { get; set; }
+
+        /// <summary>Whether it has given up its place to the next to ask, a caller of its having been given up (under the gate).</summary>
+        public bool GaveUpItsPlace { get; set; }
+
+        /// <summary>Stops the listing: when it has given up its place and no one waits for it. Not disposed: it holds nothing that needs it.</summary>
+        public CancellationTokenSource Stop { get; } = new();
     }
 }
