@@ -100,13 +100,16 @@ public class OutlookAddressBookTests
 
                 return null;
             };
-            var counting = ((ICountable)source).CountFilesAsync(CancellationToken.None);
+            // On a thread of its own: the source asks for its first list on the thread that asks for the count, so the hold
+            // above held this test, for its whole thirty seconds, and what was then looked at was wherever the count had
+            // got to by itself: the next list as a rule, and between two lists once on a build machine (24-Nov-2026)
+            var counting = Task.Run(() => ((ICountable)source).CountFilesAsync(CancellationToken.None));
             try
             {
                 Assert.IsTrue(await arrived.WaitAsync(TimeSpan.FromSeconds(10)), "a list being read");
                 var folder = source.Counters.CurrentFolder;
                 Assert.IsNotNull(folder);
-                Assert.AreEqual(MailNames.AddressBooksFolder, VfsPath.Parent(folder), $"in '{folder}'");
+                Assert.AreEqual(Gal, folder, "the first list, held as it is asked for");
             }
             finally
             {
