@@ -11,7 +11,27 @@ namespace AnyFS.App.Gui.Services;
 /// </summary>
 public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? showText = null) : IOpener
 {
+    /// <summary>
+    /// Opens the mount's folder, the text of one that shows text at once, anything else off the window's thread: a
+    /// command before the open is waited for (<c>net use</c>, 15 s, and a second one where a connection is dropped
+    /// first), and the shell takes its own time over a share that is slow to answer. The window stood still for as long
+    /// (the review of 21-Nov-2026, P10).
+    /// </summary>
     public void Open(MountOpenAction action, string? subPath)
+    {
+        if (action is MountOpenAction.ShowText text)
+        {
+            showText?.Invoke(text.Title, text.Text);
+            return;
+        }
+
+        Opening = Task.Run(() => OpenNow(action, subPath));
+    }
+
+    /// <summary>The open last asked for: under way, or over (for tests).</summary>
+    internal Task Opening { get; private set; } = Task.CompletedTask;
+
+    private void OpenNow(MountOpenAction action, string? subPath)
     {
         try
         {
@@ -40,13 +60,11 @@ public sealed class ShellOpener(ILogger logger, Func<string, string, Task>? show
                     }
 
                     break;
-                case MountOpenAction.ShowText text:
-                    showText?.Invoke(text.Title, text.Text);
-                    break;
             }
         }
-        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or InvalidOperationException)
+        catch (Exception ex)
         {
+            // whatever it is: nobody waits for this, and what is not said here is said nowhere
             logger.LogWarning(ex, "could not open {Action}", action);
         }
     }

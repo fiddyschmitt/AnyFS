@@ -224,6 +224,43 @@ public class WindowFailureTests
         Assert.IsInstanceOfType<System.ComponentModel.Win32Exception>(line.Exception);
     }
 
+    /// <summary>
+    /// "Open containing folder" ran the provider's command (the device-less <c>net use</c> for SMB) and waited for it on
+    /// the window's thread, up to 15 s, twice where a connection is dropped first: the window stood still for as long
+    /// (the review of 21-Nov-2026, P10). The open goes on elsewhere and the click returns.
+    /// </summary>
+    [TestMethod]
+    public async Task OpeningAMountsFolderDoesNotHoldTheWindowForTheCommandBeforeIt()
+    {
+        var log = new KeptLog();
+        var shown = new List<string>();
+        var opener = new ShellOpener(log, (title, _) =>
+        {
+            shown.Add(title);
+            return Task.CompletedTask;
+        });
+
+        // a command that takes three seconds, and opens nothing after it
+        var slow = OperatingSystem.IsWindows()
+            ? new MountOpenAction.Command("cmd.exe", ["/c", "ping -n 4 127.0.0.1 > nul"], null)
+            : new MountOpenAction.Command("sleep", ["3"], null);
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        opener.Open(slow, null);
+        var returned = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+        Assert.IsFalse(opener.Opening.IsCompleted, "the command is still running");
+        Assert.IsTrue(returned < TimeSpan.FromSeconds(2), $"the click returned after {returned.TotalMilliseconds:F0} ms");
+        await opener.Opening.WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.IsTrue(System.Diagnostics.Stopwatch.GetElapsedTime(started) > TimeSpan.FromSeconds(2), "and the command was waited for, elsewhere");
+        Assert.AreEqual(0, log.Lines.Count, string.Join("; ", log.Lines.Select(l => l.Text)));
+
+        // a command that is not there is said in the log, by whoever ran it; text is shown at once, on the caller's thread
+        opener.Open(new MountOpenAction.Command("anyfs-no-such-command-" + Guid.NewGuid().ToString("N"), [], null), null);
+        await opener.Opening.WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.AreEqual(LogLevel.Warning, log.Lines.Single().Level);
+        opener.Open(new MountOpenAction.ShowText("Mount it", "sudo mount ..."), null);
+        CollectionAssert.AreEqual(new[] { "Mount it" }, shown);
+    }
+
     /// <summary>A source that never gets past its start, as one waiting for a sign-in.</summary>
     private sealed class WaitingPlugin : ISourcePlugin
     {
