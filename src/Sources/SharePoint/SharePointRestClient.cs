@@ -531,7 +531,8 @@ internal sealed partial class SharePointRestClient : IDisposable
                 _logger.LogInformation("sharepoint: {Host} is throttling ({Status}); no requests to it for {Seconds:F0} s", SiteUrl.Host, (int)status, hold.TotalSeconds);
             }
 
-            if (status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout && attempt < attempts)
+            var transient = status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable || idempotent && status == HttpStatusCode.GatewayTimeout;
+            if (transient && attempt < attempts)
             {
                 var retryAfter = response.Headers.RetryAfter?.Delta ?? (response.Headers.RetryAfter?.Date is { } at ? at - DateTimeOffset.UtcNow : null);
                 var delay = retryAfter is { } ra && ra > TimeSpan.Zero ? ra : Backoff(attempt);
@@ -545,6 +546,17 @@ internal sealed partial class SharePointRestClient : IDisposable
                 response.Dispose();
                 await Task.Delay(delay, ct).ConfigureAwait(false);
                 continue;
+            }
+
+            if (status == HttpStatusCode.GatewayTimeout && !idempotent)
+            {
+                // A gateway that stopped waiting says nothing of what the server behind it went on to do. A 504 was tried
+                // again whatever the request was: a file that had been moved was not found by its own second try, and
+                // that was what the caller was told. A request that changes something is sent once, and its outcome said
+                // to be unknown; one that only reads is asked again as before (the review of 21-Nov-2026, R16).
+                response.Dispose();
+                _onTrouble?.Invoke($"SharePoint answered {(int)status}");
+                throw VfsException.Unavailable($"{SiteUrl.Host} did not answer in time (504 Gateway Timeout): it is not known whether the change was made, and the request was not sent again");
             }
 
             if (response.IsSuccessStatusCode)

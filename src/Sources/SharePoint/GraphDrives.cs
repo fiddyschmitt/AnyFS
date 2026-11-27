@@ -76,13 +76,17 @@ internal static class GraphDrives
     /// </summary>
     public static async Task<JsonDocument> PutContentAsync(this GraphClient graph, string itemAddress, Func<Stream> openContent, long length, string pathForErrors, CancellationToken ct, bool onlyIfNew = false)
     {
+        // One that replaces may be sent again: the same bytes over the same file. One that is to be new only may not: had
+        // its first try made the file and the answer been lost (a gateway that stopped waiting, a connection that
+        // dropped), "already exists" was the answer to its own second try. The source tries it again in its own time,
+        // and not as new (the review of 21-Nov-2026, R16).
         using var response = await graph.SendAsync(() =>
         {
             var content = new StreamContent(openContent());
             content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
             content.Headers.ContentLength = length;
             return new HttpRequestMessage(HttpMethod.Put, graph.Absolute($"{itemAddress}/content?@microsoft.graph.conflictBehavior={(onlyIfNew ? "fail" : "replace")}")) { Content = content };
-        }, HttpCompletionOption.ResponseContentRead, authenticated: true, idempotent: true, ct).ConfigureAwait(false);
+        }, HttpCompletionOption.ResponseContentRead, authenticated: true, idempotent: !onlyIfNew, ct).ConfigureAwait(false);
         return await graph.ReadJsonAsync(response, pathForErrors, ct).ConfigureAwait(false);
     }
 

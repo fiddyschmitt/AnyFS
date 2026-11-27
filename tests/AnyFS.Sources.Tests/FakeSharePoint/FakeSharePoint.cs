@@ -379,6 +379,17 @@ internal sealed partial class FakeSharePoint : IDisposable
             ? Response.Json(status, GraphError("activityLimitReached", "The request has been throttled")).With("Retry-After", retryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture))
             : Response.Json(status, RestError("-2147024860, Microsoft.SharePoint.SPQueryThrottledException", "The request has been throttled.")).With("Retry-After", retryAfterSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 
+    /// <summary>
+    /// The next <paramref name="times"/> requests that <paramref name="when"/> matches are carried out, and answered 504
+    /// all the same: a gateway before the server that stopped waiting for an answer the server went on to make.
+    /// </summary>
+    public void TimeOutAtTheGateway(Func<Request, bool> when, int times)
+        => Fail(when, times, request =>
+        {
+            AnswerLocked(request);
+            return Response.Text(504, "<html><head><title>504 Gateway Time-out</title></head><body><h1>504 Gateway Time-out</h1></body></html>", "text/html");
+        });
+
     /// <summary>Requests answered that match, for a test's counting.</summary>
     public int Count(Func<Seen, bool> match) => Requests.Count(match);
 

@@ -705,6 +705,103 @@ public class FakeSharePointTests
         CollectionAssert.AreEqual(saved, await ReadAllAsync(source, "Documents/edited/report.docx"));
         GC.KeepAlive(document);
     }
+
+    /// <summary>
+    /// A gateway that stops waiting (504) says nothing of what the server behind it went on to do. A request that changes
+    /// something was sent again all the same: a file that had been moved was not found by its own second try, and "not
+    /// found" was what a rename that had been made came to. Such a request is sent once, and its answer says the outcome
+    /// is not known; the folder, listed again, shows which it was. A request that only reads is asked again, as before
+    /// (the review of 21-Nov-2026, R16).
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
+    [DataRow(true, DisplayName = "tenant, Graph")]
+    public async Task AChangeAGatewayStoppedWaitingForIsNotSentAgain(bool tenant)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        fake.Seed(fake.TestSite.Library("Documents"), "gateway/draft.txt", "a draft"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode) : FarmSettings(fake), context);
+        CollectionAssert.AreEqual(new[] { "draft.txt" }, await SpsTestServer.NamesAsync(source, "Documents/gateway"));
+
+        // the move is made, and the gateway has stopped waiting for the server's word on it
+        bool IsMove(string method, string host, string rawPath) => tenant
+            ? method == "PATCH" && host.StartsWith("graph.microsoft.", StringComparison.OrdinalIgnoreCase)
+            : rawPath.Contains("MoveToUsingPath", StringComparison.OrdinalIgnoreCase);
+        fake.TimeOutAtTheGateway(r => IsMove(r.Method, r.Host, r.RawPath), 1);
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.RenameAsync("Documents/gateway/draft.txt", "Documents/gateway/final.txt", replace: false, None));
+        Assert.AreEqual(VfsError.Unavailable, ex.Error, ex.Message);
+        StringAssert.Contains(ex.Message, "it is not known whether the change was made");
+        Assert.AreEqual(1, fake.Count(s => IsMove(s.Method, s.Host, s.RawPath)), "sent once");
+
+        // a listing the gateway gives no answer to in time is asked again, and shows the move was made
+        fake.Fail(r => r.Method == "GET", 1, _ => FakeSharePoint.Response.Empty(504));
+        CollectionAssert.AreEqual(new[] { "final.txt" }, await SpsTestServer.NamesAsync(source, "Documents/gateway"));
+        Assert.AreEqual(1, fake.Count(s => s.Method == "GET" && s.Status == 504), "the read was answered 504 once, and asked again");
+    }
+
+    /// <summary>
+    /// The same for a new file: its upload makes the file, and the gateway has stopped waiting by then. Sent again as new
+    /// only, the upload was refused by the file its own first try had made: who closed the file was told one was there
+    /// already, and what they wrote was not kept. It is sent once: they are told the outcome is not known, the bytes are
+    /// kept, and the source's own next try, which is not as new, lands them (the review of 21-Nov-2026, R16).
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "farm, REST")]
+    [DataRow(true, DisplayName = "tenant, Graph")]
+    public async Task ANewFileAGatewayStoppedWaitingForIsNotSentAgainAsNew(bool tenant)
+    {
+        using var fake = tenant ? FakeSharePoint.Sandbox() : FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "gateway/there.txt", "x"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, tenant ? TenantSettings(fake, SharePointSettings.AppDeviceCode) : FarmSettings(fake), context);
+        source.UploadRetryAfter = _ => TimeSpan.FromMilliseconds(200);
+        CollectionAssert.AreEqual(new[] { "there.txt" }, await SpsTestServer.NamesAsync(source, "Documents/gateway"));
+
+        fake.TimeOutAtTheGateway(r => IsUpload(tenant, r.Method, r.Host, r.RawPath), 1);
+        var mine = "what I wrote"u8.ToArray();
+        var file = await source.OpenAsync("Documents/gateway/new.txt", VfsOpenMode.CreateNew, None);
+        await file.WriteAsync(0, mine, None);
+        var told = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync());
+        Assert.AreEqual(VfsError.Unavailable, told.Error, told.Message);
+        StringAssert.Contains(told.Message, "it is not known whether the change was made");
+
+        // the source's next try is not as new: it lands over what the first made, and the wait is over
+        await UntilAsync(() => Directory.GetFiles(Path.Combine(context.CacheDirectory, "uploads")).Length == 0, "what was kept here goes once it has landed");
+        await UntilAsync(() => context.LastHealth == ComponentHealth.Ready, "and the source is well again");
+        var sent = fake.Requests.Where(s => IsUpload(tenant, s.Method, s.Host, s.RawPath)).Select(s => s.Status).ToList();
+        Assert.AreEqual(2, sent.Count, "once as new, and once more by the source: " + string.Join(", ", sent));
+        Assert.AreEqual(504, sent[0]);
+        Assert.IsTrue(sent[1] is 200 or 201, $"which landed ({sent[1]})");
+        CollectionAssert.AreEqual(mine, documents.Root.Folder("gateway")!.File("new.txt")!.Content);
+    }
+
+    /// <summary>
+    /// A delete may be sent again, and Graph's is. One a gateway stopped waiting for had deleted the item by then, and its
+    /// second try found nothing: "not found" was what a delete that had been made came to. A delete that finds nothing
+    /// on a later try has been done.
+    /// </summary>
+    [TestMethod]
+    public async Task ADeleteAGatewayStoppedWaitingForIsDone()
+    {
+        using var fake = FakeSharePoint.Sandbox();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "gateway/old.txt", "x"u8.ToArray());
+        fake.Seed(documents, "gateway/stays.txt", "y"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, TenantSettings(fake, SharePointSettings.AppDeviceCode), context);
+        CollectionAssert.AreEqual(new[] { "old.txt", "stays.txt" }, await SpsTestServer.NamesAsync(source, "Documents/gateway"));
+
+        static bool IsDelete(string method, string host) => method == "DELETE" && host.StartsWith("graph.microsoft.", StringComparison.OrdinalIgnoreCase);
+        fake.TimeOutAtTheGateway(r => IsDelete(r.Method, r.Host), 1);
+        await source.DeleteAsync("Documents/gateway/old.txt", None);
+        var sent = fake.Requests.Where(s => IsDelete(s.Method, s.Host)).Select(s => s.Status).ToList();
+        CollectionAssert.AreEqual(new[] { 504, 404 }, sent, "made behind the gateway, then found gone: " + string.Join(", ", sent));
+        CollectionAssert.AreEqual(new[] { "stays.txt" }, await SpsTestServer.NamesAsync(source, "Documents/gateway"));
+        Assert.IsNull(documents.Root.Folder("gateway")!.File("old.txt"));
+    }
+
     private static bool IsUpload(bool tenant, string method, string host, string rawPath) => tenant
         ? host.StartsWith("graph.microsoft.", StringComparison.OrdinalIgnoreCase) && (method == "PUT" && rawPath.Contains("content", StringComparison.OrdinalIgnoreCase) || rawPath.Contains("createUploadSession", StringComparison.OrdinalIgnoreCase))
         : method == "POST" && rawPath.Contains("/Files/AddUsingPath", StringComparison.OrdinalIgnoreCase);

@@ -91,9 +91,26 @@ public sealed class GraphClient : IDisposable
         return await ReadJsonAsync(response, pathForErrors, ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Deletes; a delete may be sent again, and the one sent again finds nothing where an earlier try did the work with
+    /// its answer lost (a gateway that stopped waiting, a connection that dropped): that "not found" is the delete done,
+    /// where it was told as the item never having been there.
+    /// </summary>
     public async Task DeleteAsync(string url, string pathForErrors, CancellationToken ct)
     {
-        using var response = await SendAsync(() => new HttpRequestMessage(HttpMethod.Delete, Absolute(url)), HttpCompletionOption.ResponseContentRead, authenticated: true, idempotent: true, ct).ConfigureAwait(false);
+        var sent = 0;
+        using var response = await SendAsync(
+            () =>
+            {
+                sent++;
+                return new HttpRequestMessage(HttpMethod.Delete, Absolute(url));
+            },
+            HttpCompletionOption.ResponseContentRead, authenticated: true, idempotent: true, ct).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound && sent > 1)
+        {
+            return;
+        }
+
         if (!response.IsSuccessStatusCode)
         {
             throw MapError(response.StatusCode, await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false), pathForErrors, Service);
@@ -216,7 +233,9 @@ public sealed class GraphClient : IDisposable
     /// <summary>
     /// Sends, with the retries described on the class. <paramref name="make"/> builds a fresh request per attempt
     /// (a request can't be sent twice). Non-idempotent requests are retried only when the server says it did
-    /// nothing (429, 503, 504).
+    /// nothing (429, 503). A gateway that stopped waiting (504) does not say so, and the server behind it may have gone
+    /// on to carry the request out: a non-idempotent one is not sent again after it, and fails as
+    /// <see cref="VfsError.Unavailable"/>, saying the outcome is not known.
     /// </summary>
     public async Task<HttpResponseMessage> SendAsync(Func<HttpRequestMessage> make, HttpCompletionOption completion, bool authenticated, bool idempotent, CancellationToken ct)
     {
@@ -274,8 +293,8 @@ public sealed class GraphClient : IDisposable
                 continue;
             }
 
-            var transient = status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout
-                || idempotent && status is HttpStatusCode.InternalServerError or HttpStatusCode.BadGateway;
+            var transient = status is HttpStatusCode.TooManyRequests or HttpStatusCode.ServiceUnavailable
+                || idempotent && status is HttpStatusCode.InternalServerError or HttpStatusCode.BadGateway or HttpStatusCode.GatewayTimeout;
             if (transient && attempt < MaxAttempts)
             {
                 var retryAfter = response.Headers.RetryAfter?.Delta ?? (response.Headers.RetryAfter?.Date is { } at ? at - DateTimeOffset.UtcNow : null);
@@ -290,6 +309,16 @@ public sealed class GraphClient : IDisposable
                 response.Dispose();
                 await Task.Delay(delay, ct).ConfigureAwait(false);
                 continue;
+            }
+
+            if (status == HttpStatusCode.GatewayTimeout && !idempotent)
+            {
+                // A 504 was taken to say nothing was done, and the request went again whatever it was: a folder that had
+                // been made answered "already exists" to its own second try, a file that had been moved "not found", and
+                // that was what the caller was told (the review of 21-Nov-2026, R16).
+                response.Dispose();
+                _onTrouble?.Invoke($"{Service.Name} answered {(int)status}");
+                throw VfsException.Unavailable($"{Service.Name} did not answer in time (504 Gateway Timeout): it is not known whether the change was made, and the request was not sent again");
             }
 
             if (response.IsSuccessStatusCode)
