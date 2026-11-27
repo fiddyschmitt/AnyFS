@@ -2034,6 +2034,90 @@ public class GitLabTicketTests
     }
 
     [TestMethod]
+    public async Task TicketsAreListedWithoutTheirTextAndReadWholeAsTheyAreComeTo()
+    {
+        // Every project's issues and merge requests, each with its description, were held in a map of their own for the
+        // run, so that each could be asked again for what had changed, and held again by every folder that had listed
+        // them: memory that grew with the server (the review of 21-Nov-2026, P6). A list is among the source's answers
+        // now, without the descriptions, and the tickets whole by themselves, all within what the answers may weigh
+        const long MayWeigh = 400 * 1024;
+        var fake = new FakeGitLab();
+        var tester = fake.AddUser("tester", "Test Er", GitLabSeed.Token);
+        var group = fake.AddGroup("trio", "Trio", null, tester);
+        var text = new string('d', 1000);
+        var projects = new[] { ("a", 200), ("b", 200), ("few", 5) }.Select(p =>
+        {
+            var project = fake.AddProject(group, p.Item1, p.Item1.ToUpperInvariant());
+            project.Commit("main", new Dictionary<string, byte[]> { ["README.md"] = GitLabSeed.Bytes("# " + p.Item1 + "\n") });
+            for (var i = 1; i <= p.Item2; i++)
+            {
+                project.IssueList.Add(new FakeGitLab.Ticket(i, $"Issue {i} of {p.Item1}", text, tester, GitLabSeed.Opened.AddMinutes(i)));
+            }
+
+            return project;
+        }).ToList();
+        var settings = GitLabSeed.Settings(fake.Server + "/trio");
+        settings.RefreshSeconds = 0;
+
+        // room for the lists and for some of the issues' text: 200 issues with theirs weigh half a megabyte
+        var source = new GitLabSource(settings, fake.StandIn() with { AnswersKept = MayWeigh });
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        await using var _ = source;
+        int Listed(FakeGitLab.Project project, bool changedOnly) => fake.Requests.Count(r => r.Contains($"/projects/{project.Id}/issues?", StringComparison.Ordinal) && !r.Contains("iids", StringComparison.Ordinal) && r.Contains("updated_after=", StringComparison.Ordinal) == changedOnly);
+        int Together(FakeGitLab.Project project) => fake.Requests.Count(r => r.Contains($"/projects/{project.Id}/issues?", StringComparison.Ordinal) && r.Contains("iids", StringComparison.Ordinal));
+        int Alone(FakeGitLab.Project project) => fake.Requests.Count(r => r.Contains($"/projects/{project.Id}/issues/", StringComparison.Ordinal) && !r.Contains("/notes", StringComparison.Ordinal));
+        async Task<string> IssueAsync(string project, int number)
+        {
+            await using var file = await source.OpenAsync($"{project}/issues/#{number} Issue {number} of {project}/issue.md", VfsOpenMode.Read, CancellationToken.None);
+            var bytes = new byte[file.Length];
+            await file.ReadFullyAsync(0, bytes, CancellationToken.None);
+            return Encoding.UTF8.GetString(bytes);
+        }
+
+        // a long list: read whole, then for what changed since; none of its issues' text is kept for having been listed
+        Assert.AreEqual(200, (await ListAsync(source, "a/issues")).Count);
+        var whole = Listed(projects[0], changedOnly: false);
+        Assert.IsTrue(whole > 0);
+        Assert.IsTrue(source.Cache.Bytes < 150 * 1024, $"{source.Cache.Bytes:N0} B kept of a list of 200");
+        Assert.AreEqual(200, (await ListAsync(source, "a/issues")).Count);
+        Assert.AreEqual((whole, 1), (Listed(projects[0], changedOnly: false), Listed(projects[0], changedOnly: true)), "asked again, for what changed since alone");
+
+        // one issue opened by someone: asked for by itself, once
+        StringAssert.Contains(await IssueAsync("a", 7), text);
+        StringAssert.Contains(await IssueAsync("a", 7), text);
+        Assert.AreEqual((1, 0), (Alone(projects[0]), Together(projects[0])));
+
+        // a client going straight through them: the first by itself, and the fifty its neighbours are among in one request
+        for (var number = 51; number <= 150; number++)
+        {
+            Assert.AreEqual(1, (await ListAsync(source, $"a/issues/#{number} Issue {number} of a")).Count(e => e.Name == "issue.md"));
+        }
+
+        Assert.AreEqual((2, 2), (Alone(projects[0]), Together(projects[0])), "numbers 51 to 100 and 101 to 150, a request each, after the one that was the first");
+        StringAssert.Contains(await IssueAsync("a", 150), text);
+        Assert.AreEqual((2, 2), (Alone(projects[0]), Together(projects[0])), "and kept, for the open that follows the listing");
+
+        // more of them than may be kept: what was longest unasked for makes room
+        for (var number = 1; number <= 200; number++)
+        {
+            await ListAsync(source, $"b/issues/#{number} Issue {number} of b");
+            Assert.IsTrue(source.Cache.Bytes <= MayWeigh, $"{source.Cache.Bytes:N0} B kept at number {number}");
+        }
+
+        Assert.IsTrue(Together(projects[1]) is >= 4 and <= 5, $"{Together(projects[1])} requests for 200 issues, fifty at a time");
+        Assert.IsTrue(Alone(projects[1]) <= 2, $"{Alone(projects[1])} asked for alone");
+
+        // a short list came in one request, and its few are kept whole as they came: nothing more is asked for them
+        Assert.AreEqual(5, (await ListAsync(source, "few/issues")).Count);
+        StringAssert.Contains(await IssueAsync("few", 3), text);
+        Assert.AreEqual((0, 0), (Alone(projects[2]), Together(projects[2])));
+
+        // and the first project's list, let go meanwhile or not, answers as it did
+        Assert.AreEqual(200, (await ListAsync(source, "a/issues")).Count);
+        Assert.IsTrue(source.Cache.Bytes <= MayWeigh, $"{source.Cache.Bytes:N0} B kept");
+    }
+
+    [TestMethod]
     public async Task TheSettingOrAFeatureTurnedOffHidesTheFolders()
     {
         var fake = GitLabSeed.Lab();

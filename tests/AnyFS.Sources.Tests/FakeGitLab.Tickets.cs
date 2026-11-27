@@ -64,6 +64,10 @@ internal sealed partial class FakeGitLab
                 return project.Issues ? Paged(r, Filter(project.IssueList, r).Select(t => TicketJson(project, t, false))) : Response.Message(403, "403 Forbidden");
             case ["merge_requests"]:
                 return project.MergeRequests ? Paged(r, Filter(project.MergeRequestList, r).Select(t => TicketJson(project, t, true))) : Response.Message(403, "403 Forbidden");
+            case [var kind and ("issues" or "merge_requests"), var iid]:
+                return !(kind == "issues" ? project.Issues : project.MergeRequests) ? Response.Message(403, "403 Forbidden")
+                    : Find(project, kind, iid) is { } one ? Response.Json(TicketJson(project, one, kind == "merge_requests"))
+                    : Response.NotFound("404 Not found");
             case [var kind and ("issues" or "merge_requests"), var iid, "notes"]:
                 return Find(project, kind, iid) is { } ticket
                     ? Paged(r, ticket.Notes.Select((n, i) => (JsonNode)new JsonObject
@@ -108,7 +112,12 @@ internal sealed partial class FakeGitLab
     {
         var state = r.Q("state") ?? "opened";
         var after = r.Q("updated_after") is { } text ? DateTimeOffset.Parse(text, CultureInfo.InvariantCulture) : (DateTimeOffset?)null;
-        return tickets.Where(t => (state == "all" || t.State == state) && (after is null || t.Updated > after))
+
+        // iids[]=1&iids[]=2: those numbers alone
+        var numbers = (r.Url.Query.Length > 1 ? r.Url.Query[1..] : "").Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Split('=', 2)).Where(p => p.Length == 2 && Uri.UnescapeDataString(p[0]) == "iids[]")
+            .Select(p => long.Parse(p[1], CultureInfo.InvariantCulture)).ToHashSet();
+        return tickets.Where(t => (state == "all" || t.State == state) && (after is null || t.Updated > after) && (numbers.Count == 0 || numbers.Contains(t.Iid)))
             .OrderBy(t => r.Q("order_by") == "updated_at" ? t.Updated : t.Created).ThenBy(t => t.Iid);
     }
 

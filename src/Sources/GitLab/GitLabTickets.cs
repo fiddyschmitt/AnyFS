@@ -64,13 +64,15 @@ internal sealed class TicketFolder(GlProject project, GlTicket ticket, bool merg
 
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
     {
+        // the folder holds the ticket without its description, as its list does: with it here, for as long as this takes
+        var whole = await source.WholeTicketAsync(project, mergeRequest, Ticket, ct).ConfigureAwait(false);
         var notes = await source.NotesAsync(project, Ticket, mergeRequest, ct).ConfigureAwait(false);
-        var uploads = GitLabDocuments.Uploads(notes.Where(n => !n.System).Select(n => n.Body).Prepend(Ticket.Description));
+        var uploads = GitLabDocuments.Uploads(notes.Where(n => !n.System).Select(n => n.Body).Prepend(whole.Description));
         var names = GitLabNames.Unique(uploads.Select(u => u.Name).ToList());
         var byUpload = uploads.Select((u, i) => (u, names[i])).ToDictionary(p => p.u, p => p.Item2);
         var children = new List<GlNode>
         {
-            new TextFile(mergeRequest ? "merge_request.md" : "issue.md", GitLabDocuments.Ticket(Ticket, mergeRequest, notes, byUpload), Ticket.Updated, Ticket.Created),
+            new TextFile(mergeRequest ? "merge_request.md" : "issue.md", GitLabDocuments.Ticket(whole, mergeRequest, notes, byUpload), Ticket.Updated, Ticket.Created),
         };
         if (mergeRequest)
         {

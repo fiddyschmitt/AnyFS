@@ -8,10 +8,11 @@ namespace AnyFS.Sources.GitLab;
 
 /// <summary>
 /// What a test (or the Test button) changes about a GitLab session: what sends its requests; for the web session, what
-/// stands in for the browser (the cookies a sign-in in it would give; interactive or not); and whether a session kept
-/// from before is used.
+/// stands in for the browser (the cookies a sign-in in it would give; interactive or not); whether a session kept
+/// from before is used; and what the answers the source keeps may weigh together, in bytes (null for the request
+/// cache's own).
 /// </summary>
-internal sealed record GitLabStandIn(Func<HttpMessageHandler> Handler, Func<bool, CancellationToken, Task<IReadOnlyList<SessionCookie>>>? Browser = null, bool UseKept = true);
+internal sealed record GitLabStandIn(Func<HttpMessageHandler> Handler, Func<bool, CancellationToken, Task<IReadOnlyList<SessionCookie>>>? Browser = null, bool UseKept = true, long? AnswersKept = null);
 
 /// <summary>
 /// A GitLab source's sign-in and the client its requests go through (spec 7.8). First it finds the installation behind

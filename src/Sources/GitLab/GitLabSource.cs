@@ -91,7 +91,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         _api = new GitLabApi(_session, Requests, Logger);
         _api.TellHealth(MarkHealthy, MarkDegraded);
         _api.Held += (wait, why) => Volatile.Read(ref _counted)?.Waiting(wait, why);
-        _listings = new RequestCache(_stopping.Token);
+        _listings = new RequestCache(_stopping.Token, _standIn?.AnswersKept ?? RequestCache.DefaultMaxBytes);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
         var path = _session.Address.Path;
@@ -185,6 +185,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             return (_root ?? throw VfsException.Unavailable("GitLab is not signed in to yet")).Entry;
         }
 
+        using var opening = _ticketsAhead.ForOneThing();
         return await Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase).ConfigureAwait(false);
     }
 
@@ -296,6 +297,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             throw VfsException.NotSupported("writing to GitLab");
         }
 
+        using var opening = _ticketsAhead.ForOneThing();
         var node = await ResolveAsync(path, ct).ConfigureAwait(false);
         return node is GlFile file ? await Guard(() => file.OpenAsync(this, ct)).ConfigureAwait(false) : throw VfsException.IsADirectory(path);
     }

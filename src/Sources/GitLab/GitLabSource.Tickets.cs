@@ -6,22 +6,106 @@ using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.GitLab;
 
-/// <summary>A project's issues or merge requests as last asked: in the order of their numbers and by number, the newest change, when the whole list was last read.</summary>
-internal sealed record TicketList(IReadOnlyList<GlTicket> Items, IReadOnlyDictionary<long, GlTicket> ByNumber, DateTimeOffset? Newest, DateTimeOffset WholeAt);
+/// <summary>
+/// A project's issues or merge requests as last asked: in the order of their numbers and by number, the newest change, when
+/// the whole list was last read, each without its description (<see cref="GlTicket.Whole"/>). Kept among the source's
+/// answers, where it says what it weighs (a read of what changed since brings few bytes and holds the whole list) and
+/// that the next read builds on it.
+/// </summary>
+internal sealed record TicketList(IReadOnlyList<GlTicket> Items, IReadOnlyDictionary<long, GlTicket> ByNumber, DateTimeOffset? Newest, DateTimeOffset WholeAt) : IWeighed, IBuiltOn
+{
+    /// <summary>Each ticket's text, two bytes a character, and what a ticket costs with none.</summary>
+    public long Bytes { get; } = Items.Sum(t => 400L + (2L * (t.Title.Length + t.Description.Length + t.WebUrl.Length)));
+}
 
 public sealed partial class GitLabSource
 {
     private static readonly TimeSpan WholeListEvery = TimeSpan.FromHours(1);
 
-    private readonly ConcurrentDictionary<string, TicketList> _tickets = new(StringComparer.Ordinal);
-
     /// <summary>
     /// A project's issues or merge requests, by number. Read whole once (and every hour, so deleted ones go); between,
     /// asked again once the refresh interval has passed for only those changed since the newest seen (<c>updated_after</c>),
-    /// so a project of thousands costs a request a minute while it is open.
+    /// so a project of thousands costs a request a minute while it is open. The list that is read on from is the one the
+    /// source's answers hold (<see cref="RequestCache"/>), which may weigh so much and no more: one let go is read whole
+    /// when it is next asked for. Every project's list was held beside them in a map of its own for the run, each issue
+    /// and merge request with its description, and held again by every folder that had listed them (the review of
+    /// 21-Nov-2026, P6). A list now holds each without its description. A list of up to a hundred keeps each of them
+    /// whole beside it, by itself, as its one request brought them; a longer one's are read whole as they are come to
+    /// (<see cref="WholeTicketAsync"/>).
     /// </summary>
     internal async Task<IReadOnlyList<GlTicket>> TicketsAsync(GlProject project, bool mergeRequests, CancellationToken ct)
         => (await TicketListAsync(project, mergeRequests, ct).ConfigureAwait(false)).Items;
+
+    // issues or merge requests read whole in one request, where a client is going straight through them
+    private const int TicketsTogether = 50;
+
+    // a list of no more than this keeps its tickets whole as it is read: it came in one request, and they are few
+    private const int WholeWithTheirList = 100;
+
+    private readonly ReadAhead _ticketsAhead = new();
+
+    /// <summary>
+    /// An issue or a merge request with its description: as kept, by its number and the time of its last change (so one
+    /// changed since is not the one kept); else read with the fifty its number is among, where a client is going straight
+    /// through them and asks for them next (<see cref="ReadAhead"/>); else asked for by itself. A long list's were all
+    /// kept whole as the list was read, ahead of whoever came to them: text that was let go again, as what was longest
+    /// unasked for, just before it was wanted, and then asked for a ticket at a time.
+    /// </summary>
+    internal async Task<GlTicket> WholeTicketAsync(GlProject project, bool mergeRequest, GlTicket ticket, CancellationToken ct)
+    {
+        if (ticket.Whole)
+        {
+            return ticket;
+        }
+
+        var key = WholeKey(project, mergeRequest, ticket);
+        if (Cache.Peek<GlTicket>(key) is { } kept)
+        {
+            return kept;
+        }
+
+        var place = $"{project.Id}:{(mergeRequest ? "mr" : "issue")}";
+        if (_ticketsAhead.Wanted(place))
+        {
+            var first = ((ticket.Iid - 1) / TicketsTogether * TicketsTogether) + 1;
+            await _ticketsAhead.ReadAsync($"{place}:{first}", () => ReadTicketsTogetherAsync(project, mergeRequest, first), ct).ConfigureAwait(false);
+            if (Cache.Peek<GlTicket>(key) is { } together)
+            {
+                return together;
+            }
+        }
+
+        return await Cache.GetAsync(key, null, async c =>
+        {
+            using var doc = await Api.GetAsync($"projects/{project.Id}/{(mergeRequest ? "merge_requests" : "issues")}/{ticket.Iid}", c).ConfigureAwait(false);
+            return GlTicket.Parse(doc.RootElement);
+        }, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>The issues or merge requests numbered from <paramref name="first"/>, <see cref="TicketsTogether"/> of them, read whole in one request and kept.</summary>
+    private async Task ReadTicketsTogetherAsync(GlProject project, bool mergeRequest, long first)
+    {
+        try
+        {
+            var numbers = string.Concat(Enumerable.Range(0, TicketsTogether).Select(n => $"&iids[]={first + n}"));
+            await foreach (var e in Api.PagesAsync($"projects/{project.Id}/{(mergeRequest ? "merge_requests" : "issues")}?scope=all&state=all&per_page=100{numbers}", _stopping.Token).ConfigureAwait(false))
+            {
+                var ticket = GlTicket.Parse(e);
+                Cache.Put(WholeKey(project, mergeRequest, ticket), ticket, null, WeightOf(ticket));
+            }
+        }
+        catch (VfsException ex)
+        {
+            _ticketsAhead.Failed();
+            Logger.LogDebug("gitlab: {Project}: {Count} tickets from {First} could not be read together ({Error}); reading them alone for a while", project.FullPath, TicketsTogether, first, ex.Message);
+        }
+    }
+
+    private static string WholeKey(GlProject project, bool mergeRequest, GlTicket ticket)
+        => $"ticket:{project.Id}:{(mergeRequest ? "mr" : "issue")}:{ticket.Iid}@{ticket.Updated:O}";
+
+    /// <summary>What a ticket holds: its text, two bytes a character, and what one costs with none.</summary>
+    private static long WeightOf(GlTicket ticket) => 400L + (2L * (ticket.Title.Length + ticket.Description.Length + ticket.WebUrl.Length));
 
     /// <summary>One of a project's issues or merge requests by its number, from the same list; null where there is none.</summary>
     internal async Task<GlTicket?> TicketAsync(GlProject project, bool mergeRequests, long number, CancellationToken ct)
@@ -30,11 +114,10 @@ public sealed partial class GitLabSource
     private Task<TicketList> TicketListAsync(GlProject project, bool mergeRequests, CancellationToken ct)
     {
         var key = $"tickets:{project.Id}:{(mergeRequests ? "mr" : "issue")}";
-        return Cache.GetAsync(key, Refresh, async c =>
+        return Cache.GetAsync<TicketList>(key, Refresh, async (previous, c) =>
         {
             var what = mergeRequests ? "merge_requests" : "issues";
             var state = Settings.OpenOnly ? "opened" : "all";
-            _tickets.TryGetValue(key, out var previous);
             var whole = previous is null || previous.Newest is null || DateTimeOffset.UtcNow - previous.WholeAt > WholeListEvery;
             var query = $"projects/{project.Id}/{what}?scope=all&state={state}&per_page=100&order_by=updated_at&sort=asc";
             if (!whole)
@@ -43,6 +126,7 @@ public sealed partial class GitLabSource
             }
 
             var byNumber = whole ? new Dictionary<long, GlTicket>() : new Dictionary<long, GlTicket>(previous!.ByNumber);
+            var brought = new List<GlTicket>();
             await foreach (var e in Api.PagesAsync(query, c).ConfigureAwait(false))
             {
                 var ticket = GlTicket.Parse(e);
@@ -52,15 +136,27 @@ public sealed partial class GitLabSource
                 }
                 else
                 {
-                    byNumber[ticket.Iid] = ticket;
+                    if (brought.Count <= WholeWithTheirList)
+                    {
+                        brought.Add(ticket);
+                    }
+
+                    byNumber[ticket.Iid] = ticket with { Description = "", Whole = false };
+                }
+            }
+
+            // the few a short list brought, or the few changed since, are kept whole as they came: they are asked for next
+            if (brought.Count <= WholeWithTheirList)
+            {
+                foreach (var ticket in brought)
+                {
+                    Cache.Put(WholeKey(project, mergeRequests, ticket), ticket, null, WeightOf(ticket));
                 }
             }
 
             var items = byNumber.Values.OrderBy(t => t.Iid).ToList();
             var newest = items.Count == 0 ? previous?.Newest : items.Max(t => t.Updated);
-            var fresh = new TicketList(items, byNumber, newest, whole ? DateTimeOffset.UtcNow : previous!.WholeAt);
-            _tickets[key] = fresh;
-            return fresh;
+            return new TicketList(items, byNumber, newest, whole ? DateTimeOffset.UtcNow : previous!.WholeAt);
         }, ct);
     }
 

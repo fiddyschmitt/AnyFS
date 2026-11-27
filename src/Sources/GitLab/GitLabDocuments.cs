@@ -34,6 +34,12 @@ internal sealed record GlTicket(
     string? TargetBranch,
     string WebUrl)
 {
+    /// <summary>
+    /// False for one as a list holds it, without its description: the text is kept with the ticket by itself, and asked
+    /// for by itself where that was let go (<see cref="GitLabSource.WholeTicketAsync"/>).
+    /// </summary>
+    public bool Whole { get; init; } = true;
+
     public static GlTicket Parse(JsonElement e) => new(
         e.Long("iid"),
         e.Str("title") ?? "",
