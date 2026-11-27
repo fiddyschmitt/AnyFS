@@ -780,6 +780,86 @@ public class ConfluenceTests
     }
 
     [TestMethod]
+    public async Task WhatWasMadeJustBeforeASpaceWasReadIsCountedOnceAtTheNextWalk()
+    {
+        // A walk asks what was made since the last read with two minutes to spare, so a comment made a minute before
+        // that read is found again. It was counted again too: the count held and the things made did not add up to the
+        // space's count, and the space was read whole where one page had changed (the review of 21-Nov-2026, N18)
+        var fake = ConfluenceSeed.Lab();
+        var now = DateTimeOffset.UtcNow;
+        foreach (var c in fake.Contents)
+        {
+            c.Created = c.Changed = now.AddDays(-1);
+        }
+
+        foreach (var a in fake.Attachments)
+        {
+            a.Changed = now.AddDays(-1);
+        }
+
+        fake.AddComment(fake.PageTitled("Onboarding"), "other", "<p>Made just before the read.</p>", now.AddMinutes(-1));
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake, "/display/ANYFS"));
+        await source.CountFilesAsync(CancellationToken.None);
+        var scans = fake.Count("/rest/api/content/scan");
+        Assert.IsTrue(scans > 0);
+        StringAssert.Contains(await TextAsync(source, "AnyFS Lab Home/Onboarding/Onboarding.md"), "Made just before the read.");
+
+        // a page edited since: that page is listed again, and the space not read whole
+        var services = fake.PageTitled("Services");
+        services.Storage = "<p>The services, edited.</p>";
+        services.Version++;
+        services.Changed = DateTimeOffset.UtcNow;
+        await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+        Assert.AreEqual(scans, fake.Count("/rest/api/content/scan"), "not read whole again");
+        StringAssert.Contains(await TextAsync(source, "AnyFS Lab Home/Architecture/Services/Services.md"), "edited");
+
+        // a comment made since, found beside the one from before the read: one thing more, not two
+        fake.AddComment(fake.PageTitled("Architecture"), "other", "<p>Made after it.</p>", DateTimeOffset.UtcNow);
+        await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+        Assert.AreEqual(scans, fake.Count("/rest/api/content/scan"), "nor at the walk after that");
+        StringAssert.Contains(await TextAsync(source, "AnyFS Lab Home/Architecture/Architecture.md"), "Made after it.");
+
+        // and a comment gone leaves the counts short, as it did: the space is read whole
+        fake.Comments.RemoveAt(fake.Comments.Count - 1);
+        fake.PageTitled("Onboarding").Changed = DateTimeOffset.UtcNow;
+        await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+        Assert.IsTrue(fake.Count("/rest/api/content/scan") > scans, "read whole");
+    }
+
+    [TestMethod]
+    public async Task WhatWasMadeSinceAReadIsKnownThroughEveryPageOfTheSearch()
+    {
+        var fake = ConfluenceSeed.Lab();
+        var now = DateTimeOffset.UtcNow;
+        foreach (var c in fake.Contents)
+        {
+            c.Created = c.Changed = now.AddDays(-1);
+        }
+
+        foreach (var a in fake.Attachments)
+        {
+            a.Changed = now.AddDays(-1);
+        }
+
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake, "/display/ANYFS"));
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.IsTrue(fake.Count("/rest/api/content/scan") > 0, "read whole by the count");
+
+        // five comments made since, of which the server gives two at a time
+        for (var n = 1; n <= 5; n++)
+        {
+            fake.AddComment(fake.PageTitled("Onboarding"), "other", $"<p>Comment {n} made since.</p>", DateTimeOffset.UtcNow);
+        }
+
+        fake.Limit = 2;
+        fake.Requests.Clear();
+        await source.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+        Assert.AreEqual(3, fake.Requests.Count(r => r.Contains("/rest/api/search?", StringComparison.Ordinal) && r.Contains("created", StringComparison.Ordinal)), "two, two and one");
+        Assert.AreEqual(0, fake.Count("/rest/api/content/scan"), "the five add up, and the space is not read whole");
+        StringAssert.Contains(await TextAsync(source, "AnyFS Lab Home/Onboarding/Onboarding.md"), "Comment 5 made since.");
+    }
+
+    [TestMethod]
     public async Task ASpacesStampMovesWithAnyChangeInIt()
     {
         var fake = ConfluenceSeed.Lab();

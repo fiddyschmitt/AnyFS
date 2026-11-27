@@ -725,8 +725,11 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     // pages beyond which a change is cheaper read with the whole space
     private const int MostChangedPages = 100;
 
-    /// <summary>When a space was last read whole and last read at all, and its content's count then (CQL's, every type).</summary>
-    private sealed record SpaceRead(DateTimeOffset Whole, DateTimeOffset At, long Count);
+    /// <summary>
+    /// When a space was last read whole and last read at all, its content's count then (CQL's, every type), and the ids of
+    /// what had been made in the minutes before that read, which the count has (<see cref="MadeAsync"/>).
+    /// </summary>
+    private sealed record SpaceRead(DateTimeOffset Whole, DateTimeOffset At, long Count, HashSet<string> Made);
 
     /// <summary>Where a page's folder was in the last whole read of its space: its path, its parent's id, whether a blog post's.</summary>
     private sealed record PagePlace(string Path, string? ParentId, bool Blog);
@@ -737,11 +740,43 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     // by page id
     private readonly ConcurrentDictionary<string, PagePlace> _places = new(StringComparer.Ordinal);
 
-    /// <summary>A CQL count of a space's content (every type), and how many of them were made in the last minutes.</summary>
+    /// <summary>A CQL count of a space's content (every type).</summary>
     private async Task<long> CountAsync(string cql, CancellationToken ct)
     {
         using var doc = await Api.GetAsync($"search?cql={Uri.EscapeDataString(cql)}&limit=1&excerpt=none", ct).ConfigureAwait(false);
         return doc.RootElement.Has("totalSize") ? doc.RootElement.Long("totalSize") : doc.RootElement.Long("size");
+    }
+
+    /// <summary>
+    /// The ids of what was made in a space in the last minutes (pages, blog posts, comments and attachments alike), from
+    /// the search that counts them, a page of it at a time. Null where the pages do not come to the search's own count
+    /// (something made or gone as they were read), and nothing can be said by them.
+    /// </summary>
+    private async Task<HashSet<string>?> MadeAsync(string space, long minutes, CancellationToken ct)
+    {
+        var cql = Uri.EscapeDataString($"{space} and created >= now(\"-{minutes}m\") order by created");
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var read = 0;
+        while (true)
+        {
+            using var doc = await Api.GetAsync($"search?cql={cql}&start={read}&limit={ItemsPerRequest}&excerpt=none", ct).ConfigureAwait(false);
+            var total = doc.RootElement.Has("totalSize") ? doc.RootElement.Long("totalSize") : doc.RootElement.Long("size");
+            var page = 0;
+            foreach (var result in doc.RootElement.Arr("results"))
+            {
+                page++;
+                if (result.Obj("content").Str("id") is { Length: > 0 } id)
+                {
+                    ids.Add(id);
+                }
+            }
+
+            read += page;
+            if (page == 0 || read >= total)
+            {
+                return ids.Count == total ? ids : null;
+            }
+        }
     }
 
     /// <summary>
@@ -755,12 +790,16 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         var minutes = (long)Math.Ceiling((started - read.At).TotalMinutes) + 2;
         var space = $"space = {ConfluenceScope.Quote(folder.Space.Key)}";
 
-        // a page, comment or attachment gone leaves nothing to find by its change: the counts tell
+        // a page, comment or attachment gone leaves nothing to find by its change: the counts tell. What was made since
+        // is asked for with minutes to spare, so the search finds again what was made in the minutes before the last
+        // read, which that read's count already has. Those are known by their ids and counted once: counted again, the
+        // counts did not add up and the space was read whole (the review of 21-Nov-2026, N18)
         var count = await CountAsync(space, ct).ConfigureAwait(false);
-        var made = await CountAsync($"{space} and created >= now(\"-{minutes}m\")", ct).ConfigureAwait(false);
-        if (count != read.Count + made)
+        var made = await MadeAsync(space, minutes, ct).ConfigureAwait(false);
+        var fresh = made?.Count(id => !read.Made.Contains(id));
+        if (made is null || count != read.Count + fresh)
         {
-            Logger.LogDebug("confluence: {Space} has {Count:N0} items, not {Was:N0} and {Made:N0} new: reading it whole", folder.Space.Key, count, read.Count, made);
+            Logger.LogDebug("confluence: {Space} has {Count:N0} items, not {Was:N0} and {Made:N0} new: reading it whole", folder.Space.Key, count, read.Count, fresh);
             return null;
         }
 
@@ -825,7 +864,10 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             listings[place.Path] = nodes.Select(n => n.Entry).ToList();
         }
 
-        _spaceReads[path] = read with { At = started, Count = count };
+        // what this search found is all the next one can find again of what the count has: the next begins less than
+        // three minutes before this walk began, and this one went back that far and further. The ids of the walks
+        // before are let go, so that no more are held than one search finds
+        _spaceReads[path] = read with { At = started, Count = count, Made = made };
         Logger.LogDebug("confluence: {Space}: {Changed:N0} pages changed since the last walk", folder.Space.Key, affected.Count);
         return listings;
     }
@@ -843,6 +885,11 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         var started = DateTimeOffset.UtcNow;
         var key = ConfluenceScope.Quote(folder.Space.Key);
         var countAtStart = await CountAsync($"space = {key}", ct).ConfigureAwait(false);
+
+        // what the count has of things made lately, for the next read to know again (ChangedSpaceAsync): its search
+        // begins less than three minutes before this read began (the two it has to spare, and the part of a minute its
+        // minutes are rounded up by), and a minute more is asked for here for the time the asking takes
+        var madeBefore = await MadeAsync($"space = {key}", 4, ct).ConfigureAwait(false) ?? [];
         var pages = new List<ConfluenceContent>();
         await foreach (var e in ScanAsync(folder.Space.Key, ct).ConfigureAwait(false))
         {
@@ -931,7 +978,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         }
 
         listings[path] = rootEntries;
-        _spaceReads[path] = new SpaceRead(started, started, countAtStart);
+        _spaceReads[path] = new SpaceRead(started, started, countAtStart, madeBefore);
         Logger.LogDebug("confluence: read the space {Space} whole: {Pages:N0} pages, {Posts:N0} blog posts", folder.Space.Key, pages.Count, posts.Count);
         return listings;
     }

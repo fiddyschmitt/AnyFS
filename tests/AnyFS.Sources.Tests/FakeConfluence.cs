@@ -372,16 +372,18 @@ internal sealed partial class FakeConfluence(string origin = "https://confluence
         return Page(request, "rest/api/content/search", items, Cap(expand));
     }
 
+    /// <summary>The search: what the CQL finds from <c>start</c> on, a page of at most <see cref="Limit"/>, and how many it finds in all.</summary>
     private Response Search(Request request, Account? user)
     {
         var found = Cql(request.Q("cql") ?? "", user);
-        var limit = request.QInt("limit", 25);
-        var results = found.Take(limit).Select(f => (JsonNode)new JsonObject
+        var start = request.QInt("start", 0);
+        var limit = Math.Min(request.QInt("limit", 25), Limit);
+        var results = found.Skip(start).Take(limit).Select(f => (JsonNode)new JsonObject
         {
             ["content"] = new JsonObject { ["id"] = f.Item switch { Content c => c.Id, Attachment a => a.Id, Comment c => c.Id, _ => "" }, ["type"] = f.Type },
             ["lastModified"] = Time(f.When),
         }).ToArray();
-        return Response.Json(new JsonObject { ["results"] = new JsonArray(results), ["start"] = 0, ["limit"] = limit, ["size"] = results.Length, ["totalSize"] = found.Count });
+        return Response.Json(new JsonObject { ["results"] = new JsonArray(results), ["start"] = start, ["limit"] = limit, ["size"] = results.Length, ["totalSize"] = found.Count });
     }
 
     // --- JSON as Confluence writes it -----------------------------------------------------------------------------------
