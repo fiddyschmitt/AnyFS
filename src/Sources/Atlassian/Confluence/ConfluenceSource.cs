@@ -89,6 +89,9 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         _cache = new RequestCache(_stopping.Token, _standIn?.AnswersKept ?? RequestCache.DefaultMaxBytes);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
+        // what a run that was killed left of the spaces it was reading
+        TextSpill.Sweep(PutByDirectory);
+
         Scope = ConfluenceScope.From(_session.Address, out var problem) ?? throw new SourceFailedException(problem!, permanent: true);
         Context.ReportProgress(Scope.Kind switch
         {
@@ -864,6 +867,14 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         return await read().ConfigureAwait(false);
     }
 
+    /// <summary>Where the bodies of a space being read whole wait (<see cref="TextSpill"/>): a folder of the source's cache.</summary>
+    private string PutByDirectory => Path.Combine(Context.CacheDirectory, "put-by");
+
+    /// <summary>How many pages' bodies have been put by on disk while their space was read whole, for tests.</summary>
+    internal long BodiesPutBy => Interlocked.Read(ref _bodiesPutBy);
+
+    private long _bodiesPutBy;
+
     /// <summary>A space read whole: its listing and every folder's below it.</summary>
     private async Task<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>> WholeSpaceAsync(string path, ConfluenceSpaceFolder folder, CancellationToken ct)
     {
@@ -875,10 +886,34 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         // begins less than three minutes before this read began (the two it has to spare, and the part of a minute its
         // minutes are rounded up by), and a minute more is asked for here for the time the asking takes
         var madeBefore = await MadeAsync($"space = {key}", 4, ct).ConfigureAwait(false) ?? [];
+
+        // A page's folder cannot be listed until every page has been seen: its children's names depend on their
+        // siblings', and its attachments' on its children's. So each page's body, and each comment's, is put by on
+        // disk as it comes and read back when its page is listed. Held in memory until then, a space held every body
+        // it has at once: 144 MB for 4,040 pages of 16 KB, and as much more for each as many again, eight spaces at
+        // a time (the review of 21-Nov-2026, P6)
+        using var putBy = new TextSpill(PutByDirectory);
+        var bodies = new Dictionary<string, TextSpill.Kept>(StringComparer.Ordinal);
+        ConfluenceContent PutBy(ConfluenceContent page)
+        {
+            // whole among the answers, for an open that follows, for as long as there is room for it there
+            Remember(page);
+            if (page.Storage is not { } storage)
+            {
+                return page;
+            }
+
+            bodies[page.Id] = putBy.Put(storage);
+            Interlocked.Increment(ref _bodiesPutBy);
+            return page with { Storage = null };
+        }
+
+        ConfluenceContent WithBody(ConfluenceContent page) => bodies.TryGetValue(page.Id, out var kept) ? page with { Storage = putBy.Take(kept) } : page;
+
         var pages = new List<ConfluenceContent>();
         await foreach (var e in ScanAsync(folder.Space.Key, ct).ConfigureAwait(false))
         {
-            pages.Add(ConfluenceContent.Parse(e));
+            pages.Add(PutBy(ConfluenceContent.Parse(e)));
         }
 
         var posts = new List<ConfluenceContent>();
@@ -886,7 +921,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         {
             await foreach (var e in PagesAsync($"content?spaceKey={Uri.EscapeDataString(folder.Space.Key)}&type=blogpost&limit={BodiesPerRequest}&expand={Whole}", ct).ConfigureAwait(false))
             {
-                posts.Add(ConfluenceContent.Parse(e));
+                posts.Add(PutBy(ConfluenceContent.Parse(e)));
             }
         }
 
@@ -904,6 +939,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         }
 
         var comments = new Dictionary<string, List<ConfluenceComment>>(StringComparer.Ordinal);
+        var commentText = new Dictionary<string, TextSpill.Kept>(StringComparer.Ordinal);
         if (_settings.Comments)
         {
             await foreach (var e in PagesAsync($"content/search?cql={Uri.EscapeDataString($"space = {key} and type = comment")}&limit={BodiesPerRequest}&expand=body.storage,version,history,container,ancestors,extensions.inlineProperties", ct).ConfigureAwait(false))
@@ -911,14 +947,10 @@ public sealed class ConfluenceSource : SourceBase, ICountable
                 var comment = ConfluenceComment.Parse(e);
                 if (comment.ContainerId is { } container)
                 {
-                    (comments.TryGetValue(container, out var list) ? list : comments[container] = []).Add(comment);
+                    commentText[comment.Id] = putBy.Put(comment.Storage);
+                    (comments.TryGetValue(container, out var list) ? list : comments[container] = []).Add(comment with { Storage = "" });
                 }
             }
-        }
-
-        foreach (var page in pages.Concat(posts))
-        {
-            Remember(page);
         }
 
         var byId = pages.GroupBy(p => p.Id, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
@@ -928,9 +960,13 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         async Task ListPageAsync(string pagePath, string name, ConfluenceContent page, bool blog)
         {
             var children = blog ? [] : byParent.GetValueOrDefault(page.Id) ?? [];
-            var nodes = await BuildPageAsync(name, page, children,
+            // with its body and its comments' text back from where they were put by, for as long as this takes
+            var nodes = await BuildPageAsync(name, WithBody(page), children,
                 (attachments.GetValueOrDefault(page.Id) ?? []).OrderBy(a => a.Id.Length).ThenBy(a => a.Id, StringComparer.Ordinal).ToList(),
-                _settings.Comments ? (comments.GetValueOrDefault(page.Id) ?? []).OrderBy(c => c.Created ?? DateTimeOffset.MinValue).ToList() : null,
+                _settings.Comments
+                    ? (comments.GetValueOrDefault(page.Id) ?? []).Select(c => commentText.TryGetValue(c.Id, out var text) ? c with { Storage = putBy.Take(text) } : c)
+                        .OrderBy(c => c.Created ?? DateTimeOffset.MinValue).ToList()
+                    : null,
                 blog, ct).ConfigureAwait(false);
             listings[pagePath] = nodes.Select(n => n.Entry).ToList();
             _places[page.Id] = new PagePlace(pagePath, page.ParentId, blog);

@@ -876,6 +876,37 @@ public class ConfluenceTests
     }
 
     /// <summary>
+    /// A space read whole held every page's body, and every comment's, until its last page had come, since no page's
+    /// folder can be listed before its siblings are known: 144 MB at the most for 4,040 pages of 16 KB (the review of
+    /// 21-Nov-2026, P6). They wait on disk, and what the read lists is what it listed.
+    /// </summary>
+    [TestMethod]
+    public async Task ASpaceReadWholePutsItsBodiesByOnDiskAndListsWhatItDid()
+    {
+        var fake = ConfluenceSeed.Lab();
+        using var context = new TestSourceContext();
+        var putBy = Path.Combine(context.CacheDirectory, "put-by");
+        Directory.CreateDirectory(putBy);
+        File.WriteAllText(Path.Combine(putBy, "put-by-left.tmp"), "left by a run that was killed");
+        await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake, "/display/ANYFS"), context);
+        Assert.AreEqual(0, Directory.GetFiles(putBy).Length, "what a killed run left is gone as the source starts");
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.IsTrue(source.BodiesPutBy >= 6, $"{source.BodiesPutBy} bodies put by: the space's pages and its two blog posts");
+        Assert.AreEqual(0, Directory.GetFiles(putBy).Length, "and nothing is left on disk when the read is over");
+
+        // every page's document is what it is read alone: its body, its comments in their order, its attachments' links
+        var whole = await TextAsync(source, "AnyFS Lab Home/Architecture/Architecture.md");
+        StringAssert.Contains(whole, "A footer comment, with **bold**.");
+        StringAssert.Contains(whole, "A reply.");
+        StringAssert.Contains(whole, "Which layers?");
+        Assert.IsTrue(whole.IndexOf("A footer comment", StringComparison.Ordinal) < whole.IndexOf("A reply.", StringComparison.Ordinal));
+        await using var alone = await StartAsync(fake, ConfluenceSeed.Settings(fake, "/display/ANYFS"));
+        Assert.AreEqual(await TextAsync(alone, "AnyFS Lab Home/Architecture/Architecture.md"), whole, "as a source that has read nothing whole gives it");
+        StringAssert.Contains(await TextAsync(source, "AnyFS Lab Home/Architecture/Services/Storage/Storage.md"), "Three levels down.");
+        StringAssert.Contains(await TextAsync(source, "Blog/2026-10-05 Release notes 1/2026-10-05 Release notes 1.md"), "Release one.");
+    }
+
+    /// <summary>
     /// A pass over more pages than the source's answers may weigh keeps to that weight, and reads every one of them right:
     /// the pages read whole are among the answers kept, where each weighs its body. Two thousand were kept in a map of
     /// their own, whatever their size (the review of 21-Nov-2026, P6).
