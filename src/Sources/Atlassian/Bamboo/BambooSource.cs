@@ -1,4 +1,6 @@
+using System.Buffers;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using AngleSharp.Html.Parser;
 using AnyFS.Sdk;
@@ -408,23 +410,40 @@ public sealed class BambooSource : SourceBase, ICountable
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(c).ConfigureAwait(false);
-            using var reader = new StreamReader(stream);
-            var buffer = new char[PageBytes];
-            var length = 0;
-            while (length < buffer.Length)
+            return new Box<List<BmArtifactEntry>?>(Linked(await PageTextAsync(stream, PageBytes, c).ConfigureAwait(false), response.RequestMessage?.RequestUri ?? url));
+        }, ct).ConfigureAwait(false);
+        return box.Value;
+    }
+
+    /// <summary>
+    /// The start of a page as text, <paramref name="most"/> characters of it at most, in room that grows with what is
+    /// read. The room for the most a page may be was made for every page, 8 MB each however short the page, and a job's
+    /// artifacts are read at once (the review of 21-Nov-2026, N18).
+    /// </summary>
+    internal static async Task<string> PageTextAsync(Stream page, int most, CancellationToken ct)
+    {
+        using var reader = new StreamReader(page, leaveOpen: true);
+        var text = new StringBuilder();
+        var buffer = ArrayPool<char>.Shared.Rent(16 * 1024);
+        try
+        {
+            while (text.Length < most)
             {
-                var read = await reader.ReadAsync(buffer.AsMemory(length), c).ConfigureAwait(false);
+                var read = await reader.ReadAsync(buffer.AsMemory(0, Math.Min(buffer.Length, most - text.Length)), ct).ConfigureAwait(false);
                 if (read == 0)
                 {
                     break;
                 }
 
-                length += read;
+                text.Append(buffer, 0, read);
             }
+        }
+        finally
+        {
+            ArrayPool<char>.Shared.Return(buffer);
+        }
 
-            return new Box<List<BmArtifactEntry>?>(Linked(new string(buffer, 0, length), response.RequestMessage?.RequestUri ?? url));
-        }, ct).ConfigureAwait(false);
-        return box.Value;
+        return text.ToString();
     }
 
     /// <summary>What a page links below its own address: a folder for a link ending in a slash or going deeper, a file otherwise; each once.</summary>

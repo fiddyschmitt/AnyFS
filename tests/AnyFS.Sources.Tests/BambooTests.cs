@@ -391,6 +391,52 @@ public class BambooTests
     }
 
     [TestMethod]
+    public async Task AnArtifactsPageTakesTheRoomOfThePageNotOfTheLongestOneRead()
+    {
+        // The page Bamboo shows for an artifact's folder is read for its links, four million characters of it at most. A
+        // buffer of that size was made for every page, 8 MB however short the page, and a job's artifacts are read at
+        // once (the review of 21-Nov-2026, N18)
+        const int Artifacts = 16;
+        var fake = BambooSeed.Lab();
+        var run = fake.BuildAt("ANYFS-BUILD", 1).JobRuns[0];
+        for (var n = 1; n <= Artifacts; n++)
+        {
+            var pack = fake.AddArtifact(run, $"Pack {n:00}");
+            pack.Files["a.txt"] = BambooSeed.Bytes("a\n");
+            pack.Files["b.txt"] = BambooSeed.Bytes("b\n");
+        }
+
+        await using var source = await StartAsync(fake, BambooSeed.Settings(fake, "/browse/ANYFS-BUILD"));
+
+        // the job's folder and one page's links first: what any reading takes once is not what is measured
+        await NamesAsync(source, "#1 Successful/Default Job");
+        BambooSource.Linked("<html><body><a href=\"x.txt\">x</a></body></html>", new Uri("https://bamboo.example.com/a/"));
+
+        var before = GC.GetTotalAllocatedBytes(precise: true);
+        var names = await NamesAsync(source, "#1 Successful/Default Job/artifacts");
+        var allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+        Console.WriteLine($"{allocated / 1024:N0} KB allocated to read {Artifacts + 1} pages of links");
+        Assert.AreEqual(Artifacts + 2, names.Count, "the sixteen, and the seed's two");
+        Assert.IsTrue(allocated < 16L << 20, $"{allocated / (1 << 20):N0} MB allocated to read {Artifacts + 1} pages of links");
+    }
+
+    [TestMethod]
+    public async Task APageIsReadWholeOrAsFarAsTheMostThatIsReadOfOne()
+    {
+        // longer than one filling of the room it is read through, and with a character of more than one byte (e acute)
+        var e = (char)0xE9;
+        var html = "<html><body>" + string.Concat(Enumerable.Range(0, 5_000).Select(n => $"<a href=\"caf{e}-{n}.txt\">caf{e} {n}</a>")) + "</body></html>";
+        using var whole = new MemoryStream(Encoding.UTF8.GetBytes(html));
+        Assert.AreEqual(html, await BambooSource.PageTextAsync(whole, 4 << 20, CancellationToken.None));
+
+        // a page that is a file of its own (a report of hundreds of megabytes) is not read to its end for its links
+        using var cut = new MemoryStream(Encoding.UTF8.GetBytes(html));
+        Assert.AreEqual(html[..20_000], await BambooSource.PageTextAsync(cut, 20_000, CancellationToken.None));
+        using var empty = new MemoryStream();
+        Assert.AreEqual("", await BambooSource.PageTextAsync(empty, 20_000, CancellationToken.None));
+    }
+
+    [TestMethod]
     public async Task TheSettingsTurnOffLogsArtifactsAndBranches()
     {
         var fake = BambooSeed.Lab();
