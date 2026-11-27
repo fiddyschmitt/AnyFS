@@ -149,12 +149,23 @@ public static class UpstreamWatcherExtensions
 
 /// <summary>
 /// Tells a <see cref="IUpstreamWatcher"/> of every request that goes through it. Put it just above what sends the requests
-/// (<see cref="Around"/>), below anything that retries or renews a sign-in, and each exchange with the server is one request
+/// (<see cref="Around(HttpMessageHandler, IUpstreamWatcher?)"/>), below anything that retries or renews a sign-in, and each exchange with the server is one request
 /// of the watcher's: the method, the address (<see cref="Shown"/>), what the server answered and the bytes that went by. It
 /// lasts until the answer's body has been read or the response is disposed, so a slow download shows as running.
+/// <para>
+/// It also ends the wait for a body that has gone quiet. A client's own timeout covers a request until its answer's headers
+/// where the body is read after them (<see cref="HttpCompletionOption.ResponseHeadersRead"/>), and nothing after that: a
+/// server that sent the headers and part of the body and then nothing, its connection still up, held whoever read the body
+/// for ever, and a walk's request has no one to give it up. A read of the body that gets nothing for
+/// <see cref="DefaultQuiet"/> (or the time given to <see cref="Around(HttpMessageHandler, IUpstreamWatcher?, TimeSpan)"/>)
+/// fails as an <see cref="IOException"/>, which is what a connection lost part way fails as, and is retried where that is.
+/// </para>
 /// </summary>
 public sealed class UpstreamRequestsHandler : DelegatingHandler
 {
+    /// <summary>How long an answer's body may send nothing before a read of it fails, where no other time is given: as long as the sources' clients wait for an answer to begin.</summary>
+    public static readonly TimeSpan DefaultQuiet = TimeSpan.FromSeconds(120);
+
     /// <summary>A value in a query longer than this is left out of <see cref="Shown"/>: what long and opaque is goes by many names.</summary>
     private const int LongestValueShown = 128;
 
@@ -164,18 +175,28 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
     private static readonly string[] SecretNames = ["token", "secret", "pass", "pwd", "auth", "sig", "key", "credential", "ticket", "code", "session", "cookie", "assertion", "jwt"];
 
     private readonly IUpstreamWatcher _watcher;
+    private readonly TimeSpan _quiet;
 
-    private UpstreamRequestsHandler(IUpstreamWatcher watcher, HttpMessageHandler inner)
+    private UpstreamRequestsHandler(IUpstreamWatcher watcher, HttpMessageHandler inner, TimeSpan quiet)
         : base(inner)
     {
         _watcher = watcher;
+        _quiet = quiet;
     }
 
     /// <summary><paramref name="inner"/> with a <paramref name="watcher"/> told of what goes through it, or as it is where there is no watcher.</summary>
-    public static HttpMessageHandler Around(HttpMessageHandler inner, IUpstreamWatcher? watcher)
+    public static HttpMessageHandler Around(HttpMessageHandler inner, IUpstreamWatcher? watcher) => Around(inner, watcher, DefaultQuiet);
+
+    /// <summary>
+    /// As <see cref="Around(HttpMessageHandler, IUpstreamWatcher?)"/>, for a client whose answers may by rights send nothing
+    /// for longer than <see cref="DefaultQuiet"/> part way (a query the server answers as it finds things): a read of a
+    /// body fails when it gets nothing for <paramref name="quiet"/>.
+    /// </summary>
+    public static HttpMessageHandler Around(HttpMessageHandler inner, IUpstreamWatcher? watcher, TimeSpan quiet)
     {
         ArgumentNullException.ThrowIfNull(inner);
-        return watcher is null ? inner : new UpstreamRequestsHandler(watcher, inner);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(quiet, TimeSpan.Zero);
+        return watcher is null ? inner : new UpstreamRequestsHandler(watcher, inner, quiet);
     }
 
     /// <summary>
@@ -248,7 +269,7 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
             throw;
         }
 
-        Watch(request, response, asked);
+        Watch(request, response, asked, _quiet);
         return response;
     }
 
@@ -268,11 +289,11 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
             throw;
         }
 
-        Watch(request, response, asked);
+        Watch(request, response, asked, _quiet);
         return response;
     }
 
-    private static void Watch(HttpRequestMessage request, HttpResponseMessage response, IWatchedRequest asked)
+    private static void Watch(HttpRequestMessage request, HttpResponseMessage response, IWatchedRequest asked, TimeSpan quiet)
     {
         var status = (int)response.StatusCode;
         asked.Answered($"{status} {response.ReasonPhrase}".TrimEnd(), refused: status >= 400);
@@ -282,7 +303,7 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
             return;
         }
 
-        response.Content = new WatchedContent(response.Content, asked);
+        response.Content = new WatchedContent(response.Content, asked, quiet);
     }
 
     private static bool HasNoBody(HttpRequestMessage request, HttpResponseMessage response)
@@ -298,11 +319,13 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
     {
         private readonly HttpContent _inner;
         private readonly IWatchedRequest _asked;
+        private readonly TimeSpan _quiet;
 
-        public WatchedContent(HttpContent inner, IWatchedRequest asked)
+        public WatchedContent(HttpContent inner, IWatchedRequest asked, TimeSpan quiet)
         {
             _inner = inner;
             _asked = asked;
+            _quiet = quiet;
             foreach (var header in inner.Headers)
             {
                 Headers.TryAddWithoutValidation(header.Key, header.Value);
@@ -323,7 +346,7 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
         {
             try
             {
-                return new WatchedStream(await _inner.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), _asked);
+                return new WatchedStream(await _inner.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false), _asked, _quiet);
             }
             catch (Exception ex)
             {
@@ -336,7 +359,7 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
         {
             try
             {
-                return new WatchedStream(_inner.ReadAsStream(cancellationToken), _asked);
+                return new WatchedStream(_inner.ReadAsStream(cancellationToken), _asked, _quiet);
             }
             catch (Exception ex)
             {
@@ -364,8 +387,11 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
         }
     }
 
-    /// <summary>The body as it is read: the request is over at its end, or when it is closed before that.</summary>
-    private sealed class WatchedStream(Stream body, IWatchedRequest asked) : Stream
+    /// <summary>
+    /// The body as it is read: the request is over at its end, or when it is closed before that. A read that gets nothing
+    /// for <paramref name="quiet"/> fails (the reads that can be given up: the ones a caller waits on without a thread).
+    /// </summary>
+    private sealed class WatchedStream(Stream body, IWatchedRequest asked, TimeSpan quiet) : Stream
     {
         public override bool CanRead => true;
 
@@ -400,7 +426,7 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
         {
             try
             {
-                var read = await body.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                var read = await WithinAsync(buffer, cancellationToken).ConfigureAwait(false);
                 Went(read, buffer.Length);
                 return read;
             }
@@ -408,6 +434,20 @@ public sealed class UpstreamRequestsHandler : DelegatingHandler
             {
                 asked.Failed(ex, cancellationToken);
                 throw;
+            }
+        }
+
+        private async ValueTask<int> WithinAsync(Memory<byte> buffer, CancellationToken cancellationToken)
+        {
+            using var within = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            within.CancelAfter(quiet);
+            try
+            {
+                return await body.ReadAsync(buffer, within.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && within.IsCancellationRequested)
+            {
+                throw new IOException($"the server sent nothing for {quiet.TotalSeconds:0.#} s, part way through its answer");
             }
         }
 

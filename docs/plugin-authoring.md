@@ -134,6 +134,13 @@ public sealed class SampleSource(SampleSettings settings) : SourceBase
   `await Context.UpstreamWatcher.AskAsync("LIST", path, () => client.ListAsync(path, ct), ct)`, or
   `Ask` for one that blocks; for one that stays open, say `Asked(what, target)` yourself, and `Done()`
   when it ends. A call answered from what you hold asks nothing, and is no row here.
+- The same handler ends the wait for an answer that goes quiet part way. Your client's timeout
+  covers a request until its answer's headers where you read the body after them
+  (`HttpCompletionOption.ResponseHeadersRead`), and nothing after that: a server that then sent
+  nothing, its connection still up, would hold your read for ever, and a walk's request has no one to
+  give it up. A read of a body that gets nothing for two minutes fails with an `IOException`, as a
+  connection lost part way does, so treat it as you treat that. Give
+  `Around(handler, watcher, quiet)` another time where an answer may by rights be quiet for longer.
 - The host stops waiting for an upstream that says nothing, by what you report here. A stat, a
   listing or an open for reading that a person's file manager made is given up, as Unavailable, once
   your source has had requests out to a server and nothing back from it for the source's limit (60

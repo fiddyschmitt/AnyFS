@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
@@ -433,6 +434,21 @@ public class UpstreamRequestsHandlerTests
                         case "/half":
                             await WriteAsync(stream, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nonly this");
                             return;
+                        case "/stall":
+                            // the headers, the start of the body, and then nothing, the connection left up
+                            await WriteAsync(stream, "HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nonly this");
+                            await Task.Delay(Timeout.Infinite, _stopping.Token);
+                            break;
+                        case "/slow":
+                            await WriteAsync(stream, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");
+                            foreach (var word in new[] { "slow", " but", " it", " keeps", " coming" })
+                            {
+                                await Task.Delay(100, _stopping.Token);
+                                await WriteAsync(stream, $"{word.Length:x}\r\n{word}\r\n");
+                            }
+
+                            await WriteAsync(stream, "0\r\n\r\n");
+                            break;
                     }
                 }
             }
@@ -516,5 +532,80 @@ public class UpstreamRequestsHandlerTests
         Assert.IsNotNull(watcher.Requests[^1].Error, "and ended short of what it said");
         Assert.AreEqual(9, watcher.Requests[^1].Bytes);
         Assert.IsTrue(watcher.Requests[^1].IsDone);
+    }
+
+    private static (HttpClient Client, RecordingUpstreamWatcher Watcher) RealClient(TimeSpan quiet)
+    {
+        var watcher = new RecordingUpstreamWatcher();
+        var sockets = new SocketsHttpHandler { AutomaticDecompression = DecompressionMethods.All, UseCookies = false };
+        return (new HttpClient(UpstreamRequestsHandler.Around(sockets, watcher, quiet)) { Timeout = TimeSpan.FromSeconds(30) }, watcher);
+    }
+
+    [TestMethod]
+    public async Task ABodyThatGoesQuietPartWayFailsItsReadInsteadOfHoldingItForEver()
+    {
+        // A client's timeout covers a request until its answer's headers where the body is read after them, and nothing
+        // after that: a server that sent the headers and the start of the body and then nothing held the read for ever,
+        // and a walk's request has no one to give it up (the review of 21-Nov-2026, R6)
+        using var server = new Server();
+        var (client, watcher) = RealClient(TimeSpan.FromMilliseconds(300));
+        using var _c = client;
+        var started = Stopwatch.GetTimestamp();
+        using (var response = await client.GetAsync(server.Address + "/stall", HttpCompletionOption.ResponseHeadersRead))
+        {
+            await using var body = await response.Content.ReadAsStreamAsync();
+            var buffer = new byte[64];
+            Assert.AreEqual("only this", Encoding.UTF8.GetString(buffer, 0, await body.ReadAsync(buffer)));
+            var quiet = await Assert.ThrowsExactlyAsync<IOException>(async () => _ = await body.ReadAsync(buffer));
+            StringAssert.Contains(quiet.Message, "sent nothing for 0.3 s");
+            Assert.AreSame(quiet, watcher.Requests[^1].Error, "the request's row says why it ended");
+        }
+
+        Assert.IsTrue(watcher.Requests[^1].IsDone);
+        Assert.AreEqual(9, watcher.Requests[^1].Bytes);
+
+        // and one HttpClient reads whole before it hands the answer over fails as a connection lost part way does, long
+        // before the client's own thirty seconds
+        var whole = await Assert.ThrowsExactlyAsync<HttpRequestException>(() => client.GetStringAsync(server.Address + "/stall"));
+        Assert.IsInstanceOfType<IOException>(whole.InnerException);
+        Assert.IsTrue(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(15), "neither waited for the client's timeout");
+        Assert.AreEqual(0, watcher.Running.Count);
+    }
+
+    [TestMethod]
+    public async Task ABodyThatComesSlowlyIsReadToItsEndAndAReadGivenUpIsGivenUp()
+    {
+        using var server = new Server();
+        var (client, watcher) = RealClient(TimeSpan.FromMilliseconds(2000));
+        using var _c = client;
+
+        // six gaps of a tenth of a second, none as long as the quiet allowed: the time is each wait's, not the body's
+        using (var response = await client.GetAsync(server.Address + "/slow", HttpCompletionOption.ResponseHeadersRead))
+        {
+            Assert.AreEqual("slow but it keeps coming", await response.Content.ReadAsStringAsync());
+        }
+
+        Assert.IsNull(watcher.Requests[^1].Error);
+        Assert.IsTrue(watcher.Requests[^1].IsDone);
+
+        // a read its caller gives up is a cancellation, as it was, and not the quiet's failure
+        using (var response = await client.GetAsync(server.Address + "/stall", HttpCompletionOption.ResponseHeadersRead))
+        {
+            await using var body = await response.Content.ReadAsStreamAsync();
+            var buffer = new byte[64];
+            Assert.AreEqual(9, await body.ReadAsync(buffer));
+            using var gaveUp = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+            var cancelled = await Assert.ThrowsAsync<OperationCanceledException>(async () => _ = await body.ReadAsync(buffer, gaveUp.Token));
+            Assert.IsNotInstanceOfType<IOException>(cancelled);
+        }
+    }
+
+    [TestMethod]
+    public void TheQuietAllowedIsTwoMinutesUnlessAnotherIsGivenAndMustBeATime()
+    {
+        Assert.AreEqual(TimeSpan.FromSeconds(120), UpstreamRequestsHandler.DefaultQuiet);
+        using var inner = new Answering((_, _) => Task.FromResult(Ok("x")));
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => UpstreamRequestsHandler.Around(inner, new RecordingUpstreamWatcher(), TimeSpan.Zero));
+        Assert.AreSame(inner, UpstreamRequestsHandler.Around(inner, null, TimeSpan.FromSeconds(5)), "with no watcher the handler is as it was");
     }
 }

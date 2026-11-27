@@ -272,7 +272,7 @@ public interface ISourceContext
 
     /// <summary>
     /// Who to tell of what the source asks of whatever is behind it, its server or its folders (a row of the Operations tab
-    /// for each), or null when nobody is listening. An HTTP source gives it to <see cref="UpstreamRequestsHandler.Around"/>; any
+    /// for each), or null when nobody is listening. An HTTP source gives it to <see cref="UpstreamRequestsHandler.Around(HttpMessageHandler, IUpstreamWatcher?)"/>; any
     /// other says each call (<see cref="IUpstreamWatcher"/>). Optional for a host: the default is null.
     /// </summary>
     IUpstreamWatcher? UpstreamWatcher => null;
