@@ -275,6 +275,46 @@ public class CollectionVfsTests
     }
 
     [TestMethod]
+    public async Task TheFilesSeenAreATotalKeptNotASumMadeAtEachAsking()
+    {
+        // The window asks every source's count every second. The folders seen were kept by their paths, and summed at
+        // each asking through a copy of them all: with a million folders, 179 MB held and 45 ms and 4 MB a read (the
+        // review of 21-Nov-2026, P10)
+        const int Folders = 50_000;
+        var handle = await Handles.ReadyAsync("many", new MemorySource());
+        for (var i = 0; i < Folders; i++)
+        {
+            handle.RecordListing($"projects/group-{i % 100}/repository-{i}", 3);
+        }
+
+        Assert.AreEqual(3L * Folders, handle.FilesSeen);
+
+        // listed again with other counts, with none, and one folder twice over at once from many threads
+        handle.RecordListing("projects/group-0/repository-0", 10);
+        handle.RecordListing("projects/group-1/repository-1", 0);
+        Assert.AreEqual((3L * Folders) + 7 - 3, handle.FilesSeen);
+        Parallel.For(0, 10_000, i => handle.RecordListing("projects/group-2/repository-2", i % 50));
+        Parallel.For(0, 10_000, i => handle.RecordListing($"more/{i}", 1));
+        handle.RecordListing("projects/group-2/repository-2", 3);
+        Assert.AreEqual((3L * Folders) + 7 - 3 + 10_000, handle.FilesSeen, "each folder counted once, at what it was last seen to hold");
+
+        handle.FileCount();
+        var allocated = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 100; i++)
+        {
+            Assert.AreEqual((3L * Folders) + 10_004, handle.FileCount().Files);
+        }
+
+        allocated = GC.GetAllocatedBytesForCurrentThread() - allocated;
+        Assert.IsTrue(allocated < 4096, $"{allocated:N0} B allocated by 100 askings");
+
+        handle.ForgetListings();
+        Assert.AreEqual(0, handle.FilesSeen);
+        handle.RecordListing("projects/group-0/repository-0", 2);
+        Assert.AreEqual(2, handle.FilesSeen, "and counted from nothing after a restart");
+    }
+
+    [TestMethod]
     public async Task CanWriteAnswersWithoutIo()
     {
         var rw = await Handles.ReadyAsync("rw", new MemorySource());

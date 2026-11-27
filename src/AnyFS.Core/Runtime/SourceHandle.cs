@@ -11,7 +11,12 @@ namespace AnyFS.Core.Runtime;
 /// </summary>
 public sealed class SourceHandle
 {
-    private readonly ConcurrentDictionary<string, int> _seenPerDirectory = new(StringComparer.Ordinal);
+    // The files the router has seen in each folder listed, by a hash of the folder's path, and their total kept as it
+    // changes. The paths themselves were kept, and the total summed from them at every status read, which the window
+    // makes every second for every source not yet counted: with a million folders seen, 179 MB held for as long as the
+    // source ran, and 45 ms and 4 MB a read (the review of 21-Nov-2026, P10). Under its own lock.
+    private readonly Dictionary<ulong, int> _seenPerDirectory = [];
+    private long _filesSeen;
     private readonly ConcurrentDictionary<string, string> _notes = new(StringComparer.Ordinal);
     private ISource? _current;
     private ComponentStatus _status = ComponentStatus.DisabledStatus;
@@ -56,7 +61,7 @@ public sealed class SourceHandle
     public bool IsUsable => Current is not null && Status.IsUsable;
 
     /// <summary>Distinct files the router has seen in listings (a count per listed directory, so it needs no file names).</summary>
-    public long FilesSeen => _seenPerDirectory.Values.Sum(v => (long)v);
+    public long FilesSeen => Interlocked.Read(ref _filesSeen);
 
     /// <summary>Degraded notes from the router (shadowed entries, duplicate names), keyed so each is logged once.</summary>
     public IReadOnlyCollection<string> Notes => _notes.Values.ToList();
@@ -75,9 +80,41 @@ public sealed class SourceHandle
         return (complete ? known : Math.Max(known, FilesSeen), complete);
     }
 
-    public void RecordListing(string directory, int fileCount) => _seenPerDirectory[directory] = fileCount;
+    public void RecordListing(string directory, int fileCount)
+    {
+        ArgumentNullException.ThrowIfNull(directory);
+        var key = Key(directory);
+        lock (_seenPerDirectory)
+        {
+            _seenPerDirectory.TryGetValue(key, out var was);
+            _seenPerDirectory[key] = fileCount;
+            Interlocked.Add(ref _filesSeen, fileCount - was);
+        }
+    }
 
-    public void ForgetListings() => _seenPerDirectory.Clear();
+    public void ForgetListings()
+    {
+        lock (_seenPerDirectory)
+        {
+            _seenPerDirectory.Clear();
+            Interlocked.Exchange(ref _filesSeen, 0);
+        }
+    }
+
+    /// <summary>
+    /// A folder's path as 64 bits (FNV-1a over its characters): what two folders in many million million share, and all
+    /// that costs is one of them left out of a number shown with a "+" while it is not yet exact.
+    /// </summary>
+    private static ulong Key(string directory)
+    {
+        var hash = 14695981039346656037UL;
+        foreach (var c in directory)
+        {
+            hash = (hash ^ c) * 1099511628211UL;
+        }
+
+        return hash;
+    }
 
     /// <summary>Adds a note once; returns true the first time so the caller can log it.</summary>
     public bool AddNote(string key, string text)
