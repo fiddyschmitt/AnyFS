@@ -1016,18 +1016,47 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             return;
         }
 
+        // As many as the branches and tags of every project a walk has come to, a path and a commit each, were noted for
+        // the run (the review of 21-Nov-2026, P6). Past a number they start again: a walk notes each root as it comes
+        // to it, and a ref listed before its fellows are noted again is read from GitLab where it might have been copied
+        if (Volatile.Read(ref _rootsNoted) >= MostRootsNoted)
+        {
+            _roots.Clear();
+            Interlocked.Exchange(ref _rootsNoted, 0);
+        }
+
         var roots = _roots.GetOrAdd(project.Id, _ => new ConcurrentDictionary<string, string?>(StringComparer.Ordinal));
         path = VfsPath.Normalize(path);
         if (commit is null)
         {
             // noted on the way down to its project: the commit it was last seen at, if any, stands
-            roots.TryAdd(path, null);
+            if (roots.TryAdd(path, null))
+            {
+                Interlocked.Increment(ref _rootsNoted);
+            }
         }
         else
         {
-            roots[path] = commit;
+            var added = false;
+            roots.AddOrUpdate(path, _ =>
+            {
+                added = true;
+                return commit;
+            }, (_, _) => commit);
+            if (added)
+            {
+                Interlocked.Increment(ref _rootsNoted);
+            }
         }
     }
+
+    /// <summary>The repository roots noted at most, over every project; past that they start again (lower in a test).</summary>
+    internal int MostRootsNoted { get; set; } = 200_000;
+
+    /// <summary>How many repository roots are noted, about (for tests).</summary>
+    internal int RootsNoted => Volatile.Read(ref _rootsNoted);
+
+    private int _rootsNoted;
 
     /// <summary>
     /// A root of the project's repository (<see cref="IsRoot"/>) whose listings are kept at <paramref name="commit"/>,

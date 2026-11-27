@@ -1606,6 +1606,42 @@ public class GitLabSourceTests
 
         // and what shares a commit is read once still: files and main, scratch and the last tag
         Assert.AreEqual(2 * Each + 1, fake.Count("repository/tree"), "each commit read whole, once");
+        Assert.AreEqual(roots, source.RootsNoted);
+    }
+
+    [TestMethod]
+    public async Task TheRootsNotedStartAgainPastANumberAndTheCountIsWholeAllTheSame()
+    {
+        // as many as the branches and tags of every project a walk has come to were noted for the run, a path and a
+        // commit each (the review of 21-Nov-2026, P6)
+        const int Each = 60;
+        var fake = GitLabSeed.Lab();
+        var project = fake.AddProject(fake.AddGroup("many", "Many", null, fake.UserNamed("tester")), "refs", "Refs");
+        project.Commit("main", new Dictionary<string, byte[]> { ["README.md"] = GitLabSeed.Bytes("# Refs\n") });
+        for (var i = 0; i < Each; i++)
+        {
+            project.Commit($"branch-{i:000}", new Dictionary<string, byte[]> { ["a.txt"] = GitLabSeed.Bytes($"branch {i}\n") });
+            project.Tags[$"tag-{i:000}"] = project.Commit("scratch", new Dictionary<string, byte[]> { ["a.txt"] = GitLabSeed.Bytes($"tag {i}\n") });
+        }
+
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/many/refs"));
+        await using var _s = source;
+        source.MostRootsNoted = 25;
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+        Assert.IsTrue(source.RootsNoted <= 25, $"{source.RootsNoted} roots noted");
+
+        // every ref's file is there to be read, noted or not
+        Assert.AreEqual(1, (await ListAsync(source, "branches/branch-059")).Count(e => e.Name == "a.txt"));
+        Assert.AreEqual(1, (await ListAsync(source, "tags/tag-000")).Count(e => e.Name == "a.txt"));
+
+        // and the count is what it is with every root noted
+        var (whole, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/many/refs"));
+        await using var _w = whole;
+        await whole.CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(1 + project.Branches.Count + project.Tags.Count, whole.RootsNoted);
+        Assert.AreEqual(whole.Counters.FilesKnown, source.Counters.FilesKnown);
+        Assert.IsTrue(source.Counters.FilesKnown >= 2 * Each, $"{source.Counters.FilesKnown} files");
     }
 
     [TestMethod]
