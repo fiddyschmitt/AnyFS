@@ -13,6 +13,20 @@ internal static class TeamsNames
 
     public static string Safe(string name) => SafeNames.Safe(name, MaxName);
 
+    /// <summary>Where <paramref name="name"/> is among <paramref name="names"/>, in either case; -1 where it is not.</summary>
+    public static int IndexOf(IReadOnlyList<string> names, string name)
+    {
+        for (var i = 0; i < names.Count; i++)
+        {
+            if (names[i].Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
     /// <summary>
     /// Display names for a set of things in order: each made <see cref="Safe"/>, twins in case numbered after the first; one
     /// that would be a <paramref name="reserved"/> name (a file or folder the source puts beside them) numbered too.

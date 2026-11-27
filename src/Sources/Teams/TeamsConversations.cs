@@ -91,11 +91,36 @@ public sealed partial class TeamsSource
 
         public int Count => Messages.Count;
 
+        /// <summary>How many times its messages have changed, counted under the gate by whatever changes them: what a thing made of them is still good by.</summary>
+        public int Changes;
+
+        private (int Changes, object Made)? _made;
+
         public List<TeamsMessage> All()
         {
             lock (Gate)
             {
                 return Messages.Values.ToList();
+            }
+        }
+
+        /// <summary>
+        /// What <paramref name="make"/> makes of its messages, made once for each state of them: a channel's threads were
+        /// grouped and sorted again at every asking, and every post of a channel asks (the review of 21-Nov-2026, P8).
+        /// </summary>
+        public T Made<T>(Func<List<TeamsMessage>, T> make)
+            where T : class
+        {
+            lock (Gate)
+            {
+                if (_made is { } kept && kept.Changes == Changes && kept.Made is T made)
+                {
+                    return made;
+                }
+
+                var fresh = make(Messages.Values.ToList());
+                _made = (Changes, fresh);
+                return fresh;
             }
         }
 
@@ -167,6 +192,7 @@ public sealed partial class TeamsSource
                         store.Messages[message.Id] = message;
                     }
 
+                    store.Changes++;
                     store.Version = version;
                     return store;
                 }
@@ -181,6 +207,7 @@ public sealed partial class TeamsSource
                 store.Messages[message.Id] = message;
             }
 
+            store.Changes++;
             store.Version = version;
             store.ReadWhole = now;
             var oldest = read.Select(m => m.Composed).Where(at => at is not null).Min();
@@ -271,8 +298,47 @@ public sealed partial class TeamsSource
     {
         var store = await ChannelConversationAsync(channelId, ct).ConfigureAwait(false);
         await HistoryAsync(store, ct).ConfigureAwait(false);
-        return Threads(store.All());
+        return store.Made(Threads);
     }
+
+    /// <summary>
+    /// A channel's posts as folders, and by their names: made once for the threads as they stand
+    /// (<see cref="ThreadsAsync"/> gives the same list while the channel's messages are the same), the team and channel
+    /// as last read, and the names known of the people in them. Every post's folder is found through its channel's posts
+    /// folder, and each finding named every thread of the channel again: counting a channel of 4,000 posts took 76 s and
+    /// allocated 62 GB, four times as much for each doubling (the review of 21-Nov-2026, P8).
+    /// </summary>
+    internal ThreadFolders ThreadFoldersOf(TeamInfo team, ChannelInfo channel, IReadOnlyList<IReadOnlyList<TeamsMessage>> threads)
+    {
+        var names = _names.Count;
+        if (_threadFolders.TryGetValue(threads, out var kept) && kept.Names == names && ReferenceEquals(kept.Team, team) && ReferenceEquals(kept.Channel, channel))
+        {
+            return kept;
+        }
+
+        Interlocked.Increment(ref _threadFoldersMade);
+        var nodes = ThreadFolder.Of(this, team, channel, threads);
+        var byName = new Dictionary<string, TmNode>(nodes.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var node in nodes)
+        {
+            byName.TryAdd(node.Name, node);
+        }
+
+        var fresh = new ThreadFolders(team, channel, names, nodes, byName);
+        _threadFolders.AddOrUpdate(threads, fresh);
+        return fresh;
+    }
+
+    /// <summary>How many times a channel's posts were made into folders, every one of them named (for tests).</summary>
+    internal long ThreadFoldersMade => Interlocked.Read(ref _threadFoldersMade);
+
+    private long _threadFoldersMade;
+
+    // by the list of threads they were made of: gone with it
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<IReadOnlyList<IReadOnlyList<TeamsMessage>>, ThreadFolders> _threadFolders = [];
+
+    /// <summary>A channel's posts as folders (<see cref="ThreadFoldersOf"/>), with what they were made of.</summary>
+    internal sealed record ThreadFolders(TeamInfo Team, ChannelInfo Channel, int Names, IReadOnlyList<TmNode> Nodes, IReadOnlyDictionary<string, TmNode> ByName);
 
     /// <summary>
     /// Whether a conversation's messages are all read, back to its start or the window, so a listing made of them now is
@@ -484,6 +550,7 @@ public sealed partial class TeamsSource
                         store.Messages.TryAdd(message.Id, message);
                     }
 
+                    store.Changes++;
                     var oldest = page.Messages.Select(m => m.Composed).Where(at => at is not null).Min();
                     if (oldest is { } at && (store.Oldest is null || at < store.Oldest))
                     {
@@ -562,6 +629,7 @@ public sealed partial class TeamsSource
                     store.Messages.Remove(id);
                 }
 
+                store.Changes++;
                 store.Next = store.NewestNext;
                 store.HistoryBegun = false;
                 store.Oldest = store.Messages.Values.Select(m => m.Composed).Where(at => at is not null).Min();

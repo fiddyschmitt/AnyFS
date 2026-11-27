@@ -60,6 +60,34 @@ internal sealed class RootFolder : TmFolder
     {
     }
 
+    /// <summary>
+    /// One of the root's folders by its name, with none of the root's files made: every path below is found through the
+    /// root, and a listing of it builds all-groups.md, groups.md, calls.md and activity.md, each as long as the tenant
+    /// makes it (the review of 21-Nov-2026, P8). A file's name is found as before, by the listing.
+    /// </summary>
+    public override async Task<TmNode?> FindAsync(TeamsSource source, string name, CancellationToken ct)
+    {
+        if (name.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+        {
+            return await base.FindAsync(source, name, ct).ConfigureAwait(false);
+        }
+
+        if (source.Settings.Chats && name.Equals(ChatsFolder.FolderName, StringComparison.OrdinalIgnoreCase))
+        {
+            return new ChatsFolder();
+        }
+
+        if (source.Settings.Groups && name.Equals(OtherGroupsFolder.FolderName, StringComparison.OrdinalIgnoreCase))
+        {
+            return new OtherGroupsFolder();
+        }
+
+        var teams = source.Settings.ChannelMessages || source.Settings.Files ? await source.TeamsAsync(ct).ConfigureAwait(false) : [];
+        var names = TeamsNames.Unique(teams.Select(t => t.DisplayName).ToList(), Reserved);
+        var at = TeamsNames.IndexOf(names, name);
+        return at < 0 ? null : new TeamFolder(teams[at], names[at]);
+    }
+
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
         var teams = source.Settings.ChannelMessages || source.Settings.Files ? await source.TeamsAsync(ct).ConfigureAwait(false) : [];
@@ -135,6 +163,19 @@ internal sealed class TeamFolder(TeamInfo team, string name) : TmFolder(name)
 
     public TeamInfo Team { get; } = team;
 
+    /// <summary>One of the team's channels by its folder's name, team.md not made for it (it is, by the listing, when it is the one asked for).</summary>
+    public override Task<TmNode?> FindAsync(TeamsSource source, string name, CancellationToken ct)
+    {
+        if (name.Equals(DetailsFile, StringComparison.OrdinalIgnoreCase))
+        {
+            return base.FindAsync(source, name, ct);
+        }
+
+        var names = TeamsNames.Unique(Team.Channels.Select(c => c.DisplayName).ToList(), [DetailsFile]);
+        var at = TeamsNames.IndexOf(names, name);
+        return Task.FromResult<TmNode?>(at < 0 ? null : new ChannelFolder(Team, Team.Channels[at], names[at]));
+    }
+
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
         var names = TeamsNames.Unique(Team.Channels.Select(c => c.DisplayName).ToList(), [DetailsFile]);
@@ -154,6 +195,12 @@ internal sealed class ChannelFolder(TeamInfo team, ChannelInfo channel, string n
     public TeamInfo Team { get; } = team;
 
     public ChannelInfo Channel { get; } = channel;
+
+    /// <summary>The channel's posts or files folder by its name, channel.md not made for it, nor the channel's details asked for.</summary>
+    public override Task<TmNode?> FindAsync(TeamsSource source, string name, CancellationToken ct)
+        => source.Settings.ChannelMessages && name.Equals("posts", StringComparison.OrdinalIgnoreCase) ? Task.FromResult<TmNode?>(new PostsFolder(Team, Channel))
+            : source.Settings.Files && name.Equals("files", StringComparison.OrdinalIgnoreCase) ? Task.FromResult<TmNode?>(new ChannelFilesFolder(Team, Channel))
+            : base.FindAsync(source, name, ct);
 
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
     {
@@ -260,7 +307,11 @@ internal sealed class PostsFolder(TeamInfo team, ChannelInfo channel) : TmFolder
     public string ThreadId => channel.Id;
 
     public override async Task<IReadOnlyList<TmNode>> ListAsync(TeamsSource source, CancellationToken ct)
-        => ThreadFolder.Of(source, team, channel, await source.ThreadsAsync(channel.Id, ct).ConfigureAwait(false));
+        => source.ThreadFoldersOf(team, channel, await source.ThreadsAsync(channel.Id, ct).ConfigureAwait(false)).Nodes;
+
+    /// <summary>One post's folder by its name, from the folders as last made: not by naming every post of the channel again.</summary>
+    public override async Task<TmNode?> FindAsync(TeamsSource source, string name, CancellationToken ct)
+        => source.ThreadFoldersOf(team, channel, await source.ThreadsAsync(channel.Id, ct).ConfigureAwait(false)).ByName.GetValueOrDefault(name);
 }
 
 /// <summary>

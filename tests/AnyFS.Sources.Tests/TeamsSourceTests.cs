@@ -64,6 +64,56 @@ public class TeamsSourceTests
         return Encoding.UTF8.GetString(buffer);
     }
 
+    /// <summary>A channel of <paramref name="posts"/> posts, each the opening message and two replies of <paramref name="html"/>.</summary>
+    private static (FakeTeams Fake, ChannelInfo Channel) ChannelOf(int posts, string html)
+    {
+        var fake = new FakeTeams();
+        var channel = FakeTeams.Channel("General", general: true);
+        fake.AddTeam("Big team", channel);
+        for (var p = 0; p < posts; p++)
+        {
+            var root = fake.Post(channel.Id, Jane, "Jane Doe", html, When.AddMinutes(p * 10));
+            fake.Post(channel.Id, John, "John Roe", html, When.AddMinutes((p * 10) + 1), rootId: root.Id);
+            fake.Post(channel.Id, Jane, "Jane Doe", html, When.AddMinutes((p * 10) + 2), rootId: root.Id);
+        }
+
+        return (fake, channel);
+    }
+
+    [TestMethod]
+    public async Task AChannelsPostsAreNamedOnceNotAtEveryPostThatIsComeTo()
+    {
+        // Every post's folder is found through its channel's posts folder, and each finding grouped the channel's messages
+        // into threads and named every one of them again: counting a channel of 4,000 posts took 76 s and allocated 62 GB,
+        // four times as much for each doubling (the review of 21-Nov-2026, P8)
+        const int Posts = 300;
+        var (fake, _) = ChannelOf(Posts, "<p>A post.</p>");
+        await using var source = await StartAsync(fake, newest: Posts * 3);
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+        Assert.IsTrue(source.Counters.FilesKnown >= Posts, $"{source.Counters.FilesKnown} files");
+        Console.WriteLine($"{Posts} posts counted: their folders made {source.ThreadFoldersMade} times");
+        Assert.IsTrue(source.ThreadFoldersMade <= 4, $"the channel's posts were named {source.ThreadFoldersMade} times for a count of {Posts}");
+
+        // found by name after that with nothing made, in either case of the name, and what is not there is not found
+        var made = source.ThreadFoldersMade;
+        var names = await NamesAsync(source, "Big team/General/posts");
+        Assert.AreEqual(Posts, names.Count);
+        foreach (var name in new[] { names[0], names[^1], names[Posts / 2].ToUpperInvariant() })
+        {
+            StringAssert.Contains(await TextAsync(source, $"Big team/General/posts/{name}/post.md"), "A post.");
+        }
+
+        Assert.IsNull(await source.StatAsync("Big team/General/posts/no such post", CancellationToken.None));
+        Assert.IsNull(await source.StatAsync("Big team/General/no such folder", CancellationToken.None));
+        Assert.IsNull(await source.StatAsync("Big team/No such channel", CancellationToken.None));
+        Assert.IsNull(await source.StatAsync("No such team", CancellationToken.None));
+        Assert.IsNotNull(await source.StatAsync("big TEAM/general/POSTS", CancellationToken.None));
+        Assert.IsNotNull(await source.StatAsync("Big team/General/channel.md", CancellationToken.None));
+        Assert.IsNotNull(await source.StatAsync("Big team/team.md", CancellationToken.None));
+        Assert.AreEqual(made, source.ThreadFoldersMade);
+    }
+
     [TestMethod]
     public async Task TheRootShowsTheTeamsAndTheChatsFolder()
     {
