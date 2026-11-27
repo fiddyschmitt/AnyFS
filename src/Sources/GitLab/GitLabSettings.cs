@@ -86,7 +86,7 @@ public sealed class GitLabSettings
     public bool KeepListings { get; set; } = true;
 
     [Setting(KeptListings.WalkSetting, Advanced = true, Order = 16,
-        Hint = "With folder listings kept: how long after one walk the next begins. The walks are what checks kept folders for changes, so this is how long a change can take to show. 0 walks once, at the start. Without 'Count files on start' a walk goes only through the folders that have been opened; with it, through every group and project, each project's default branch whole (a hundred files a request), its issues, merge requests, pipelines, wiki and releases, and of each branch's or tag's repository only what has been opened. A project whose activity and head have not moved since the last walk is kept as it was, so a walk over a quiet server asks for little; once a day everything is listed again.")]
+        Hint = "With folder listings kept: how long after one walk the next begins. The walks are what checks kept folders for changes, so this is how long a change can take to show. 0 walks once, at the start. Without 'Count files on start' a walk goes only through the folders that have been opened; with it, through every group and project: each project's default branch and each of its branches and tags whole (a hundred files a request, and a commit already kept not read again), its issues, merge requests, pipelines, wiki and releases. A project whose activity and head have not moved since the last walk is kept as it was, so a walk over a quiet server asks for little; once a day everything is listed again.")]
     public int WalkMinutes { get; set; } = 30;
 
     [Setting("Projects at a time", Advanced = true, Order = 17,

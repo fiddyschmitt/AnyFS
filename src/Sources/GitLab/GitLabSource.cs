@@ -12,7 +12,7 @@ namespace AnyFS.Sources.GitLab;
 /// each project's repository on its default branch (<c>files</c>), every branch and tag, and the project's other folders.
 /// Names are compared in either case, as Windows does. Folder listings are kept (the SDK's <see cref="KeptListings"/>),
 /// and a change shows when a walk comes to it: the walks go through the folders opened, and "Count files on start" walks the tree
-/// into them, each project's default branch whole at once.
+/// into them, each repository whole at once: a project's default branch, and each of its branches and tags at its commit.
 /// </summary>
 public sealed partial class GitLabSource : SourceBase, ICountable
 {
@@ -724,12 +724,12 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
     /// <summary>
     /// "Count files on start": the first walk of the tree (<see cref="KeptListings"/>), which lists every folder it goes into
-    /// and keeps the listings, so they open at once afterwards: each project's default branch whole, a hundred entries a
-    /// request (<see cref="ListTreeAsync"/>); with listings kept, a walk again every "Walk every folder every" minutes. It
-    /// goes into every folder: since 6-Nov-2026 a branch's and a tag's too, so nothing is left out and the count is exact
-    /// unless a folder could not be listed. A server's or a group's count says how far it has got through the list of its
-    /// projects; the walk comes to each in turn, and all that is below one before the next, so that is how far through
-    /// the walk it is too.
+    /// and keeps the listings, so they open at once afterwards: each repository whole, a hundred entries a request
+    /// (<see cref="ListTreeAsync"/>), on a project's default branch and, since 6-Nov-2026, at each of its branches and tags;
+    /// with listings kept, a walk again every "Walk every folder every" minutes. It goes into every folder, a branch's and
+    /// a tag's among them, so nothing is left out and the count is exact unless a folder could not be listed. A server's
+    /// or a group's count says how far it has got through the list of its projects; the walk comes to each in turn, and
+    /// all that is below one before the next, so that is how far through the walk it is too.
     /// </summary>
     public async Task CountFilesAsync(CancellationToken ct)
     {
@@ -889,10 +889,11 @@ public sealed partial class GitLabSource : SourceBase, ICountable
                 var head = now.Repository ? await HeadAsync(project.Project, ct).ConfigureAwait(false) : null;
                 return $"{now.LastActivity?.UtcTicks ?? 0}|{head?.Commit}";
             case FilesFolder files:
-                IsRoot(files.Project, path);
-                return files.Project.Repository && await HeadAsync(files.Project, ct).ConfigureAwait(false) is { } at ? at.Commit : NoRepository;
+                var filesAt = files.Project.Repository && await HeadAsync(files.Project, ct).ConfigureAwait(false) is { } at ? at.Commit : NoRepository;
+                IsRoot(files.Project, path, filesAt);
+                return filesAt;
             case TreeFolder { RepoPath.Length: 0 } tree:
-                IsRoot(tree.Project, path);
+                IsRoot(tree.Project, path, tree.Commit);
                 return tree.Commit;
             case TicketFolder ticket:
                 return (ticket.Ticket.Updated?.UtcTicks ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -961,7 +962,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             }
         }
 
-        IsRoot(root.Project, path);
+        IsRoot(root.Project, path, root.Commit);
         return listings;
     }
 
@@ -1002,16 +1003,37 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         return copied;
     }
 
-    /// <summary>Notes a folder that is a repository's root (a project's <c>files</c>, a branch's or a tag's folder): one a ref at a commit it is kept at is copied from.</summary>
-    private void IsRoot(GlProject project, string path)
+    /// <summary>
+    /// Notes a folder that is a repository's root (a project's <c>files</c>, a branch's or a tag's folder), with the commit
+    /// it stands at where the caller knows it: one a ref at a commit it is kept at is copied from (<see cref="KeptRoot"/>).
+    /// </summary>
+    private void IsRoot(GlProject project, string path, string? commit = null)
     {
-        if (_settings.Keeps)
+        if (!_settings.Keeps)
         {
-            _roots.GetOrAdd(project.Id, _ => new ConcurrentDictionary<string, byte>(StringComparer.Ordinal))[VfsPath.Normalize(path)] = 0;
+            return;
+        }
+
+        var roots = _roots.GetOrAdd(project.Id, _ => new ConcurrentDictionary<string, string?>(StringComparer.Ordinal));
+        path = VfsPath.Normalize(path);
+        if (commit is null)
+        {
+            // noted on the way down to its project: the commit it was last seen at, if any, stands
+            roots.TryAdd(path, null);
+        }
+        else
+        {
+            roots[path] = commit;
         }
     }
 
-    /// <summary>A root of the project's repository (<see cref="IsRoot"/>) whose listings are kept at <paramref name="commit"/>, other than <paramref name="except"/>; null where there is none.</summary>
+    /// <summary>
+    /// A root of the project's repository (<see cref="IsRoot"/>) whose listings are kept at <paramref name="commit"/>,
+    /// other than <paramref name="except"/>; null where there is none. The stamp held is asked only of a root last seen
+    /// at that commit, or seen at none yet (a project's <c>files</c> before the walk has come to it, which an earlier
+    /// run may have kept). It was asked of every root of the project, as many as its branches and tags, at each listing
+    /// of one: a first count of a project of 300 read 45,000 stamps (the review of 21-Nov-2026, N21).
+    /// </summary>
     private string? KeptRoot(long project, string commit, string except)
     {
         if (!_settings.Keeps || _kept is null || !_roots.TryGetValue(project, out var roots))
@@ -1019,9 +1041,15 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             return null;
         }
 
-        foreach (var root in roots.Keys)
+        foreach (var (root, seenAt) in roots)
         {
-            if (root != except && _kept.Cache.StampHeld(root) == commit)
+            if (root == except || (seenAt is not null && seenAt != commit))
+            {
+                continue;
+            }
+
+            Interlocked.Increment(ref _rootStampsRead);
+            if (_kept.Cache.StampHeld(root) == commit)
             {
                 return root;
             }
@@ -1030,8 +1058,14 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         return null;
     }
 
-    // the folders that are a repository's root, by the project: as many as its refs, whatever their commits (KeptRoot)
-    private readonly ConcurrentDictionary<long, ConcurrentDictionary<string, byte>> _roots = new();
+    /// <summary>How many times the stamp held of a repository's root was asked for, to find one kept at a commit (<see cref="KeptRoot"/>), for tests.</summary>
+    internal long RootStampsRead => Interlocked.Read(ref _rootStampsRead);
+
+    private long _rootStampsRead;
+
+    // the folders that are a repository's root, by the project, each with the commit it was last seen at (null: at none
+    // yet): as many as the project's refs (KeptRoot)
+    private readonly ConcurrentDictionary<long, ConcurrentDictionary<string, string?>> _roots = new();
 
     // a repository's whole tree being read, or read and not yet seen kept (FillTreeAsync), by the project and the commit
     private readonly ConcurrentDictionary<(long Project, string Commit), Lazy<Task<Dictionary<string, List<TreeItem>>>>> _filling = new();

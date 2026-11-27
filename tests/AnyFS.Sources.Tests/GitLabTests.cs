@@ -1581,6 +1581,34 @@ public class GitLabSourceTests
     }
 
     [TestMethod]
+    public async Task ACountOfAProjectOfManyBranchesAndTagsAsksTheStampOfFewOfThemNotOfEveryOtherAtEachOne()
+    {
+        // As the walk lists a branch's or a tag's folder it looks for another folder of the project kept at the same
+        // commit, to copy from. It asked the stamp held of every other one to find it, at each: for 150 branches and 150
+        // tags, each at a commit of its own, 300 stamps some 300 times over (the review of 21-Nov-2026, N21)
+        const int Each = 150;
+        var fake = GitLabSeed.Lab();
+        var project = fake.AddProject(fake.AddGroup("many", "Many", null, fake.UserNamed("tester")), "refs", "Refs");
+        project.Commit("main", new Dictionary<string, byte[]> { ["README.md"] = GitLabSeed.Bytes("# Refs\n") });
+        for (var i = 0; i < Each; i++)
+        {
+            project.Commit($"branch-{i:000}", new Dictionary<string, byte[]> { ["a.txt"] = GitLabSeed.Bytes($"branch {i}\n") });
+            project.Tags[$"tag-{i:000}"] = project.Commit("scratch", new Dictionary<string, byte[]> { ["a.txt"] = GitLabSeed.Bytes($"tag {i}\n") });
+        }
+
+        var (source, _) = await StartAsync(fake, GitLabSeed.Settings(fake.Server + "/many/refs"));
+        await using var _s = source;
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.AreEqual(EnumerationState.Complete, source.Counters.State);
+        var roots = 1 + project.Branches.Count + project.Tags.Count;
+        Console.WriteLine($"{roots} roots (files, {project.Branches.Count} branches, {project.Tags.Count} tags): {source.RootStampsRead:N0} stamps read to find one kept at the same commit");
+        Assert.IsTrue(source.RootStampsRead <= 4 * roots, $"{source.RootStampsRead:N0} stamps read for {roots} roots");
+
+        // and what shares a commit is read once still: files and main, scratch and the last tag
+        Assert.AreEqual(2 * Each + 1, fake.Count("repository/tree"), "each commit read whole, once");
+    }
+
+    [TestMethod]
     public async Task AProjectWhoseActivityHoldsIsKeptAcrossARestartAndAChangedOneListedAgain()
     {
         var fake = GitLabSeed.Lab();
