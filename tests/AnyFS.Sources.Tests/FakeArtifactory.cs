@@ -97,6 +97,9 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
     /// </summary>
     public int? StreamedHolds { get; set; }
 
+    /// <summary>How many answers to a query break off part way: half of the answer is sent, and then the connection is lost.</summary>
+    public int QueryAnswersBreak { get; set; }
+
     /// <summary>Whether a file's download is sent on to a signed address at <see cref="Storage"/>, which refuses a request that carries a sign-in.</summary>
     public bool Redirects { get; set; }
 
@@ -436,6 +439,9 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
 
     internal sealed record Response(int Status, byte[] Body, string? ContentType = "application/json", Dictionary<string, string>? Headers = null)
     {
+        /// <summary>Half of the body is sent, and then the connection is lost.</summary>
+        public bool BreaksOff { get; init; }
+
         public static Response Json(JsonNode node, int status = 200, Dictionary<string, string>? headers = null) => new(status, Encoding.UTF8.GetBytes(node.ToJsonString()), "application/json", headers);
 
         public static Response Text(string text, int status = 200, string type = "text/plain") => new(status, Encoding.UTF8.GetBytes(text), type);
@@ -958,7 +964,14 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
 
             lock (_gate)
             {
-                return Query(text, user, request.Headers.GetValueOrDefault("stream") == "true");
+                var answer = Query(text, user, request.Headers.GetValueOrDefault("stream") == "true");
+                if (answer.Status != 200 || QueryAnswersBreak <= 0)
+                {
+                    return answer;
+                }
+
+                QueryAnswersBreak--;
+                return answer with { BreaksOff = true };
             }
         }
         finally
@@ -1181,7 +1194,11 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
                 .Select(p => p.Split('=', 2)).GroupBy(p => Uri.UnescapeDataString(p[0]), StringComparer.Ordinal)
                 .ToDictionary(g => g.Key, g => g.First().Length > 1 ? Uri.UnescapeDataString(g.First()[1].Replace('+', ' ')) : "", StringComparer.Ordinal);
             var answer = await fake.AnswerAsync(new Request(message.Method.Method, url, segments, query, headers, body)).ConfigureAwait(false);
-            var response = new HttpResponseMessage((HttpStatusCode)answer.Status) { RequestMessage = message, Content = new ByteArrayContent(message.Method == HttpMethod.Head ? [] : answer.Body) };
+            var response = new HttpResponseMessage((HttpStatusCode)answer.Status)
+            {
+                RequestMessage = message,
+                Content = answer.BreaksOff ? new StreamContent(new BrokenOff(answer.Body)) : new ByteArrayContent(message.Method == HttpMethod.Head ? [] : answer.Body),
+            };
             if (answer.ContentType is not null)
             {
                 response.Content.Headers.TryAddWithoutValidation("Content-Type", answer.ContentType);
@@ -1212,5 +1229,20 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
 
             return response;
         }
+    }
+
+    /// <summary>An answer's body of which half arrives, and then the connection is lost.</summary>
+    private sealed class BrokenOff(byte[] body) : MemoryStream(body, 0, body.Length / 2, writable: false)
+    {
+        // no length to go by: the answer was to be longer than what comes of it
+        public override bool CanSeek => false;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var read = await base.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            return read > 0 ? read : throw new IOException("The response ended prematurely.");
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
     }
 }

@@ -1287,6 +1287,33 @@ public class ArtifactoryTests
     }
 
     [TestMethod]
+    public async Task AQueryWhoseAnswerBreaksOffPartWayIsAskedAgain()
+    {
+        // The answer to a query begins, and the connection is lost part way through its body. That was the query's
+        // failure at once, though a dropped connection is tried again and the class said so: a walk then read the
+        // repository a folder at a time, or went without what had changed in it (the review of 21-Nov-2026, N20).
+        var fake = ArtifactorySeed.Lab();
+        await using var source = await StartAsync(fake, ArtifactorySeed.Settings(fake));
+        const string query = "items.find({\"repo\":\"generic-local\",\"type\":\"any\"}).include(\"repo\",\"path\",\"name\",\"type\")";
+        var whole = await source.Api.AqlAsync(query, int.MaxValue, "everything in generic-local", CancellationToken.None);
+        Assert.IsTrue(whole.Items.Count > 10, whole.Items.Count.ToString(CultureInfo.InvariantCulture));
+
+        var asked = fake.Queries.Count;
+        fake.QueryAnswersBreak = 1;
+        var again = await source.Api.AqlAsync(query, int.MaxValue, "everything in generic-local", CancellationToken.None);
+        Assert.AreEqual(whole.Items.Count, again.Items.Count, "the answer whole, from the second asking");
+        Assert.AreEqual(asked + 2, fake.Queries.Count, "asked again, once");
+
+        // one that breaks off every time is the query's failure, after as many askings as a request that gets no answer has
+        asked = fake.Queries.Count;
+        fake.QueryAnswersBreak = int.MaxValue;
+        var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => source.Api.AqlAsync(query, int.MaxValue, "everything in generic-local", CancellationToken.None));
+        Assert.AreEqual(VfsError.Unavailable, ex.Error);
+        StringAssert.Contains(ex.Message, "broke off its answer to everything in generic-local");
+        Assert.AreEqual(asked + 3, fake.Queries.Count, "three times in all");
+    }
+
+    [TestMethod]
     public async Task AFolderWhoseListingFailedStaysSoUntilTheNextWalk()
     {
         var fake = ArtifactorySeed.Lab();

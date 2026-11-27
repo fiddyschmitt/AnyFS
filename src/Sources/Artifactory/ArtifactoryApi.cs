@@ -85,10 +85,11 @@ internal sealed class ArtifactoryApi : RequestCore
     /// </summary>
     public async Task<AqlAnswer> AqlAsync(string query, int most, string what, CancellationToken ct, bool streamed = false)
     {
-        for (var refusals = 0; ;)
+        for (int refusals = 0, breaks = 0; ;)
         {
             await _queryGate.WaitAsync(urgent: !Walks.Current, ct).ConfigureAwait(false);
             var sentAt = System.Diagnostics.Stopwatch.GetTimestamp();
+            TimeSpan? brokeOff = null;
             try
             {
                 return await AqlNowAsync(query, most, what, streamed, ct).ConfigureAwait(false);
@@ -97,12 +98,30 @@ internal sealed class ArtifactoryApi : RequestCore
             {
                 // its place is given back first: it goes again when there is one under what the server takes
             }
+            catch (Exception ex) when (ex is HttpRequestException or IOException)
+            {
+                // The answer began, and the connection was lost part way through it. That was the query's failure at
+                // once, where a request that gets no answer is sent again: a walk then read the repository a folder at a
+                // time, or went without what had changed in it (the review of 21-Nov-2026, N20). It is asked again from
+                // the start, as often and after the same pauses as a request that got no answer, its place given back first.
+                if (++breaks >= Attempts)
+                {
+                    throw new VfsException(VfsError.Unavailable, $"Artifactory ({Host}) broke off its answer to {what}: {ex.Message}", ex);
+                }
+
+                Logger.LogInformation("artifactory: {Host} broke off its answer to {What} ({Error}); asking again", Host, what, ex.Message);
+                brokeOff = Pause(breaks, answered: false);
+            }
             finally
             {
                 _queryGate.Release();
             }
 
-            if (!SendFewer(sentAt))
+            if (brokeOff is { } pause)
+            {
+                await Task.Delay(pause, ct).ConfigureAwait(false);
+            }
+            else if (!SendFewer(sentAt))
             {
                 // one at a time already: the server is busy with others' queries, and made this one wait before it refused it
                 if (++refusals >= ThrottledAttempts)
@@ -201,14 +220,11 @@ internal sealed class ArtifactoryApi : RequestCore
                     buffer = larger;
                 }
 
+                // a connection lost here is the caller's to ask again for (AqlAsync)
                 var read = await stream.ReadAsync(buffer.AsMemory(filled), ct).ConfigureAwait(false);
                 final = read == 0;
                 filled += read;
             }
-        }
-        catch (Exception ex) when (ex is HttpRequestException or IOException)
-        {
-            throw new VfsException(VfsError.Unavailable, $"Artifactory ({Host}) broke off its answer to {what}: {ex.Message}", ex);
         }
         finally
         {

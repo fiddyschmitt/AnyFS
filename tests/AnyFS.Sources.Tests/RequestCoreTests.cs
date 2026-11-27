@@ -36,6 +36,24 @@ public class RequestCoreTests
     }
 
     [TestMethod]
+    public async Task ARequestTheServerFailedGivesItsPlaceBackWhileItPauses()
+    {
+        // the pause after a failure of the server's own, as the one after no answer above: one place, the first request
+        // is answered 502 and pauses before it tries again (here: for good), and the second is answered meanwhile
+        var server = new Server((request, _) => Task.FromResult(request.RequestUri!.AbsolutePath == "/failed" ? Status(HttpStatusCode.BadGateway) : Ok()));
+        using var client = new Client(server, slots: 1) { Paused = Timeout.InfiniteTimeSpan };
+        using var over = new CancellationTokenSource();
+        var failed = client.GetAsync("/failed", over.Token);
+        await server.Asked("/failed", 1).WaitAsync(Soon);
+
+        using var answer = await client.GetAsync("/other", CancellationToken.None).WaitAsync(Soon);
+        Assert.AreEqual(HttpStatusCode.OK, answer.StatusCode);
+
+        over.Cancel();
+        await Assert.ThrowsAsync<TaskCanceledException>(() => failed);
+    }
+
+    [TestMethod]
     public async Task ARequestThatGetsNoAnswerIsSentThreeTimesAndThenSaysSo()
     {
         var server = new Server((_, _) => throw new HttpRequestException("the connection was closed"));
