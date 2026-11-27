@@ -12,7 +12,8 @@ namespace AnyFS.Sources.Sshfs;
 /// SFTP through a <see cref="SftpPool"/>. Paths map to <c>root/path</c>; listings go through a two-second
 /// <see cref="ListingCache"/> and stats are answered from it; a symbolic link shows as what it points at (a
 /// dangling one as an empty file); names starting with a dot are hidden; an entry nobody may write is read-only.
-/// A dropped connection is retried once on a fresh one, and the source turns Degraded until something succeeds; while
+/// A dropped connection is retried once on a fresh one, and the source turns Degraded until something succeeds; a file
+/// open on it is not carried over, and fails until it is closed and opened again (<see cref="CutOff"/>); while
 /// the server cannot be reached the pool refuses its callers at once, but for one every ten seconds who connects for real.
 /// "Count files on start" lists many folders at once over the pool instead of the host's one-at-a-time walk. Each call to
 /// the server is told to <see cref="ISourceContext.UpstreamWatcher"/>, an open file as one from its open to its close.
@@ -150,7 +151,7 @@ public sealed class SshfsSource : SourceBase, ICountable
 
         if (mode.MayCreate())
         {
-            Listings.InvalidateParentOf(path);
+            Made(Listings, path, mode, known);
         }
 
         long length;
@@ -163,7 +164,7 @@ public sealed class SshfsSource : SourceBase, ICountable
             length = known?.Length ?? 0;
         }
 
-        return new SshfsFile(stream, path, length, access != FileAccess.Read, () => Listings.InvalidateParentOf(path), asked);
+        return new SshfsFile(stream, path, length, access != FileAccess.Read, () => KeepAsync(Listings, path, () => EntryAsync(path)), asked, CutOff);
     }
 
     public override async Task CreateDirectoryAsync(string path, CancellationToken ct)
@@ -293,7 +294,7 @@ public sealed class SshfsSource : SourceBase, ICountable
             await Context.UpstreamWatcher.AskAsync("SFTP set time", remote, () => Task.Run(() => client.SetLastWriteTimeUtc(remote, modified.Value.UtcDateTime), ct), ct).ConfigureAwait(false);
             return true;
         }, ct).ConfigureAwait(false);
-        Listings.InvalidateParentOf(path);
+        await KeepAsync(Listings, path, () => EntryAsync(path)).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -380,6 +381,91 @@ public sealed class SshfsSource : SourceBase, ICountable
         var modified = modifiedUtc.Year > 1970 ? new DateTimeOffset(DateTime.SpecifyKind(modifiedUtc, DateTimeKind.Utc)) : (DateTimeOffset?)null;
         return new VfsEntry(name, isDirectory, isDirectory ? 0 : length, null, modified, attributes);
     }
+
+    /// <summary>
+    /// What an open that may make a file leaves in the listing held of its folder: the file as it is from then on, new or
+    /// cut to nothing, made now. The listing used to be forgotten here, and at each close and each time set, so that
+    /// copying files into a folder listed the folder again for each of them, with every file copied so far (the review of
+    /// 21-Nov-2026, N17). What the server says of the file takes this entry's place as the file closes
+    /// (<see cref="KeepAsync"/>).
+    /// </summary>
+    internal static void Made(ListingCache listings, string path, VfsOpenMode mode, VfsEntry? known)
+    {
+        if (mode == VfsOpenMode.OpenOrCreate)
+        {
+            // opened as it was where the listing has it. Where it has not, the open made the file, or found one made
+            // since the folder was listed, and which is not known here: the folder is listed again when next asked
+            if (known is null)
+            {
+                listings.InvalidateParentOf(path);
+            }
+
+            return;
+        }
+
+        listings.Update(path, ToEntry(VfsPath.Name(path), isDirectory: false, 0, DateTime.UtcNow, anyoneCanWrite: true));
+    }
+
+    /// <summary>
+    /// Puts what the server now says of <paramref name="path"/> into the listing held of its folder
+    /// (<paramref name="ask"/>: null where it has nothing there), as a file opened for writing closes and as a time is
+    /// set, where the listing was forgotten (<see cref="Made"/>). The listing is no newer for it: it is listed afresh
+    /// when its two seconds are over, as before. With nothing held of the folder there is nothing to put right and the
+    /// server is not asked; where it cannot be asked, the listing is forgotten as it was.
+    /// </summary>
+    internal static async Task KeepAsync(ListingCache listings, string path, Func<Task<VfsEntry?>> ask)
+    {
+        if (listings.Held(VfsPath.Parent(path)) is null)
+        {
+            // and one on its way, which may have been made before the write, is not kept
+            listings.InvalidateParentOf(path);
+            return;
+        }
+
+        VfsEntry? now;
+        try
+        {
+            now = await ask().ConfigureAwait(false);
+        }
+        catch (VfsException)
+        {
+            listings.InvalidateParentOf(path);
+            return;
+        }
+
+        listings.Update(path, now);
+    }
+
+    /// <summary>
+    /// What the server has at <paramref name="path"/> now, as a listing of its folder would show it; null for nothing.
+    /// Asked whatever its caller has given up since: the file is closed, or its time set, and the listing follows.
+    /// </summary>
+    private Task<VfsEntry?> EntryAsync(string path)
+    {
+        var remote = Remote(path);
+        return RunAsync<VfsEntry?>(path, async client =>
+        {
+            try
+            {
+                var attributes = await AttributesAsync(client, remote, CancellationToken.None).ConfigureAwait(false);
+                return ToEntry(VfsPath.Name(path), attributes.IsDirectory, attributes.Size, attributes.LastWriteTimeUtc, attributes.OwnerCanWrite || attributes.GroupCanWrite || attributes.OthersCanWrite);
+            }
+            catch (SftpPathNotFoundException)
+            {
+                return null;
+            }
+        }, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// An open file has found its connection gone (<see cref="SshfsFile"/>): the source says so as it does when a call of
+    /// its own finds the server out of reach, until a call next reaches it. The file itself stays as it was, failing
+    /// until it is closed and opened again: it is one handle on the connection it was opened on, what was written through
+    /// it and not yet sent went with that connection, and SFTP has nothing to tell a file opened again by its path from
+    /// another put in its place. Its source used to hear nothing of it, the tile Ready throughout (the review of
+    /// 21-Nov-2026, N17).
+    /// </summary>
+    private void CutOff(VfsException lost) => MarkDegraded($"{_settings.Host}: {lost.Message}");
 
     /// <summary>The server path of a source path: under the root, or the drive mapping on a Windows server served from "/".</summary>
     private string Remote(string path) => _driveRoot ? RemotePath.JoinDriveRoot(path) : RemotePath.Join(_root, path);
@@ -609,7 +695,9 @@ public sealed class SshfsSource : SourceBase, ICountable
 /// it, so that a test can hand over one that fails as a server or a lost connection would.
 /// </summary>
 /// <param name="path">The file's path in the source, for what a failed close says.</param>
-internal sealed class SshfsFile(Stream stream, string path, long length, bool writable, Action onClose, IWatchedRequest? asked = null) : IVfsFile
+/// <param name="onClose">Waited for as a file opened for writing closes, the handle given up: its source puts the folder's listing right.</param>
+/// <param name="onCutOff">Told the failure when something asked through the file fails for want of its connection, once.</param>
+internal sealed class SshfsFile(Stream stream, string path, long length, bool writable, Func<Task> onClose, IWatchedRequest? asked = null, Action<VfsException>? onCutOff = null) : IVfsFile
 {
     private readonly SemaphoreSlim _lock = new(1, 1);
     private long _length = length;
@@ -618,6 +706,10 @@ internal sealed class SshfsFile(Stream stream, string path, long length, bool wr
     // a write was taken through this handle that may not be on the server yet, and nothing since has told its writer so:
     // SSH.NET keeps a write until its buffer fills (about 32 KB with OpenSSH) or the stream is flushed. Under the lock
     private bool _unsent;
+
+    // the source has been told that this file's connection has gone (Told): once, since a file cut off asks the server
+    // nothing more, and what it fails with after that says nothing new of the server. Under the lock
+    private bool _cutOff;
 
     public long Length => Volatile.Read(ref _length);
 
@@ -642,10 +734,10 @@ internal sealed class SshfsFile(Stream stream, string path, long length, bool wr
             asked?.AddBytes(read);
             return read;
         }
-        catch (Exception ex) when (ex is SshException or SocketException or IOException)
+        catch (Exception ex) when (IsFailure(ex))
         {
             asked?.Failed(ex, ct);
-            throw Translate(ex);
+            throw Told(Translate(ex));
         }
         finally
         {
@@ -681,10 +773,10 @@ internal sealed class SshfsFile(Stream stream, string path, long length, bool wr
                 Volatile.Write(ref _length, offset + data.Length);
             }
         }
-        catch (Exception ex) when (ex is SshException or SocketException or IOException)
+        catch (Exception ex) when (IsFailure(ex))
         {
             asked?.Failed(ex, ct);
-            throw Translate(ex);
+            throw Told(Translate(ex));
         }
         finally
         {
@@ -706,9 +798,9 @@ internal sealed class SshfsFile(Stream stream, string path, long length, bool wr
             stream.SetLength(length);
             Volatile.Write(ref _length, length);
         }
-        catch (Exception ex) when (ex is SshException or SocketException or IOException)
+        catch (Exception ex) when (IsFailure(ex))
         {
-            throw Translate(ex);
+            throw Told(Translate(ex));
         }
         finally
         {
@@ -732,9 +824,9 @@ internal sealed class SshfsFile(Stream stream, string path, long length, bool wr
             _unsent = false;
             await stream.FlushAsync(ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is SshException or SocketException or IOException)
+        catch (Exception ex) when (IsFailure(ex))
         {
-            throw Translate(ex);
+            throw Told(Translate(ex));
         }
         finally
         {
@@ -804,13 +896,36 @@ internal sealed class SshfsFile(Stream stream, string path, long length, bool wr
 
         if (writable)
         {
-            onClose();
+            await onClose().ConfigureAwait(false);
         }
 
         if (lost is not null)
         {
-            throw new VfsException(lost is SftpException ? VfsError.IoError : VfsError.Unavailable, $"what was written to '{path}' did not all reach the server: {lost.Message}", lost);
+            throw Told(new VfsException(lost is SftpException ? VfsError.IoError : VfsError.Unavailable, $"what was written to '{path}' did not all reach the server: {lost.Message}", lost));
         }
+    }
+
+    /// <summary>
+    /// Whether an exception is the server's or the connection's answer to what was asked through the file, to be put as
+    /// a <see cref="VfsException"/>. SSH.NET says a session that has gone as an InvalidOperationException ("The session
+    /// is not open."), and a client disposed of (a connection the pool dropped) as an ObjectDisposedException, which is
+    /// one too. The close alone took those for what they are: from a read, a write, a flush or a length set they went to
+    /// the mount as they came, which it answers as a fault of its own (WebDAV a 500, FTP by ending the session) and not
+    /// as a server out of reach. A file used after its own close is its caller's mistake, and is told as that.
+    /// </summary>
+    private bool IsFailure(Exception ex)
+        => ex is SshException or SocketException or IOException || (ex is InvalidOperationException && !_disposed);
+
+    /// <summary>A failure as it is, its source told first where it is the connection's (<c>onCutOff</c>, once).</summary>
+    private VfsException Told(VfsException failure)
+    {
+        if (failure.Error == VfsError.Unavailable && !_cutOff)
+        {
+            _cutOff = true;
+            onCutOff?.Invoke(failure);
+        }
+
+        return failure;
     }
 
     private static VfsException Translate(Exception ex) => ex switch
