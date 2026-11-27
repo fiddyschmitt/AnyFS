@@ -115,6 +115,34 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task TheMarkdownAListingMeasuredIsKeptByWhatItWeighsAndBuiltAgainWhereItWasLetGo()
+    {
+        // every Markdown file a listing measured was kept for the opens that follow, fifty thousand of any size, and then
+        // none of them (the review of 21-Nov-2026, P8)
+        const int Posts = 120;
+        const long MayWeigh = 256 * 1024;
+        var text = "<p>" + string.Join(" ", Enumerable.Range(0, 250).Select(i => "word" + (i % 97))) + "</p>";
+        var (fake, _) = ChannelOf(Posts, text);
+        var source = new TeamsSource(new TeamsSettings { Account = fake.Account }, fake.StandIn(Posts * 3, 200, MayWeigh));
+        await source.InitialiseAsync(new TestSourceContext(), CancellationToken.None);
+        await using var _s = source;
+        var names = await NamesAsync(source, "Big team/General/posts");
+        Assert.AreEqual(Posts, names.Count);
+        var first = "";
+        foreach (var name in names)
+        {
+            // as a search goes: the folder listed, and its file read at once
+            CollectionAssert.Contains(await NamesAsync(source, $"Big team/General/posts/{name}"), "post.md");
+            var read = await TextAsync(source, $"Big team/General/posts/{name}/post.md");
+            StringAssert.Contains(read, "word96");
+            first = first.Length == 0 ? read : first;
+        }
+
+        // the first of them was let go long since: opened now, it is built again, the same
+        Assert.AreEqual(first, await TextAsync(source, $"Big team/General/posts/{names[0]}/post.md"));
+    }
+
+    [TestMethod]
     public async Task TheRootShowsTheTeamsAndTheChatsFolder()
     {
         await using var source = await StartAsync(Seed());

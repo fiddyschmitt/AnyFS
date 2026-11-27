@@ -547,7 +547,7 @@ internal sealed class FakeTeams : ITeamsApi
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     /// <summary>The seam a source reads this fake through; with a newest read of <paramref name="newest"/> messages, <paramref name="pageSize"/> to a page, so a few messages have a history.</summary>
-    public TeamsStandIn StandIn(int newest = 2_000, int pageSize = 200) => new(this, newest, pageSize);
+    public TeamsStandIn StandIn(int newest = 2_000, int pageSize = 200, long? answersKept = null) => new(this, newest, pageSize, answersKept);
 
     private List<TeamsMessage> Ordered(string threadId)
         => _messages.TryGetValue(threadId, out var list)

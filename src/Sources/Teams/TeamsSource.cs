@@ -24,10 +24,20 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     // otherwise rename a chat a kept listing still shows under its first name
     private readonly ConcurrentDictionary<string, string> _chatNames = new(StringComparer.Ordinal);
 
-    // the Markdown a listing measured, by its path: an open serves the bytes of the length the listing reported, not a
-    // rebuild from a conversation that has moved on since (the last two builds, so a refresh landing between a stat and an
-    // open still finds the one the stat saw)
-    private readonly ConcurrentDictionary<string, (byte[] Latest, byte[]? Previous)> _served = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// The Markdown a listing measured: an open serves the bytes of the length the listing reported, not a rebuild from a
+    /// conversation that has moved on since (the last two builds, so a refresh landing between a stat and an open still
+    /// finds the one the stat saw). Kept among the source's answers (<see cref="RequestCache.Put{T}"/>), where it weighs
+    /// what it is and goes as what was longest unasked for; an open that finds none builds the file again and puts the
+    /// listing right. It was a map of its own: every file listed, fifty thousand of any size, and then none of them (the
+    /// review of 21-Nov-2026, P8).
+    /// </summary>
+    private sealed record Served(byte[] Latest, byte[]? Previous);
+
+    private Served? ServedAt(string path) => _cache?.Peek<Served>(ServedKey(path));
+
+    // by its path in either case, as the map it was kept in compared them
+    private static string ServedKey(string path) => "served:" + path.ToUpperInvariant();
     private ITeamsApi? _api;
     private RequestCache? _cache;
     private KeptListings? _kept;
@@ -64,7 +74,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     {
         _cloud = _settings.ChosenCloud ?? TeamsCloud.Global;
         _api = _standIn?.Api ?? await SignInAsync(ct).ConfigureAwait(false);
-        _cache = new RequestCache(_stopping.Token);
+        _cache = new RequestCache(_stopping.Token, _standIn?.AnswersKept ?? RequestCache.DefaultMaxBytes);
         _root = new RootFolder();
 
         // the walk may have all of "Requests at a time" in flight (until 5-Nov-2026 half, the rest kept back for browsing, which
@@ -212,7 +222,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         // a conversation's Markdown as the listing measured it: the bytes of the length the client was told
         var normalized = VfsPath.Normalize(path);
         var (parent, name) = VfsPath.SplitLast(normalized);
-        if (_served.TryGetValue(normalized, out var served))
+        if (ServedAt(normalized) is { } served)
         {
             var length = (await AwaitedAsync(parent, Kept.Cache.StatAsync(normalized, ct, StringComparison.OrdinalIgnoreCase)).ConfigureAwait(false))?.Length;
             var bytes = served.Previous is { } previous && length == previous.Length && length != served.Latest.Length ? previous : served.Latest;
@@ -296,7 +306,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     private readonly ConcurrentDictionary<string, byte> _unlisted = new(StringComparer.OrdinalIgnoreCase);
 
     // the files other than Markdown (shared files, images, recordings) of each folder as last listed, by its path: an open
-    // serves the file the listing named (as _served does the Markdown) without finding it from the root again
+    // serves the file the listing named (as the Markdown served is its listing's) without finding it from the root again
     private readonly ConcurrentDictionary<string, IReadOnlyList<TmFile>> _files = new(StringComparer.OrdinalIgnoreCase);
 
     // the conversations listed while nothing read their shared files (no SharePoint or Graph token in hand), by path: listed
@@ -373,12 +383,11 @@ public sealed partial class TeamsSource : SourceBase, ICountable
 
     private void Serve(string path, byte[] content)
     {
-        if (_served.Count > 50_000)
+        var kept = ServedAt(path);
+        if (kept is null || !kept.Latest.AsSpan().SequenceEqual(content))
         {
-            _served.Clear();
+            Cache.Put(ServedKey(path), new Served(content, kept?.Latest), null, content.Length + (kept?.Latest.Length ?? 0));
         }
-
-        _served.AddOrUpdate(path, _ => (content, null), (_, kept) => kept.Latest.AsSpan().SequenceEqual(content) ? kept : (content, kept.Latest));
     }
 
     private async Task<TmNode> ResolveAsync(string path, CancellationToken ct)
@@ -1074,7 +1083,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     /// <summary>Whether a root listing has a built file as it is now: served with its bytes, or not shown where it has none.</summary>
     private bool Measured(IReadOnlyList<VfsEntry> root, BuiltFile file)
         => file.Last?.Bytes is { } bytes
-            ? _served.TryGetValue(file.Name, out var served) && served.Latest.AsSpan().SequenceEqual(bytes)
+            ? ServedAt(file.Name) is { } served && served.Latest.AsSpan().SequenceEqual(bytes)
             : !root.Any(e => e.Name.Equals(file.Name, StringComparison.OrdinalIgnoreCase));
 
     private async Task<(byte[]? Bytes, int Reached)> BuildMyGroupsAsync(CancellationToken ct)
