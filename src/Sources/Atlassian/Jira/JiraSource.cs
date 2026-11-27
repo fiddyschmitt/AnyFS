@@ -29,16 +29,12 @@ public sealed class JiraSource : SourceBase, ICountable
     // issue heads (key, summary, times) a request carries: Jira's own cap, jira.search.views.default.max
     private const int HeadsPerRequest = 1000;
 
-    // issues read whole and kept for the opens and listings that follow (each a few kilobytes as JSON)
-    internal const int IssuesKept = 2_000;
-
     private static readonly string[] AllFields = ["*all"];
     private static readonly string[] HeadFields = ["summary", "created", "updated"];
 
     private readonly JiraSettings _settings;
     private readonly AtlassianStandIn? _standIn;
     private readonly CancellationTokenSource _stopping = new();
-    private readonly ConcurrentDictionary<string, (JiraIssue Issue, long At)> _issues = new(StringComparer.OrdinalIgnoreCase);
 
     // whole issues asked for at once: as many as this server answers in a few seconds
     private readonly RequestSizer _wholeIssues = new(smallest: 1, start: 10, largest: IssuesPerRequest);
@@ -90,7 +86,7 @@ public sealed class JiraSource : SourceBase, ICountable
         // "Requests at a time" is 1 to 64 (the client itself takes more: Bitbucket's and Bamboo's two settings multiplied)
         _api = new AtlassianApi(_session, Math.Clamp(_settings.Concurrency, 1, 64), Logger);
         _api.TellHealth(MarkHealthy, MarkDegraded);
-        _cache = new RequestCache(_stopping.Token);
+        _cache = new RequestCache(_stopping.Token, _standIn?.AnswersKept ?? RequestCache.DefaultMaxBytes);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
         Scope = JiraScope.From(_session.Address, out var problem) ?? throw new SourceFailedException(problem!, permanent: true);
@@ -319,16 +315,10 @@ public sealed class JiraSource : SourceBase, ICountable
             }
         }
 
-        return await Cache.GetAsync($"issue:{key}", Refresh, async c =>
+        return await Cache.GetAsync(IssueKey(key), Refresh, async c =>
         {
             using var doc = await Api.FindAsync($"issue/{Uri.EscapeDataString(key)}?expand=renderedFields,names&fields=*all", c).ConfigureAwait(false);
-            var issue = doc is null ? null : JiraIssue.Parse(doc.RootElement);
-            if (issue is not null)
-            {
-                Remember(issue);
-            }
-
-            return new Box<JiraIssue?>(issue);
+            return new Box<JiraIssue?>(doc is null ? null : JiraIssue.Parse(doc.RootElement));
         }, ct).ConfigureAwait(false) is { Value: { } read } ? read : null;
     }
 
@@ -352,36 +342,22 @@ public sealed class JiraSource : SourceBase, ICountable
 
     private readonly ReadAhead _readAhead = new();
 
-    private JiraIssue? Fresh(string key)
-        => _issues.TryGetValue(key, out var kept) && Stopwatch.GetElapsedTime(kept.At) < Refresh ? kept.Issue : null;
+    /// <summary>An issue read whole not long ago, alone or with those a search brought beside it; null for none.</summary>
+    private JiraIssue? Fresh(string key) => _cache?.Peek<Box<JiraIssue?>>(IssueKey(key))?.Value;
 
-    /// <summary>How many issues are kept whole, for tests.</summary>
-    internal int IssuesRemembered => _issues.Count;
+    /// <summary>
+    /// Keeps an issue a search brought whole, for the listings and opens that follow: among the answers kept
+    /// (<see cref="RequestCache.Put{T}"/>), where it weighs what it is and is found by the key an asking for it alone
+    /// uses. Two thousand were kept in a map of their own whatever their size: 130 MB where an issue is 65 KB (the review
+    /// of 21-Nov-2026, P6).
+    /// </summary>
+    internal void Remember(JiraIssue issue) => _cache?.Put(IssueKey(issue.Key), new Box<JiraIssue?>(issue), Refresh, issue.Bytes);
 
-    internal void Remember(JiraIssue issue)
-    {
-        _issues[issue.Key] = (issue, Stopwatch.GetTimestamp());
-        if (_issues.Count <= IssuesKept || Interlocked.Exchange(ref _trimming, 1) != 0)
-        {
-            return;
-        }
+    /// <summary>How many answers the source keeps and what they weigh together, for tests.</summary>
+    internal (int Count, long Bytes) AnswersKept => _cache is { } cache ? (cache.Count, cache.Bytes) : (0, 0);
 
-        try
-        {
-            // from a copy made whole: others go on adding, and sorting the dictionary itself as it grows throws
-            foreach (var old in _issues.ToArray().OrderBy(i => i.Value.At).Take(IssuesKept / 4))
-            {
-                _issues.TryRemove(old);
-            }
-        }
-        finally
-        {
-            Volatile.Write(ref _trimming, 0);
-        }
-    }
-
-    // 1 while the issues kept whole are being trimmed: a second trim meanwhile would sort them all again for the same ones
-    private int _trimming;
+    /// <summary>What an issue is kept under: its key in capitals, as a path may give it in either case.</summary>
+    private static string IssueKey(string key) => "issue:" + key.ToUpperInvariant();
 
     /// <summary>An issue folder's children: its <c>issue.md</c> and, where it has attachments and they are shown, its <c>attachments</c>.</summary>
     internal async Task<IReadOnlyList<JiNode>> IssueChildrenAsync(JiraIssue issue, CancellationToken ct)

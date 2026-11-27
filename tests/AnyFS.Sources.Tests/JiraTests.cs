@@ -773,49 +773,84 @@ public class JiraTests
         await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync("ANYFS-99 Nothing/issue.md", VfsOpenMode.Read, CancellationToken.None));
     }
 
-    /// <summary>The issues kept whole are trimmed as others are added: a sort of the dictionary itself threw as it grew.</summary>
+    /// <summary>
+    /// An issue a search brought whole is kept among the source's answers, where it weighs what it is, and answers an
+    /// asking for it alone, in either case of its key, with nothing asked of the server. Two thousand were kept in a map
+    /// of their own, whatever their size (the review of 21-Nov-2026, P6).
+    /// </summary>
     [TestMethod]
-    public async Task IssuesRememberedByManyThreadsAtOnceAreTrimmedWithoutAFault()
+    public async Task AnIssueReadWithOthersIsKeptAmongTheAnswersAndWeighsWhatItIs()
     {
-        const int Threads = 4;
-        const int Each = 5_000;
-        static JiraIssue Issue(string key)
+        var fake = JiraSeed.Lab();
+        await using var source = await StartAsync(fake, JiraSeed.Settings(fake));
+        var before = source.AnswersKept;
+        using var doc = System.Text.Json.JsonDocument.Parse(new JsonObject { ["id"] = "77", ["key"] = "KEPT-1", ["fields"] = new JsonObject { ["summary"] = "Kept", ["description"] = new string('d', 10_000) } }.ToJsonString());
+        var issue = JiraIssue.Parse(doc.RootElement);
+        Assert.IsTrue(issue.Bytes is > 12_500 and < 13_000, $"{issue.Bytes:N0} B: its JSON and a quarter as much again");
+        source.Remember(issue);
+        Assert.AreEqual((before.Count + 1, before.Bytes + RequestCache.LeastWeight + issue.Bytes), source.AnswersKept);
+
+        var asked = fake.Requests.Count;
+        Assert.AreSame(issue, await source.IssueAsync("kept-1", CancellationToken.None));
+        Assert.AreSame(issue, await source.IssueAsync("KEPT-1", CancellationToken.None));
+        Assert.AreEqual(asked, fake.Requests.Count, "answered from what is kept");
+
+        // read again with others, it takes the place of what was kept of it
+        source.Remember(JiraIssue.Parse(doc.RootElement));
+        Assert.AreEqual((before.Count + 1, before.Bytes + RequestCache.LeastWeight + issue.Bytes), source.AnswersKept);
+    }
+
+    /// <summary>A pass over more issues than the source's answers may weigh keeps to that weight, and reads every one of them right.</summary>
+    [TestMethod]
+    public async Task APassOverMoreIssuesThanMayBeKeptKeepsToWhatMayBeKept()
+    {
+        const int Issues = 300;
+        const long MayWeigh = 1 << 20;
+        var text = string.Join(" ", Enumerable.Range(0, 1_500).Select(i => "word" + (i % 97)));
+        var fake = new FakeJira(root: "/jira");
+        fake.AddAccount("tester", "Test Er", JiraSeed.Token, JiraSeed.Password);
+        var project = fake.AddProject("BIG", "Big project");
+        for (var i = 0; i < Issues; i++)
         {
-            using var doc = System.Text.Json.JsonDocument.Parse(new JsonObject { ["id"] = "1", ["key"] = key, ["fields"] = new JsonObject() }.ToJsonString());
-            return JiraIssue.Parse(doc.RootElement);
+            fake.AddIssue(project, $"Issue number {i}", issue =>
+            {
+                issue.Description = text;
+                issue.DescriptionHtml = "<p>" + text + "</p>";
+            });
         }
 
-        await using var source = new JiraSource(new JiraSettings());
-        var batches = Enumerable.Range(0, Threads).Select(t => Enumerable.Range(1, Each).Select(n => Issue($"T{t}-{n}")).ToArray()).ToArray();
-        var faults = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
-        using var go = new ManualResetEventSlim();
-        var threads = batches.Select(batch => new Thread(() =>
+        var settings = JiraSeed.Settings(fake, "/projects/BIG");
+        settings.RefreshSeconds = 3600;
+        await using var source = await StartAsync(fake, settings, standIn: fake.StandIn() with { AnswersKept = MayWeigh });
+        var heaviest = 0L;
+        var read = 0;
+        var folders = new List<string>();
+        await foreach (var entry in source.ListAsync("", CancellationToken.None))
         {
-            go.Wait();
-            try
+            if (entry.IsDirectory)
             {
-                foreach (var issue in batch)
+                folders.Add(entry.Name);
+            }
+        }
+
+        foreach (var folder in folders)
+        {
+            foreach (var name in await NamesAsync(source, folder))
+            {
+                if (name.EndsWith(".md", StringComparison.Ordinal))
                 {
-                    source.Remember(issue);
+                    StringAssert.Contains(await TextAsync(source, $"{folder}/{name}"), "word96");
+                    read++;
                 }
             }
-            catch (Exception ex)
-            {
-                faults.Enqueue(ex);
-            }
-        })).ToList();
-        threads.ForEach(t => t.Start());
-        go.Set();
-        threads.ForEach(t => t.Join());
-        Assert.AreEqual(0, faults.Count, faults.FirstOrDefault()?.ToString());
 
-        // a trim under way lets the others add without one of their own, so more may be kept just now: an issue more trims again
-        for (var n = 0; source.IssuesRemembered > JiraSource.IssuesKept && n < Threads * Each; n++)
-        {
-            source.Remember(Issue($"S-{n}"));
+            heaviest = Math.Max(heaviest, source.AnswersKept.Bytes);
         }
 
-        Assert.IsTrue(source.IssuesRemembered <= JiraSource.IssuesKept, $"{source.IssuesRemembered:N0} issues kept");
+        Assert.AreEqual(Issues, read);
+        Console.WriteLine($"{Issues} issues of {text.Length / 1024} KB read; the answers kept weighed {heaviest / 1024:N0} KB at most");
+        Assert.IsTrue(heaviest <= MayWeigh + (MayWeigh / 4), $"{heaviest:N0} B kept at the most");
+        Assert.IsTrue(source.AnswersKept.Bytes > MayWeigh / 2, "and what may be kept is");
     }
 
     [TestMethod]

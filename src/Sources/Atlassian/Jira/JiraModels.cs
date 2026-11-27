@@ -211,7 +211,15 @@ internal sealed class JiraIssue
         Created = Fields.Date("created");
         Updated = Fields.Date("updated");
         Attachments = Fields.Arr("attachment").Select(JiraAttachment.Parse).OrderBy(a => a.Created ?? DateTimeOffset.MinValue).ThenBy(a => a.Id, StringComparer.Ordinal).ToList();
+
+        // its JSON as it came, and the table over it that makes it readable: a quarter as much again (measured: 54 KB
+        // held of an issue of 47 KB)
+        var raw = System.Runtime.InteropServices.JsonMarshal.GetRawUtf8Value(issue).Length;
+        Bytes = raw + (raw / 4);
     }
+
+    /// <summary>What the issue holds in memory, about: for what keeps it to weigh it by.</summary>
+    public long Bytes { get; }
 
     public JsonElement Raw { get; }
 

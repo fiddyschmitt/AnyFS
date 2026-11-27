@@ -11,10 +11,11 @@ namespace AnyFS.Sources.Atlassian;
 
 /// <summary>
 /// What a test (or the Test button) changes about a Jira or Confluence session: what sends its requests; for the web
-/// session, what stands in for the browser (the cookies a sign-in in it would give; interactive or not); and whether a
-/// session kept from before is used.
+/// session, what stands in for the browser (the cookies a sign-in in it would give; interactive or not); whether a
+/// session kept from before is used; and what the answers a source keeps may weigh together, in bytes (null for the
+/// request cache's own).
 /// </summary>
-internal sealed record AtlassianStandIn(Func<HttpMessageHandler> Handler, Func<bool, CancellationToken, Task<IReadOnlyList<SessionCookie>>>? Browser = null, bool UseKept = true);
+internal sealed record AtlassianStandIn(Func<HttpMessageHandler> Handler, Func<bool, CancellationToken, Task<IReadOnlyList<SessionCookie>>>? Browser = null, bool UseKept = true, long? AnswersKept = null);
 
 /// <summary>
 /// An Atlassian source's sign-in (Jira, Confluence, Bitbucket, Bamboo) and the client its requests go through (spec 7.10).
