@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using AnyFS.Sdk;
@@ -159,12 +160,25 @@ public sealed class SshfsSource : SourceBase, ICountable
         {
             length = known is not null && !mode.IsWrite() ? known.Length : stream.Length;
         }
-        catch (SshException)
+        catch (Exception ex) when (ex is SshException or InvalidOperationException)
         {
+            // (a session gone since the open is SSH.NET's InvalidOperationException: the file says so at its first call)
             length = known?.Length ?? 0;
         }
 
-        return new SshfsFile(stream, path, length, access != FileAccess.Read, () => KeepAsync(Listings, path, () => EntryAsync(path)), asked, CutOff);
+        if (access == FileAccess.Read)
+        {
+            return new SshfsFile(stream, path, length, writable: false, () => Task.CompletedTask, asked, CutOff);
+        }
+
+        SshfsFile? file = null;
+        file = new SshfsFile(stream, path, length, writable: true, () =>
+        {
+            _writing.Remove(file!);
+            return KeepAsync(Listings, path, () => EntryAsync(path));
+        }, asked, CutOff);
+        _writing.Add(file, path);
+        return file;
     }
 
     public override async Task CreateDirectoryAsync(string path, CancellationToken ct)
@@ -288,6 +302,8 @@ public sealed class SshfsSource : SourceBase, ICountable
             return;
         }
 
+        // what the file's writer has written and its handle still keeps goes to the server first (OpenWrites)
+        await _writing.SendAsync(path, ct).ConfigureAwait(false);
         var remote = Remote(path);
         await RunAsync(path, async client =>
         {
@@ -466,6 +482,9 @@ public sealed class SshfsSource : SourceBase, ICountable
     /// 21-Nov-2026, N17).
     /// </summary>
     private void CutOff(VfsException lost) => MarkDegraded($"{_settings.Host}: {lost.Message}");
+
+    // the files open for writing: a time set on one of them sends what its handle still keeps first (SetTimesAsync)
+    private readonly OpenWrites _writing = new();
 
     /// <summary>The server path of a source path: under the root, or the drive mapping on a Windows server served from "/".</summary>
     private string Remote(string path) => _driveRoot ? RemotePath.JoinDriveRoot(path) : RemotePath.Join(_root, path);
@@ -689,6 +708,42 @@ public sealed class SshfsSource : SourceBase, ICountable
 }
 
 /// <summary>
+/// The files a source has open for writing, by their paths: so that a time set on one of them sends what its handle
+/// still keeps before the time is set. SSH.NET keeps the last of what is written until its buffer fills or the file
+/// closes, and a mount sets a copied file's time while the file is still open (WinFsp and SMB, by its path, before
+/// their close): the kept bytes then went to the server after the time, at the close, and the server put the file's
+/// time to that moment. A file copied in through a mount had the time of its copying and not its own (asked of a real
+/// server, 27-Nov-2026: every file, of 5 bytes and of a megabyte alike).
+/// </summary>
+internal sealed class OpenWrites
+{
+    private readonly ConcurrentDictionary<SshfsFile, string> _open = new();
+
+    /// <summary>How many files are open for writing.</summary>
+    public int Count => _open.Count;
+
+    public void Add(SshfsFile file, string path) => _open[file] = path;
+
+    public void Remove(SshfsFile file) => _open.TryRemove(file, out _);
+
+    /// <summary>
+    /// Sends what the files open for writing at <paramref name="path"/> still keep. Where that fails the failure is
+    /// thrown as the file's writer would have been told it, and what was kept stays kept for the close to try.
+    /// </summary>
+    public async Task SendAsync(string path, CancellationToken ct)
+    {
+        foreach (var (file, at) in _open)
+        {
+            // in either case: a server that tells names apart by case has two files there, and sending early harms neither
+            if (string.Equals(at, path, StringComparison.OrdinalIgnoreCase))
+            {
+                await file.SendKeptAsync(ct).ConfigureAwait(false);
+            }
+        }
+    }
+}
+
+/// <summary>
 /// An open SFTP file: one <see cref="SftpFileStream"/>, positioned per call under a lock (the handle is
 /// positionless to callers, SFTP reads carry offsets anyway). The length is what the listing said at open, kept
 /// up to date by this handle's own writes. The stream is taken as a <see cref="Stream"/>, which is all that is used of
@@ -823,6 +878,48 @@ internal sealed class SshfsFile(Stream stream, string path, long length, bool wr
             // sent, or its caller told here that it was not
             _unsent = false;
             await stream.FlushAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (IsFailure(ex))
+        {
+            throw Told(Translate(ex));
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Sends what was written through the file and is still kept here, for its source to set the file's time after
+    /// (<see cref="OpenWrites"/>). Nothing for a file closed meanwhile, or with nothing kept. Where it fails, what is
+    /// kept stays so: the close tries again, and tells the writer as it would have.
+    /// </summary>
+    internal async ValueTask SendKeptAsync(CancellationToken ct)
+    {
+        if (!writable)
+        {
+            return;
+        }
+
+        try
+        {
+            await _lock.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException)
+        {
+            // closed, and what it kept was sent by its close
+            return;
+        }
+
+        try
+        {
+            if (_disposed || !_unsent)
+            {
+                return;
+            }
+
+            await stream.FlushAsync(ct).ConfigureAwait(false);
+            _unsent = false;
         }
         catch (Exception ex) when (IsFailure(ex))
         {

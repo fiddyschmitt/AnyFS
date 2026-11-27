@@ -311,6 +311,46 @@ public class SshfsLiveTests
     }
 
     [TestMethod]
+    [DataRow(5)]
+    [DataRow(100_000)]
+    public async Task ATimeSetOnAFileStillOpenIsItsTimeAfterItsClose(int length)
+    {
+        // as a mount copies a file in: its bytes, its time while it is still open, its close. The last of the bytes went
+        // to the server at the close, after the time, and the file had the time of its copying (27-Nov-2026)
+        SshTestServer.Require();
+        await using var source = await StartAsync(SshTestServer.Settings());
+        var path = $"scratch/timed-{Guid.NewGuid():N}.bin";
+        var modified = new DateTimeOffset(2026, 11, 2, 3, 4, 5, TimeSpan.Zero);
+        try
+        {
+            await using (var file = await source.OpenAsync(path, VfsOpenMode.CreateNew, None))
+            {
+                var bytes = new byte[length];
+                for (var at = 0; at < length; at += 65536)
+                {
+                    await file.WriteAsync(at, bytes.AsMemory(at, Math.Min(65536, length - at)), None);
+                }
+
+                await source.SetTimesAsync(path, null, modified, None);
+            }
+
+            var mine = await source.StatAsync(path, None);
+            Assert.AreEqual(modified, mine?.Modified, "by the source that wrote it");
+            Assert.AreEqual(length, mine?.Length);
+
+            // and by the server's own word, to a source that has listed nothing yet
+            await using var other = await StartAsync(SshTestServer.Settings());
+            var theirs = await other.StatAsync(path, None);
+            Assert.AreEqual(modified, theirs?.Modified, "by the server");
+            Assert.AreEqual(length, theirs?.Length);
+        }
+        finally
+        {
+            await source.DeleteAsync(path, None);
+        }
+    }
+
+    [TestMethod]
     public async Task AMissingRootFailsPermanentlyWithTheReason()
     {
         SshTestServer.Require();
@@ -767,6 +807,43 @@ public class SshfsUnitTests
         Assert.AreEqual(VfsError.Unavailable, write.Error);
         Assert.AreSame(write, cutOff.Single());
         await file.DisposeAsync();
+    }
+
+    [TestMethod]
+    public async Task ATimeSetOnAFileStillOpenSendsWhatTheFileKeepsFirst()
+    {
+        // SSH.NET keeps the last of what is written until the file closes, and a mount sets a copied file's time while it
+        // is open: the kept bytes went to the server after the time, and the server put the file's time to that moment
+        // (asked of a real server, 27-Nov-2026: the live test below). What the source does before it sets a time:
+        var writes = new OpenWrites();
+        var stream = new SftpLikeStream();
+        var file = new SshfsFile(stream, "docs/a.txt", 0, writable: true, NothingToTell);
+        writes.Add(file, "docs/a.txt");
+        var other = new SftpLikeStream();
+        var beside = new SshfsFile(other, "docs/b.txt", 0, writable: true, NothingToTell);
+        writes.Add(beside, "docs/b.txt");
+        await file.WriteAsync(0, "hello"u8.ToArray(), CancellationToken.None);
+        await beside.WriteAsync(0, "beside"u8.ToArray(), CancellationToken.None);
+        Assert.AreEqual(0, stream.OnServer.Count, "kept, as SSH.NET keeps a write until its buffer fills");
+
+        await writes.SendAsync("docs/a.txt", CancellationToken.None);
+        CollectionAssert.AreEqual("hello"u8.ToArray(), stream.OnServer, "sent before the time is set");
+        Assert.AreEqual(0, other.OnServer.Count, "and no other file's");
+
+        // a connection gone by then fails the time's setting as a server out of reach, and what is kept stays kept: the
+        // close tries again and tells the writer, as it would have with no time set
+        await file.WriteAsync(5, "!"u8.ToArray(), CancellationToken.None);
+        stream.SessionOpen = false;
+        var lost = await Assert.ThrowsExactlyAsync<VfsException>(() => writes.SendAsync("docs/a.txt", CancellationToken.None));
+        Assert.AreEqual(VfsError.Unavailable, lost.Error);
+        var close = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync());
+        StringAssert.Contains(close.Message, "did not all reach the server");
+
+        // a file closed is asked nothing, and one only read is not among them
+        await writes.SendAsync("docs/a.txt", CancellationToken.None);
+        await beside.DisposeAsync();
+        CollectionAssert.AreEqual("beside"u8.ToArray(), other.OnServer);
+        await writes.SendAsync("docs/b.txt", CancellationToken.None);
     }
 
     [TestMethod]
