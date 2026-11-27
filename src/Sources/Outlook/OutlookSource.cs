@@ -194,7 +194,9 @@ public sealed class OutlookSource : SourceBase, ICountable
                 await _books.StartAsync(ct).ConfigureAwait(false);
             }
 
+            var builtAt = (_store as EwsMailStore)?.Revision ?? -1;
             Swap(await MailTree.BuildAsync(_store, ct, (done, total, name) => Context.ReportProgress($"Listing {name} ({done} of {total} folders)", total == 0 ? null : (double)done / total), _books?.Node, _settings.ShowHidden, ItsOwn).ConfigureAwait(false));
+            _builtRevision = builtAt;
             if (kept is null)
             {
                 await KeepListingAsync(ct).ConfigureAwait(false);
@@ -590,7 +592,22 @@ public sealed class OutlookSource : SourceBase, ICountable
                 await _books.RefreshAsync(ct).ConfigureAwait(false);
             }
 
+            if (await QuietAsync(ct).ConfigureAwait(false))
+            {
+                // nothing in the mailbox changed, and the tree stands as it is
+                Interlocked.Increment(ref _quietRefreshes);
+                Logger.LogDebug("outlook: {Name}: nothing changed", Store.Name);
+
+                // what was measured of items since is kept as at any refresh
+                await KeepListingsAsync(now: true).ConfigureAwait(false);
+                MarkHealthy();
+                HoldDegraded("refresh", null);
+                return;
+            }
+
+            var builtAt = (_store as EwsMailStore)?.Revision ?? -1;
             Swap(await MailTree.BuildAsync(Store, ct, null, _books?.Node, _settings.ShowHidden, ItsOwn).ConfigureAwait(false));
+            _builtRevision = builtAt;
             ForgetFiles();
             ListNewBehind();
             Logger.LogInformation("outlook: {Name} read again in {Seconds:F1} s: {Folders:N0} folders, {Items:N0} items", Store.Name, Stopwatch.GetElapsedTime(started).TotalSeconds, _tree.FolderCount, _tree.ItemCount);
@@ -652,6 +669,48 @@ public sealed class OutlookSource : SourceBase, ICountable
             Logger.LogWarning("outlook: looking for changes failed; the last listing is still served: {Error}", ex.Message);
             HoldDegraded("refresh", ex is SignInRequiredException ? ex.Message : $"looking for changes failed, and the last listing is still served: {ex.Message}");
         }
+    }
+
+    // the mailbox's revision as the tree was last made of it (-1: none, or a data file's, which is read by its stamp)
+    private long _builtRevision = -1;
+
+    /// <summary>How many refreshes found nothing changed and made no tree (for tests).</summary>
+    internal long QuietRefreshes => Interlocked.Read(ref _quietRefreshes);
+
+    private long _quietRefreshes;
+
+    /// <summary>
+    /// Whether a refresh found the mailbox as the tree has it: the store counts every change it takes in (a folder made,
+    /// renamed or gone, an item new, changed or gone, a calendar's view other than it was), and none has been counted
+    /// since the tree was made. The tree was made again at every refresh all the same, every folder sorted and every item
+    /// named: a kilobyte allocated for each item of the mailbox each time, 83 MB for 80,000 of them every five minutes
+    /// (the review of 21-Nov-2026, P9). A calendar's view moves with the day and is let go by the store at each refresh:
+    /// each is read again here, as making the tree read it, and counts as a change where it differs.
+    /// </summary>
+    private async Task<bool> QuietAsync(CancellationToken ct)
+    {
+        if (_store is not EwsMailStore mailbox || _builtRevision < 0 || ReferenceEquals(_tree, MailTree.Empty))
+        {
+            return false;
+        }
+
+        try
+        {
+            foreach (var calendar in Calendars(mailbox.Folders))
+            {
+                await mailbox.ItemsAsync(calendar, ct).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // told as the tree's making tells it: by the folder that failed, or the mailbox's own
+            return false;
+        }
+
+        return mailbox.Revision == _builtRevision;
+
+        static IEnumerable<MailFolder> Calendars(IReadOnlyList<MailFolder> folders)
+            => folders.SelectMany(f => (f.IsCalendar ? new[] { f } : []).Concat(Calendars(f.Folders)));
     }
 
     private void Swap(MailTree tree)

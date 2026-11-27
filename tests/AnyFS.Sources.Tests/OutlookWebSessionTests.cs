@@ -194,6 +194,91 @@ public class OutlookWebSessionTests
         }
     }
 
+    /// <summary>Every name below <paramref name="path"/>, folders and files, however deep.</summary>
+    private static async Task<List<string>> EverythingAsync(OutlookSource source, string path = "")
+    {
+        var names = new List<string>();
+        var folders = new Queue<string>();
+        folders.Enqueue(path);
+        while (folders.Count > 0)
+        {
+            var at = folders.Dequeue();
+            foreach (var entry in await OutlookFixtures.ListAsync(source, at))
+            {
+                var child = at.Length == 0 ? entry.Name : at + "/" + entry.Name;
+                names.Add(child);
+                if (entry.IsDirectory)
+                {
+                    folders.Enqueue(child);
+                }
+            }
+        }
+
+        return names;
+    }
+
+    [TestMethod]
+    public async Task ARefreshThatFindsNothingChangedMakesNoTreeAndOneThatFindsAChangeMakesIt()
+    {
+        // The tree was made again at every refresh whatever the mailbox said: every folder sorted and every item named, a
+        // kilobyte allocated for each item of the mailbox each time, 83 MB for 80,000 of them every five minutes (the
+        // review of 21-Nov-2026, P9)
+        var fake = FakeExchange.Mailbox();
+        var inbox = fake.Folders.Values.Single(f => f.Name == "Inbox");
+        var calendar = fake.Folders.Values.Single(f => f.Name == "Calendar");
+        var (source, context) = await StartAsync(fake);
+        await using (source)
+        using (context)
+        {
+            await source.RefreshAsync(CancellationToken.None);
+            var before = await EverythingAsync(source);
+            var quiet = source.QuietRefreshes;
+            for (var n = 0; n < 3; n++)
+            {
+                await source.RefreshAsync(CancellationToken.None);
+            }
+
+            Assert.AreEqual(quiet + 3, source.QuietRefreshes, "nothing changed: no tree made");
+            CollectionAssert.AreEqual(before, await EverythingAsync(source), "and everything is where it was");
+
+            // a message come since: taken in by the refresh, and the tree made of it
+            var come = fake.AddMessage(inbox, "Come since the start", ("Adele Vance", "adelev@fake.test"), new DateTimeOffset(2026, 6, 1, 9, 0, 0, TimeSpan.Zero), "<p>New.</p>", []);
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(quiet + 3, source.QuietRefreshes);
+            Assert.IsTrue((await EverythingAsync(source)).Any(n => n.Contains("Come since the start", StringComparison.Ordinal)), "shown");
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(quiet + 4, source.QuietRefreshes, "and quiet again after it");
+
+            // a meeting put in the calendar: its view is other than it was
+            fake.AddAppointment(calendar, "Put in since", DateTimeOffset.UtcNow.AddDays(2), TimeSpan.FromHours(1), "Room 5", ("Adele Vance", "adelev@fake.test"));
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(quiet + 4, source.QuietRefreshes);
+            Assert.IsTrue((await EverythingAsync(source)).Any(n => n.Contains("Put in since", StringComparison.Ordinal)));
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(quiet + 5, source.QuietRefreshes);
+
+            // a message gone
+            fake.Delete(come);
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(quiet + 5, source.QuietRefreshes);
+            Assert.IsFalse((await EverythingAsync(source)).Any(n => n.Contains("Come since the start", StringComparison.Ordinal)), "gone from the tree");
+
+            // and a folder made, with something in it
+            var made = fake.AddFolder("Made since", "IPF.Note", inbox, null);
+            fake.AddMessage(made, "In the new folder", ("Adele Vance", "adelev@fake.test"), new DateTimeOffset(2026, 6, 2, 9, 0, 0, TimeSpan.Zero), "<p>New.</p>", []);
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(quiet + 5, source.QuietRefreshes);
+            Assert.IsTrue((await EverythingAsync(source)).Any(n => n.Contains("Made since", StringComparison.Ordinal)));
+
+            // (its items were first read as the tree was made, which the store counts as a change after the tree's
+            // revision was taken: the tree is made once more at the next refresh, and stands from the one after)
+            await source.RefreshAsync(CancellationToken.None);
+            await source.RefreshAsync(CancellationToken.None);
+            Assert.AreEqual(quiet + 6, source.QuietRefreshes);
+            Assert.IsTrue((await EverythingAsync(source)).Any(n => n.Contains("In the new folder", StringComparison.Ordinal)));
+        }
+    }
+
     [TestMethod]
     public async Task AFolderWithNothingInItIsNotShownUntilSomethingIs()
     {
