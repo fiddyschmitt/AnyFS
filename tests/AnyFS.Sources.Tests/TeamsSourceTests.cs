@@ -305,12 +305,20 @@ public class TeamsSourceTests
         CollectionAssert.AreEqual(new[] { image }, await NamesAsync(source, "Chats/Pictures/attachments"));
         CollectionAssert.AreEqual(new[] { image }, await NamesAsync(source, "Chats/Pictures/attachments"));
         Assert.AreEqual((1, 0), (fake.ImageSizeCalls, fake.ImageCalls), "measured once, read not at all");
-        for (var open = 1; open <= 2; open++)
+
+        // read when it is opened, once: an open after that is the spool's, as any file's is (28-Nov-2026: each open read
+        // it again, whole, and a file manager opens a picture more than once to show it)
+        for (var open = 1; open <= 3; open++)
         {
             await using var file = await source.OpenAsync($"Chats/Pictures/attachments/{image}", VfsOpenMode.Read, CancellationToken.None);
             Assert.AreEqual(png.Length, file.Length);
-            Assert.AreEqual(open, fake.ImageCalls, "read when opened, kept by nothing after");
+            var bytes = new byte[png.Length];
+            Assert.AreEqual(png.Length, await file.ReadFullyAsync(0, bytes, CancellationToken.None));
+            CollectionAssert.AreEqual(png, bytes);
+            Assert.AreEqual(1, fake.ImageCalls, "read once, however often it is opened");
         }
+
+        Assert.AreEqual(1, fake.ImageSizeCalls, "and measured no more for being opened");
     }
 
     [TestMethod]

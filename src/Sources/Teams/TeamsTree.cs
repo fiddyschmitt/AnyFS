@@ -270,8 +270,7 @@ internal sealed class LibraryFile(string name, string siteUrl, string path, long
 /// <summary>An inline image of the length its first reading measured: served as that reading kept it, else read again from Teams' media service when opened.</summary>
 internal sealed class ImageFile(string name, string src, long length, DateTimeOffset? modified) : TmFile(name, length, modified)
 {
-    public override async Task<IVfsFile> OpenAsync(TeamsSource source, CancellationToken ct)
-        => new MemoryFile(await source.ImageBytesAsync(src, ct).ConfigureAwait(false), "an inline image from Teams");
+    public override Task<IVfsFile> OpenAsync(TeamsSource source, CancellationToken ct) => source.OpenImageAsync(src, Entry.Length, ct);
 }
 
 /// <summary>A conversation's attachments: the files its messages share and its inline images, read with the conversation.</summary>

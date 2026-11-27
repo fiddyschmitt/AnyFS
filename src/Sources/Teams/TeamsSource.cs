@@ -40,6 +40,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     private static string ServedKey(string path) => "served:" + path.ToUpperInvariant();
     private ITeamsApi? _api;
     private RequestCache? _cache;
+    private SpoolCache? _spool;
     private KeptListings? _kept;
     private RootFolder? _root;
 
@@ -75,6 +76,7 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         _cloud = _settings.ChosenCloud ?? TeamsCloud.Global;
         _api = _standIn?.Api ?? await SignInAsync(ct).ConfigureAwait(false);
         _cache = new RequestCache(_stopping.Token, _standIn?.AnswersKept ?? RequestCache.DefaultMaxBytes);
+        _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
         _root = new RootFolder();
 
         // the walk may have all of "Requests at a time" in flight (until 5-Nov-2026 half, the rest kept back for browsing, which
@@ -1219,8 +1221,8 @@ public sealed partial class TeamsSource : SourceBase, ICountable
     // --- files ---------------------------------------------------------------------------------------------------------
 
     // inline images by address: an image's bytes never change, so its length and extension are kept once measured (a
-    // listing measures it once); its bytes are read only when it is opened, and kept nowhere (9-Nov-2026: they were kept,
-    // to 64 MiB, after the listing had read each image whole to measure it)
+    // listing measures it once); its bytes are read only when it is opened (9-Nov-2026: they were kept, to 64 MiB, after
+    // the listing had read each image whole to measure it), and from then on are the spool's, as any file opened is
     private readonly ConcurrentDictionary<string, (long Length, string Extension)> _imageSizes = new(StringComparer.Ordinal);
 
     /// <summary>
@@ -1342,9 +1344,17 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         return measured;
     }
 
-    /// <summary>An inline image's bytes, for an open: read now, kept by nothing but the open file.</summary>
-    internal async Task<byte[]> ImageBytesAsync(string src, CancellationToken ct)
-        => (await Api.ImageAsync(src, ct).ConfigureAwait(false))?.Bytes ?? throw new VfsException(VfsError.IoError, "an inline image could not be read from Teams' media service");
+    /// <summary>
+    /// An inline image, for an open: read whole from Teams' media service the first time, and from the spool after that,
+    /// as GitLab's job logs are. Every open read it again, whole, and a file manager opens a picture more than once to
+    /// show it (the review of 21-Nov-2026, P8). Nothing is read or kept for a listing: that measures it.
+    /// </summary>
+    internal Task<IVfsFile> OpenImageAsync(string src, long length, CancellationToken ct)
+        => length == 0
+            ? Task.FromResult<IVfsFile>(new MemoryFile([], "an inline image from Teams"))
+            : (_spool ?? throw VfsException.Unavailable("Teams is not signed in to yet")).OpenAsync($"teams:image:{src}", length, async c =>
+                new MemoryStream((await Api.ImageAsync(src, c).ConfigureAwait(false))?.Bytes
+                    ?? throw new VfsException(VfsError.IoError, "an inline image could not be read from Teams' media service")), ct);
 
     /// <summary>
     /// A SharePoint or OneDrive file (a shared one by its own address too), read in ranges through a download address fetched
@@ -1508,6 +1518,11 @@ public sealed partial class TeamsSource : SourceBase, ICountable
         if (_kept is not null)
         {
             await _kept.DisposeAsync().ConfigureAwait(false);
+        }
+
+        if (_spool is not null)
+        {
+            await _spool.DisposeAsync().ConfigureAwait(false);
         }
 
         if (_api is not null)
