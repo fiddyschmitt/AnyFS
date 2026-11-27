@@ -1,9 +1,12 @@
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using AnyFS.Sdk;
 using AnyFS.Sdk.Testing;
 using AnyFS.Sources.Common;
 using AnyFS.Sources.GitLab;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Sources.Tests;
 
@@ -2805,6 +2808,124 @@ public class GitLabWindowsTests
         finally
         {
             fake.Stop();
+        }
+    }
+
+    /// <summary>
+    /// The Windows account is for the server alone. A request GitLab sends on elsewhere is followed (an upload's address
+    /// in object storage), and the client went there with the account's credentials in hand for whoever asked: a host
+    /// that answered 401 was given the name and password, in clear where it asked for Basic (the review of 21-Nov-2026,
+    /// R16). Two servers on this computer, each asking who is there before it answers. Basic stands here for Negotiate
+    /// and NTLM, which a test can offer on Windows alone: the client asks the one set of credentials for each of them.
+    /// </summary>
+    [TestMethod]
+    [Timeout(60_000)]
+    public async Task AWindowsAccountAnswersTheServerItIsForAndNoOtherThatAsks()
+    {
+        using var server = Challenger.Start();
+        using var other = Challenger.Start();
+        var settings = new GitLabSettings { Address = server.Address, SignInMethod = GitLabSettings.Windows, Username = @"ANYFS\tester", Password = "tester-password" };
+        using var session = new GitLabSession(settings, NullLogger.Instance);
+
+        using (var elsewhere = await session.Http.GetAsync(other.Address + "/uploads/data.bin"))
+        {
+            Assert.AreEqual(0, other.Answered, "the account's name and password went to a server that is not the source's");
+            Assert.AreEqual(HttpStatusCode.Unauthorized, elsewhere.StatusCode, "its question is the request's answer");
+        }
+
+        using var own = await session.Http.GetAsync(server.Address + "/users/auth/kerberos/negotiate");
+        Assert.AreEqual(HttpStatusCode.OK, own.StatusCode, "the server's own question is answered, as before");
+        Assert.AreEqual(1, server.Answered);
+    }
+
+    /// <summary>The same as yourself, with Windows' own sign-in: the person is signed in to the source's server, and to no other that asks.</summary>
+    [TestMethod]
+    [Timeout(120_000)]
+    public async Task AsYourselfIsOfferedToTheServerItIsForAndToNoOther()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("Windows' own sign-in over loopback is Windows-only");
+        }
+
+        // two servers on this computer, each with a page that takes Windows' own sign-in: the source's, and another
+        var fake = GitLabSeed.Fill(FakeGitLab.Listen());
+        var other = GitLabSeed.Fill(FakeGitLab.Listen());
+        try
+        {
+            fake.WindowsUserAs = other.WindowsUserAs = "tester";
+            using var session = new GitLabSession(new GitLabSettings { Address = fake.Server, SignInMethod = GitLabSettings.WindowsCurrent }, NullLogger.Instance);
+            const string page = "/users/auth/kerberos/negotiate";
+            using (var elsewhere = await session.Http.GetAsync(other.Server + page))
+            {
+                Assert.AreEqual(0, other.Count(page), "the person was signed in to a server that is not the source's");
+                Assert.AreEqual(HttpStatusCode.Unauthorized, elsewhere.StatusCode, "its question is the request's answer");
+            }
+
+            using var own = await session.Http.GetAsync(fake.Server + page);
+            Assert.AreEqual(HttpStatusCode.Found, own.StatusCode, "signed in to its own server, which sends the request on to its callback");
+        }
+        finally
+        {
+            fake.Stop();
+            other.Stop();
+        }
+    }
+
+    /// <summary>A server on a free port of 127.0.0.1 that asks every request who is there (401, Basic), and answers one that says.</summary>
+    private sealed class Challenger : IDisposable
+    {
+        private readonly HttpListener _listener = new();
+        private int _answered;
+
+        private Challenger(int port)
+        {
+            Address = $"http://127.0.0.1:{port}";
+            _listener.Prefixes.Add(Address + "/");
+            _listener.Start();
+            _ = ServeAsync();
+        }
+
+        public string Address { get; }
+
+        /// <summary>How many requests came with an answer to its question.</summary>
+        public int Answered => Volatile.Read(ref _answered);
+
+        public static Challenger Start()
+        {
+            var probe = new TcpListener(IPAddress.Loopback, 0);
+            probe.Start();
+            var port = ((IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+            return new Challenger(port);
+        }
+
+        public void Dispose() => _listener.Close();
+
+        private async Task ServeAsync()
+        {
+            while (_listener.IsListening)
+            {
+                try
+                {
+                    var context = await _listener.GetContextAsync().ConfigureAwait(false);
+                    if (context.Request.Headers["Authorization"] is null)
+                    {
+                        context.Response.StatusCode = 401;
+                        context.Response.AddHeader("WWW-Authenticate", "Basic realm=\"test\"");
+                    }
+                    else
+                    {
+                        Interlocked.Increment(ref _answered);
+                    }
+
+                    context.Response.Close();
+                }
+                catch (Exception ex) when (ex is HttpListenerException or IOException or ObjectDisposedException or InvalidOperationException)
+                {
+                    // the listener was closed, or a client hung up
+                }
+            }
         }
     }
 }

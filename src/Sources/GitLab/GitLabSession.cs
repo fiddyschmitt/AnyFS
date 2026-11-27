@@ -59,8 +59,9 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
         }
         else
         {
-            // the Windows sign-ins answer GitLab's Kerberos challenge (Negotiate) with these; nothing else asks for them
-            inner = SessionHttp.Sockets(settings.TrustAnyCertificate, Method is GitLabSignIn.WindowsCurrent or GitLabSignIn.Windows ? settings.Credentials() : null);
+            // the Windows sign-ins answer GitLab's Kerberos challenge (Negotiate) with these: the server's own, and no
+            // other host's that asks (ServerOnly)
+            inner = SessionHttp.Sockets(settings.TrustAnyCertificate, Method is GitLabSignIn.WindowsCurrent or GitLabSignIn.Windows ? new ServerOnly(settings.Credentials(), OnServer) : null);
         }
 
         _handler = new CookieJarHandler(Cookies, UpstreamRequestsHandler.Around(inner, watcher));
@@ -535,5 +536,16 @@ internal sealed class GitLabSession : IDisposable, IRequestSession
         Http.Dispose();
         _handler.Dispose();
         _renewal.Dispose();
+    }
+
+    /// <summary>
+    /// The Windows credentials for the server alone (<see cref="OnServer"/>). A request GitLab sends on elsewhere is
+    /// followed through the same handler (an upload's address in object storage), which gave them to whatever host
+    /// answered 401 there: the account's name and password, in clear to one that asked for Basic, or the person's own
+    /// Windows sign-in (the review of 21-Nov-2026, R16).
+    /// </summary>
+    private sealed class ServerOnly(ICredentials credentials, Func<Uri, bool> onServer) : ICredentials
+    {
+        public NetworkCredential? GetCredential(Uri uri, string authType) => onServer(uri) ? credentials.GetCredential(uri, authType) : null;
     }
 }
