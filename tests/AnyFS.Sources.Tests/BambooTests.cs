@@ -305,6 +305,77 @@ public class BambooTests
     }
 
     [TestMethod]
+    [DataRow("token", DisplayName = "a personal access token")]
+    [DataRow("basic", DisplayName = "Basic authentication")]
+    [DataRow("session", DisplayName = "a web session")]
+    public async Task ArtifactsLinkedAtAnotherHostAreReadThereAndTheSignInStaysWithTheServer(string signIn)
+    {
+        // Bamboo names an artifact by a whole address, which need not be the server's own (a store of its own). The
+        // request goes where the link says, and the sign-in stays with the server the source was given: the
+        // token and the Basic credentials went on every request, whatever host it was for (the review of 21-Nov-2026,
+        // R16). A session's cookie did not go there: the jar sends a cookie where the cookie says it is for, which
+        // here is the server's host.
+        var fake = BambooSeed.Lab();
+        fake.ArtifactsElsewhere = true;
+        var settings = BambooSeed.Settings(fake, "/browse/ANYFS-BUILD");
+        AtlassianStandIn? standIn = null;
+        if (signIn == "basic")
+        {
+            // no login form to post to, and Basic taken: the user name and password go as a header on every request
+            fake.TwoStepLogin = false;
+            fake.LoginForm = false;
+            fake.BasicAllowed = true;
+            settings = new BambooSettings { Address = settings.Address, SignInMethod = AtlassianSignInChoices.Password, Username = "tester", Password = BambooSeed.Password };
+        }
+        else if (signIn == "session")
+        {
+            settings = new BambooSettings { Address = settings.Address, SignInMethod = AtlassianSignInChoices.WebSession };
+            standIn = fake.StandIn((_, _) => Task.FromResult<IReadOnlyList<SessionCookie>>([fake.SessionFor("tester")]));
+        }
+
+        await using var source = await StartAsync(fake, settings, standIn: standIn);
+        const string artifacts = "#1 Successful/Default Job/artifacts";
+        CollectionAssert.AreEqual(new[] { "Reports", "app.exe" }, await NamesAsync(source, artifacts));
+        CollectionAssert.AreEqual(new[] { "css", "data", "index.html" }, await NamesAsync(source, artifacts + "/Reports"));
+        Assert.AreEqual("body { color: black }\n", await TextAsync(source, artifacts + "/Reports/css/style.css"));
+        CollectionAssert.AreEqual(new byte[] { 77, 90, 1, 2, 3 }, await ReadAsync(source, artifacts + "/app.exe"));
+
+        var store = fake.ArtifactStoreRequests.ToList();
+        Assert.IsTrue(store.Count >= 4, "the pages and the files, asked where they are linked: " + string.Join("; ", store));
+        Assert.IsFalse(store.Any(r => r.EndsWith(']')), "a sign-in header went with a request to another host: " + string.Join("; ", store));
+    }
+
+    [TestMethod]
+    [DataRow("token", DisplayName = "a personal access token")]
+    [DataRow("basic", DisplayName = "Basic authentication")]
+    public async Task LinksThatNameTheServerByAnotherNameAreAskedAtTheAddressItWasOpenedBy(string signIn)
+    {
+        // Bamboo writes its links from its base URL, which its administrator set and which may name the server otherwise
+        // than the address typed here (another host name, a port behind a proxy). The sign-in goes to the address typed
+        // and to no other host, so such a link left as given would be asked with no sign-in, of a name that may not
+        // even answer from here. A log or an artifact of the server's own is asked at the address it was opened by.
+        var fake = BambooSeed.Lab();
+        fake.LinksByAnotherName = true;
+        var settings = BambooSeed.Settings(fake, "/browse/ANYFS-BUILD");
+        if (signIn == "basic")
+        {
+            fake.TwoStepLogin = false;
+            fake.LoginForm = false;
+            fake.BasicAllowed = true;
+            settings = new BambooSettings { Address = settings.Address, SignInMethod = AtlassianSignInChoices.Password, Username = "tester", Password = BambooSeed.Password };
+        }
+
+        await using var source = await StartAsync(fake, settings);
+        const string job = "#1 Successful/Default Job";
+        CollectionAssert.AreEqual(new[] { "Reports", "app.exe" }, await NamesAsync(source, job + "/artifacts"));
+        Assert.AreEqual("body { color: black }\n", await TextAsync(source, job + "/artifacts/Reports/css/style.css"));
+        CollectionAssert.AreEqual(new byte[] { 77, 90, 1, 2, 3 }, await ReadAsync(source, job + "/artifacts/app.exe"));
+        var log = (await NamesAsync(source, job)).Single(n => n.EndsWith(".log", StringComparison.Ordinal));
+        Assert.IsTrue((await TextAsync(source, job + "/" + log)).Length > 0, "the job's log is read");
+        Assert.AreEqual(0, fake.ArtifactStoreRequests.Count, "nothing is asked of the other name: " + string.Join("; ", fake.ArtifactStoreRequests));
+    }
+
+    [TestMethod]
     public void APagesLinksBelowItAreItsFilesAndFolders()
     {
         var page = new Uri("https://bamboo.example.com/bamboo/browse/A-B-JOB1-1/artifact/JOB1/Reports/");

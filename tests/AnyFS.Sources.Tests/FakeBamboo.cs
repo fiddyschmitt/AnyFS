@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Text;
@@ -20,6 +21,26 @@ internal sealed class FakeBamboo(string origin = "https://bamboo.fake.test", str
 
     /// <summary>The most entries a list gives a page when asked for more; lower in a test of the paging.</summary>
     public int PageLimit { get; set; } = 1000;
+
+    /// <summary>
+    /// A host apart from Bamboo's, answered by the same handler. With <see cref="ArtifactsElsewhere"/> it is a store the
+    /// links to a build's artifacts lead to, which serves an artifact to whoever has its address and is no place for
+    /// Bamboo's sign-in. With <see cref="LinksByAnotherName"/> it is the name Bamboo writes its own links by, and holds
+    /// nothing: what is asked of it is not found.
+    /// </summary>
+    public const string ArtifactStore = "https://artifacts.fake.test";
+
+    /// <summary>Whether Bamboo links its artifacts in a store at <see cref="ArtifactStore"/>, under paths that are not Bamboo's own.</summary>
+    public bool ArtifactsElsewhere { get; set; }
+
+    /// <summary>
+    /// Whether Bamboo writes its links, to its logs and artifacts, by another name than the address the source reaches it by:
+    /// its base URL, as its administrator set it, here <see cref="ArtifactStore"/>'s host. The paths are Bamboo's own.
+    /// </summary>
+    public bool LinksByAnotherName { get; set; }
+
+    /// <summary>Every request the artifact store answered, oldest first, a sign-in header it came with named after it: "GET /browse/... [Authorization]".</summary>
+    public ConcurrentQueue<string> ArtifactStoreRequests { get; } = new();
 
     protected override string WhoPath => "rest/api/latest/currentUser";
 
@@ -290,6 +311,29 @@ internal sealed class FakeBamboo(string origin = "https://bamboo.fake.test", str
         }
     }
 
+    protected override bool AnswersFor(Uri url) => url.GetLeftPart(UriPartial.Authority).Equals(ArtifactStore, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The artifact store's answer: an artifact's file or page by its address, with a note of any sign-in header the request came with.</summary>
+    protected override Response AnswerElsewhere(Request request)
+    {
+        var signIns = new[] { "Authorization", "Cookie" }.Where(request.Headers.ContainsKey).ToList();
+        ArtifactStoreRequests.Enqueue($"{request.Method} {request.Url.AbsolutePath}{(signIns.Count == 0 ? "" : $" [{string.Join(", ", signIns)}]")}");
+        lock (_gate)
+        {
+            if (ArtifactsElsewhere && request.Segments is ["store", var resultKey, var jobShortKey, var artifactName, .. var rest])
+            {
+                var run = AllPlans().SelectMany(p => p.Builds).SelectMany(b => b.JobRuns)
+                    .FirstOrDefault(r => r.Key.Equals(resultKey, StringComparison.OrdinalIgnoreCase) && r.Job.ShortKey.Equals(jobShortKey, StringComparison.OrdinalIgnoreCase));
+                if (run?.Artifacts.FirstOrDefault(a => a.Name.Equals(artifactName, StringComparison.OrdinalIgnoreCase)) is { } artifact)
+                {
+                    return ArtifactAnswer(request, artifact, string.Join('/', rest));
+                }
+            }
+
+            return new Response(404, "<html>Not Found</html>"u8.ToArray(), "text/html");
+        }
+    }
+
     /// <summary>An artifact's file, or the page Bamboo shows for a folder of it: links to what is in it.</summary>
     private static Response ArtifactAnswer(Request request, Artifact artifact, string filePath)
     {
@@ -516,7 +560,7 @@ internal sealed class FakeBamboo(string origin = "https://bamboo.fake.test", str
 
         if (expand.Contains("logFiles", StringComparison.Ordinal))
         {
-            json["logFiles"] = new JsonArray((JsonNode)$"{Server}/download/{r.JobKey}/build_logs/{r.Key}.log");
+            json["logFiles"] = new JsonArray((JsonNode)$"{(LinksByAnotherName ? ArtifactStore + Root : Server)}/download/{r.JobKey}/build_logs/{r.Key}.log");
         }
 
         return json;
@@ -525,7 +569,9 @@ internal sealed class FakeBamboo(string origin = "https://bamboo.fake.test", str
     /// <summary>Where Bamboo links an artifact: the page of its folder, or its one file.</summary>
     private string ArtifactHref(JobRun r, Artifact a)
     {
-        var folder = $"{Server}/browse/{r.Key}/artifact/{r.Job.ShortKey}/{Uri.EscapeDataString(a.Name)}/";
+        var folder = ArtifactsElsewhere
+            ? $"{ArtifactStore}/store/{r.Key}/{r.Job.ShortKey}/{Uri.EscapeDataString(a.Name)}/"
+            : $"{(LinksByAnotherName ? ArtifactStore + Root : Server)}/browse/{r.Key}/artifact/{r.Job.ShortKey}/{Uri.EscapeDataString(a.Name)}/";
         return a.SingleFile && a.Files.Count == 1 ? folder + Uri.EscapeDataString(a.Files.Keys.First()) : folder;
     }
 }

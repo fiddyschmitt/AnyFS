@@ -690,9 +690,19 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
         return AtlassianUser.Parse(Product, data.RootElement);
     }
 
-    /// <summary>Adds what the sign-in needs to a request: the token's or Basic's header (a session's cookies go by themselves).</summary>
+    /// <summary>
+    /// Adds what the sign-in needs to a request to the server itself: the token's or Basic's header (a session's cookies
+    /// go by themselves, each where the cookie says it is for). Nothing to a request for another host, which an address
+    /// the server gives may name (a build's artifact, where Bamboo links it elsewhere): the header went on every
+    /// request, whatever host it was for (the review of 21-Nov-2026, R16).
+    /// </summary>
     public ValueTask AuthorizeAsync(HttpRequestMessage request, CancellationToken ct)
     {
+        if (request.RequestUri is not { } url || !OnServer(url))
+        {
+            return ValueTask.CompletedTask;
+        }
+
         if (Method == AtlassianSignIn.Token && Settings.Token is { } token)
         {
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
@@ -704,6 +714,10 @@ internal sealed class AtlassianSession : IDisposable, IRequestSession
 
         return ValueTask.CompletedTask;
     }
+
+    /// <summary>Whether an address is the server's own (its scheme and host, with the port), not another's.</summary>
+    public bool OnServer(Uri url)
+        => url.Scheme.Equals(Address.Base.Scheme, StringComparison.OrdinalIgnoreCase) && url.Authority.Equals(Address.Base.Authority, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Whether a response was answered for nobody: Seraph names the user it served in <c>X-AUSERNAME</c>, and a lapsed

@@ -164,7 +164,7 @@ internal sealed class BmJobFolder(BmJobResult job, string name, DateTimeOffset? 
         var children = new List<BmNode>();
         if (source.Settings.Logs)
         {
-            var logs = job.LogFiles.Select(l => Uri.TryCreate(l, UriKind.Absolute, out var url) ? url : new Uri(source.Installation, l)).ToList();
+            var logs = job.LogFiles.Select(source.Own).ToList();
             var sizes = await Task.WhenAll(logs.Select(url => source.SizeAsync(url, ct))).ConfigureAwait(false);
             var names = AtlassianNames.Unique(logs.Select(url => FileName(url, "build.log")).ToList(), [BambooDocuments.ArtifactsFolder]);
             children.AddRange(logs.Select((url, i) => new BmWebFile(url, sizes[i], names[i], Modified)));
@@ -192,7 +192,7 @@ internal sealed class BmArtifactsFolder(BmJobResult job, DateTimeOffset? time) :
 {
     public override async Task<IReadOnlyList<BmNode>> ListAsync(BambooSource source, CancellationToken ct)
     {
-        var artifacts = job.Artifacts.Select(a => (Artifact: a, Url: Uri.TryCreate(a.Href, UriKind.Absolute, out var url) ? url : new Uri(source.Installation, a.Href))).ToList();
+        var artifacts = job.Artifacts.Select(a => (Artifact: a, Url: source.Own(a.Href))).ToList();
         var pages = await Task.WhenAll(artifacts.Select(a => source.ArtifactEntriesAsync(a.Url, ct))).ConfigureAwait(false);
         var names = AtlassianNames.Unique(artifacts.Select((a, i) => pages[i] is null ? BmJobFolder.FileName(a.Url, a.Artifact.Name) : a.Artifact.Name).ToList());
         var children = new List<BmNode>(artifacts.Count);

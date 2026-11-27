@@ -147,6 +147,12 @@ internal abstract class FakeAtlassian
 
     protected abstract JsonNode Who(Account? user);
 
+    /// <summary>Whether the stand-in answers for another host too, one the product's links lead to; none unless a product has one.</summary>
+    protected virtual bool AnswersFor(Uri url) => false;
+
+    /// <summary>That other host's answer to a request (<see cref="AnswersFor"/>): it knows no account of the product's.</summary>
+    protected virtual Response AnswerElsewhere(Request request) => Response.Html("<html>Not Found</html>", 404);
+
     private Response Answer(Request request)
     {
         var full = "/" + string.Join('/', request.Segments);
@@ -286,7 +292,8 @@ internal abstract class FakeAtlassian
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage message, CancellationToken ct)
         {
             var url = message.RequestUri!;
-            if (!url.GetLeftPart(UriPartial.Authority).Equals(fake.Origin, StringComparison.OrdinalIgnoreCase))
+            var elsewhere = !url.GetLeftPart(UriPartial.Authority).Equals(fake.Origin, StringComparison.OrdinalIgnoreCase);
+            if (elsewhere && !fake.AnswersFor(url))
             {
                 throw new HttpRequestException($"No such host is known. ({url.Host})");
             }
@@ -313,7 +320,8 @@ internal abstract class FakeAtlassian
             var query = (url.Query.Length > 1 ? url.Query[1..] : "").Split('&', StringSplitOptions.RemoveEmptyEntries)
                 .Select(p => p.Split('=', 2)).GroupBy(p => Uri.UnescapeDataString(p[0]), StringComparer.Ordinal)
                 .ToDictionary(g => g.Key, g => g.First().Length > 1 ? Uri.UnescapeDataString(g.First()[1].Replace('+', ' ')) : "", StringComparer.Ordinal);
-            var answer = fake.Answer(new Request(message.Method.Method, url, segments, query, headers, body));
+            var request = new Request(message.Method.Method, url, segments, query, headers, body);
+            var answer = elsewhere ? fake.AnswerElsewhere(request) : fake.Answer(request);
             var response = new HttpResponseMessage((HttpStatusCode)answer.Status) { RequestMessage = message, Content = new ByteArrayContent(message.Method == HttpMethod.Head ? [] : answer.Body) };
             if (answer.ContentType is not null)
             {

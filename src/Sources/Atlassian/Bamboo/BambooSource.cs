@@ -72,6 +72,32 @@ public sealed class BambooSource : SourceBase, ICountable
     /// <summary>The installation's address (its base, with a slash at the end), for the documents' links and the files' addresses.</summary>
     internal Uri Installation => Session.Address.Base;
 
+    /// <summary>
+    /// A link the server gave to something of its own (a job's log, an artifact), at the address it was opened by here.
+    /// Bamboo writes its links from its base URL, which its administrator set and which may name the server otherwise than
+    /// the address typed here (another host name, a port behind a proxy). The sign-in goes to the address typed and to no
+    /// other host (the review of 21-Nov-2026, R16), so such a link left as given would be asked with no sign-in. It is
+    /// known by its path, one of Bamboo's own under the same context. Any other link (an artifact kept in a store
+    /// elsewhere) is asked where it says, and takes no sign-in with it.
+    /// </summary>
+    internal Uri Own(string link)
+    {
+        if (!Uri.TryCreate(link, UriKind.Absolute, out var url))
+        {
+            return new Uri(Installation, link);
+        }
+
+        var context = Installation.AbsolutePath;
+        if (Session.OnServer(url) || !url.AbsolutePath.StartsWith(context, StringComparison.OrdinalIgnoreCase))
+        {
+            return url;
+        }
+
+        var below = url.AbsolutePath[context.Length..];
+        var first = below.IndexOf('/') is var slash and >= 0 ? below[..slash] : below;
+        return first is "browse" or "artifact" or "download" ? new Uri(Installation, below + url.Query) : url;
+    }
+
     protected override async Task OnInitialiseAsync(CancellationToken ct)
     {
         _session = new AtlassianSession(AtlassianProduct.Bamboo, _settings, Logger, _standIn, Context.Secrets, Context.UpstreamWatcher);
