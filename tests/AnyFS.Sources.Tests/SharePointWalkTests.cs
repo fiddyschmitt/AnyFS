@@ -426,7 +426,12 @@ public class SharePointWalkTests
         // of 21-Nov-2026, P7)
         var store = MemoryDocumentStore.Sample();
         store.Seed("/Shared Documents", "in/there.txt", Encoding.UTF8.GetBytes("there"));
-        await using var source = await MemorySharePointSource.StartAsync(store, walkEvery: kept ? TimeSpan.FromHours(1) : null);
+
+        // without listings kept a listing answers for two seconds, and a run slower than that listed the folder again by
+        // its own slowness: the count failed once on a busy machine (27-Nov-2026). An hour here, so that what is counted
+        // is the source's doing alone
+        await using var source = new MemorySharePointSource(store, null, false, null, null, null, kept ? TimeSpan.FromHours(1) : null) { ListingsLast = TimeSpan.FromHours(1) };
+        await source.InitialiseAsync(source.TestContext, None);
         if (kept)
         {
             await source.CountFilesAsync(None);

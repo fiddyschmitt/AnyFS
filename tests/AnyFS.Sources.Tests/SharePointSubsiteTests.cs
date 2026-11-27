@@ -398,6 +398,11 @@ internal sealed class MemorySharePointSource(MemoryDocumentStore store, string? 
 
     protected override int ItemsRememberedAtMost => Remembers ?? base.ItemsRememberedAtMost;
 
+    /// <summary>Without listings kept: how long a listing answers, when not the source's own two seconds (for a test that counts listings, which a slow run would otherwise add to).</summary>
+    public TimeSpan? ListingsLast { get; init; }
+
+    protected override TimeSpan ListingsLastFor => ListingsLast ?? base.ListingsLastFor;
+
     /// <param name="otherSites">As for the tenant's root site: the store's other sites show in a Sites folder.</param>
     /// <param name="given">For a source given several sites: those sites, found in the store by their paths.</param>
     /// <param name="retry">How soon a site left out is tried again, when not the source's own five minutes.</param>

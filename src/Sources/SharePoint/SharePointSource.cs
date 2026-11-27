@@ -156,6 +156,9 @@ public abstract partial class SharePointSource : SourceBase, ICountable
     /// <summary>With listings kept: how long after one walk of the whole tree the next begins; zero for none after the first.</summary>
     protected virtual TimeSpan WalkEvery => TimeSpan.FromMinutes(30);
 
+    /// <summary>Without listings kept: how long a folder's listing answers before the folder is listed again.</summary>
+    protected virtual TimeSpan ListingsLastFor => TimeSpan.FromSeconds(2);
+
     /// <summary>Signs in and connects; throw <see cref="SourceFailedException"/> for a reason the user must act on.</summary>
     private protected abstract Task<IDocumentStore> ConnectAsync(CancellationToken ct);
 
@@ -189,6 +192,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         _kept = new KeptListings(ListRemoteAsync, Counters, Logger, new KeptListingsOptions
         {
             Keep = KeepListings,
+            UnkeptFor = ListingsLastFor,
             Unsaved = why => HoldDegraded("listings", why),
             WalkEvery = WalkEvery,
             Parallelism = Math.Clamp(WalkPerSite, 1, 64),
