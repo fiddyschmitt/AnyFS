@@ -1,4 +1,6 @@
-﻿using System.Runtime.CompilerServices;
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using AnyFS.Sdk;
 
@@ -13,13 +15,23 @@ internal sealed class GraphDocumentStore : IDocumentStore
 {
     private const string ChildrenSelect = "$select=id,name,size,file,folder,fileSystemInfo,lastModifiedDateTime,createdDateTime,eTag,cTag&$top=500";
 
+    /// <summary>
+    /// The same with each file's download address, which a selection leaves out unless it names it: for a listing
+    /// someone waits for, whose files are likely to be opened next (<see cref="DownloadAddresses"/>).
+    /// </summary>
+    private const string ChildrenWithAddressSelect = "$select=id,name,size,file,folder,fileSystemInfo,lastModifiedDateTime,createdDateTime,eTag,cTag,content.downloadUrl&$top=500";
+
     /// <summary>The same for the site's pages, with each page's content fields (<see cref="SharePointPages"/>).</summary>
     private const string PageSelect = "$select=id,name,size,file,folder,fileSystemInfo,lastModifiedDateTime,createdDateTime,eTag,cTag,webUrl&$expand=listItem($select=id;$expand=fields($select=" + SharePointPages.Fields + "))";
 
     private readonly GraphClient _graph;
     private readonly PageCache _pages = new();
+    private readonly DownloadAddresses _addresses = new();
     private readonly Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> _listLibraries;
     private readonly SiteAddress? _site;
+
+    // Graph would not list a folder with the addresses asked for, and listed it without: not asked again in this run
+    private volatile bool _addressesRefused;
 
     private GraphDocumentStore(GraphClient graph, string description, string libraryNoun, string siteId, Func<CancellationToken, Task<IReadOnlyList<LibraryInfo>>> listLibraries, SiteAddress? site = null)
     {
@@ -40,6 +52,13 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
     /// <summary>The Graph client (for tests, which make their page through it).</summary>
     internal GraphClient Graph => _graph;
+
+    /// <summary>How long a file's download address is used after Graph gave it (for tests, which cannot wait that long).</summary>
+    internal TimeSpan AddressesKeptFor
+    {
+        get => _addresses.KeptFor;
+        set => _addresses.KeptFor = value;
+    }
 
     /// <summary>Resolves the site the address is in (<see cref="FindAsync"/>); null when Graph has no such site for this account.</summary>
     public static async Task<GraphDocumentStore?> ConnectAsync(GraphClient graph, SiteAddress site, CancellationToken ct)
@@ -473,23 +492,54 @@ internal sealed class GraphDocumentStore : IDocumentStore
 
     public async IAsyncEnumerable<(VfsEntry Entry, ItemRef Item)> ListChildrenAsync(LibraryInfo library, string itemPath, [EnumeratorCancellation] CancellationToken ct)
     {
-        var url = $"{SharePointPaths.ItemAddress(library.Key, itemPath)}/children?{(library.Pages ? PageSelect : ChildrenSelect)}";
+        // A listing someone waits for is likely followed by opens of what it lists, and brings each file's download
+        // address for them (DownloadAddresses). A walk's lists every folder there is with no one to open anything, and
+        // brings none, as before: an address is some thousand characters a file
+        var children = $"{SharePointPaths.ItemAddress(library.Key, itemPath)}/children?";
+        var withAddresses = !library.Pages && !Walks.Current && !_addressesRefused;
+        var url = children + (library.Pages ? PageSelect : withAddresses ? ChildrenWithAddressSelect : ChildrenSelect);
+        var first = true;
+        var refused = false;
         while (url is not null)
         {
-            using var doc = await _graph.GetJsonAsync(url, Display(library, itemPath), ct).ConfigureAwait(false);
-            foreach (var element in doc.RootElement.GetProperty("value").EnumerateArray())
+            JsonDocument doc;
+            try
             {
-                if (!library.Pages || element.TryGetProperty("folder", out _))
-                {
-                    yield return GraphDrives.ParseItem(element);
-                }
-                else if (SharePointPages.IsPage(element.GetProperty("name").GetString() ?? ""))
-                {
-                    yield return ParsePage(element);
-                }
+                doc = await _graph.GetJsonAsync(url, Display(library, itemPath), ct).ConfigureAwait(false);
+            }
+            catch (VfsException ex) when (first && withAddresses && !refused && ex.Error is VfsError.InvalidPath or VfsError.NotSupported)
+            {
+                // refused with the addresses asked for, perhaps for them: once more, as it was asked before
+                refused = true;
+                url = children + ChildrenSelect;
+                continue;
             }
 
-            url = doc.RootElement.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
+            first = false;
+            if (refused)
+            {
+                // and listed without them: it was the addresses, which this Graph is not asked for again
+                _addressesRefused = true;
+            }
+
+            using (doc)
+            {
+                foreach (var element in doc.RootElement.GetProperty("value").EnumerateArray())
+                {
+                    if (!library.Pages || element.TryGetProperty("folder", out _))
+                    {
+                        var child = GraphDrives.ParseItem(element);
+                        _addresses.Remember(library.Key, child.Item);
+                        yield return child;
+                    }
+                    else if (SharePointPages.IsPage(element.GetProperty("name").GetString() ?? ""))
+                    {
+                        yield return ParsePage(element);
+                    }
+                }
+
+                url = doc.RootElement.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
+            }
         }
     }
 
@@ -517,7 +567,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
             }
         }
 
-        // no $select: the download URL is an annotation that only comes with the whole item
+        // no $select: the download URL is an annotation that comes with the whole item (or with a selection that names it)
         using var doc = await _graph.TryGetJsonAsync(SharePointPaths.ItemAddress(library.Key, itemPath), Display(library, itemPath), ct).ConfigureAwait(false);
         var item = doc is null ? null : GraphDrives.ParseItem(doc.RootElement).Item;
         return library.Pages && item is { IsFolder: false } ? null : item;
@@ -538,8 +588,13 @@ internal sealed class GraphDocumentStore : IDocumentStore
             return SharePointPages.Response(markdown, offset);
         }
 
+        // the address Graph last gave for the item, in a listing or at an open, while that is a few minutes old at most
+        // (DownloadAddresses); else the one the item came with; else asked for now. Every open of an item that came
+        // without one asked for it, a request to Graph before each read's own (the review of 21-Nov-2026, N22). The one
+        // last given goes first: an item its source remembers for the run comes with the address it had when it was
+        // asked for, which stops working within the hour, and was tried, and failed, before every read after that
         var path = Display(library, itemPath);
-        var url = item.DownloadUrl ?? await FreshDownloadUrlAsync(library, itemPath, ct).ConfigureAwait(false);
+        var url = _addresses.Find(library.Key, item.Id) ?? item.DownloadUrl ?? await FreshDownloadUrlAsync(library, itemPath, ct).ConfigureAwait(false);
         try
         {
             return await _graph.GetContentAsync(url, offset, path, ct).ConfigureAwait(false);
@@ -547,6 +602,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
         catch (VfsException ex) when (ex.Error is VfsError.AccessDenied or VfsError.NotFound or VfsError.Unavailable)
         {
             // the pre-authenticated URL expires after a while: a fresh one, once
+            _addresses.Forget(library.Key, item.Id);
             url = await FreshDownloadUrlAsync(library, itemPath, ct).ConfigureAwait(false);
             return await _graph.GetContentAsync(url, offset, path, ct).ConfigureAwait(false);
         }
@@ -656,12 +712,73 @@ internal sealed class GraphDocumentStore : IDocumentStore
     private async Task<string> FreshDownloadUrlAsync(LibraryInfo library, string itemPath, CancellationToken ct)
     {
         var item = await GetItemAsync(library, itemPath, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(Display(library, itemPath));
+        _addresses.Remember(library.Key, item);
         return item.DownloadUrl ?? throw new VfsException(VfsError.IoError, $"'{Display(library, itemPath)}' has no download URL (is it a file?)");
     }
 
     private static FileStream OpenLocal(string path) => new(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, FileOptions.Asynchronous);
 
     private static string Display(LibraryInfo library, string itemPath) => itemPath.Length == 0 ? library.Shown : library.Shown + "/" + itemPath;
+}
+
+/// <summary>
+/// Files' download addresses as Graph last gave them, by the drive and the item's id, each used for a few minutes: from
+/// the listing someone asked for, or from the asking at an open, so that the opens that follow ask Graph nothing more.
+/// In memory alone, and not for long: an address works for about an hour and is itself the permission to read the
+/// file, so none is kept with the listings, and none outlives the run. One that fails before its time is let go and
+/// asked for again (<see cref="GraphDocumentStore.OpenContentAsync"/>).
+/// </summary>
+internal sealed class DownloadAddresses
+{
+    // as many as a few big folders hold; past that they start again, and a file whose address went is asked for it
+    private const int Capacity = 4_096;
+
+    private readonly ConcurrentDictionary<(string Drive, string Id), (string Address, long At)> _held = new();
+
+    /// <summary>How long an address is used after Graph gave it.</summary>
+    public TimeSpan KeptFor { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>Holds the address an item came with; nothing for an item that came with none, or with no id.</summary>
+    public void Remember(string drive, ItemRef item)
+    {
+        if (item.Id is not { Length: > 0 } id || item.DownloadUrl is not { Length: > 0 } address)
+        {
+            return;
+        }
+
+        if (_held.Count >= Capacity)
+        {
+            _held.Clear();
+        }
+
+        _held[(drive, id)] = (address, Stopwatch.GetTimestamp());
+    }
+
+    /// <summary>The address held for an item, while it is new enough; null for none.</summary>
+    public string? Find(string drive, string? id)
+    {
+        if (id is not { Length: > 0 } || !_held.TryGetValue((drive, id), out var held))
+        {
+            return null;
+        }
+
+        if (Stopwatch.GetElapsedTime(held.At) < KeptFor)
+        {
+            return held.Address;
+        }
+
+        _held.TryRemove((drive, id), out _);
+        return null;
+    }
+
+    /// <summary>Lets go of the address held for an item: it did not work.</summary>
+    public void Forget(string drive, string? id)
+    {
+        if (id is { Length: > 0 })
+        {
+            _held.TryRemove((drive, id), out _);
+        }
+    }
 }
 
 /// <summary>JSON string literals without a serializer (nothing for the trimmer to analyse).</summary>

@@ -766,7 +766,10 @@ internal sealed partial class FakeSharePoint
 
     private static string GraphTime(DateTimeOffset when) => when.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
 
-    /// <summary>A driveItem; a file's download address only when nothing was selected (it is an annotation that comes with the whole item).</summary>
+    /// <summary>
+    /// A driveItem; a file's download address where nothing was selected (it is an annotation that comes with the whole
+    /// item), or where the selection names it as <c>content.downloadUrl</c>.
+    /// </summary>
     private JsonObject ItemJson(Request request, Item item, string? select, bool downloadUrl = true)
     {
         var json = new JsonObject
@@ -790,7 +793,7 @@ internal sealed partial class FakeSharePoint
                 json["size"] = file.Content.LongLength;
                 json["cTag"] = file.GraphCTag;
                 json["file"] = new JsonObject { ["mimeType"] = "application/octet-stream" };
-                if (select is null && downloadUrl)
+                if (downloadUrl && (select is null || select.Split(',', StringSplitOptions.TrimEntries).Contains("content.downloadUrl", StringComparer.Ordinal)))
                 {
                     var token = NewSecret(24);
                     _downloads[token] = (file, DateTimeOffset.UtcNow + DownloadUrlLifetime);

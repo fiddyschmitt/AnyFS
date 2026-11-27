@@ -351,6 +351,228 @@ public class FakeSharePointTests
         Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth);
     }
 
+    /// <summary>Graph asked for one item alone, by its path: what a file's download address was asked with.</summary>
+    private static bool IsItemAsked(FakeSharePoint.Seen s)
+        => s.Method == "GET" && s.Host.StartsWith("graph.microsoft.", StringComparison.OrdinalIgnoreCase) && s.RawPath.Contains("/root:/", StringComparison.Ordinal) && s.RawPath.EndsWith(':');
+
+    /// <summary>A file's bytes asked for at a download address.</summary>
+    private static bool IsDownload(FakeSharePoint.Seen s) => s.RawPath.StartsWith("/_fakegraph/download/", StringComparison.Ordinal);
+
+    /// <summary>
+    /// A folder's listing was asked to leave each file's download address out, so every file opened after its folder was
+    /// listed asked Graph for the item first, for its address alone: two requests a file, at the pace a walk goes at
+    /// too (the review of 21-Nov-2026, N22). The listing a person asks for brings the addresses now, kept a few minutes.
+    /// </summary>
+    [TestMethod]
+    public async Task FilesOpenedAfterTheirFolderWasListedAreReadWithoutAskingForEachOnesAddress()
+    {
+        const int Files = 20;
+        using var fake = FakeSharePoint.Sandbox();
+        var documents = fake.TestSite.Library("Documents");
+        for (var i = 0; i < Files; i++)
+        {
+            fake.Seed(documents, $"read/file-{i:00}.txt", System.Text.Encoding.UTF8.GetBytes($"file {i}\n"));
+        }
+
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, TenantSettings(fake, SharePointSettings.AppDeviceCode), context);
+        var names = await SpsTestServer.NamesAsync(source, "Documents/read");
+        Assert.AreEqual(Files, names.Count);
+
+        var before = fake.Requests.Count;
+        for (var i = 0; i < Files; i++)
+        {
+            await using var file = await source.OpenAsync($"Documents/read/file-{i:00}.txt", VfsOpenMode.Read, None);
+            var bytes = new byte[file.Length];
+            Assert.AreEqual(bytes.Length, await file.ReadFullyAsync(0, bytes, None));
+            Assert.AreEqual($"file {i}\n", System.Text.Encoding.UTF8.GetString(bytes));
+        }
+
+        var asked = fake.Requests.Skip(before).ToList();
+        Console.WriteLine($"{Files} files read after their folder was listed: {asked.Count(IsItemAsked)} requests for an address, {asked.Count(IsDownload)} for bytes");
+        Assert.AreEqual(Files, asked.Count(IsDownload), "each file's bytes");
+        Assert.AreEqual(0, asked.Count(IsItemAsked), "and no request for an address: " + string.Join("; ", asked.Where(IsItemAsked).Take(3).Select(s => s.Path)));
+    }
+
+    /// <summary>
+    /// A big file is read through streams opened where it is read, and each asked Graph for the file's address first
+    /// where the folder's listing was a walk's, which brings none: a request to Graph at every place a reader went to.
+    /// The address asked for is kept a few minutes, and serves the places that follow.
+    /// </summary>
+    [TestMethod]
+    public async Task ABigFileReadHereAndThereAsksForItsAddressOnceNotAtEachPlace()
+    {
+        using var fake = FakeSharePoint.Sandbox();
+        var bytes = new byte[8 << 20];
+        new Random(7).NextBytes(bytes);
+        fake.Seed(fake.TestSite.Library("Documents"), "big/video.bin", bytes);
+        using var context = new TestSourceContext("sharepoint");
+        var settings = TenantSettings(fake, SharePointSettings.AppDeviceCode, spoolBelowMiB: 0);
+        settings.KeepListings = true;
+        settings.WalkMinutes = 0;
+        await using var source = await StartAsync(fake, settings, context);
+        await source.CountFilesAsync(None);
+        static bool IsListing(FakeSharePoint.Seen s) => s.RawPath.EndsWith("/children", StringComparison.Ordinal);
+        Assert.IsTrue(fake.Count(IsListing) > 0);
+        Assert.AreEqual(0, fake.Count(s => IsListing(s) && Uri.UnescapeDataString(s.RawQuery).Contains("downloadUrl", StringComparison.OrdinalIgnoreCase)),
+            "a walk's listings ask for no address: it would be one for every file of every folder, and none of them wanted");
+
+        // from its end towards its start, so that no stream open at one place can be read on to the next
+        var before = fake.Requests.Count;
+        await using var file = await source.OpenAsync("Documents/big/video.bin", VfsOpenMode.Read, None);
+        var piece = new byte[4096];
+        foreach (var at in new[] { 15 << 19, 6 << 20, 9 << 19, 3 << 20, 3 << 19, 0 })
+        {
+            Assert.AreEqual(piece.Length, await file.ReadFullyAsync(at, piece, None));
+            CollectionAssert.AreEqual(bytes[at..(at + piece.Length)], piece);
+        }
+
+        var asked = fake.Requests.Skip(before).ToList();
+        Console.WriteLine($"a file read at 6 places: {asked.Count(IsItemAsked)} requests for its address, {asked.Count(IsDownload)} for bytes");
+        Assert.AreEqual(6, asked.Count(IsDownload), "a stream opened at each place");
+        Assert.AreEqual(1, asked.Count(IsItemAsked), "and its address asked for once");
+    }
+
+    /// <summary>An address works for about an hour: one Graph gave more than a few minutes ago is not tried, and the file's is asked for.</summary>
+    [TestMethod]
+    public async Task ADownloadAddressIsUsedForAFewMinutesAndAskedForAgainAfterThat()
+    {
+        using var fake = FakeSharePoint.Sandbox();
+        fake.Seed(fake.TestSite.Library("Documents"), "aged/a.txt", "aged"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, TenantSettings(fake, SharePointSettings.AppDeviceCode), context);
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, "Documents/aged"), "a.txt");
+        var store = (GraphDocumentStore)source.Store;
+        Assert.AreEqual(TimeSpan.FromMinutes(10), store.AddressesKeptFor);
+
+        // as if those minutes had passed since the listing: what it brought is too old to use
+        store.AddressesKeptFor = TimeSpan.Zero;
+        var before = fake.Requests.Count;
+        await using var file = await source.OpenAsync("Documents/aged/a.txt", VfsOpenMode.Read, None);
+        var bytes = new byte[file.Length];
+        Assert.AreEqual(bytes.Length, await file.ReadFullyAsync(0, bytes, None));
+        CollectionAssert.AreEqual("aged"u8.ToArray(), bytes);
+        var asked = fake.Requests.Skip(before).ToList();
+        Assert.AreEqual(1, asked.Count(IsItemAsked), "the address asked for");
+        Assert.AreEqual(1, asked.Count(IsDownload));
+    }
+
+    /// <summary>
+    /// A file asked for by itself is remembered for the run with the address it came with, and that address stops working
+    /// within the hour. It was tried first at every place the file was read at after that, and failed there, with the one
+    /// Graph had just given in its place set aside: three requests a place. The one Graph gave last is tried first.
+    /// </summary>
+    [TestMethod]
+    public async Task AnAddressThatStoppedWorkingIsAskedForAgainOnceNotAtEachPlaceTheFileIsReadAt()
+    {
+        using var fake = FakeSharePoint.Sandbox();
+        var bytes = new byte[1 << 20];
+        new Random(11).NextBytes(bytes);
+        fake.Seed(fake.TestSite.Library("Documents"), "big/video.bin", bytes);
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, TenantSettings(fake, SharePointSettings.AppDeviceCode), context);
+        var store = (GraphDocumentStore)source.Store;
+        var library = (await store.ListLibrariesAsync(null, None)).First(l => l.Name == "Documents");
+
+        // asked for by itself, as the source asks for a file opened before its folder was listed in the run; the source
+        // keeps what it is given for the run, and opens the file's content with it each time
+        var item = await store.GetItemAsync(library, "big/video.bin", None);
+        Assert.IsNotNull(item?.DownloadUrl, "an item asked for by itself comes with its address");
+        async Task ReadAsync(int at)
+        {
+            using var response = await store.OpenContentAsync(library, "big/video.bin", item, at, None);
+            var piece = new byte[4096];
+            await using var content = await response.Content.ReadAsStreamAsync(None);
+            await content.ReadExactlyAsync(piece, None);
+            CollectionAssert.AreEqual(bytes[at..(at + piece.Length)], piece);
+        }
+
+        await ReadAsync(0);
+
+        // the hour is over
+        fake.ExpireDownloadUrls();
+        var before = fake.Requests.Count;
+        foreach (var at in new[] { 1 << 19, 1 << 18, 1 << 17, 1 << 16, 0 })
+        {
+            await ReadAsync(at);
+        }
+
+        var asked = fake.Requests.Skip(before).ToList();
+        Console.WriteLine($"a file read at 5 places after its address stopped working: {asked.Count(IsItemAsked)} requests for its address, {asked.Count(IsDownload)} for bytes, {asked.Count(s => IsDownload(s) && s.Status >= 400)} of those refused");
+        Assert.AreEqual(1, asked.Count(IsItemAsked), "its address asked for once");
+        Assert.AreEqual(1, asked.Count(s => IsDownload(s) && s.Status >= 400), "and the one that stopped working tried once");
+    }
+
+    /// <summary>
+    /// A download address is the permission to read its file, for an hour: none is written down with the listings a run
+    /// keeps, and the next run, which answers a folder from those, asks for a file's address when the file is opened.
+    /// </summary>
+    [TestMethod]
+    public async Task NoDownloadAddressIsKeptWithTheListingsOrUsedByTheNextRun()
+    {
+        using var fake = FakeSharePoint.Sandbox();
+        fake.Seed(fake.TestSite.Library("Documents"), "kept/a.txt", "kept"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        var settings = TenantSettings(fake, SharePointSettings.AppDeviceCode);
+        settings.KeepListings = true;
+        settings.WalkMinutes = 0;
+        static bool BroughtAddresses(FakeSharePoint.Seen s) => s.RawPath.EndsWith("/children", StringComparison.Ordinal) && Uri.UnescapeDataString(s.RawQuery).Contains("downloadUrl", StringComparison.Ordinal);
+        var first = await StartAsync(fake, settings, context);
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(first, "Documents/kept"), "a.txt");
+        Assert.IsTrue(fake.Count(BroughtAddresses) > 0, "the listing someone asked for brought the addresses");
+        await first.DisposeAsync();
+
+        foreach (var kept in Directory.EnumerateFiles(context.StateDirectory, "*", SearchOption.AllDirectories))
+        {
+            Assert.IsFalse(System.Text.Encoding.Latin1.GetString(File.ReadAllBytes(kept)).Contains("_fakegraph/download", StringComparison.Ordinal), $"an address in {Path.GetFileName(kept)}");
+        }
+
+        // the next run: the start's own walk done with, the folder is answered from what was kept, and its file read
+        await using var second = await StartAsync(fake, settings, context);
+        await second.WalkAsync(new SourceCounters(), None);
+        var before = fake.Requests.Count;
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(second, "Documents/kept"), "a.txt");
+        Assert.AreEqual(0, fake.Requests.Skip(before).Count(BroughtAddresses), "no listing asked for it");
+        await using var file = await second.OpenAsync("Documents/kept/a.txt", VfsOpenMode.Read, None);
+        var bytes = new byte[file.Length];
+        Assert.AreEqual(bytes.Length, await file.ReadFullyAsync(0, bytes, None));
+        CollectionAssert.AreEqual("kept"u8.ToArray(), bytes);
+        var asked = fake.Requests.Skip(before).ToList();
+        Assert.AreEqual(1, asked.Count(IsItemAsked), "the file's address asked for by this run");
+        Assert.AreEqual(1, asked.Count(IsDownload));
+    }
+
+    /// <summary>
+    /// Should a Graph refuse a listing asked for with the addresses, the folder is listed as it was before, and that
+    /// Graph is not asked for them again: a folder is never left unlisted for the sake of its files' addresses.
+    /// </summary>
+    [TestMethod]
+    public async Task AGraphThatWillNotListWithTheAddressesListsWithoutAndIsNotAskedForThemAgain()
+    {
+        using var fake = FakeSharePoint.Sandbox();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "plain/a.txt", "plain"u8.ToArray());
+        fake.Seed(documents, "plain/sub/b.txt", "b"u8.ToArray());
+        fake.Fail(r => r.IsGraph && r.RawPath.EndsWith("/children", StringComparison.OrdinalIgnoreCase) && Uri.UnescapeDataString(r.RawQuery).Contains("downloadUrl", StringComparison.Ordinal),
+            1000, _ => FakeSharePoint.Response.Json(400, FakeSharePoint.GraphError("invalidRequest", "Could not find a property named 'downloadUrl' on type 'microsoft.graph.driveItem'.")));
+        using var context = new TestSourceContext("sharepoint");
+        await using var source = await StartAsync(fake, TenantSettings(fake, SharePointSettings.AppDeviceCode), context);
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, "Documents/plain"), "a.txt");
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(source, "Documents/plain/sub"), "b.txt");
+        Assert.AreEqual(1, fake.Count(s => s.Status == 400), "asked for with the addresses once, and not after that was refused");
+
+        // and a file is read as it was before: its address asked for at its open
+        var before = fake.Requests.Count;
+        await using var file = await source.OpenAsync("Documents/plain/a.txt", VfsOpenMode.Read, None);
+        var bytes = new byte[file.Length];
+        Assert.AreEqual(bytes.Length, await file.ReadFullyAsync(0, bytes, None));
+        CollectionAssert.AreEqual("plain"u8.ToArray(), bytes);
+        var asked = fake.Requests.Skip(before).ToList();
+        Assert.AreEqual(1, asked.Count(IsItemAsked));
+        Assert.AreEqual(1, asked.Count(IsDownload));
+        Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth);
+    }
+
     /// <summary>
     /// A folder is deleted only when empty, and the listing that says it is may be hours old, while SharePoint deletes a
     /// folder with all it holds: the server is asked for the folder's own count for the delete. Before, a folder a
