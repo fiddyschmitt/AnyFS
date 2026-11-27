@@ -70,6 +70,7 @@ internal static class WinFspInstaller
         using (process)
         {
             await process.WaitForExitAsync(ct).ConfigureAwait(false);
+            WinFspRuntime.ForgetProblem();
             var code = process.ExitCode;
             var installed = WinFspRuntime.IsInstalled();
             if (code is 0 or SuccessRebootRequired && installed)

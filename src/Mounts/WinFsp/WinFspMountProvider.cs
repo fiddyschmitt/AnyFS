@@ -106,6 +106,7 @@ public sealed class WinFspMountProvider : IMountProviderPlugin, IValidatable, II
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
         await process.WaitForExitAsync(ct).ConfigureAwait(false);
+        WinFspRuntime.ForgetProblem();
         if (!WinFspRuntime.IsInstalled())
         {
             return new InstallResult(false, $"winget exited with code {process.ExitCode} and WinFsp is still missing: {string.Join(" | ", tail)}");
@@ -304,9 +305,50 @@ internal static class WinFspRuntime
         }
     }
 
-    /// <summary>Null when the driver is there and new enough; otherwise why the mount can't start, as the tile and the Add mount dialog show it.</summary>
+    /// <summary>How long what <see cref="Problem"/> found is used before it looks again.</summary>
+    internal static readonly TimeSpan ProblemHeldFor = TimeSpan.FromSeconds(5);
+
+    private static readonly Lock ProblemGate = new();
+    private static (long At, string? Problem)? _problem;
+
+    /// <summary>
+    /// Null when the driver is there and new enough; otherwise why the mount can't start, as the tile and the Add mount
+    /// dialog show it. The window asks for each WinFsp mount's tile at each refresh, and each answer was the registry, the
+    /// DLL's presence and its version read afresh: a millisecond a tile, every second (the review of 21-Nov-2026, P10).
+    /// What was found is used for <see cref="ProblemHeldFor"/>, and an install forgets it as it ends
+    /// (<see cref="ForgetProblem"/>), so the mount started on its heels sees the driver.
+    /// </summary>
     [SupportedOSPlatform("windows")]
     public static string? Problem()
+    {
+        lock (ProblemGate)
+        {
+            if (_problem is { } found && Stopwatch.GetElapsedTime(found.At) < ProblemHeldFor)
+            {
+                return found.Problem;
+            }
+        }
+
+        var now = ProblemNow();
+        lock (ProblemGate)
+        {
+            _problem = (Stopwatch.GetTimestamp(), now);
+        }
+
+        return now;
+    }
+
+    /// <summary>What <see cref="Problem"/> last found is looked for again at its next asking: the driver has just been installed, or may have been.</summary>
+    public static void ForgetProblem()
+    {
+        lock (ProblemGate)
+        {
+            _problem = null;
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static string? ProblemNow()
     {
         var installed = InstalledVersion();
         if (installed is null)

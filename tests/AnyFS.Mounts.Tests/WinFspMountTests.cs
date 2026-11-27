@@ -789,6 +789,42 @@ public class WinFspMountTests
         }
     }
 
+    [TestMethod]
+    public void WhetherTheDriverIsThereIsLookedUpOnceForManyAskings()
+    {
+        // The window asks for each WinFsp mount's tile at each refresh. Each answer read the registry, the DLL's presence
+        // and its version: a millisecond a tile, every second (the review of 21-Nov-2026, P10). What a look-up takes
+        // of memory tells one from an answer held, with no clock
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("WinFsp is a Windows driver: elsewhere the provider says so and looks nothing up");
+        }
+
+        Assert.AreEqual(TimeSpan.FromSeconds(5), WinFspRuntime.ProblemHeldFor);
+        var provider = new WinFspMountProvider();
+        WinFspRuntime.ForgetProblem();
+        var allocated = GC.GetAllocatedBytesForCurrentThread();
+        var first = provider.UnavailableReason;
+        var looked = GC.GetAllocatedBytesForCurrentThread() - allocated;
+        Assert.IsTrue(looked > 0, "the first asking looks it up");
+
+        allocated = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 200; i++)
+        {
+            Assert.AreEqual(first, provider.UnavailableReason);
+            Assert.AreEqual(first is not null, provider.NeedsAdministrator);
+        }
+
+        var held = GC.GetAllocatedBytesForCurrentThread() - allocated;
+        Assert.IsTrue(held < looked, $"400 askings allocated {held:N0} B where one look-up allocated {looked:N0} B");
+
+        // an install forgets what was found as it ends, so the mount started on its heels looks again
+        WinFspRuntime.ForgetProblem();
+        allocated = GC.GetAllocatedBytesForCurrentThread();
+        Assert.AreEqual(first, provider.UnavailableReason);
+        Assert.IsTrue(GC.GetAllocatedBytesForCurrentThread() - allocated > held, "looked up again after an install");
+    }
+
     /// <summary>The copy the plugin carries for single-file hosts is the layer this build links, and the installer constant follows it.</summary>
     [TestMethod]
     public void InteropCopyIsTheLayerThisBuildLinks()
