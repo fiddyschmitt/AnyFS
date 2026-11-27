@@ -1314,6 +1314,26 @@ public class ArtifactoryTests
     }
 
     [TestMethod]
+    public async Task AQueryWhoseAnswerGoesQuietPartWayIsGivenUpAndAskedAgain()
+    {
+        // The answer to a query begins, and then the server sends nothing more with the connection still up. The
+        // request's own time ended at the answer's headers, so nothing ended the wait for the rest: a walk stood at
+        // that query for ever, with its place among the queries (the review of 21-Nov-2026, R6). A read of an answer
+        // that gets nothing for as long as a request may wait fails as a connection lost part way does.
+        var fake = ArtifactorySeed.Lab();
+        using var context = new TestSourceContext();
+        await using var source = await StartAsync(fake, ArtifactorySeed.Settings(fake), context, fake.StandIn(quiet: TimeSpan.FromMilliseconds(300)));
+        const string query = "items.find({\"repo\":\"generic-local\",\"type\":\"any\"}).include(\"repo\",\"path\",\"name\",\"type\")";
+        var whole = await source.Api.AqlAsync(query, int.MaxValue, "everything in generic-local", CancellationToken.None);
+        var asked = fake.Queries.Count;
+        fake.QueryAnswersGoQuiet = 1;
+        var again = await source.Api.AqlAsync(query, int.MaxValue, "everything in generic-local", CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.AreEqual(whole.Items.Count, again.Items.Count, "the answer whole, from the second asking");
+        Assert.AreEqual(asked + 2, fake.Queries.Count, "asked again, once");
+        Assert.AreEqual(0, context.UpstreamRequests.Running.Count, "and the one given up is over");
+    }
+
+    [TestMethod]
     public async Task AFolderWhoseListingFailedStaysSoUntilTheNextWalk()
     {
         var fake = ArtifactorySeed.Lab();

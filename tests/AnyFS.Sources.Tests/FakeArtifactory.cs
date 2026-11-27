@@ -100,6 +100,9 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
     /// <summary>How many answers to a query break off part way: half of the answer is sent, and then the connection is lost.</summary>
     public int QueryAnswersBreak { get; set; }
 
+    /// <summary>How many of the next queries' answers send half of what they hold and then nothing, the connection left up.</summary>
+    public int QueryAnswersGoQuiet { get; set; }
+
     /// <summary>Whether a file's download is sent on to a signed address at <see cref="Storage"/>, which refuses a request that carries a sign-in.</summary>
     public bool Redirects { get; set; }
 
@@ -428,7 +431,7 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
 
     /// <summary>A stand-in for the source: its requests come here, and <paramref name="browser"/> stands in for the person at the browser (<see cref="Person"/>).</summary>
     /// <summary>The stand-in a source of this server is made with; AnyFS takes a client sign-in's session to be held as long as this platform holds one (<see cref="ClientSessionsLast"/>).</summary>
-    public ArtifactoryStandIn StandIn(Func<bool, Uri, CancellationToken, Task>? browser = null, bool useKept = true) => new(Handler, browser, useKept, ClientSessionsLast);
+    public ArtifactoryStandIn StandIn(Func<bool, Uri, CancellationToken, Task>? browser = null, bool useKept = true, TimeSpan? quiet = null) => new(Handler, browser, useKept, ClientSessionsLast, quiet);
 
     // --- answering -------------------------------------------------------------------------------------------------------
 
@@ -441,6 +444,9 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
     {
         /// <summary>Half of the body is sent, and then the connection is lost.</summary>
         public bool BreaksOff { get; init; }
+
+        /// <summary>Half of the body is sent, and then nothing: the connection stays up.</summary>
+        public bool GoesQuiet { get; init; }
 
         public static Response Json(JsonNode node, int status = 200, Dictionary<string, string>? headers = null) => new(status, Encoding.UTF8.GetBytes(node.ToJsonString()), "application/json", headers);
 
@@ -965,6 +971,12 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
             lock (_gate)
             {
                 var answer = Query(text, user, request.Headers.GetValueOrDefault("stream") == "true");
+                if (answer.Status == 200 && QueryAnswersGoQuiet > 0)
+                {
+                    QueryAnswersGoQuiet--;
+                    return answer with { GoesQuiet = true };
+                }
+
                 if (answer.Status != 200 || QueryAnswersBreak <= 0)
                 {
                     return answer;
@@ -1197,7 +1209,9 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
             var response = new HttpResponseMessage((HttpStatusCode)answer.Status)
             {
                 RequestMessage = message,
-                Content = answer.BreaksOff ? new StreamContent(new BrokenOff(answer.Body)) : new ByteArrayContent(message.Method == HttpMethod.Head ? [] : answer.Body),
+                Content = answer.BreaksOff ? new StreamContent(new BrokenOff(answer.Body))
+                    : answer.GoesQuiet ? new StreamContent(new GoneQuiet(answer.Body))
+                    : new ByteArrayContent(message.Method == HttpMethod.Head ? [] : answer.Body),
             };
             if (answer.ContentType is not null)
             {
@@ -1241,6 +1255,25 @@ internal sealed class FakeArtifactory(string origin = "https://artifactory.fake.
         {
             var read = await base.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
             return read > 0 ? read : throw new IOException("The response ended prematurely.");
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
+    }
+
+    /// <summary>Half of an answer, and then a read that waits until it is given up: a server that stopped sending and kept the connection.</summary>
+    private sealed class GoneQuiet(byte[] body) : MemoryStream(body, 0, body.Length / 2, writable: false)
+    {
+        public override bool CanSeek => false;
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var read = await base.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
+            }
+
+            return read;
         }
 
         public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();

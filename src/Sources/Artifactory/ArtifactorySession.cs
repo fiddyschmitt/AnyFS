@@ -14,9 +14,10 @@ namespace AnyFS.Sources.Artifactory;
 /// what stands in for the person at the browser (given the platform's sign-in page for the session, whether a window may be
 /// shown, and what ends when AnyFS closes the window: signs in there and gives the code, or does not, or closes the
 /// window by finishing), and how long the platform holds a session for them (null for the real platform's five minutes);
-/// and whether a sign-in kept from before is used.
+/// whether a sign-in kept from before is used; and how long an answer may send nothing part way before its read fails
+/// (null for the session's own five minutes).
 /// </summary>
-internal sealed record ArtifactoryStandIn(Func<HttpMessageHandler> Handler, Func<bool, Uri, CancellationToken, Task>? Browser = null, bool UseKept = true, TimeSpan? SessionHeld = null);
+internal sealed record ArtifactoryStandIn(Func<HttpMessageHandler> Handler, Func<bool, Uri, CancellationToken, Task>? Browser = null, bool UseKept = true, TimeSpan? SessionHeld = null, TimeSpan? Quiet = null);
 
 /// <summary>
 /// A token JFrog's client sign-in gave: its access token, which the whole platform takes, the refresh token that renews it
@@ -111,7 +112,9 @@ internal sealed class ArtifactorySession : IDisposable, IRequestSession
             inner = SessionHttp.Sockets(settings.TrustAnyCertificate);
         }
 
-        _handler = new ClockHandler(this, UpstreamRequestsHandler.Around(inner, watcher));
+        // an answer may send nothing for as long as a request may wait for its answer to begin: a query's answer comes
+        // as the server finds things, and one that goes quiet for longer is given up and asked again (ArtifactoryApi)
+        _handler = new ClockHandler(this, UpstreamRequestsHandler.Around(inner, watcher, standIn?.Quiet ?? RequestTimeout));
         Http = SessionHttp.Client(_handler, RequestTimeout, typeof(ArtifactorySession));
         Address = ArtifactoryAddress.Candidates(Url)[0];
         _renewal = new SignInRenewal(RefreshAgainAsync, MinRenewalInterval);
