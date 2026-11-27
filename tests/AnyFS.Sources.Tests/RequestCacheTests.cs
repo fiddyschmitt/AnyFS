@@ -1,4 +1,5 @@
 using AnyFS.Sdk;
+using AnyFS.Sdk.Testing;
 using AnyFS.Sources.Common;
 
 namespace AnyFS.Sources.Tests;
@@ -202,11 +203,12 @@ public class RequestCacheTests
     {
         // Twenty thousand answers of any size were kept, and one past its time went only when it was asked for again: a
         // GitLab's notes and diffs, a Confluence's comments, a wiki read whole stayed for the run
-        var cache = new RequestCache(CancellationToken.None, maxBytes: 1000 * Kilo);
+        var time = new FakeTime();
+        var cache = new RequestCache(CancellationToken.None, maxBytes: 1000 * Kilo, time);
         var each = RequestCache.LeastWeight + (15 * Kilo);
         for (var key = 0; key < 20; key++)
         {
-            await cache.GetAsync($"short{key}", TimeSpan.FromMilliseconds(1), _ => Answer(10 * Kilo), CancellationToken.None);
+            await cache.GetAsync($"short{key}", TimeSpan.FromSeconds(1), _ => Answer(10 * Kilo), CancellationToken.None);
         }
 
         for (var key = 0; key < 20; key++)
@@ -214,8 +216,8 @@ public class RequestCacheTests
             await cache.GetAsync($"kept{key}", null, _ => Answer(10 * Kilo), CancellationToken.None);
         }
 
+        time.Advance(TimeSpan.FromSeconds(2));
         Assert.AreEqual((40, 40 * each), (cache.Count, cache.Bytes), "under what it may weigh, all are there, those past their time too");
-        await Task.Delay(50);
 
         // 25 more reach the bound: what is past its time goes, which is enough, and nothing in its time does
         for (var key = 0; key < 25; key++)
@@ -250,7 +252,8 @@ public class RequestCacheTests
     public async Task WhatIsPutIsFoundByItsKeyAndWeighsWhatItsCallerSays()
     {
         // one of many a single request brought (a page of a search read ahead): no fetch of its own stands for it
-        var cache = new RequestCache(CancellationToken.None, maxBytes: 100 * Kilo);
+        var time = new FakeTime();
+        var cache = new RequestCache(CancellationToken.None, maxBytes: 100 * Kilo, time);
         cache.Put("issue:A-1", new Box<string>("one"), TimeSpan.FromMinutes(1), 20 * Kilo);
         Assert.AreEqual("one", cache.Peek<Box<string>>("issue:A-1")?.Value);
         Assert.AreEqual((1, RequestCache.LeastWeight + (20 * Kilo)), (cache.Count, cache.Bytes));
@@ -270,8 +273,8 @@ public class RequestCacheTests
         Assert.AreEqual((1, RequestCache.LeastWeight + (30 * Kilo)), (cache.Count, cache.Bytes));
 
         // past its time it answers no more, and the asking fetches
-        cache.Put("issue:A-2", new Box<string>("brief"), TimeSpan.FromMilliseconds(1), Kilo);
-        await Task.Delay(50);
+        cache.Put("issue:A-2", new Box<string>("brief"), TimeSpan.FromSeconds(1), Kilo);
+        time.Advance(TimeSpan.FromSeconds(2));
         Assert.IsNull(cache.Peek<Box<string>>("issue:A-2"));
         Assert.AreEqual("fetched", (await cache.GetAsync("issue:A-2", TimeSpan.FromMinutes(1), _ => Task.FromResult(new Box<string>("fetched")), CancellationToken.None)).Value);
 
@@ -323,6 +326,111 @@ public class RequestCacheTests
 
         Assert.IsTrue(cache.Bytes <= 2000 * Kilo, $"{cache.Bytes:N0} B kept");
         Assert.AreEqual(cache.Count * (RequestCache.LeastWeight + (4 * Kilo)), cache.Bytes, "and what is kept is what is weighed, after all that");
+    }
+
+    /// <summary>A list that is read again for what changed since: it says what it weighs, and that its next read builds on it.</summary>
+    private sealed record Listed(string Items, long Bytes) : IWeighed, IBuiltOn;
+
+    [TestMethod]
+    public async Task AFetchIsGivenWhatWasKeptPastItsTimeToBuildOn()
+    {
+        // GitLab kept every project's issues and merge requests in a map of its own for the run, to ask each again for
+        // what had changed. What is read on from is what the cache holds, while it holds it (the review of 21-Nov-2026, P6)
+        var time = new FakeTime();
+        var cache = new RequestCache(CancellationToken.None, time: time);
+        var given = new List<string?>();
+        Task<Listed> Read(Listed? previous, CancellationToken token)
+        {
+            given.Add(previous?.Items);
+            RequestCache.Received(1 << 20);
+            return Task.FromResult(new Listed((previous?.Items ?? "whole") + "+", 3000));
+        }
+
+        var brief = TimeSpan.FromSeconds(30);
+        Assert.AreEqual("whole+", (await cache.GetAsync<Listed>("list", brief, Read, CancellationToken.None)).Items);
+        time.Advance(TimeSpan.FromSeconds(29));
+        Assert.AreEqual("whole+", (await cache.GetAsync<Listed>("list", brief, Read, CancellationToken.None)).Items, "in its time it answers, and nothing is read");
+        Assert.AreEqual(RequestCache.LeastWeight + 3000, cache.Bytes, "it weighs what it says, whatever was read for it");
+        time.Advance(TimeSpan.FromSeconds(2));
+        Assert.AreEqual("whole++", (await cache.GetAsync<Listed>("list", brief, Read, CancellationToken.None)).Items, "past its time it is what the next read builds on");
+        Assert.AreEqual((1, RequestCache.LeastWeight + 3000), (cache.Count, cache.Bytes));
+        cache.Forget("list");
+        Assert.AreEqual("whole+", (await cache.GetAsync<Listed>("list", brief, Read, CancellationToken.None)).Items, "let go, it is read whole");
+        CollectionAssert.AreEqual(new string?[] { null, "whole+", null }, given);
+    }
+
+    [TestMethod]
+    public async Task WhatIsBuiltOnIsNotLetGoForBeingPastItsTimeButAsWhatWasLongestUnaskedFor()
+    {
+        var time = new FakeTime();
+        var cache = new RequestCache(CancellationToken.None, maxBytes: 100 * Kilo, time);
+        var brief = TimeSpan.FromSeconds(1);
+        for (var key = 0; key < 4; key++)
+        {
+            await cache.GetAsync<Listed>($"list{key}", brief, (_, _) => Task.FromResult(new Listed("whole", 10 * Kilo)), CancellationToken.None);
+            await cache.GetAsync($"plain{key}", brief, _ => Answer(10 * Kilo / 3 * 2), CancellationToken.None);
+        }
+
+        time.Advance(TimeSpan.FromSeconds(2));
+        Assert.AreEqual(8, cache.Count, "all past their time, and all there while the cache is under what it may weigh");
+
+        // past the bound: the plain answers past their time go, and the lists stay to be built on
+        for (var key = 0; key < 3; key++)
+        {
+            await cache.GetAsync($"more{key}", null, _ => Answer(10 * Kilo / 3 * 2), CancellationToken.None);
+        }
+
+        Assert.IsNull(cache.Peek<string>("plain0"));
+        Assert.AreEqual(7, cache.Count, "four lists and the three in their time");
+        string? built = null;
+        await cache.GetAsync<Listed>("list3", brief, (previous, _) =>
+        {
+            built = previous?.Items;
+            return Task.FromResult(new Listed("built on", 10 * Kilo));
+        }, CancellationToken.None);
+        Assert.AreEqual("whole", built);
+
+        // and past it again with nothing else to let go, the lists longest unasked for go as anything does
+        for (var key = 3; key < 9; key++)
+        {
+            await cache.GetAsync($"more{key}", null, _ => Answer(10 * Kilo / 3 * 2), CancellationToken.None);
+        }
+
+        Assert.IsTrue(cache.Bytes <= 100 * Kilo, $"{cache.Bytes:N0} B kept");
+        built = "not asked";
+        await cache.GetAsync<Listed>("list0", brief, (previous, _) =>
+        {
+            built = previous?.Items;
+            return Task.FromResult(new Listed("whole again", 10 * Kilo));
+        }, CancellationToken.None);
+        Assert.IsNull(built, "the one longest unasked for was let go, and is read whole");
+    }
+
+    [TestMethod]
+    public async Task AFetchThatPutsItsItemsByIsNotLetGoForThemNorBeforeItAnswers()
+    {
+        // A list's fetch puts each of its items by as its pages come, more of them than may be kept. The list is older
+        // than they are by when it was first asked for, and weighs nothing while it is on its way: let go as the oldest,
+        // it was asked for again at every use, with all its pages
+        var cache = new RequestCache(CancellationToken.None, maxBytes: 100 * Kilo);
+        var fetched = 0;
+        Task<Listed> ListAsync(Listed? previous, CancellationToken token)
+        {
+            fetched++;
+            for (var item = 0; item < 40; item++)
+            {
+                cache.Put($"item{fetched}-{item}", new Box<string>("whole"), null, 5 * Kilo);
+            }
+
+            return Task.FromResult(new Listed("list", 10 * Kilo));
+        }
+
+        Assert.AreEqual("list", (await cache.GetAsync<Listed>("list", null, ListAsync, CancellationToken.None)).Items);
+        Assert.IsTrue(cache.Bytes <= 100 * Kilo, $"{cache.Bytes:N0} B kept");
+        Assert.IsNull(cache.Peek<Box<string>>("item1-0"), "the first of its items made room");
+        Assert.AreEqual("whole", cache.Peek<Box<string>>("item1-39")?.Value, "the last are kept");
+        Assert.AreEqual("list", (await cache.GetAsync<Listed>("list", null, ListAsync, CancellationToken.None)).Items);
+        Assert.AreEqual(1, fetched, "and the list itself, which answers the next asking");
     }
 
     [TestMethod]

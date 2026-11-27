@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using System.Runtime.CompilerServices;
 
 namespace AnyFS.Sources.Common;
@@ -24,8 +23,14 @@ namespace AnyFS.Sources.Common;
 /// </summary>
 /// <param name="stopping">The source's own: a request shared by several askers is not cancelled by one of them giving up. It is stopped with the source, or when it has given up its place and no one waits for it any more.</param>
 /// <param name="maxBytes">What the answers kept may weigh together.</param>
-public sealed class RequestCache(CancellationToken stopping, long maxBytes = RequestCache.DefaultMaxBytes)
+/// <param name="time">The clock an answer's time is told by (a test's own).</param>
+public sealed class RequestCache(CancellationToken stopping, long maxBytes = RequestCache.DefaultMaxBytes, TimeProvider? time = null)
 {
+    private readonly TimeProvider _time = time ?? TimeProvider.System;
+
+    // each asking in the order it came: what a trim tells the longest unasked for by, whatever the clock's grain
+    private long _uses;
+
     public const int MaxEntries = 20_000;
 
     /// <summary>What a source's answers kept may weigh together, where it says nothing else.</summary>
@@ -78,23 +83,23 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
         private bool _counted;
         private bool _removed;
 
-        // when it was last asked for
+        // which asking of the cache's was the last for it
         private long _used;
 
-        public Entry(RequestCache cache, Func<CancellationToken, Task<object>> start, long at, TimeSpan? ttl, CancellationToken stopping)
+        public Entry(RequestCache cache, Func<CancellationToken, Task<object>> start, long at, long use, TimeSpan? ttl, CancellationToken stopping)
         {
             At = at;
             Ttl = ttl;
-            _used = at;
+            _used = use;
             _task = new Lazy<Task<object>>(() => RunAsync(cache, start, stopping), LazyThreadSafetyMode.ExecutionAndPublication);
         }
 
         /// <summary>An answer that was not fetched through the cache: kept as it is.</summary>
-        public Entry(object value, long at, TimeSpan? ttl)
+        public Entry(object value, long at, long use, TimeSpan? ttl)
         {
             At = at;
             Ttl = ttl;
-            _used = at;
+            _used = use;
             _task = new Lazy<Task<object>>(System.Threading.Tasks.Task.FromResult(value));
         }
 
@@ -104,10 +109,10 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
 
         public TimeSpan? Ttl { get; }
 
-        /// <summary>When it was last asked for: what a trim lets go by.</summary>
+        /// <summary>Which asking was the last for it: what a trim lets go by.</summary>
         public long Used => Volatile.Read(ref _used);
 
-        public void Touch() => Volatile.Write(ref _used, Stopwatch.GetTimestamp());
+        public void Touch(long use) => Volatile.Write(ref _used, use);
 
         /// <summary>Counts in one who waits for the fetch; false where it has given up its place, and whoever asks fetches anew.</summary>
         public bool TryEnter()
@@ -199,6 +204,9 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
             try
             {
                 var value = await start(stop.Token).ConfigureAwait(false);
+
+                // asked for as lately as it answers: whatever it put by on its way (the items of a list) is older than it
+                Touch(cache.NextUse());
                 cache.Weighed(this, WeightOf(value, Interlocked.Read(ref tally.Bytes)));
                 return value;
             }
@@ -213,19 +221,34 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
     }
 
     /// <summary>The kept <typeparamref name="T"/> for <paramref name="key"/> while it is younger than <paramref name="ttl"/> (null: for good), else fetched.</summary>
-    public async Task<T> GetAsync<T>(string key, TimeSpan? ttl, Func<CancellationToken, Task<T>> fetch, CancellationToken ct)
+    public Task<T> GetAsync<T>(string key, TimeSpan? ttl, Func<CancellationToken, Task<T>> fetch, CancellationToken ct)
         where T : class
     {
+        ArgumentNullException.ThrowIfNull(fetch);
+        return GetAsync<T>(key, ttl, (_, token) => fetch(token), ct);
+    }
+
+    /// <summary>
+    /// As <see cref="GetAsync{T}(string, TimeSpan?, Func{CancellationToken, Task{T}}, CancellationToken)"/>, for a thing
+    /// that is asked again for what changed since it was last read: the fetch is given what was kept for the key and is
+    /// past its time, if it is still kept (null otherwise, and it reads the thing whole). Such a value says so by being
+    /// an <see cref="IBuiltOn"/>, and is then not let go for being past its time alone.
+    /// </summary>
+    public async Task<T> GetAsync<T>(string key, TimeSpan? ttl, Func<T?, CancellationToken, Task<T>> fetch, CancellationToken ct)
+        where T : class
+    {
+        ArgumentNullException.ThrowIfNull(fetch);
         while (true)
         {
             if (_entries.TryGetValue(key, out var kept) && Usable(kept) && kept.TryEnter())
             {
-                kept.Touch();
+                kept.Touch(NextUse());
                 return await WaitedForAsync<T>(key, kept, ct).ConfigureAwait(false);
             }
 
             // not started until it wins its place: a loser of the race never asks upstream
-            var fresh = new Entry(this, token => Run(fetch, token), Stopwatch.GetTimestamp(), ttl, stopping);
+            var previous = kept is { Task.IsCompletedSuccessfully: true } ? kept.Task.Result as T : null;
+            var fresh = new Entry(this, token => Run(inner => fetch(previous, inner), token), _time.GetTimestamp(), NextUse(), ttl, stopping);
             if (kept is null ? _entries.TryAdd(key, fresh) : _entries.TryUpdate(key, fresh, kept))
             {
                 if (kept is not null)
@@ -288,7 +311,7 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
     {
         if (_entries.TryGetValue(key, out var kept) && kept.Task.IsCompletedSuccessfully && Usable(kept) && kept.Task.Result is T value)
         {
-            kept.Touch();
+            kept.Touch(NextUse());
             return value;
         }
 
@@ -305,7 +328,7 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
         where T : class
     {
         ArgumentNullException.ThrowIfNull(value);
-        var entry = new Entry(value, Stopwatch.GetTimestamp(), ttl);
+        var entry = new Entry(value, _time.GetTimestamp(), NextUse(), ttl);
         _ = entry.Task;
         while (true)
         {
@@ -336,8 +359,10 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
         }
     }
 
-    private static bool Usable(Entry entry)
-        => !entry.Task.IsCompleted || entry.Task.IsCompletedSuccessfully && (entry.Ttl is not { } ttl || Stopwatch.GetElapsedTime(entry.At) < ttl);
+    private bool Usable(Entry entry)
+        => !entry.Task.IsCompleted || entry.Task.IsCompletedSuccessfully && (entry.Ttl is not { } ttl || _time.GetElapsedTime(entry.At) < ttl);
+
+    private long NextUse() => Interlocked.Increment(ref _uses);
 
     private static async Task<object> Run<T>(Func<CancellationToken, Task<T>> fetch, CancellationToken ct)
         where T : class
@@ -350,7 +375,15 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
     /// What an answer weighs: half as much again as the bytes read for it, or what it is where it is text or bytes itself (or a pair or a
     /// box of them), whichever is more; and what an entry costs with nothing in it.
     /// </summary>
-    internal static long WeightOf(object? value, long received) => LeastWeight + Math.Max(received + (received / 2), Plain(value));
+    internal static long WeightOf(object? value, long received) => LeastWeight + (Said(value) ?? Math.Max(received + (received / 2), Plain(value)));
+
+    // what a value says it weighs itself, alone or in a box
+    private static long? Said(object? value) => value switch
+    {
+        IWeighed weighed => Math.Max(0, weighed.Bytes),
+        IBoxed boxed => Said(boxed.Boxed),
+        _ => null,
+    };
 
     private static long Plain(object? value) => value switch
     {
@@ -398,10 +431,10 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
             // from a copy made whole: others go on asking, and sorting the dictionary itself as it grows throws
             var all = _entries.ToArray();
 
-            // what is past its time answers no one any more
+            // what is past its time answers no one any more; but what the next read of it builds on is still that
             foreach (var old in all)
             {
-                if (!Usable(old.Value))
+                if (!Usable(old.Value) && !(old.Value.Task.IsCompletedSuccessfully && old.Value.Task.Result is IBuiltOn))
                 {
                     Drop(old.Key, old.Value);
                 }
@@ -415,12 +448,18 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
             // then what was longest unasked for, until a fifth of each bound is free: the next trim is as far off as that
             foreach (var old in all.OrderBy(e => e.Value.Used))
             {
-                if (_entries.Count <= MaxEntries / 5 * 4 && Bytes <= maxBytes / 5 * 4)
+                var many = _entries.Count > MaxEntries / 5 * 4;
+                if (!many && Bytes <= maxBytes / 5 * 4)
                 {
                     break;
                 }
 
-                Drop(old.Key, old.Value);
+                // one still on its way weighs nothing yet: letting it go frees nothing, and what it is fetching would
+                // be asked for again at once. It goes only where there are too many
+                if (many || old.Value.Task.IsCompleted)
+                {
+                    Drop(old.Key, old.Value);
+                }
             }
         }
         finally
@@ -429,6 +468,23 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
         }
     }
 }
+
+/// <summary>
+/// A value kept in a <see cref="RequestCache"/> that says what it weighs: one whose fetch does not read all of what it
+/// holds (a list read again for what changed since, most of it carried over from the last read).
+/// </summary>
+public interface IWeighed
+{
+    /// <summary>What the value holds in memory, about, in bytes.</summary>
+    long Bytes { get; }
+}
+
+/// <summary>
+/// A value kept in a <see cref="RequestCache"/> that its own next fetch builds on: a list asked again for what changed
+/// since. Past its time it answers no one, and is still worth what reading it whole again would cost, so it is not let
+/// go for being past its time alone: only, with everything else, as what was longest unasked for.
+/// </summary>
+public interface IBuiltOn;
 
 /// <summary>What a <see cref="Box{T}"/> holds, whatever its type: for <see cref="RequestCache"/> to weigh.</summary>
 internal interface IBoxed
