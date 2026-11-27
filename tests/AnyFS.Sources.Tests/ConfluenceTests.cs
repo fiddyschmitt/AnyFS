@@ -875,45 +875,62 @@ public class ConfluenceTests
         Assert.IsNull(await source.StampAsync("", null, CancellationToken.None), "the list of spaces has none");
     }
 
-    /// <summary>The pages kept whole are trimmed as others are added: a sort of the dictionary itself threw as it grew.</summary>
+    /// <summary>
+    /// A pass over more pages than the source's answers may weigh keeps to that weight, and reads every one of them right:
+    /// the pages read whole are among the answers kept, where each weighs its body. Two thousand were kept in a map of
+    /// their own, whatever their size (the review of 21-Nov-2026, P6).
+    /// </summary>
     [TestMethod]
-    public async Task PagesRememberedByManyThreadsAtOnceAreTrimmedWithoutAFault()
+    public async Task APassOverMorePagesThanMayBeKeptKeepsToWhatMayBeKept()
     {
-        const int Threads = 4;
-        const int Each = 5_000;
-        using var doc = System.Text.Json.JsonDocument.Parse("""{"id":"0","type":"page","title":"A page","body":{"storage":{"value":"<p>Text.</p>"}}}""");
-        var page = ConfluenceContent.Parse(doc.RootElement);
-        await using var source = new ConfluenceSource(new ConfluenceSettings());
-        var batches = Enumerable.Range(0, Threads).Select(t => Enumerable.Range(1, Each).Select(n => page with { Id = $"{t}-{n}" }).ToArray()).ToArray();
-        var faults = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
-        using var go = new ManualResetEventSlim();
-        var threads = batches.Select(batch => new Thread(() =>
+        const int Pages = 300;
+        const long MayWeigh = 1 << 20;
+        var storage = "<p>" + string.Join(" ", Enumerable.Range(0, 1_500).Select(i => "word" + (i % 97))) + "</p>";
+        var fake = new FakeConfluence(root: "/confluence");
+        fake.AddAccount("tester", "Test Er", ConfluenceSeed.Token, ConfluenceSeed.Password);
+        var space = fake.AddSpace("BIG", "Big space");
+        for (var p = 0; p < Pages; p++)
         {
-            go.Wait();
-            try
-            {
-                foreach (var content in batch)
-                {
-                    source.Remember(content);
-                }
-            }
-            catch (Exception ex)
-            {
-                faults.Enqueue(ex);
-            }
-        })).ToList();
-        threads.ForEach(t => t.Start());
-        go.Set();
-        threads.ForEach(t => t.Join());
-        Assert.AreEqual(0, faults.Count, faults.FirstOrDefault()?.ToString());
-
-        // a trim under way lets the others add without one of their own, so more may be kept just now: a page more trims again
-        for (var n = 0; source.PagesRemembered > ConfluenceSource.PagesKept && n < Threads * Each; n++)
-        {
-            source.Remember(page with { Id = $"more-{n}" });
+            fake.AddPage(space, space.Home, $"Page {p:D3}", storage);
         }
 
-        Assert.IsTrue(source.PagesRemembered <= ConfluenceSource.PagesKept, $"{source.PagesRemembered:N0} pages kept");
+        var settings = ConfluenceSeed.Settings(fake, "/display/BIG");
+        settings.RefreshSeconds = 3600;
+        await using var source = await StartAsync(fake, settings, standIn: fake.StandIn() with { AnswersKept = MayWeigh });
+        var heaviest = 0L;
+        var read = 0;
+        var folders = new Queue<string>();
+        folders.Enqueue("");
+        while (folders.Count > 0)
+        {
+            var path = folders.Dequeue();
+            var entries = new List<VfsEntry>();
+            await foreach (var entry in source.ListAsync(path, CancellationToken.None))
+            {
+                entries.Add(entry);
+            }
+
+            foreach (var entry in entries)
+            {
+                var child = path.Length == 0 ? entry.Name : path + "/" + entry.Name;
+                if (entry.IsDirectory)
+                {
+                    folders.Enqueue(child);
+                }
+                else if (entry.Name.StartsWith("Page ", StringComparison.Ordinal) && entry.Name.EndsWith(".md", StringComparison.Ordinal))
+                {
+                    StringAssert.Contains(await TextAsync(source, child), "word96");
+                    read++;
+                }
+            }
+
+            heaviest = Math.Max(heaviest, source.AnswersKept.Bytes);
+        }
+
+        Assert.AreEqual(Pages, read);
+        Console.WriteLine($"{Pages} pages of {storage.Length / 1024} KB read; the answers kept weighed {heaviest / 1024:N0} KB at most");
+        Assert.IsTrue(heaviest <= MayWeigh + (MayWeigh / 4), $"{heaviest:N0} B kept at the most");
+        Assert.IsTrue(source.AnswersKept.Bytes > MayWeigh / 2, "and what may be kept is");
     }
 
     // --- the plugin ----------------------------------------------------------------------------------------------------

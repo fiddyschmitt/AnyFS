@@ -31,16 +31,12 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     // things without bodies a request carries
     private const int ItemsPerRequest = 200;
 
-    // pages read whole and kept for the listings and opens that follow
-    internal const int PagesKept = 2_000;
-
     private const string Summary = "version,history";
     private const string Whole = "body.storage,version,history,metadata.labels,ancestors,space";
 
     private readonly ConfluenceSettings _settings;
     private readonly AtlassianStandIn? _standIn;
     private readonly CancellationTokenSource _stopping = new();
-    private readonly ConcurrentDictionary<string, (ConfluenceContent Content, long At)> _pages = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string?> _people = new(StringComparer.Ordinal);
     private AtlassianSession? _session;
     private AtlassianApi? _api;
@@ -90,7 +86,7 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         // "Requests at a time" is 1 to 64 (the client itself takes more: Bitbucket's and Bamboo's two settings multiplied)
         _api = new AtlassianApi(_session, Math.Clamp(_settings.Concurrency, 1, 64), Logger);
         _api.TellHealth(MarkHealthy, MarkDegraded);
-        _cache = new RequestCache(_stopping.Token);
+        _cache = new RequestCache(_stopping.Token, _standIn?.AnswersKept ?? RequestCache.DefaultMaxBytes);
         _spool = new SpoolCache(Path.Combine(Context.CacheDirectory, "spool"), logger: Logger);
 
         Scope = ConfluenceScope.From(_session.Address, out var problem) ?? throw new SourceFailedException(problem!, permanent: true);
@@ -462,10 +458,15 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             }
         }
 
+        // one kept at a version older than the listing names answers no more, and asked for by its key it would
+        if (Cache.Peek<Box<ConfluenceContent>>($"page:{id}") is { Value.Version: var held } && held < folder.Content.Version)
+        {
+            Cache.Forget($"page:{id}");
+        }
+
         var alone = await Cache.GetAsync($"page:{id}", Refresh, async c => await FindContentAsync($"content/{id}?expand={Whole}", c).ConfigureAwait(false) is { } page
             ? new Box<ConfluenceContent>(page)
             : throw VfsException.NotFound(folder.Content.Title), ct).ConfigureAwait(false);
-        Remember(alone.Value);
         return alone.Value;
     }
 
@@ -489,42 +490,26 @@ public sealed class ConfluenceSource : SourceBase, ICountable
         }
     }
 
-    /// <summary>A page read whole not long ago, at the version a listing names (any, given none).</summary>
+    /// <summary>How many answers the source keeps and what they weigh together, for tests.</summary>
+    internal (int Count, long Bytes) AnswersKept => _cache is { } cache ? (cache.Count, cache.Bytes) : (0, 0);
+
+    /// <summary>A page read whole not long ago, alone or with those beside it, at the version a listing names (any, given none).</summary>
     private ConfluenceContent? Fresh(string id, int? version)
-        => _pages.TryGetValue(id, out var kept) && Stopwatch.GetElapsedTime(kept.At) < Refresh && (version is null || version == 0 || kept.Content.Version >= version) ? kept.Content : null;
+        => _cache?.Peek<Box<ConfluenceContent>>($"page:{id}")?.Value is { } kept && (version is null || version == 0 || kept.Version >= version) ? kept : null;
 
-    /// <summary>How many pages are kept whole, for tests.</summary>
-    internal int PagesRemembered => _pages.Count;
-
+    /// <summary>
+    /// Keeps a page read whole, for the listings and opens that follow: among the answers kept
+    /// (<see cref="RequestCache.Put{T}"/>), where it weighs its body, two bytes a character, and is found by the key an
+    /// asking for it alone uses. Two thousand were kept in a map of their own whatever their size: 64 MB where a page is
+    /// 16 KB (the review of 21-Nov-2026, P6).
+    /// </summary>
     internal void Remember(ConfluenceContent content)
     {
-        if (content.Storage is null)
+        if (content.Storage is not null)
         {
-            return;
-        }
-
-        _pages[content.Id] = (content, Stopwatch.GetTimestamp());
-        if (_pages.Count <= PagesKept || Interlocked.Exchange(ref _trimming, 1) != 0)
-        {
-            return;
-        }
-
-        try
-        {
-            // from a copy made whole: others go on adding, and sorting the dictionary itself as it grows throws
-            foreach (var old in _pages.ToArray().OrderBy(p => p.Value.At).Take(PagesKept / 4))
-            {
-                _pages.TryRemove(old);
-            }
-        }
-        finally
-        {
-            Volatile.Write(ref _trimming, 0);
+            _cache?.Put($"page:{content.Id}", new Box<ConfluenceContent>(content), Refresh, 2L * content.Storage.Length);
         }
     }
-
-    // 1 while the pages kept whole are being trimmed: a second trim meanwhile would sort them all again for the same ones
-    private int _trimming;
 
     /// <summary>The names of the people a page mentions, each asked of Confluence once (by key, else by user name) and kept for the run.</summary>
     private async Task PeopleAsync(IEnumerable<string> keys, CancellationToken ct)
