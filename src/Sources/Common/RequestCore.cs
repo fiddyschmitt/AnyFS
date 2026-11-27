@@ -334,6 +334,13 @@ public abstract class RequestCore : IDisposable
             var lapsed = IsLapsed(response, sent);
             if (IsAnswer(response, sent) && !lapsed)
             {
+                // an answer taken whole is what a fetch keeps something of: its size is that fetch's to weigh by. One
+                // whose body its caller reads as a stream is a file's, and is not kept
+                if (completion == HttpCompletionOption.ResponseContentRead)
+                {
+                    RequestCache.Received(response.Content.Headers.ContentLength ?? 0);
+                }
+
                 return response;
             }
 

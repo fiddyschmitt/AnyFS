@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace AnyFS.Sources.Common;
 
@@ -8,15 +9,61 @@ namespace AnyFS.Sources.Common;
 /// many ask for it at once; a thing kept until it is older than the time it was asked with (null: for the session); a
 /// failure not kept, so the next asking tries again. An entry's fetch starts only once that entry is the one kept: two
 /// askers racing to replace a stale entry (or to add a missing one) do not both go upstream, and the loser's request is
-/// never left unobserved. Bounded: past <see cref="MaxEntries"/> the oldest fifth go.
+/// never left unobserved.
+/// <para>
+/// Bounded by what it holds, as well as by how many: past <see cref="MaxEntries"/> entries, or once they weigh more than
+/// the bytes it was made with, what is past its time goes, and then what was longest unasked for, down to four fifths of
+/// each bound (not the oldest: the list of a server's projects is as old as the run, small, and asked for all the time).
+/// It was bounded by the count alone, twenty thousand answers of any size, and an answer past its time went only when it
+/// was asked for again: a GitLab's notes and diffs, a Confluence's comments, a wiki read whole, stayed for the run (the
+/// review of 21-Nov-2026, P6). An answer weighs half as much again as the bytes the server sent for it
+/// (<see cref="Received"/>: what is kept of one is mostly its text, two bytes a character, less the names and the fields
+/// not kept; GitLab's notes and diffs and Confluence's comments held 0.74 of twice the bytes), or what it is where it is
+/// text or bytes itself, and never less than <see cref="LeastWeight"/>.
+/// </para>
 /// </summary>
 /// <param name="stopping">The source's own: a request shared by several askers is not cancelled by one of them giving up. It is stopped with the source, or when it has given up its place and no one waits for it any more.</param>
-public sealed class RequestCache(CancellationToken stopping)
+/// <param name="maxBytes">What the answers kept may weigh together.</param>
+public sealed class RequestCache(CancellationToken stopping, long maxBytes = RequestCache.DefaultMaxBytes)
 {
     public const int MaxEntries = 20_000;
 
+    /// <summary>What a source's answers kept may weigh together, where it says nothing else.</summary>
+    public const long DefaultMaxBytes = 64L << 20;
+
+    /// <summary>What an answer weighs at least: its entry, its key, its task.</summary>
+    public const long LeastWeight = 512;
+
+    // the bytes received for the fetch this flow is in: set as a fetch starts, added to by whatever reads its answers
+    private static readonly AsyncLocal<Tally?> Fetching = new();
+
     private readonly ConcurrentDictionary<string, Entry> _entries = new(StringComparer.Ordinal);
+    private long _bytes;
     private int _trimming;
+
+    /// <summary>How many answers are kept, on their way among them.</summary>
+    public int Count => _entries.Count;
+
+    /// <summary>What the answers kept weigh together.</summary>
+    public long Bytes => Interlocked.Read(ref _bytes);
+
+    /// <summary>
+    /// Says that <paramref name="bytes"/> of an answer were read for whatever fetch is under way here, if one is: what a
+    /// source's client calls as it takes an answer whole (<see cref="RequestCore"/> does). Nothing where no fetch
+    /// is under way, and nothing for a body its caller reads as a stream: that is a file's, and is not kept.
+    /// </summary>
+    public static void Received(long bytes)
+    {
+        if (bytes > 0 && Fetching.Value is { } tally)
+        {
+            Interlocked.Add(ref tally.Bytes, bytes);
+        }
+    }
+
+    private sealed class Tally
+    {
+        public long Bytes;
+    }
 
     private sealed class Entry
     {
@@ -26,11 +73,29 @@ public sealed class RequestCache(CancellationToken stopping)
         private int _waiting;
         private bool _gaveUpItsPlace;
 
-        public Entry(Func<CancellationToken, Task<object>> start, long at, TimeSpan? ttl, CancellationToken stopping)
+        // what it weighs, once it has answered; whether that is in the cache's total; whether it has left the cache
+        private long _weight;
+        private bool _counted;
+        private bool _removed;
+
+        // when it was last asked for
+        private long _used;
+
+        public Entry(RequestCache cache, Func<CancellationToken, Task<object>> start, long at, TimeSpan? ttl, CancellationToken stopping)
         {
             At = at;
             Ttl = ttl;
-            _task = new Lazy<Task<object>>(() => RunAsync(start, stopping), LazyThreadSafetyMode.ExecutionAndPublication);
+            _used = at;
+            _task = new Lazy<Task<object>>(() => RunAsync(cache, start, stopping), LazyThreadSafetyMode.ExecutionAndPublication);
+        }
+
+        /// <summary>An answer that was not fetched through the cache: kept as it is.</summary>
+        public Entry(object value, long at, TimeSpan? ttl)
+        {
+            At = at;
+            Ttl = ttl;
+            _used = at;
+            _task = new Lazy<Task<object>>(System.Threading.Tasks.Task.FromResult(value));
         }
 
         public Task<object> Task => _task.Value;
@@ -38,6 +103,11 @@ public sealed class RequestCache(CancellationToken stopping)
         public long At { get; }
 
         public TimeSpan? Ttl { get; }
+
+        /// <summary>When it was last asked for: what a trim lets go by.</summary>
+        public long Used => Volatile.Read(ref _used);
+
+        public void Touch() => Volatile.Write(ref _used, Stopwatch.GetTimestamp());
 
         /// <summary>Counts in one who waits for the fetch; false where it has given up its place, and whoever asks fetches anew.</summary>
         public bool TryEnter()
@@ -82,7 +152,39 @@ public sealed class RequestCache(CancellationToken stopping)
             }
         }
 
-        private async Task<object> RunAsync(Func<CancellationToken, Task<object>> start, CancellationToken stopping)
+        /// <summary>The answer's weight, as it comes; what to add to the cache's total, which is nothing for an entry that has left the cache.</summary>
+        public long Weighs(long weight)
+        {
+            lock (_gate)
+            {
+                if (_removed || _counted)
+                {
+                    return 0;
+                }
+
+                _weight = weight;
+                _counted = true;
+                return weight;
+            }
+        }
+
+        /// <summary>The entry has left the cache; what to take from the cache's total.</summary>
+        public long Left()
+        {
+            lock (_gate)
+            {
+                _removed = true;
+                if (!_counted)
+                {
+                    return 0;
+                }
+
+                _counted = false;
+                return _weight;
+            }
+        }
+
+        private async Task<object> RunAsync(RequestCache cache, Func<CancellationToken, Task<object>> start, CancellationToken stopping)
         {
             // a token of its own under the source's
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(stopping);
@@ -91,9 +193,14 @@ public sealed class RequestCache(CancellationToken stopping)
                 _stop = stop;
             }
 
+            // for this fetch and what it calls, and no further: what an async method sets here is not its caller's
+            var tally = new Tally();
+            Fetching.Value = tally;
             try
             {
-                return await start(stop.Token).ConfigureAwait(false);
+                var value = await start(stop.Token).ConfigureAwait(false);
+                cache.Weighed(this, WeightOf(value, Interlocked.Read(ref tally.Bytes)));
+                return value;
             }
             finally
             {
@@ -113,13 +220,19 @@ public sealed class RequestCache(CancellationToken stopping)
         {
             if (_entries.TryGetValue(key, out var kept) && Usable(kept) && kept.TryEnter())
             {
+                kept.Touch();
                 return await WaitedForAsync<T>(key, kept, ct).ConfigureAwait(false);
             }
 
             // not started until it wins its place: a loser of the race never asks upstream
-            var fresh = new Entry(token => Run(fetch, token), Stopwatch.GetTimestamp(), ttl, stopping);
+            var fresh = new Entry(this, token => Run(fetch, token), Stopwatch.GetTimestamp(), ttl, stopping);
             if (kept is null ? _entries.TryAdd(key, fresh) : _entries.TryUpdate(key, fresh, kept))
             {
+                if (kept is not null)
+                {
+                    Left(kept);
+                }
+
                 Trim();
 
                 // in its place a moment already: another may have come, been given up and left, and so stopped it
@@ -147,7 +260,7 @@ public sealed class RequestCache(CancellationToken stopping)
         }
         catch (Exception) when (!ct.IsCancellationRequested && entry.Task.IsFaulted)
         {
-            _entries.TryRemove(new KeyValuePair<string, Entry>(key, entry));
+            Drop(key, entry);
             throw;
         }
         catch (OperationCanceledException) when (AnyFS.Sdk.UpstreamPatience.GivenUp && !entry.Task.IsCompleted)
@@ -167,15 +280,61 @@ public sealed class RequestCache(CancellationToken stopping)
     /// else waits on it, and gives up its place, so that the next to ask fetches anew. Joined, the one that hung held
     /// every later caller until its own request's time was up, though the upstream answered again long before.
     /// </summary>
-    private void GiveUpPlace(string key, Entry entry) => _entries.TryRemove(new KeyValuePair<string, Entry>(key, entry));
+    private void GiveUpPlace(string key, Entry entry) => Drop(key, entry);
 
     /// <summary>The kept <typeparamref name="T"/> for <paramref name="key"/> if there is one, finished and younger than the time it was asked with; nothing is fetched.</summary>
     public T? Peek<T>(string key)
         where T : class
-        => _entries.TryGetValue(key, out var kept) && kept.Task.IsCompletedSuccessfully && Usable(kept) ? kept.Task.Result as T : null;
+    {
+        if (_entries.TryGetValue(key, out var kept) && kept.Task.IsCompletedSuccessfully && Usable(kept) && kept.Task.Result is T value)
+        {
+            kept.Touch();
+            return value;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Keeps <paramref name="value"/> for <paramref name="key"/>, in the place of whatever is kept for it: one of many that
+    /// a single request brought (a page of a search read ahead), which no fetch of its own stands for. It weighs
+    /// <paramref name="bytes"/>, as its caller says, and is found with <see cref="Peek{T}"/> or by a
+    /// <see cref="GetAsync{T}"/> for the key while it is younger than <paramref name="ttl"/>.
+    /// </summary>
+    public void Put<T>(string key, T value, TimeSpan? ttl, long bytes)
+        where T : class
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        var entry = new Entry(value, Stopwatch.GetTimestamp(), ttl);
+        _ = entry.Task;
+        while (true)
+        {
+            if (_entries.TryGetValue(key, out var old))
+            {
+                if (_entries.TryUpdate(key, entry, old))
+                {
+                    Left(old);
+                    break;
+                }
+            }
+            else if (_entries.TryAdd(key, entry))
+            {
+                break;
+            }
+        }
+
+        Weighed(entry, LeastWeight + Math.Max(0, bytes));
+        Trim();
+    }
 
     /// <summary>Forgets <paramref name="key"/>: the next asking fetches it.</summary>
-    public void Forget(string key) => _entries.TryRemove(key, out _);
+    public void Forget(string key)
+    {
+        if (_entries.TryRemove(key, out var entry))
+        {
+            Left(entry);
+        }
+    }
 
     private static bool Usable(Entry entry)
         => !entry.Task.IsCompleted || entry.Task.IsCompletedSuccessfully && (entry.Ttl is not { } ttl || Stopwatch.GetElapsedTime(entry.At) < ttl);
@@ -187,9 +346,49 @@ public sealed class RequestCache(CancellationToken stopping)
         return await fetch(ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// What an answer weighs: half as much again as the bytes read for it, or what it is where it is text or bytes itself (or a pair or a
+    /// box of them), whichever is more; and what an entry costs with nothing in it.
+    /// </summary>
+    internal static long WeightOf(object? value, long received) => LeastWeight + Math.Max(received + (received / 2), Plain(value));
+
+    private static long Plain(object? value) => value switch
+    {
+        string text => 2L * text.Length,
+        byte[] bytes => bytes.LongLength,
+        ITuple tuple => Enumerable.Range(0, tuple.Length).Sum(i => Plain(tuple[i])),
+        IBoxed boxed => Plain(boxed.Boxed),
+        _ => 0,
+    };
+
+    /// <summary>An entry's fetch has answered: its weight joins the total, unless the entry has left meanwhile.</summary>
+    private void Weighed(Entry entry, long weight)
+    {
+        if (entry.Weighs(weight) is > 0 and var added && Interlocked.Add(ref _bytes, added) > maxBytes)
+        {
+            Trim();
+        }
+    }
+
+    private void Left(Entry entry)
+    {
+        if (entry.Left() is > 0 and var weight)
+        {
+            Interlocked.Add(ref _bytes, -weight);
+        }
+    }
+
+    private void Drop(string key, Entry entry)
+    {
+        if (_entries.TryRemove(new KeyValuePair<string, Entry>(key, entry)))
+        {
+            Left(entry);
+        }
+    }
+
     private void Trim()
     {
-        if (_entries.Count <= MaxEntries || Interlocked.Exchange(ref _trimming, 1) != 0)
+        if ((_entries.Count <= MaxEntries && Bytes <= maxBytes) || Interlocked.Exchange(ref _trimming, 1) != 0)
         {
             return;
         }
@@ -197,9 +396,31 @@ public sealed class RequestCache(CancellationToken stopping)
         try
         {
             // from a copy made whole: others go on asking, and sorting the dictionary itself as it grows throws
-            foreach (var old in _entries.ToArray().OrderBy(e => e.Value.At).Take(MaxEntries / 5))
+            var all = _entries.ToArray();
+
+            // what is past its time answers no one any more
+            foreach (var old in all)
             {
-                _entries.TryRemove(old);
+                if (!Usable(old.Value))
+                {
+                    Drop(old.Key, old.Value);
+                }
+            }
+
+            if (_entries.Count <= MaxEntries && Bytes <= maxBytes)
+            {
+                return;
+            }
+
+            // then what was longest unasked for, until a fifth of each bound is free: the next trim is as far off as that
+            foreach (var old in all.OrderBy(e => e.Value.Used))
+            {
+                if (_entries.Count <= MaxEntries / 5 * 4 && Bytes <= maxBytes / 5 * 4)
+                {
+                    break;
+                }
+
+                Drop(old.Key, old.Value);
             }
         }
         finally
@@ -209,5 +430,14 @@ public sealed class RequestCache(CancellationToken stopping)
     }
 }
 
+/// <summary>What a <see cref="Box{T}"/> holds, whatever its type: for <see cref="RequestCache"/> to weigh.</summary>
+internal interface IBoxed
+{
+    object? Boxed { get; }
+}
+
 /// <summary>A value kept in a <see cref="RequestCache"/>, which keeps only references: a struct, or a null for a thing that is not there.</summary>
-public sealed record Box<T>(T Value);
+public sealed record Box<T>(T Value) : IBoxed
+{
+    object? IBoxed.Boxed => Value;
+}
