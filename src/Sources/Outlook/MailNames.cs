@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Globalization;
+using AnyFS.Sdk;
 using AnyFS.Sources.Outlook.Mail;
 
 namespace AnyFS.Sources.Outlook;
@@ -10,7 +11,9 @@ namespace AnyFS.Sources.Outlook;
 /// (message.md, message.eml, event.ics), so that a path stays well inside Windows' limit with a long subject. A character
 /// no Windows file name takes becomes an underscore, a name never ends in a dot or a space, and a long one is cut (a
 /// folder's at 120 characters, a file's at 150 with its extension kept), leaving room in a path for the " (2)" a name
-/// shared by two gets.
+/// shared by two gets. The cut falls where <see cref="SafeNames.Cut"/> makes it, before the character that does not fit
+/// whole: it fell at a count of UTF-16 units, and left half of a character that takes two, a letter without its accent
+/// or a part of an emoji joined of several (the review of 21-Nov-2026, R16).
 /// </summary>
 internal static class MailNames
 {
@@ -90,7 +93,7 @@ internal static class MailNames
         text = Clean(Replace(text));
         if (text.Length > MaxFolderName)
         {
-            text = Clean(text[..MaxFolderName]);
+            text = Clean(SafeNames.Cut(text, MaxFolderName));
         }
 
         return text.Length == 0 ? "_" : text;
@@ -109,7 +112,7 @@ internal static class MailNames
             }
 
             var stem = text[..(text.Length - extension.Length)];
-            text = stem[..Math.Min(stem.Length, MaxFileName - extension.Length)].Trim() + extension;
+            text = SafeNames.Cut(stem, MaxFileName - extension.Length).Trim() + extension;
         }
 
         text = text.TrimEnd('.', ' ').Trim();

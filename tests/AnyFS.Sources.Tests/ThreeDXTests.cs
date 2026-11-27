@@ -45,6 +45,21 @@ public class ThreeDXNamesTests
     }
 
     [TestMethod]
+    [DataRow("\U0001F600", DisplayName = "a character of two UTF-16 units")]
+    [DataRow("e\U00000301", DisplayName = "a letter and the accent joined to it")]
+    [DataRow("\U0001F468\U0000200D\U0001F469\U0000200D\U0001F467", DisplayName = "an emoji joined of three")]
+    public void ALongNameIsCutBeforeACharacterThatDoesNotFitWholeNeverInsideIt(string character)
+    {
+        // as the Outlook source's names were: cut at a count of UTF-16 units, wherever that fell (the review of
+        // 21-Nov-2026, R16)
+        const string start = "X Rev 1 (";
+        var title = new string('a', ThreeDXNames.MaxDocumentName - start.Length - 1);
+        Assert.AreEqual(start + title, ThreeDXNames.DocumentFolder("X", "1", title + character + " and more"));
+        var stem = new string('n', ThreeDXNames.MaxFileName - ".pdf".Length - 1);
+        Assert.AreEqual(stem + ".pdf", ThreeDXNames.FileName(stem + character + " and more.pdf"), "a file's name too, its extension kept");
+    }
+
+    [TestMethod]
     public void NamesTwoDocumentsShareAreNumberedWithTheirTypes()
     {
         var older = new DxDocument("A1", "DOC", "Spec", "1", "Document", DateTimeOffset.Parse("2020-01-01T00:00:00Z"), null, []);

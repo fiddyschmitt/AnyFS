@@ -1,4 +1,5 @@
 using System.Text;
+using AnyFS.Sdk;
 
 namespace AnyFS.Sources.ThreeDX;
 
@@ -7,7 +8,9 @@ namespace AnyFS.Sources.ThreeDX;
 /// the same file: a document is the folder "Name Rev A (Title)", the title left out when it is the name; a file keeps its
 /// title. A character no Windows file name takes becomes an underscore, a name never ends in a dot or a space, and a long
 /// one is cut (a document's at 120 characters, a file's at 150 with its extension kept), leaving room in a path for the
-/// " (2)" a name shared by two gets.
+/// " (2)" a name shared by two gets. The cut falls where <see cref="SafeNames.Cut"/> makes it, before the character that
+/// does not fit whole: it fell at a count of UTF-16 units, and left half of a character that takes two, a letter without
+/// its accent or a part of an emoji joined of several (the review of 21-Nov-2026, R16).
 /// </summary>
 internal static class ThreeDXNames
 {
@@ -36,7 +39,7 @@ internal static class ThreeDXNames
         text = Clean(Replace(text));
         if (text.Length > MaxDocumentName)
         {
-            text = Clean(text[..MaxDocumentName]);
+            text = Clean(SafeNames.Cut(text, MaxDocumentName));
         }
 
         return text.Length == 0 ? "_" : text;
@@ -56,7 +59,7 @@ internal static class ThreeDXNames
             }
 
             var stem = text[..(text.Length - extension.Length)];
-            text = stem[..Math.Min(stem.Length, MaxFileName - extension.Length)].Trim() + extension;
+            text = SafeNames.Cut(stem, MaxFileName - extension.Length).Trim() + extension;
         }
 
         text = text.TrimEnd('.', ' ').Trim();

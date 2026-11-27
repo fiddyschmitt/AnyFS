@@ -674,6 +674,26 @@ public class MailNamesTests
         Assert.AreEqual((date.ToLocalTime().Year.ToString("0000", System.Globalization.CultureInfo.InvariantCulture), date.ToLocalTime().Month.ToString("00", System.Globalization.CultureInfo.InvariantCulture)), (year, month));
         Assert.AreEqual(("undated", (string?)null), MailNames.Period(null));
     }
+
+    [TestMethod]
+    [DataRow("\U0001F600", DisplayName = "a character of two UTF-16 units")]
+    [DataRow("e\U00000301", DisplayName = "a letter and the accent joined to it")]
+    [DataRow("\U0001F468\U0000200D\U0001F469\U0000200D\U0001F467", DisplayName = "an emoji joined of three")]
+    public void ALongNameIsCutBeforeACharacterThatDoesNotFitWholeNeverInsideIt(string character)
+    {
+        // A name was cut at a count of UTF-16 units, wherever that fell: half of a character that takes two (which no
+        // client shows as it was), a letter without its accent, a part of an emoji joined of several. The cut is before
+        // the character that does not fit whole, as SafeNames cuts every other source's names (the review of
+        // 21-Nov-2026, R16).
+        var kept = new string('a', MailNames.MaxFolderName - 1);
+        Assert.AreEqual(kept, MailNames.Folder(kept + character + " and more"));
+        var stem = new string('n', MailNames.MaxFileName - ".pdf".Length - 1);
+        Assert.AreEqual(stem + ".pdf", MailNames.FileName(stem + character + " and more.pdf"), "a file's name too, its extension kept");
+
+        // one that fits is kept whole
+        var room = new string('a', MailNames.MaxFolderName - character.Length);
+        Assert.AreEqual(room + character, MailNames.Folder(room + character + " and more"));
+    }
 }
 
 [TestClass]
