@@ -143,6 +143,49 @@ public class TeamsSourceTests
     }
 
     [TestMethod]
+    public async Task TheLeastUsedConversationsHistoryIsLetGoByWhatTheMessagesWeigh()
+    {
+        // the conversations held 150,000 messages of any length before the least used histories were let go (the review
+        // of 21-Nov-2026, P8)
+        var fake = new FakeTeams();
+        fake.AddPerson(Jane, "Jane Doe");
+        fake.AddPerson(John, "John Roe");
+        var filler = new string('m', 1000);
+        var chats = new[] { ("First chat", Jane), ("Second chat", John) }.Select(c =>
+        {
+            var chat = fake.AddChat(ChatKind.Group, c.Item1, [c.Item2], When);
+            for (var m = 0; m < 130; m++)
+            {
+                fake.Post(chat.Id, c.Item2, null, $"<p>Message {m} of the {c.Item1}: {filler}</p>", When.AddDays(-60).AddHours(m));
+            }
+
+            return chat;
+        }).ToList();
+
+        // a newest read of five messages: the 125 before them are a chat's history. The walk that begins with the source
+        // lists both chats, and each listing waits for its chat's history
+        await using var source = await StartAsync(fake, s => s.WithinDays = 0, newest: 5, pageSize: 5);
+        await source.CountFilesAsync(CancellationToken.None);
+        Assert.IsTrue(source.ConversationWhole(chats[0].Id) && source.ConversationWhole(chats[1].Id), "both read back to their start");
+        var both = source.HistoriesHeld;
+        Assert.IsTrue(both > 590 * 1024, $"{both:N0} B: 260 messages of a thousand characters");
+
+        // less may be held than the two weigh: the history of the one used longest ago goes, back to its newest messages
+        source.HistoriesKept = 400 * 1024;
+        var gone = chats.Where(c => !source.ConversationWhole(c.Id)).ToList();
+        Assert.AreEqual(1, gone.Count, "one let go, and no more than had to be");
+        Assert.IsTrue(source.HistoriesHeld < 400 * 1024, $"{source.HistoriesHeld:N0} B held of {both:N0}");
+
+        // listed again, it is read back again, whole; and as its history lands the other, used longest ago now, is let go
+        var (name, other) = gone[0] == chats[0] ? ("First chat", chats[1]) : ("Second chat", chats[0]);
+        await source.Listings.RefreshAsync($"Chats/{name}", CancellationToken.None);
+        Assert.IsTrue(source.ConversationWhole(gone[0].Id));
+        Assert.IsFalse(source.ConversationWhole(other.Id), "the one used longest ago is let go of");
+        Assert.IsTrue(source.HistoriesHeld < 400 * 1024, $"{source.HistoriesHeld:N0} B held: one whole, and the other's newest");
+        StringAssert.Contains(await TextAsync(source, $"Chats/{name}/chat.md"), $"Message 0 of the {name}");
+    }
+
+    [TestMethod]
     public async Task TheRootShowsTheTeamsAndTheChatsFolder()
     {
         await using var source = await StartAsync(Seed());

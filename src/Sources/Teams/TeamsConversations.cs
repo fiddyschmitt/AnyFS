@@ -22,8 +22,24 @@ public sealed partial class TeamsSource
     /// <summary>A page of the chat service's messages: 200 at most ("PageSize query parameter is too large" past it).</summary>
     private int PageSize => _standIn?.PageSize ?? 200;
 
-    /// <summary>How many messages the conversations hold in all before the least used histories are let go (read again when next listed).</summary>
-    private const int KeptMessages = 150_000;
+    /// <summary>
+    /// What the conversations' messages may weigh in all before the least used ones' histories are let go (read again when
+    /// next listed). It was a number of messages, 150,000 of any length (the review of 21-Nov-2026, P8).
+    /// </summary>
+    internal long HistoriesKept
+    {
+        get => Interlocked.Read(ref _historiesKept);
+        set
+        {
+            Interlocked.Exchange(ref _historiesKept, value);
+            LetGo(null);
+        }
+    }
+
+    private long _historiesKept = 128L << 20;
+
+    /// <summary>What the conversations' messages weigh in all, for tests.</summary>
+    internal long HistoriesHeld => _conversations.Values.Sum(c => c.Bytes());
 
     // how soon a history read that failed is begun again
     private static readonly TimeSpan HistoryRetry = TimeSpan.FromMinutes(1);
@@ -96,6 +112,22 @@ public sealed partial class TeamsSource
 
         private (int Changes, object Made)? _made;
 
+        private (int Changes, long Bytes) _weighed = (-1, 0);
+
+        /// <summary>What its messages weigh: their text, two bytes a character, and what a message costs with none; summed once for each state of them.</summary>
+        public long Bytes()
+        {
+            lock (Gate)
+            {
+                if (_weighed.Changes != Changes)
+                {
+                    _weighed = (Changes, Messages.Values.Sum(m => 300L + (2L * ((m.Html?.Length ?? 0) + (m.FromDisplayName?.Length ?? 0)))));
+                }
+
+                return _weighed.Bytes;
+            }
+        }
+
         public List<TeamsMessage> All()
         {
             lock (Gate)
@@ -140,6 +172,9 @@ public sealed partial class TeamsSource
         {
             var conversation = await RefreshNewestAsync(threadId, versionOf(await StructureAsync(c).ConfigureAwait(false)), c).ConfigureAwait(false);
             await LearnNamesAsync(conversation.All(), c).ConfigureAwait(false);
+
+            // the newest messages of many conversations weigh too, with no history's page landing to say so
+            LetGo(conversation);
             return conversation;
         }, ct).ConfigureAwait(false);
         store.Used = Interlocked.Increment(ref _uses);
@@ -603,15 +638,15 @@ public sealed partial class TeamsSource
     }
 
     /// <summary>
-    /// While the conversations hold more than <see cref="KeptMessages"/> messages, the least used ones' histories are let go
-    /// (back to their newest messages; read again when their folders are next listed).
+    /// While the conversations' messages weigh more than <see cref="HistoriesKept"/>, the least used ones' histories are let
+    /// go (back to their newest messages; read again when their folders are next listed).
     /// </summary>
-    private void LetGo(Conversation reading)
+    private void LetGo(Conversation? reading)
     {
-        var total = _conversations.Values.Sum(c => c.Count);
+        var total = _conversations.Values.Sum(c => c.Bytes());
         foreach (var store in _conversations.Values.Where(c => c != reading && c.HistoryBegun && c.Reading.IsCompleted).OrderBy(c => c.Used).ToList())
         {
-            if (total <= KeptMessages)
+            if (total <= HistoriesKept)
             {
                 return;
             }
@@ -623,7 +658,7 @@ public sealed partial class TeamsSource
                     continue;
                 }
 
-                var before = store.Messages.Count;
+                var before = store.Bytes();
                 foreach (var id in store.Messages.Where(p => p.Value.Composed is { } at && at < from).Select(p => p.Key).ToList())
                 {
                     store.Messages.Remove(id);
@@ -633,7 +668,7 @@ public sealed partial class TeamsSource
                 store.Next = store.NewestNext;
                 store.HistoryBegun = false;
                 store.Oldest = store.Messages.Values.Select(m => m.Composed).Where(at => at is not null).Min();
-                total -= before - store.Messages.Count;
+                total -= before - store.Bytes();
             }
         }
     }
