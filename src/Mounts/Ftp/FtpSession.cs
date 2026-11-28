@@ -21,7 +21,6 @@ internal sealed class FtpSession
     private const int MaxLineBytes = 8192;
     private const int ReadChunk = 1 << 20;
     private const int WriteChunk = 256 * 1024;
-    private static readonly TimeSpan IdleTimeout = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan DataTimeout = TimeSpan.FromSeconds(30);
     private static readonly UTF8Encoding Utf8 = new(false);
 
@@ -37,6 +36,9 @@ internal sealed class FtpSession
     private int _lineEnd;
     private Task<string?>? _pendingLine;
 
+    /// <summary>What ends <see cref="_pendingLine"/> at the idle timeout: set going once the transfer that began the read has ended.</summary>
+    private CancellationTokenSource? _pendingIdle;
+
     private string? _pendingUser;
     private string? _login;
     private IReadOnlyList<FtpCollection> _visible = [];
@@ -48,7 +50,7 @@ internal sealed class FtpSession
     private bool _epsvAll;
     private bool _quit;
 
-    /// <summary>The command in hand is a transfer that has been told how it ended: what fails after that (its file's close) is not answered again.</summary>
+    /// <summary>The command in hand is a transfer that has been told how it ended: what fails after that is not answered again.</summary>
     private bool _answered;
 
     public FtpSession(FtpServer server, TcpClient client)
@@ -133,18 +135,30 @@ internal sealed class FtpSession
 
     // ---- the control connection ----------------------------------------------------------------------------
 
-    /// <summary>The next command line, or null when the client went away or said nothing for the idle timeout.</summary>
+    /// <summary>
+    /// The next command line, or null when the client went away or said nothing for the idle timeout. A line too long is
+    /// answered here, and the one after it read.
+    /// </summary>
     private async Task<string?> NextLineAsync(CancellationToken ct)
     {
-        var pending = _pendingLine;
-        _pendingLine = null;
-        if (pending is null)
+        while (true)
         {
-            using var idle = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            idle.CancelAfter(IdleTimeout);
+            // a read that a transfer began, and left going when it ended, is given the idle timeout from now, as a read
+            // begun here is. It was waited for with no timeout, and a client that went quiet after a transfer held its
+            // session for ever (seen in the review of 21-Nov-2026 and left)
+            var pending = _pendingLine;
+            using var idle = _pendingIdle ?? CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _pendingLine = null;
+            _pendingIdle = null;
+            idle.CancelAfter(_server.IdleTimeout);
             try
             {
-                return await ReadLineAsync(idle.Token).ConfigureAwait(false);
+                return await (pending ?? ReadLineAsync(idle.Token)).ConfigureAwait(false);
+            }
+            catch (FtpReplyException ex)
+            {
+                // a line too long, read to its end and dropped
+                await ReplyAsync(ex.Code, ex.Message, ct).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
@@ -152,14 +166,17 @@ internal sealed class FtpSession
                 return null;
             }
         }
-
-        return await pending.ConfigureAwait(false);
     }
 
-    /// <summary>One line of the control connection, CR LF or LF terminated, Telnet IAC sequences dropped, as UTF-8.</summary>
+    /// <summary>
+    /// One line of the control connection, CR LF or LF terminated, Telnet IAC sequences dropped, as UTF-8. A line longer
+    /// than <see cref="MaxLineBytes"/> is read to its end, with nothing kept past the limit, and then refused with a 500
+    /// for the caller to answer.
+    /// </summary>
     private async Task<string?> ReadLineAsync(CancellationToken ct)
     {
         var line = new List<byte>(128);
+        var tooLong = false;
         while (true)
         {
             if (_lineLength == _lineEnd)
@@ -167,7 +184,7 @@ internal sealed class FtpSession
                 var n = await _stream.ReadAsync(_lineBuffer, ct).ConfigureAwait(false);
                 if (n == 0)
                 {
-                    return line.Count == 0 ? null : Utf8.GetString(line.ToArray());
+                    return line.Count == 0 || tooLong ? null : Utf8.GetString(line.ToArray());
                 }
 
                 _lineLength = 0;
@@ -177,6 +194,11 @@ internal sealed class FtpSession
             var b = _lineBuffer[_lineLength++];
             if (b == '\n')
             {
+                if (tooLong)
+                {
+                    throw new FtpReplyException(500, "Line too long");
+                }
+
                 if (line.Count > 0 && line[^1] == '\r')
                 {
                     line.RemoveAt(line.Count - 1);
@@ -199,7 +221,11 @@ internal sealed class FtpSession
 
             if (line.Count >= MaxLineBytes)
             {
-                throw new FtpReplyException(500, "Line too long");
+                // the rest of the line, to its LF, is read and dropped, so the next command is read from its start. The
+                // limit was thrown at here, and with nothing to answer it the session ended, with no reply (seen in the
+                // review of 21-Nov-2026 and left)
+                tooLong = true;
+                continue;
             }
 
             line.Add(b);
@@ -789,15 +815,35 @@ internal sealed class FtpSession
         var transfer = Task.Run(() => body(data.GetStream(), aborting.Token), CancellationToken.None);
         while (true)
         {
-            _pendingLine ??= ReadLineAsync(ct);
+            if (_pendingLine is null)
+            {
+                // no idle timeout while the transfer runs, which may take hours: the read is given one when it has ended
+                _pendingIdle = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                _pendingLine = ReadLineAsync(_pendingIdle.Token);
+            }
+
             var finished = await Task.WhenAny(transfer, _pendingLine).ConfigureAwait(false);
             if (finished == transfer)
             {
                 break;
             }
 
-            var line = await _pendingLine.ConfigureAwait(false);
+            var read = _pendingLine;
             _pendingLine = null;
+            _pendingIdle?.Dispose();
+            _pendingIdle = null;
+            string? line;
+            try
+            {
+                line = await read.ConfigureAwait(false);
+            }
+            catch (FtpReplyException ex)
+            {
+                // a line too long, read to its end and dropped: answered, and the transfer goes on
+                await ReplyAsync(ex.Code, ex.Message, ct).ConfigureAwait(false);
+                continue;
+            }
+
             if (line is null)
             {
                 aborted = true;
@@ -1003,6 +1049,28 @@ internal sealed class FtpSession
         }
 
         var file = await target.Fs.OpenAsync(target.Path, VfsOpenMode.Read, ct).ConfigureAwait(false);
+
+        // closed once, by whichever comes to it first: the transfer, on a thread of its own, or the finally below
+        var closes = 0;
+        async Task CloseAsync()
+        {
+            if (Interlocked.Exchange(ref closes, 1) != 0)
+            {
+                return;
+            }
+
+            try
+            {
+                await file.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // a file that is read gives nothing more at its close: a transfer that sent every byte is complete
+                // whatever the close says, and one that failed has its own reply. The failure is logged, not answered
+                _logger.LogWarning(ex, "ftp {Peer}: {Command}: closing the file failed", _peer, "RETR " + arg);
+            }
+        }
+
         try
         {
             await TransferAsync($"Opening BINARY mode data connection for {entry.Name} ({entry.Length} bytes)", async (stream, token) =>
@@ -1028,12 +1096,18 @@ internal sealed class FtpSession
                 finally
                 {
                     ArrayPool<byte>.Shared.Return(buffer);
+
+                    // closed before the transfer is told how it ended, however it ended, so that reply is its last. It was
+                    // closed after the 226, and a close that failed was answered as well: a second reply, which the client
+                    // read as its next command's (seen in the review of 21-Nov-2026 and left)
+                    await CloseAsync().ConfigureAwait(false);
                 }
             }, ct).ConfigureAwait(false);
         }
         finally
         {
-            await file.DisposeAsync().ConfigureAwait(false);
+            // a transfer that never began (no data connection) has its file closed here
+            await CloseAsync().ConfigureAwait(false);
         }
     }
 

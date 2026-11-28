@@ -51,6 +51,9 @@ internal sealed class FtpServer : IAsyncDisposable
 
     public ILogger Logger => _logger;
 
+    /// <summary>How long a session may wait for its client's next command before it says so (421) and closes: 15 minutes, less in tests.</summary>
+    internal TimeSpan IdleTimeout { get; set; } = TimeSpan.FromMinutes(15);
+
     public int CollectionCount => _collections.Count;
 
     public int SessionCount => _sessions.Count;

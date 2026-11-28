@@ -458,7 +458,7 @@ public class FtpMountTests
             Assert.AreEqual("hello readme", Encoding.UTF8.GetString(await client.RetrieveAsync("/work/readme.txt")));
         }
 
-        // one that fails when its command has been answered (the file's close, after the 226) is logged, and not answered again
+        // one whose file fails to close when every byte has been sent is complete all the same, and the failure is logged
         count = log.Warnings.Count;
         Assert.AreEqual("late", Encoding.UTF8.GetString(await client.RetrieveAsync("/work/late.txt")));
         Assert.AreEqual(200, (await client.CommandAsync("NOOP")).Code, "the next command's reply is its own");
@@ -522,6 +522,146 @@ public class FtpMountTests
         }
 
         Assert.AreEqual(0, log.Warnings.Count, string.Join(" | ", log.Warnings.Select(w => w.Message)));
+    }
+
+    /// <summary>
+    /// A command line over the limit (8,192 bytes) is answered 500, the rest of it is read to its end and dropped, and the
+    /// session goes on, during a transfer as well. The limit was met by an exception that nothing answered: the session
+    /// ended with no reply, and with a warning in the log (seen in the review of 21-Nov-2026 and left).
+    /// </summary>
+    [TestMethod]
+    [Timeout(60000)]
+    public async Task ALineTooLongIsAnswered500AndDroppedAndTheSessionGoesOn()
+    {
+        var reached = new SemaphoreSlim(0);
+        var held = new ManualResetEventSlim();
+        var (_, _, port) = await StartAsync(Tree().AddFile("held.bin", Medium), wrap: vfs => new Faulty(vfs, (call, path, offset) =>
+        {
+            if (call == "read" && path == "held.bin" && offset == 0)
+            {
+                reached.Release();
+                held.Wait(TimeSpan.FromSeconds(30));
+            }
+
+            return null;
+        }));
+        var client = await ConnectAsync(port);
+
+        // a line within the limit is a command like any other
+        Assert.AreEqual(200, (await client.CommandAsync("NOOP " + new string('x', 8000))).Code);
+
+        // a megabyte, and a command after it in the same write: the long line is answered once, and the command after it
+        // has its own reply. Kept, the rest of the line would have grown without end, or been read as commands of its own
+        FtpClient.Reply? tooLong = null;
+        try
+        {
+            await client.SendAsync("NOOP " + new string('x', 1 << 20) + "\r\nNOOP");
+            tooLong = await client.ReadReplyAsync();
+        }
+        catch (IOException ex)
+        {
+            Assert.Fail("the session ended, with no reply to the line too long: " + ex.Message);
+        }
+
+        Assert.AreEqual(500, tooLong?.Code, tooLong?.Text);
+        Assert.AreEqual(200, (await client.ReadReplyAsync()).Code, "the command after it is read as itself");
+        CollectionAssert.AreEqual(Medium, await client.RetrieveAsync("/work/medium.bin"), "and the session goes on");
+
+        // during a transfer: answered, and the transfer goes on to its end
+        using (var data = await client.PassiveAsync())
+        {
+            Assert.AreEqual(150, (await client.CommandAsync("RETR /work/held.bin")).Code);
+            Assert.IsTrue(await reached.WaitAsync(TimeSpan.FromSeconds(15)), "the transfer is under way");
+            await client.SendAsync("NOOP " + new string('x', 20_000));
+            var during = await client.ReadReplyAsync();
+            Assert.AreEqual(500, during.Code, during.Text);
+            held.Set();
+            using var came = new MemoryStream();
+            await data.GetStream().CopyToAsync(came);
+            CollectionAssert.AreEqual(Medium, came.ToArray(), "the file came whole");
+            var done = await client.ReadReplyAsync();
+            Assert.AreEqual(226, done.Code, done.Text);
+        }
+
+        Assert.AreEqual(200, (await client.CommandAsync("NOOP")).Code, "the session goes on after the transfer");
+    }
+
+    /// <summary>
+    /// A transfer has one final reply, whatever its file's close does. A download's file was closed after its 226, and a
+    /// close that failed with an error of the file system's was answered as well: a second reply, which the client read as
+    /// its next command's (seen in the review of 21-Nov-2026 and left). A download whose every byte was sent is complete
+    /// whatever its close does, and the failure is logged; a file written through a transfer has a failed close for its
+    /// answer, STOR and APPE alike.
+    /// </summary>
+    [TestMethod]
+    [Timeout(60000)]
+    public async Task ATransferHasOneFinalReplyWhenItsFileFailsToClose()
+    {
+        var log = new Recorded();
+        var (_, _, port) = await StartAsync(Tree().AddFile("late.bin", Medium), logger: log, wrap: vfs => new Faulty(vfs, (call, path, _)
+            => call == "close" && path is "late.bin" or "written.txt" ? VfsException.Unavailable("the source went away at the close") : null));
+        var client = await ConnectAsync(port);
+
+        var before = log.Warnings.Count;
+        CollectionAssert.AreEqual(Medium, await client.RetrieveAsync("/work/late.bin"), "every byte came, and the transfer is complete");
+        var next = await client.CommandAsync("NOOP");
+        Assert.AreEqual(200, next.Code, "the next command's reply is its own: " + next.Text);
+        var warnings = log.Warnings.Skip(before).ToList();
+        Assert.AreEqual(1, warnings.Count, "the close's failure is logged: " + string.Join(" | ", warnings.Select(w => w.Message)));
+        StringAssert.Contains(warnings[0].Message, "RETR /work/late.bin", "the line names the command");
+        Assert.IsInstanceOfType<VfsException>(warnings[0].Exception, "with what was thrown");
+
+        foreach (var command in new[] { "STOR", "APPE" })
+        {
+            var reply = await client.UploadAsync("/work/written.txt", Encoding.UTF8.GetBytes("written"), command);
+            Assert.AreEqual(450, reply.Code, $"{command}: the close's failure is the transfer's answer: {reply.Text}");
+            next = await client.CommandAsync("NOOP");
+            Assert.AreEqual(200, next.Code, $"after {command}, the next command's reply is its own: {next.Text}");
+        }
+    }
+
+    /// <summary>
+    /// The first command after a transfer is waited for as long as any other: a session that says nothing for the idle
+    /// timeout is told so and closed. The read a transfer left going was waited on with no timeout at all, so a client that
+    /// went quiet after a download or a listing held its session open for ever (seen in the review of 21-Nov-2026 and left).
+    /// </summary>
+    [TestMethod]
+    [Timeout(60000)]
+    public async Task TheFirstCommandAfterATransferIsWaitedForNoLongerThanAnyOther()
+    {
+        var (mount, _, port) = await StartAsync(Tree());
+        ((FtpMount)mount).Server!.IdleTimeout = TimeSpan.FromSeconds(1);
+
+        // what the server says unasked within ten seconds, or null
+        static async Task<FtpClient.Reply?> UnaskedAsync(FtpClient client)
+        {
+            try
+            {
+                return await client.ReadReplyAsync(TimeSpan.FromSeconds(10));
+            }
+            catch (OperationCanceledException)
+            {
+                return null;
+            }
+        }
+
+        // quiet after a command: told, and closed, as before
+        var quiet = await ConnectAsync(port);
+        Assert.AreEqual(200, (await quiet.CommandAsync("NOOP")).Code);
+        var told = await UnaskedAsync(quiet);
+        Assert.AreEqual(421, told?.Code, "quiet after a NOOP: " + told?.Text);
+
+        // quiet after a download, and after a listing: the same
+        foreach (var (what, transfer) in new (string, Func<FtpClient, Task>)[] { ("a download", c => c.RetrieveAsync("/work/readme.txt")), ("a listing", c => c.ListAsync("/work")) })
+        {
+            var after = await ConnectAsync(port);
+            await transfer(after);
+            told = await UnaskedAsync(after);
+            Assert.IsNotNull(told, $"quiet after {what}: nothing said in ten seconds, the next command waited for with no timeout");
+            Assert.AreEqual(421, told.Code, $"quiet after {what}: {told.Text}");
+            StringAssert.StartsWith(told.Text, "Idle timeout", what);
+            await Assert.ThrowsAsync<IOException>(() => after.ReadReplyAsync(), $"after {what}, the session is closed");
+        }
     }
 
     [TestMethod]
@@ -615,9 +755,14 @@ public class FtpMountTests
             return reply.Code == 331 ? await CommandAsync("PASS " + password) : reply;
         }
 
+        /// <summary>A command as the test output shows it: a password hidden, a long line cut short.</summary>
+        private static string Shown(string command)
+            => command.StartsWith("PASS ", StringComparison.Ordinal) ? "PASS ****"
+                : command.Length > 200 ? $"{command[..60]}... ({command.Length:N0} characters)" : command;
+
         public async Task<Reply> CommandAsync(string command)
         {
-            Console.WriteLine("[ftp] > " + (command.StartsWith("PASS ", StringComparison.Ordinal) ? "PASS ****" : command));
+            Console.WriteLine("[ftp] > " + Shown(command));
             await _writer.WriteLineAsync(command);
             var reply = await ReadReplyAsync();
             Console.WriteLine($"[ftp] < {reply.Code} {reply.Text}");
@@ -740,7 +885,7 @@ public class FtpMountTests
 
         public Task SendAsync(string command)
         {
-            Console.WriteLine("[ftp] > " + command);
+            Console.WriteLine("[ftp] > " + Shown(command));
             return _writer.WriteLineAsync(command);
         }
 
@@ -782,9 +927,9 @@ public class FtpMountTests
             return data;
         }
 
-        public async Task<Reply> ReadReplyAsync()
+        public async Task<Reply> ReadReplyAsync(TimeSpan? patience = null)
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            using var timeout = new CancellationTokenSource(patience ?? TimeSpan.FromSeconds(20));
             var first = await _reader.ReadLineAsync(timeout.Token) ?? throw new IOException("the control connection closed");
             var code = int.Parse(first[..3]);
             var text = new StringBuilder(first[3..].TrimStart('-', ' '));

@@ -114,6 +114,9 @@ internal sealed class FtpMount(FtpMountSettings settings, ICollectionInfo collec
 
     public MountOpenAction? OpenAction { get; private set; }
 
+    /// <summary>The server this mount is served by while it runs, shared with the mounts on the same address and port.</summary>
+    internal FtpServer? Server => _lease?.Value;
+
     public async Task StartAsync(IVirtualFileSystem fs, IMountContext context, CancellationToken ct)
     {
         if (!BindAddress.TryParse(settings.BindAddress, out var address))
