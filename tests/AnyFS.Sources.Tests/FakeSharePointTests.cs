@@ -518,8 +518,17 @@ public class FakeSharePointTests
         settings.WalkMinutes = 0;
         static bool BroughtAddresses(FakeSharePoint.Seen s) => s.RawPath.EndsWith("/children", StringComparison.Ordinal) && Uri.UnescapeDataString(s.RawQuery).Contains("downloadUrl", StringComparison.Ordinal);
         var first = await StartAsync(fake, settings, context);
-        CollectionAssert.Contains(await SpsTestServer.NamesAsync(first, "Documents/kept"), "a.txt");
+
+        // The walk that began with the source is let end first. It lists every folder, without the addresses, and a
+        // listing asked for after it is answered from what it kept: where the walk came to the folder before the test
+        // did, no listing brought an address (met here once, 28-Nov-2026). What is listed for the addresses is a folder
+        // the source made since, which no walk has listed, with a file put in it behind the source's back
+        await first.WalkAsync(new SourceCounters(), None);
+        await first.CreateDirectoryAsync("Documents/since", None);
+        fake.Seed(fake.TestSite.Library("Documents"), "since/b.txt", "since"u8.ToArray());
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(first, "Documents/since"), "b.txt");
         Assert.IsTrue(fake.Count(BroughtAddresses) > 0, "the listing someone asked for brought the addresses");
+        CollectionAssert.Contains(await SpsTestServer.NamesAsync(first, "Documents/kept"), "a.txt");
         await first.DisposeAsync();
 
         foreach (var kept in Directory.EnumerateFiles(context.StateDirectory, "*", SearchOption.AllDirectories))
