@@ -396,6 +396,23 @@ public class BitbucketTests
     }
 
     [TestMethod]
+    public async Task AFileThatIsTheSameAtTwoCommitsIsReadFromBitbucketOnce()
+    {
+        // Kept by commit and path, the same file was downloaded once for every branch and tag it was read under, though
+        // Bitbucket names its content with every listing (the review of 21-Nov-2026, P12)
+        var fake = BitbucketSeed.Lab();
+        await using var source = await StartAsync(fake, BitbucketSeed.Settings(fake, "/projects/ANYFS/repos/docs"));
+        CollectionAssert.AreEqual(BitbucketSeed.Large, await ReadAsync(source, "branches/main/docs/large.bin"));
+        CollectionAssert.AreEqual(BitbucketSeed.Large, await ReadAsync(source, "branches/feature (2)/x/docs/large.bin"));
+        CollectionAssert.AreEqual(BitbucketSeed.Large, await ReadAsync(source, "tags/v1.0/docs/large.bin"));
+        Assert.AreEqual(1, fake.Count("/raw/docs/large.bin"), string.Join("; ", fake.Requests.Where(r => r.Contains("/raw/", StringComparison.Ordinal))));
+
+        // another file of the same name is another file
+        Assert.AreEqual("on feature/x\n", await TextAsync(source, "branches/feature (2)/x/feature.txt"));
+        Assert.AreEqual("the branch named Feature\n", await TextAsync(source, "branches/Feature/capital.txt"));
+    }
+
+    [TestMethod]
     public async Task WithoutBranchesAndTagsOrPullRequestsARepositoryHasItsFilesAlone()
     {
         var fake = BitbucketSeed.Lab();

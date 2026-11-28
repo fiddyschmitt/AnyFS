@@ -364,8 +364,12 @@ public sealed class BitbucketSource : SourceBase, ICountable
     /// <summary>A path in the repository, each segment escaped, with a slash before it; empty for the root.</summary>
     private static string RepoPath(string path) => path.Length == 0 ? "" : "/" + string.Join('/', path.Split('/').Select(Uri.EscapeDataString));
 
-    /// <summary>A file's bytes at a commit, spooled from Bitbucket as they arrive and kept by commit and path (what a commit holds never changes).</summary>
-    internal Task<IVfsFile> OpenBlobAsync(BbRepository repository, string commit, string path, long length, CancellationToken ct)
+    /// <summary>
+    /// A file's bytes at a commit, spooled from Bitbucket as they arrive and kept by the id Bitbucket gives its content:
+    /// the same file under every branch and tag it has not changed at is one download. Kept by commit and path, it was
+    /// one for each (the review of 21-Nov-2026, P12); so it is still where Bitbucket names no content.
+    /// </summary>
+    internal Task<IVfsFile> OpenBlobAsync(BbRepository repository, string commit, string path, long length, string? contentId, CancellationToken ct)
     {
         if (length == 0)
         {
@@ -373,7 +377,8 @@ public sealed class BitbucketSource : SourceBase, ICountable
         }
 
         var url = Api.Rest($"{repository.Path}/raw{RepoPath(path)}?at={Uri.EscapeDataString(commit)}");
-        return Spool.OpenAsync($"bitbucket:{Installation.Authority}{Installation.AbsolutePath}:{repository.Path}@{commit}:{path}", length,
+        var content = contentId is { Length: > 0 } ? $"#{contentId}" : $"@{commit}:{path}";
+        return Spool.OpenAsync($"bitbucket:{Installation.Authority}{Installation.AbsolutePath}:{repository.Path}{content}", length,
             async c => await ResponseStream.OpenAsync(await Api.OpenAsync(url, "a file", c).ConfigureAwait(false), c).ConfigureAwait(false), ct);
     }
 

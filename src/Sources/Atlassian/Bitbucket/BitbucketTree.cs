@@ -233,7 +233,7 @@ internal sealed class BbTreeFolder(BbRepository repository, string commit, strin
             var full = RepoPath.Length == 0 ? entry.Name : RepoPath + "/" + entry.Name;
             children.Add(entry.IsDirectory ? new BbTreeFolder(Repository, Commit, full, names[i], time)
                 : entry.IsSubmodule ? new BbEmptyFolder(names[i], time)
-                : new BbBlobFile(Repository, Commit, full, entry.Size, names[i], time));
+                : new BbBlobFile(Repository, Commit, full, entry.Size, names[i], time, entry.ContentId));
         }
 
         return children;
@@ -241,9 +241,9 @@ internal sealed class BbTreeFolder(BbRepository repository, string commit, strin
 }
 
 /// <summary>A file of the repository at a commit: its bytes as git keeps them, streamed as it is opened.</summary>
-internal sealed class BbBlobFile(BbRepository repository, string commit, string path, long size, string name, DateTimeOffset? time) : BbFile(name, size, time, time)
+internal sealed class BbBlobFile(BbRepository repository, string commit, string path, long size, string name, DateTimeOffset? time, string? contentId) : BbFile(name, size, time, time)
 {
-    public override Task<IVfsFile> OpenAsync(BitbucketSource source, CancellationToken ct) => source.OpenBlobAsync(repository, commit, path, Length, ct);
+    public override Task<IVfsFile> OpenAsync(BitbucketSource source, CancellationToken ct) => source.OpenBlobAsync(repository, commit, path, Length, contentId, ct);
 }
 
 /// <summary>The repository's pull requests (open ones, or all), newest first: each a folder <c>#12 Title</c>.</summary>
