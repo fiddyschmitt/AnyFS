@@ -458,11 +458,29 @@ internal sealed partial class WebDavServer : IAsyncDisposable
             return;
         }
 
-        var file = await r.Fs.OpenAsync(r.Path, VfsOpenMode.Read, ct).ConfigureAwait(false);
-        var stream = new VfsFileStream(file, ownsFile: true);
         var etag = new EntityTagHeaderValue(DavXml.ETagFor(entry));
+        var stream = await ServedAsync(r.Ctx, r.Fs, r.Path, entry, etag.Tag.Value!, ct).ConfigureAwait(false);
         var result = Results.File(stream, DavXml.ContentTypeFor(entry.Name), fileDownloadName: null, lastModified: entry.Modified, entityTag: etag, enableRangeProcessing: true);
         await result.ExecuteAsync(r.Ctx).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The stream a GET or a HEAD of a file is answered from. One that has no body (a HEAD, a client whose copy still
+    /// stands) is made of the file unopened: its length is the listing's, and it is opened only if the answer turns out
+    /// to want it after all. Any other is opened now, so the answer has the file's length as it is, and is read a
+    /// megabyte ahead unless a small piece of it is asked for. A HEAD and a "not modified" opened the file, a request
+    /// of the source's server each, and a download asked the source 64 KiB at a time (the review of 21-Nov-2026, P13).
+    /// </summary>
+    private static async Task<VfsFileStream> ServedAsync(HttpContext ctx, IVirtualFileSystem fs, string path, VfsEntry entry, string entityTag, CancellationToken ct)
+    {
+        var request = ctx.Request;
+        if (HttpMethods.IsHead(request.Method) || HttpValidators.NotModified(request.Headers.IfNoneMatch, request.Headers.IfModifiedSince, entityTag, entry.Modified))
+        {
+            return new VfsFileStream(entry.Length, c => fs.OpenAsync(path, VfsOpenMode.Read, c));
+        }
+
+        var small = request.GetTypedHeaders().Range is { Ranges.Count: 1 } range && range.Ranges.First() is { From: { } from, To: { } to } && to - from < SequentialReadAhead.DefaultThreshold;
+        return new VfsFileStream(await fs.OpenAsync(path, VfsOpenMode.Read, ct).ConfigureAwait(false), ownsFile: true, readAhead: !small);
     }
 
     private async Task PutAsync(DavRequest r, CancellationToken ct)

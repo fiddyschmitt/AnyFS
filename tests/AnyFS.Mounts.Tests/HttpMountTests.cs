@@ -42,7 +42,8 @@ public class HttpMountTests
         .AddFile("unicode/ünïcödé ✓ 日本語.txt", "unicode names")
         .AddDirectory("emptydir");
 
-    private async Task<(IMount Mount, TestMountContext Context, HttpClient Client, string Base)> StartAsync(ISource source, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool readOnly = false)
+    private async Task<(IMount Mount, TestMountContext Context, HttpClient Client, string Base)> StartAsync(ISource source, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool readOnly = false,
+        Func<IVirtualFileSystem, IVirtualFileSystem>? wrap = null)
     {
         await source.InitialiseAsync(new TestSourceContext(collection), CancellationToken.None);
         var p = port ?? FreePort();
@@ -51,7 +52,8 @@ public class HttpMountTests
         settings.Port = p;
         var mount = provider.CreateMount(settings, new Info(collection));
         var context = new TestMountContext(collection, "http", shareWith: shareWith);
-        await mount.StartAsync(new SingleSourceVfs(source, collection, readOnly), context, CancellationToken.None);
+        IVirtualFileSystem vfs = new SingleSourceVfs(source, collection, readOnly);
+        await mount.StartAsync(wrap?.Invoke(vfs) ?? vfs, context, CancellationToken.None);
         _cleanup.Add(mount);
         var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{p}/") };
         _cleanup.Add(new ClientDisposer(client));
@@ -102,6 +104,73 @@ public class HttpMountTests
         Assert.AreEqual("/work/docs/sub/?format=json", r.Headers.Location!.ToString());
         r = await raw.GetAsync("work/readme.txt/");
         Assert.AreEqual(HttpStatusCode.NotFound, r.StatusCode, "a file with a trailing slash is not a directory");
+    }
+
+    [TestMethod]
+    public async Task AHeadAndAnAnswerOfNotModifiedOpenNoFileAndADownloadAsksTheSourceAMegabyteAtATime()
+    {
+        // A HEAD and an answer of "not modified" opened the file all the same, which to a source is a request of its
+        // server, and a download asked the source for 64 KiB at a time where the other mounts read a megabyte ahead
+        // (the review of 21-Nov-2026, P13)
+        var big = Enumerable.Range(0, 8 << 20).Select(i => (byte)(i * 7 % 251)).ToArray();
+        var opens = 0;
+        var reads = 0;
+        var (_, _, client, b) = await StartAsync(Tree().AddFile("big.bin", big, new DateTimeOffset(2026, 10, 2, 8, 0, 0, TimeSpan.Zero)), wrap: vfs => new Faulty(vfs, (call, path, _) =>
+        {
+            if (path == "big.bin" && call is "open" or "read")
+            {
+                Interlocked.Increment(ref call == "open" ? ref opens : ref reads);
+            }
+
+            return null;
+        }));
+        using (var head = await client.SendAsync(new HttpRequestMessage(HttpMethod.Head, b + "big.bin")))
+        {
+            Assert.AreEqual(HttpStatusCode.OK, head.StatusCode);
+            Assert.AreEqual(big.Length, head.Content.Headers.ContentLength);
+            Assert.IsNotNull(head.Headers.ETag);
+            Assert.AreEqual("bytes", head.Headers.AcceptRanges.Single());
+        }
+
+        string etag;
+        DateTimeOffset modified;
+        using (var first = await client.SendAsync(new HttpRequestMessage(HttpMethod.Head, b + "big.bin")))
+        {
+            etag = first.Headers.ETag!.ToString();
+            modified = first.Content.Headers.LastModified!.Value;
+        }
+
+        using (var same = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, b + "big.bin") { Headers = { { "If-None-Match", etag } } }))
+        {
+            Assert.AreEqual(HttpStatusCode.NotModified, same.StatusCode);
+        }
+
+        using (var since = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, b + "big.bin") { Headers = { IfModifiedSince = modified } }))
+        {
+            Assert.AreEqual(HttpStatusCode.NotModified, since.StatusCode);
+        }
+
+        Assert.AreEqual(0, Volatile.Read(ref opens), "nothing of the file was sent, and it was not opened");
+
+        // a tag that is not the file's: the file, whole
+        using (var other = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, b + "big.bin") { Headers = { { "If-None-Match", "\"not-this\"" } } }))
+        {
+            Assert.AreEqual(HttpStatusCode.OK, other.StatusCode);
+            CollectionAssert.AreEqual(big, await other.Content.ReadAsByteArrayAsync());
+        }
+
+        Assert.AreEqual(1, Volatile.Read(ref opens));
+        Assert.IsTrue(Volatile.Read(ref reads) <= 12, $"{reads} reads of the source for 8 MiB: a megabyte at a time");
+
+        // a piece of it is asked of the source as a piece
+        Volatile.Write(ref reads, 0);
+        using (var piece = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, b + "big.bin") { Headers = { Range = new RangeHeaderValue(3_000_000, 3_000_099) } }))
+        {
+            Assert.AreEqual(HttpStatusCode.PartialContent, piece.StatusCode);
+            CollectionAssert.AreEqual(big[3_000_000..3_000_100], await piece.Content.ReadAsByteArrayAsync());
+        }
+
+        Assert.IsTrue(Volatile.Read(ref reads) <= 2, $"{reads} reads for a hundred bytes");
     }
 
     [TestMethod]

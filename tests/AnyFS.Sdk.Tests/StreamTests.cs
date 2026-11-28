@@ -8,6 +8,111 @@ public class StreamTests
 {
     private static readonly byte[] Payload = Encoding.ASCII.GetBytes("0123456789abcdefghijklmnopqrstuvwxyz");
 
+    /// <summary>A file that counts what is asked of it.</summary>
+    private sealed class Counted(byte[] data) : IVfsFile
+    {
+        public int Reads { get; private set; }
+
+        public int Closes { get; private set; }
+
+        public long Length => data.Length;
+
+        public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct)
+        {
+            Reads++;
+            var n = (int)Math.Max(0, Math.Min(buffer.Length, data.Length - offset));
+            data.AsMemory((int)Math.Min(offset, data.Length), n).CopyTo(buffer);
+            return ValueTask.FromResult(n);
+        }
+
+        public ValueTask WriteAsync(long offset, ReadOnlyMemory<byte> written, CancellationToken ct) => throw VfsException.NotSupported("writing");
+
+        public ValueTask SetLengthAsync(long length, CancellationToken ct) => throw VfsException.NotSupported("writing");
+
+        public ValueTask FlushAsync(CancellationToken ct) => ValueTask.CompletedTask;
+
+        public ValueTask DisposeAsync()
+        {
+            Closes++;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    [TestMethod]
+    public async Task VfsFileStream_OfAFileNotYetOpenedOpensItWhenItIsReadAndNotAtAllIfItNeverIs()
+    {
+        // an answer that has headers and no body (a HEAD, a "not modified") needs a file's length and nothing else
+        var opens = 0;
+        Counted? opened = null;
+        Task<IVfsFile> Open(CancellationToken ct)
+        {
+            opens++;
+            return Task.FromResult<IVfsFile>(opened = new Counted(Payload));
+        }
+
+        await using (var unread = new VfsFileStream(Payload.Length, Open))
+        {
+            Assert.AreEqual(Payload.Length, unread.Length);
+            Assert.IsTrue(unread.CanSeek);
+            unread.Position = 10;
+            Assert.IsFalse(unread.IsOpened);
+        }
+
+        Assert.AreEqual(0, opens, "never read, never opened");
+
+        var read = new VfsFileStream(Payload.Length, Open);
+        read.Seek(10, SeekOrigin.Begin);
+        var buffer = new byte[5];
+        Assert.AreEqual(5, await read.ReadAsync(buffer));
+        Assert.AreEqual("abcde", Encoding.ASCII.GetString(buffer));
+        Assert.AreEqual(5, await read.ReadAsync(buffer));
+        Assert.AreEqual("fghij", Encoding.ASCII.GetString(buffer));
+        Assert.IsTrue(read.IsOpened);
+        Assert.AreEqual(1, opens, "opened once, at its first read");
+        await read.DisposeAsync();
+        Assert.AreEqual(1, opened!.Closes, "and closed with the stream");
+        Assert.ThrowsExactly<NotSupportedException>(() => read.SetLength(1), "read-only");
+    }
+
+    [TestMethod]
+    public async Task VfsFileStream_ReadAheadAsksTheFileAMegabyteAtATimeForWhatIsCopiedOutInPieces()
+    {
+        var data = Enumerable.Range(0, 4 << 20).Select(i => (byte)(i * 13 % 251)).ToArray();
+        var plain = new Counted(data);
+        var ahead = new Counted(data);
+        foreach (var (file, readAhead) in new[] { (plain, false), (ahead, true) })
+        {
+            await using var stream = new VfsFileStream(file, ownsFile: true, readAhead: readAhead);
+            var copied = new MemoryStream();
+            await stream.CopyToAsync(copied, 64 * 1024);
+            CollectionAssert.AreEqual(data, copied.ToArray());
+        }
+
+        Assert.IsTrue(plain.Reads >= 64, $"{plain.Reads} reads without");
+        Assert.IsTrue(ahead.Reads <= 6, $"{ahead.Reads} reads with it");
+        Assert.AreEqual((1, 1), (plain.Closes, ahead.Closes));
+    }
+
+    [TestMethod]
+    [DataRow("\"abc\"", null, true, DisplayName = "the tag")]
+    [DataRow("W/\"abc\"", null, true, DisplayName = "the tag, weak")]
+    [DataRow("\"x\", \"abc\"", null, true, DisplayName = "one of several")]
+    [DataRow("*", null, true, DisplayName = "any")]
+    [DataRow("\"x\"", null, false, DisplayName = "another tag")]
+    [DataRow("\"x\"", "Thu, 01 Oct 2026 12:00:00 GMT", false, DisplayName = "another tag, whatever the time says")]
+    [DataRow(null, "Thu, 01 Oct 2026 12:00:00 GMT", true, DisplayName = "not changed since, to the second")]
+    [DataRow(null, "Thu, 01 Oct 2026 12:00:01 GMT", true, DisplayName = "not changed since a later time")]
+    [DataRow(null, "Thu, 01 Oct 2026 11:59:59 GMT", false, DisplayName = "changed since")]
+    [DataRow(null, "the first of October", false, DisplayName = "a time that is none")]
+    [DataRow(null, null, false, DisplayName = "no validator")]
+    public void HttpValidators_SayWhetherTheClientsCopyStillStands(string? ifNoneMatch, string? ifModifiedSince, bool expected)
+    {
+        var modified = new DateTimeOffset(2026, 10, 1, 12, 0, 0, 500, TimeSpan.Zero);
+        Assert.AreEqual(expected, HttpValidators.NotModified(ifNoneMatch, ifModifiedSince, "\"abc\"", modified));
+        Assert.IsTrue(HttpValidators.NotModified("\"{4A0C},3\"", null, "\"{4A0C},3\"", null), "a tag with a comma of its own");
+        Assert.IsFalse(HttpValidators.NotModified(null, "Thu, 01 Oct 2026 12:00:00 GMT", "\"abc\"", null), "no time to go by");
+    }
+
     [TestMethod]
     public async Task BytesVfsFile_ReadsRangesAndStopsAtEnd()
     {

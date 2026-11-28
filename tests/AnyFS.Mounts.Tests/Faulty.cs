@@ -5,7 +5,7 @@ namespace AnyFS.Mounts.Tests;
 
 /// <summary>
 /// A file system in which a test makes things go wrong, the way a source's own fault reaches a mount. The test is asked at
-/// each "stat" of a path, at each "read" of a file with the read's offset, at each entry a "list" of a folder comes to,
+/// each "stat" of a path, at each "open" of a file, at each "read" of it with the read's offset, at each entry a "list" of a folder comes to,
 /// with how many it has given, and at a file's "close": what it gives is thrown in place of the call (a close is made
 /// first), and with nothing given the call goes through.
 /// </summary>
@@ -34,7 +34,8 @@ internal sealed class Faulty(IVirtualFileSystem inner, Func<string, string, long
         }
     }
 
-    public async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct) => new File(await inner.OpenAsync(path, mode, ct), VfsPath.Normalize(path), fault);
+    public async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct)
+        => fault("open", VfsPath.Normalize(path), 0) is { } thrown ? throw thrown : new File(await inner.OpenAsync(path, mode, ct), VfsPath.Normalize(path), fault);
 
     public Task CreateDirectoryAsync(string path, CancellationToken ct) => inner.CreateDirectoryAsync(path, ct);
 

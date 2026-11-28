@@ -294,6 +294,73 @@ public class WebDavMountTests
     }
 
     [TestMethod]
+    public async Task AHeadAndAnAnswerOfNotModifiedOpenNoFileAndADownloadAsksTheSourceAMegabyteAtATime()
+    {
+        // A HEAD and an answer of "not modified" opened the file all the same, which to a source is a request of its
+        // server, and a download asked the source for 64 KiB at a time where the other mounts read a megabyte ahead
+        // (the review of 21-Nov-2026, P13)
+        var big = Enumerable.Range(0, 8 << 20).Select(i => (byte)(i * 7 % 251)).ToArray();
+        var opens = 0;
+        var reads = 0;
+        var (_, _, client) = await StartAsync(Tree().AddFile("big.bin", big, new DateTimeOffset(2026, 10, 2, 8, 0, 0, TimeSpan.Zero)), wrap: vfs => new Faulty(vfs, (call, path, _) =>
+        {
+            if (path == "big.bin" && call is "open" or "read")
+            {
+                Interlocked.Increment(ref call == "open" ? ref opens : ref reads);
+            }
+
+            return null;
+        }));
+        using (var head = await client.SendAsync(new HttpRequestMessage(HttpMethod.Head, "work/big.bin")))
+        {
+            Assert.AreEqual(HttpStatusCode.OK, head.StatusCode);
+            Assert.AreEqual(big.Length, head.Content.Headers.ContentLength);
+            Assert.IsNotNull(head.Headers.ETag);
+            Assert.AreEqual("bytes", head.Headers.AcceptRanges.Single());
+        }
+
+        string etag;
+        DateTimeOffset modified;
+        using (var first = await client.SendAsync(new HttpRequestMessage(HttpMethod.Head, "work/big.bin")))
+        {
+            etag = first.Headers.ETag!.ToString();
+            modified = first.Content.Headers.LastModified!.Value;
+        }
+
+        using (var same = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, "work/big.bin") { Headers = { { "If-None-Match", etag } } }))
+        {
+            Assert.AreEqual(HttpStatusCode.NotModified, same.StatusCode);
+        }
+
+        using (var since = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, "work/big.bin") { Headers = { IfModifiedSince = modified } }))
+        {
+            Assert.AreEqual(HttpStatusCode.NotModified, since.StatusCode);
+        }
+
+        Assert.AreEqual(0, Volatile.Read(ref opens), "nothing of the file was sent, and it was not opened");
+
+        // a tag that is not the file's: the file, whole
+        using (var other = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, "work/big.bin") { Headers = { { "If-None-Match", "\"not-this\"" } } }))
+        {
+            Assert.AreEqual(HttpStatusCode.OK, other.StatusCode);
+            CollectionAssert.AreEqual(big, await other.Content.ReadAsByteArrayAsync());
+        }
+
+        Assert.AreEqual(1, Volatile.Read(ref opens));
+        Assert.IsTrue(Volatile.Read(ref reads) <= 12, $"{reads} reads of the source for 8 MiB: a megabyte at a time");
+
+        // a piece of it is asked of the source as a piece
+        Volatile.Write(ref reads, 0);
+        using (var piece = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, "work/big.bin") { Headers = { Range = new RangeHeaderValue(3_000_000, 3_000_099) } }))
+        {
+            Assert.AreEqual(HttpStatusCode.PartialContent, piece.StatusCode);
+            CollectionAssert.AreEqual(big[3_000_000..3_000_100], await piece.Content.ReadAsByteArrayAsync());
+        }
+
+        Assert.IsTrue(Volatile.Read(ref reads) <= 2, $"{reads} reads for a hundred bytes");
+    }
+
+    [TestMethod]
     public async Task GetRangesHeadAndDirectoryPage()
     {
         var (_, _, client) = await StartAsync(Tree());
