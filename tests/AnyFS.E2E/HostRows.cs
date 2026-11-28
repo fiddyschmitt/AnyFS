@@ -389,9 +389,9 @@ public abstract class HostRows
             var snapshot = d.AnyFs!.Status()!;
             var sources = d.AnyFs.Sources.Select(s => snapshot.Collections.Single(c => c.Name == s.Collection).Sources.Single()).ToList();
 
-            // a GitLab source counts each project's default branch alone, a lower bound ("+"), never complete
-            var lowerBound = d.AnyFs.Sources.Where(s => s.Type == "gitlab").Select(s => s.Collection).ToHashSet(StringComparer.Ordinal);
-            if (sources.Select((s, i) => (s, Collection: d.AnyFs.Sources[i].Collection)).All(x => (x.s.FilesComplete || lowerBound.Contains(x.Collection)) && x.s.Files >= Fixture.ManifestLines))
+            // every source's count ends complete, GitLab's too: its walk goes into every folder, issues and each branch and
+            // tag among them, where it once counted each project's default branch alone and ended a lower bound
+            if (sources.All(s => s.FilesComplete && s.Files >= Fixture.ManifestLines))
             {
                 Console.WriteLine(string.Join("\n", sources.Select(s => $"{s.Name}: {s.Files:N0} files, complete")));
                 return;

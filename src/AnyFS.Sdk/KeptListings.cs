@@ -1275,8 +1275,9 @@ public sealed record KeptListingsOptions
 
     /// <summary>
     /// Of the folders in a folder, the names of those a walk does not go into, because listing them costs requests of their
-    /// own (GitLab's issues): they are listed when opened, what has been opened of them is checked by the walks like the rest, and
-    /// the count ends as a lower bound (<see cref="EnumerationState.Unknown"/>). Null, or none, goes into every folder.
+    /// own (a folder for each of many tickets, each read alone): they are listed when opened, what has been opened of them is
+    /// checked by the walks like the rest, and the count ends as a lower bound (<see cref="EnumerationState.Unknown"/>). Null,
+    /// or none, goes into every folder.
     /// </summary>
     public Func<string, CancellationToken, ValueTask<IReadOnlySet<string>?>>? LeftOut { get; init; }
 
