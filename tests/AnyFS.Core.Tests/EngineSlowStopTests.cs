@@ -58,6 +58,9 @@ public class EngineSlowStopTests
 
         public volatile bool Stopping;
 
+        /// <summary>How long a source's stop takes to begin, as on a busy machine where the thread to run it comes late.</summary>
+        public TimeSpan StopsAfter { get; set; }
+
         public string TypeId => "held";
 
         public string DisplayName => "Held";
@@ -98,6 +101,11 @@ public class EngineSlowStopTests
             };
             source.OnDispose = async context =>
             {
+                if (StopsAfter > TimeSpan.Zero)
+                {
+                    await Task.Delay(StopsAfter).ConfigureAwait(false);
+                }
+
                 // what a source keeps as it stops: the engine forgets a deleted source's secrets after this, not before
                 context?.Secrets.Set("session", "kept as it stopped");
                 Stopping = true;
@@ -274,9 +282,11 @@ public class EngineSlowStopTests
             engine.ChangePatience = Short;
             var (stuck, handle) = await HeldSourceAsync(engine);
 
-            // a dialog was busy for as long as the stop took: for ever
+            // a dialog was busy for as long as the stop took: for ever. On a busy machine the stop reaches the source after
+            // the change's patience is over (CI's Windows runner, 28-Nov-2026): as here
+            _held.StopsAfter = Short * 2;
             await engine.SetSourceEnabledAsync(stuck, false).WaitAsync(Soon);
-            Assert.IsTrue(_held.Stopping);
+            await Wait.UntilAsync(() => _held.Stopping, what: "its stop under way");
             Assert.AreEqual(ComponentState.Stopping, handle.Status.State, "it says what it is doing");
             Assert.IsFalse(Reload().Sources.Single().Enabled, "the change is kept");
 

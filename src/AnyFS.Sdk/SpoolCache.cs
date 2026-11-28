@@ -314,6 +314,7 @@ public sealed class SpoolCache : IAsyncDisposable
         private int _refs;
         private bool _detached;
         private bool _closed;
+        private bool _settled;
 
         public Spool(SpoolCache owner, string key, string path, long length, Func<CancellationToken, Task<Stream>> openUpstream, TimeSpan stallLimit, ILogger logger, TimeProvider time)
         {
@@ -338,6 +339,9 @@ public sealed class SpoolCache : IAsyncDisposable
         public long Available => Interlocked.Read(ref _available);
 
         public bool IsComplete { get; private set; }
+
+        /// <summary>The download is over, and the cache has taken in how it ended: a whole one is among those that age.</summary>
+        public bool IsSettled => Volatile.Read(ref _settled);
 
         public Exception? Error { get; private set; }
 
@@ -524,16 +528,19 @@ public sealed class SpoolCache : IAsyncDisposable
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 Signal(Available, complete: true, error: new OperationCanceledException("the download was stopped"));
+                Volatile.Write(ref _settled, true);
                 return;
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "spool {Key}: download failed", Key);
                 Signal(Available, complete: true, error: ex);
+                Volatile.Write(ref _settled, true);
                 return;
             }
 
             _owner.Finished(this);
+            Volatile.Write(ref _settled, true);
         }
 
         private void Signal(long available, bool complete, Exception? error)
@@ -580,7 +587,12 @@ public sealed class SpoolingFile : IVfsFile
     /// <summary>How many bytes of the file have arrived so far (for status text and tests).</summary>
     public long Available => _spool.Available;
 
-    public bool IsComplete => _spool.IsComplete;
+    /// <summary>
+    /// Whether the download is over, whole or not, and the cache has taken that in (a whole one ages from then). Its bytes
+    /// are all there a moment sooner, before its connection has closed: said then, the cache might not yet have known it
+    /// was whole (the review of 21-Nov-2026: a test that aged the file in that moment).
+    /// </summary>
+    public bool IsComplete => _spool.IsSettled;
 
     public ValueTask<int> ReadAsync(long offset, Memory<byte> buffer, CancellationToken ct) => _spool.ReadAsync(offset, buffer, ct);
 

@@ -278,8 +278,10 @@ public class SpoolCacheTests
         await HeldAsync("k1");
         Assert.AreEqual((1, 2), (downloads["k0"], downloads["k1"]), "k0 was kept and read from its file each time; k1 went, and was downloaded again");
 
-        // one past its age while someone reads it stays for that reader, and goes when the reader does
-        var late = new DrippingUpstream(data);
+        // one past its age while someone reads it stays for that reader, and goes when the reader does. Its download's close
+        // takes a moment: it ages from when it is whole, and is among those that age once that close is done (macOS CI
+        // advanced the clock between the two, 28-Nov-2026: as here)
+        var late = new DrippingUpstream(data) { CloseTakes = TimeSpan.FromMilliseconds(300) };
         late.Release(1000);
         var reader = await cache.OpenAsync("late", 1000, late.OpenAsync, CancellationToken.None);
         await reader.ReadFullyAsync(0, new byte[1000], CancellationToken.None);
@@ -330,6 +332,9 @@ public class SpoolCacheTests
         public bool Cancelled { get; private set; }
 
         public int FailAfter { get; set; } = int.MaxValue;
+
+        /// <summary>How long the stream's close takes, as a connection's does.</summary>
+        public TimeSpan CloseTakes { get; set; }
 
         public void Release(int bytes) => _released.Release(bytes);
 
@@ -389,6 +394,16 @@ public class SpoolCacheTests
             }
 
             public override int Read(byte[] buffer, int offset, int count) => ReadAsync(buffer.AsMemory(offset, count)).AsTask().GetAwaiter().GetResult();
+
+            public override async ValueTask DisposeAsync()
+            {
+                if (owner.CloseTakes > TimeSpan.Zero)
+                {
+                    await Task.Delay(owner.CloseTakes);
+                }
+
+                await base.DisposeAsync();
+            }
 
             public override void Flush()
             {
