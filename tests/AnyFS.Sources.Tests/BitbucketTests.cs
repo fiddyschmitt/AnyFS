@@ -413,6 +413,52 @@ public class BitbucketTests
     }
 
     [TestMethod]
+    public async Task AfterARestartAFileIsOpenedFromTheKeptListingsWithNoFolderAskedFor()
+    {
+        // The listings kept said where everything was, but an open went down from the root a folder at a time and asked
+        // Bitbucket for each folder on the way, once more in every run (the review of 21-Nov-2026, P12)
+        var fake = BitbucketSeed.Lab();
+        var docs = fake.RepositoryAt("ANYFS", "docs");
+        var files = new Dictionary<string, byte[]>(docs.Commits[docs.Branches["main"]].Files, StringComparer.Ordinal)
+        {
+            // twins in case, and a name Windows refuses: shown by other names than git's
+            ["docs/Guide.md"] = BitbucketSeed.Bytes("the twin\n"),
+            ["docs/deep/er/what?.txt"] = BitbucketSeed.Bytes("a question\n"),
+        };
+        docs.Commit("main", files, BitbucketSeed.Day.AddDays(5), message: "Twins");
+        using var context = new TestSourceContext();
+        var settings = BitbucketSeed.Settings(fake, "/projects/ANYFS/repos/docs");
+        List<string> twins;
+        string refused;
+        await using (var first = await StartAsync(fake, settings, context))
+        {
+            await first.CountFilesAsync(CancellationToken.None);
+            await UpstreamRequestRows.AllEndAsync(context);
+            twins = (await NamesAsync(first, "files/docs")).Where(n => n.StartsWith("guide", StringComparison.OrdinalIgnoreCase)).ToList();
+            refused = (await NamesAsync(first, "files/docs/deep/er")).Single();
+        }
+
+        Assert.AreEqual(2, twins.Count, string.Join(", ", twins));
+        Assert.AreNotEqual("what?.txt", refused);
+        var before = fake.Requests.Count;
+        await using var second = await StartAsync(fake, settings, context);
+        CollectionAssert.AreEquivalent(new[] { "# Guide\n\nStep one.\n", "the twin\n" }, new[] { await TextAsync(second, "files/docs/" + twins[0]), await TextAsync(second, "files/docs/" + twins[1]) });
+        Assert.AreEqual("a question\n", await TextAsync(second, "files/docs/deep/er/" + refused));
+        Assert.AreEqual("print('hello')\n", await TextAsync(second, "branches/main/src/main.py"));
+        Assert.AreEqual("on feature/x\n", await TextAsync(second, "tags/release/2.0/feature.txt"));
+        CollectionAssert.AreEqual(Array.Empty<string>(), (await NamesAsync(second, "files/vendor/lib")).ToArray(), "a submodule is an empty folder still");
+        Assert.IsNull(await second.StatAsync("files/docs/none.md", CancellationToken.None));
+        var asked = fake.Requests.Skip(before).Where(r => r.Contains("/browse", StringComparison.Ordinal)).ToList();
+        Assert.AreEqual(0, asked.Count, "folders asked for: " + string.Join("; ", asked));
+
+        // a name the kept listing does not have is asked of Bitbucket, its folder once
+        await Assert.ThrowsExactlyAsync<VfsException>(() => ReadAsync(second, "files/docs/none.md"));
+        await Assert.ThrowsExactlyAsync<VfsException>(() => ReadAsync(second, "files/docs/nor-this.md"));
+        asked = fake.Requests.Skip(before).Where(r => r.Contains("/browse", StringComparison.Ordinal)).ToList();
+        Assert.AreEqual(1, asked.Count, string.Join("; ", asked));
+    }
+
+    [TestMethod]
     public async Task WithoutBranchesAndTagsOrPullRequestsARepositoryHasItsFilesAlone()
     {
         var fake = BitbucketSeed.Lab();

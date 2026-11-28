@@ -108,7 +108,7 @@ public sealed class BitbucketSource : SourceBase, ICountable
             // the listings last run saw open at once at the next start: for the same installation, account and scope, the
             // same settings that shape the tree, and the same documents (a file's size is a fact about how it is written)
             SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
-            SaveKey = $"{_session.Address.Server}|{_session.User?.Name}|{Scope.Kind}:{Scope.Value}|{_settings.Shape}|md{BitbucketDocuments.Format}",
+            SaveKey = $"{_session.Address.Server}|{_session.User?.Name}|{Scope.Kind}:{Scope.Value}|{_settings.Shape}|md{BitbucketDocuments.Format}|keys{RepositoryKeys.Format}",
         });
 
         _session.Renewed += _kept.Cache.ForgetFailures;
@@ -178,7 +178,13 @@ public sealed class BitbucketSource : SourceBase, ICountable
         return node is BbFile file ? await Guard(() => file.OpenAsync(this, ct)).ConfigureAwait(false) : throw VfsException.IsADirectory(path);
     }
 
-    /// <summary>The node at <paramref name="path"/>, found a folder at a time from the root (a pull request by its number, not by listing them all).</summary>
+    /// <summary>
+    /// The node at <paramref name="path"/>, found a folder at a time from the root (a pull request by its number, not by
+    /// listing them all; a branch or a tag with its own commit asked for and no other's). In a repository a folder's
+    /// child is taken from the listing kept of the folder where one is held (<see cref="KeptChild"/>), nothing asked: a
+    /// file was opened by asking Bitbucket for every folder on the way to it, once more in every run, though the kept
+    /// listings had said where everything was (the review of 21-Nov-2026, P12). A walk goes by what Bitbucket says now.
+    /// </summary>
     private async Task<BbNode> ResolveAsync(string path, CancellationToken ct)
     {
         BbNode node = _root ?? throw VfsException.Unavailable("Bitbucket is not signed in to yet");
@@ -188,6 +194,7 @@ public sealed class BitbucketSource : SourceBase, ICountable
             return node;
         }
 
+        var at = "";
         foreach (var segment in VfsPath.Split(normalized))
         {
             if (node is not BbFolder folder)
@@ -195,10 +202,44 @@ public sealed class BitbucketSource : SourceBase, ICountable
                 throw VfsException.NotADirectory(path);
             }
 
-            node = await Guard(() => folder.FindAsync(this, segment, ct)).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
+            node = (_settings.Keeps && !Walks.Current ? KeptChild(folder, at, segment) : null)
+                ?? await Guard(() => folder.FindAsync(this, segment, ct)).ConfigureAwait(false)
+                ?? throw VfsException.NotFound(path);
+            at = VfsPath.Join(at, segment);
         }
 
         return node;
+    }
+
+    /// <summary>
+    /// A repository folder's child from the listing kept of the folder, nothing asked: a repository's entries carry what
+    /// finding and reading them takes (<see cref="RepositoryKeys"/>), and their commit is the one the repository's
+    /// listings were made at, kept as its root's stamp (<see cref="StampAsync"/>), so a file opens as its folder shows
+    /// it. Null outside a repository, where the folder's listing is not held, or where it does not name the child.
+    /// </summary>
+    private BbNode? KeptChild(BbFolder folder, string path, string name)
+    {
+        (BbRepository Repository, string? Commit, string RepoPath)? at = folder switch
+        {
+            BbFilesFolder files => (files.Repository, _kept?.Cache.StampHeld(path), ""),
+            BbTreeFolder { RepoPath.Length: 0 } root => (root.Repository, _kept?.Cache.StampHeld(path), ""),
+            BbTreeFolder tree => (tree.Repository, tree.Commit, tree.RepoPath),
+            _ => null,
+        };
+        if (at is not { Commit: { Length: > 0 } commit } repository || _kept?.Cache.Held(path) is not { } listing)
+        {
+            return null;
+        }
+
+        foreach (var entry in listing)
+        {
+            if (entry.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return BbTreeFolder.FromKept(repository.Repository, commit, repository.RepoPath, entry);
+            }
+        }
+
+        return null;
     }
 
     // --- what the folders ask for --------------------------------------------------------------------------------------

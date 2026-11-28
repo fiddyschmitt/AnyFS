@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 
 namespace AnyFS.Sources.Atlassian.Bitbucket;
 
@@ -46,9 +47,11 @@ internal sealed class BbText(string name, byte[] content, DateTimeOffset? modifi
     public override Task<IVfsFile> OpenAsync(BitbucketSource source, CancellationToken ct) => Task.FromResult<IVfsFile>(new MemoryFile(content, "a file made from Bitbucket's data"));
 }
 
-/// <summary>A folder with nothing in it: a submodule, whose repository is another's.</summary>
-internal sealed class BbEmptyFolder(string name, DateTimeOffset? modified) : BbFolder(name, modified, modified)
+/// <summary>A folder with nothing in it: a submodule, whose repository is another's; its entry says so (<see cref="RepositoryKeys"/>).</summary>
+internal sealed class BbEmptyFolder(string name, DateTimeOffset? modified, string? key = null) : BbFolder(name, modified, modified)
 {
+    public override VfsEntry Entry => key is null ? base.Entry : base.Entry with { Key = key };
+
     public override Task<IReadOnlyList<BbNode>> ListAsync(BitbucketSource source, CancellationToken ct) => Task.FromResult<IReadOnlyList<BbNode>>([]);
 }
 
@@ -210,7 +213,10 @@ internal sealed class BbRefsFolder(BbRepository repository, bool isTags, string 
             : new BbRefsFolder(repository, isTags, prefix + level.Raw[i] + "/", level.Names[i]);
 }
 
-/// <summary>A folder of the repository at a commit: never changes, so listed once and kept for the run.</summary>
+/// <summary>
+/// A folder of the repository at a commit: never changes, so listed once and kept for the run. Each entry carries what
+/// finding it again takes (<see cref="RepositoryKeys"/>), so a kept listing is enough to go on from (<see cref="FromKept"/>).
+/// </summary>
 internal sealed class BbTreeFolder(BbRepository repository, string commit, string path, string name, DateTimeOffset? time) : BbFolder(name, time, time)
 {
     public BbRepository Repository { get; } = repository;
@@ -219,6 +225,25 @@ internal sealed class BbTreeFolder(BbRepository repository, string commit, strin
 
     /// <summary>The folder's path in the repository; empty for its root.</summary>
     public string RepoPath { get; } = path;
+
+    /// <summary>A folder in the repository says git's name for it where the name shown is another; its root, a ref's folder, nothing.</summary>
+    public override VfsEntry Entry => RepoPath.Length == 0 ? base.Entry : base.Entry with { Key = RepositoryKeys.Of(RepoPath[(RepoPath.LastIndexOf('/') + 1)..], Name) };
+
+    /// <summary>
+    /// What an entry of a kept listing of the repository folder at <paramref name="path"/> names, made from the entry
+    /// alone: a folder, a submodule, or a file with its size and, where Bitbucket named it, its content's id.
+    /// </summary>
+    public static BbNode FromKept(BbRepository repository, string commit, string path, VfsEntry entry)
+    {
+        var (gitName, _, submodule) = RepositoryKeys.Read(entry);
+        var full = path.Length == 0 ? gitName : path + "/" + gitName;
+        if (entry.IsDirectory)
+        {
+            return submodule ? new BbEmptyFolder(entry.Name, entry.Modified, entry.Key) : new BbTreeFolder(repository, commit, full, entry.Name, entry.Modified);
+        }
+
+        return new BbBlobFile(repository, commit, full, entry.Length, entry.Name, entry.Modified, entry.ETag);
+    }
 
     public override async Task<IReadOnlyList<BbNode>> ListAsync(BitbucketSource source, CancellationToken ct)
     {
@@ -232,7 +257,7 @@ internal sealed class BbTreeFolder(BbRepository repository, string commit, strin
             var entry = ordered[i];
             var full = RepoPath.Length == 0 ? entry.Name : RepoPath + "/" + entry.Name;
             children.Add(entry.IsDirectory ? new BbTreeFolder(Repository, Commit, full, names[i], time)
-                : entry.IsSubmodule ? new BbEmptyFolder(names[i], time)
+                : entry.IsSubmodule ? new BbEmptyFolder(names[i], time, RepositoryKeys.Of(entry.Name, names[i], submodule: true))
                 : new BbBlobFile(Repository, Commit, full, entry.Size, names[i], time, entry.ContentId));
         }
 
@@ -240,9 +265,14 @@ internal sealed class BbTreeFolder(BbRepository repository, string commit, strin
     }
 }
 
-/// <summary>A file of the repository at a commit: its bytes as git keeps them, streamed as it is opened.</summary>
+/// <summary>
+/// A file of the repository at a commit: its bytes as git keeps them, streamed as it is opened. Its entry carries its
+/// content's id as Bitbucket names it (the ETag), and git's name where another is shown.
+/// </summary>
 internal sealed class BbBlobFile(BbRepository repository, string commit, string path, long size, string name, DateTimeOffset? time, string? contentId) : BbFile(name, size, time, time)
 {
+    public override VfsEntry Entry => base.Entry with { ETag = contentId is { Length: > 0 } ? contentId : null, Key = RepositoryKeys.Of(path[(path.LastIndexOf('/') + 1)..], Name) };
+
     public override Task<IVfsFile> OpenAsync(BitbucketSource source, CancellationToken ct) => source.OpenBlobAsync(repository, commit, path, Length, contentId, ct);
 }
 
