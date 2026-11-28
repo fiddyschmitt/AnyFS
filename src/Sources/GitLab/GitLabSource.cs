@@ -156,7 +156,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
             // settings that shape the tree, the same files (a file's size is a fact about how it is written), and what a
             // repository's entries keep in the same form (they are what a file is found and read by)
             SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
-            SaveKey = $"{_session.Address.Server}|{_session.User?.Username}|{path}|{_settings.Shape}|md{GitLabDocuments.Format}|keys{GitLabKeys.Format}",
+            SaveKey = $"{_session.Address.Server}|{_session.User?.Username}|{path}|{_settings.Shape}|md{GitLabDocuments.Format}|keys{RepositoryKeys.Format}",
         });
 
         // a sign-in renewed: what it refused may be answered now
@@ -359,7 +359,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
     /// <summary>
     /// A repository folder's child from the listing kept of the folder, nothing asked (spec 7.8): a repository's entries carry
-    /// what finding and reading them takes (<see cref="GitLabKeys"/>), and their commit is the one the repository's listings
+    /// what finding and reading them takes (<see cref="RepositoryKeys"/>), and their commit is the one the repository's listings
     /// were made at, kept as its root's stamp, so a file opens as its folder shows it. Null outside a repository, where its
     /// folder's listing is not kept, or where the listing does not name the child.
     /// </summary>
@@ -970,7 +970,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
 
     /// <summary>
     /// The repository at the root's commit as kept under another folder, every listing of it moved under <paramref name="path"/>:
-    /// a repository's entries say nothing of where it is shown (<see cref="GitLabKeys"/>), so they are the same under any ref at
+    /// a repository's entries say nothing of where it is shown (<see cref="RepositoryKeys"/>), so they are the same under any ref at
     /// that commit. Null where none is kept whole at that commit. Until 16-Nov-2026 the refs shared a copy the source held of
     /// every repository folder read in the run, in memory and bounded at a million folders.
     /// </summary>

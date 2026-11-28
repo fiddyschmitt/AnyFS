@@ -1,4 +1,5 @@
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 
 namespace AnyFS.Sources.GitLab;
 
@@ -49,7 +50,7 @@ internal abstract class GlFile(string name, long length, DateTimeOffset? modifie
     public abstract Task<IVfsFile> OpenAsync(GitLabSource source, CancellationToken ct);
 }
 
-/// <summary>A folder with nothing in it: a submodule (git keeps only the commit it points at), its entry saying so (<see cref="GitLabKeys"/>).</summary>
+/// <summary>A folder with nothing in it: a submodule (git keeps only the commit it points at), its entry saying so (<see cref="RepositoryKeys"/>).</summary>
 internal sealed class EmptyFolder(string name, DateTimeOffset? modified = null, string? key = null) : GlFolder(name, modified)
 {
     public override VfsEntry Entry => key is null ? base.Entry : base.Entry with { Key = key };
@@ -344,7 +345,7 @@ internal sealed class RefsFolder(GlProject project, RefKind kind, string prefix,
 /// A folder of the repository at a commit: never changes, so its listing is kept as long as the commit is where the folder
 /// stands. Its folders first, then the rest, each in the order of their names, however GitLab sent them (a folder listed
 /// alone, or the whole tree at once), so twins in case are numbered the same either way. Each entry carries what finding
-/// it again takes (<see cref="GitLabKeys"/>), so a kept listing is enough to go on from (<see cref="FromKept"/>).
+/// it again takes (<see cref="RepositoryKeys"/>), so a kept listing is enough to go on from (<see cref="FromKept"/>).
 /// </summary>
 internal sealed class TreeFolder(GlProject project, string commit, string path, string name, DateTimeOffset? time) : GlFolder(name, time, time)
 {
@@ -356,7 +357,7 @@ internal sealed class TreeFolder(GlProject project, string commit, string path, 
     public string RepoPath => path;
 
     /// <summary>A folder in the repository says git's name for it where the name shown is another; its root, a ref's folder, nothing.</summary>
-    public override VfsEntry Entry => path.Length == 0 ? base.Entry : base.Entry with { Key = GitLabKeys.Of(path[(path.LastIndexOf('/') + 1)..], Name) };
+    public override VfsEntry Entry => path.Length == 0 ? base.Entry : base.Entry with { Key = RepositoryKeys.Of(path[(path.LastIndexOf('/') + 1)..], Name) };
 
     public override async Task<IReadOnlyList<GlNode>> ListAsync(GitLabSource source, CancellationToken ct)
         => Children(project, commit, path, await source.TreeAsync(project, commit, path, ct).ConfigureAwait(false), Modified);
@@ -374,7 +375,7 @@ internal sealed class TreeFolder(GlProject project, string commit, string path, 
             children.Add(item.K switch
             {
                 't' => new TreeFolder(project, commit, full, names[i], time),
-                'c' => new EmptyFolder(names[i], time, GitLabKeys.Of(item.N, names[i], submodule: true)),
+                'c' => new EmptyFolder(names[i], time, RepositoryKeys.Of(item.N, names[i], submodule: true)),
                 _ => new BlobFile(project, commit, full, item, names[i], time),
             });
         }
@@ -389,7 +390,7 @@ internal sealed class TreeFolder(GlProject project, string commit, string path, 
     /// </summary>
     public static GlNode? FromKept(GlProject project, string commit, string path, VfsEntry entry)
     {
-        var (gitName, lfs, submodule) = GitLabKeys.Read(entry);
+        var (gitName, lfs, submodule) = RepositoryKeys.Read(entry);
         var full = path.Length == 0 ? gitName : path + "/" + gitName;
         if (entry.IsDirectory)
         {
@@ -406,8 +407,8 @@ internal sealed class TreeFolder(GlProject project, string commit, string path, 
 internal sealed class BlobFile(GlProject project, string commit, string path, TreeItem item, string name, DateTimeOffset? time)
     : GlFile(name, item.L, time, time, item.S)
 {
-    /// <summary>With git's name where it shows another, and its LFS mark (<see cref="GitLabKeys"/>).</summary>
-    public override VfsEntry Entry => base.Entry with { Key = GitLabKeys.Of(item.N, Name, lfs: item.F) };
+    /// <summary>With git's name where it shows another, and its LFS mark (<see cref="RepositoryKeys"/>).</summary>
+    public override VfsEntry Entry => base.Entry with { Key = RepositoryKeys.Of(item.N, Name, lfs: item.F) };
 
     public override Task<IVfsFile> OpenAsync(GitLabSource source, CancellationToken ct) => source.OpenBlobAsync(project, commit, path, item, ct);
 }
