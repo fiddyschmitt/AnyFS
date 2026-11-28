@@ -313,13 +313,34 @@ public class SmbMountTests
         var source = Tree();
         var provider = new SmbMountProvider();
         var settings = (SmbMountSettings)provider.CreateDefaultSettings(new Collection("work"));
-        settings.Port = FreePort();
         settings.User = User;
         settings.Password = Password;
         settings.DriveLetter = letter;
-        var mount = provider.CreateMount(settings, new Collection("work"));
-        var context = new TestMountContext("work", "smb");
-        await mount.StartAsync(await VfsAsync(source), context, CancellationToken.None);
+        var vfs = await VfsAsync(source);
+
+        // Windows keeps its connection to localhost a minute or more after a letter goes, and refuses a mapping of it
+        // meanwhile ("Multiple connections ... by the same user", then "The network name cannot be found"): run again soon
+        // after itself, this test failed (N39). It waits that out now, trying every fifteen seconds
+        IMount mount;
+        TestMountContext context;
+        var waited = System.Diagnostics.Stopwatch.StartNew();
+        while (true)
+        {
+            settings.Port = FreePort();
+            mount = provider.CreateMount(settings, new Collection("work"));
+            context = new TestMountContext("work", "smb");
+            await mount.StartAsync(vfs, context, CancellationToken.None);
+            if (context.HealthReports.Count == 0 || waited.Elapsed > TimeSpan.FromMinutes(3) || !context.HealthReports.All(h => h.Detail?.StartsWith($"Mapping {letter}: failed", StringComparison.Ordinal) == true))
+            {
+                break;
+            }
+
+            Console.WriteLine($"[test] {context.HealthReports.Last().Detail} ({waited.Elapsed.TotalSeconds:N0} s): Windows' connection from before, waited out");
+            await mount.StopAsync(CancellationToken.None);
+            await mount.DisposeAsync();
+            await Task.Delay(TimeSpan.FromSeconds(15));
+        }
+
         _cleanup.Add(mount);
         Assert.AreEqual(0, context.HealthReports.Count, string.Join(" | ", context.HealthReports.Select(h => h.Detail)));
         Assert.IsTrue(mount.AccessPaths.Any(p => p.Value == letter + @":\"), string.Join(" | ", mount.AccessPaths.Select(p => p.Value)));

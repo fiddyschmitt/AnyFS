@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using AnyFS.Sdk.Testing;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AnyFS.Sdk.Tests;
@@ -72,14 +73,14 @@ public class KeptListingsOnDiskTests
         return folder;
     }
 
-    private static KeptListingsOptions Options(string folder, bool onDisk = true, string key = Key, Func<string, CancellationToken, ValueTask<IReadOnlySet<string>?>>? leftOut = null, Action<string?>? unsaved = null) => new()
+    private static KeptListingsOptions Options(string folder, bool onDisk = true, string key = Key, Func<string, CancellationToken, ValueTask<IReadOnlySet<string>?>>? leftOut = null, Action<string?>? unsaved = null, TimeSpan? saveEvery = null) => new()
     {
         WalkEvery = TimeSpan.Zero,
         SaveTo = Path.Combine(folder, "listings.json.gz"),
         SaveKey = key,
         StampOf = StampOf,
         Parallelism = 2,
-        SaveEvery = TimeSpan.Zero,
+        SaveEvery = saveEvery ?? TimeSpan.Zero,
         OnDisk = onDisk,
         LeftOut = leftOut,
         Unsaved = unsaved,
@@ -301,6 +302,73 @@ public class KeptListingsOnDiskTests
         await kept.DisposeAsync();
         Assert.AreEqual(2, said.Count);
         Assert.IsNull(said.Last(), "over");
+    }
+
+    /// <summary>
+    /// A commit that does not land (the disk full as it is written) loses what its transaction held, and nothing of it is
+    /// answered: what the listings hold of those folders is listed again, the tile is told, and the writes after it go on
+    /// in a transaction of their own. Left open, the transaction took every write after it down with it, each BEGIN
+    /// refused inside it (the review of 21-Nov-2026, R15a). Nothing here fills a disk: a trigger made through another
+    /// connection fails the count the commit writes last, as a full disk fails the commit.
+    /// </summary>
+    [TestMethod]
+    public async Task ACommitThatDoesNotLandLosesWhatItHeldAndTheWritesAfterItGoOn()
+    {
+        var folder = TempFolder();
+        var said = new ConcurrentQueue<string?>();
+        var kept = Kept(Options(folder, unsaved: said.Enqueue, saveEvery: SaveEvery));
+        await using var closing = kept;
+        await kept.CountAsync(CancellationToken.None);
+
+        using var other = new Microsoft.Data.Sqlite.SqliteConnection(new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder { DataSource = Path.Combine(folder, "listings.db"), Pooling = false }.ToString());
+        other.Open();
+        void Run(string sql)
+        {
+            using var command = other.CreateCommand();
+            command.CommandText = sql;
+            command.ExecuteNonQuery();
+        }
+
+        // made once a save has ended the transaction the walk wrote in (the store holds one open between saves); then a
+        // listing stored goes into a transaction the next save cannot commit
+        Run("CREATE TRIGGER full_disk BEFORE INSERT ON meta WHEN NEW.name = 'count' BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END");
+        _tree["d05"] = [.. _tree["d05"], VfsEntry.File("lost.txt", 3)];
+        kept.Cache.Invalidate("d05");
+        Assert.IsTrue((await kept.Cache.GetAsync("d05", CancellationToken.None)).Any(e => e.Name == "lost.txt"), "listed from the source");
+        await ToldAsync(said, 1);
+        StringAssert.Contains(said.Single(), "database or disk is full", "the tile is told, in the database's words");
+        Assert.IsNull(kept.Cache.Held("d05"), "nothing is held of it: the row the database still has is older than what was listed");
+
+        _listed.Clear();
+        Assert.IsTrue((await kept.Cache.GetAsync("d05", CancellationToken.None)).Any(e => e.Name == "lost.txt"));
+        Assert.AreEqual(1, Listed("d05"), "the folder whose listing was lost is listed again");
+
+        // the disk has room again (the trigger goes once no transaction holds the database): the next writes have a
+        // transaction of their own, and land
+        Run("DROP TRIGGER full_disk");
+        _tree["d06"] = [.. _tree["d06"], VfsEntry.File("kept.txt", 4)];
+        kept.Cache.Invalidate("d06");
+        Assert.IsTrue((await kept.Cache.GetAsync("d06", CancellationToken.None)).Any(e => e.Name == "kept.txt"));
+        await ToldAsync(said, 2);
+        Assert.IsNull(said.Last(), "the tile is told it is over: " + string.Join(" | ", said));
+        _listed.Clear();
+        Assert.IsTrue((await kept.Cache.GetAsync("d06", CancellationToken.None)).Any(e => e.Name == "kept.txt"));
+        Assert.AreEqual(0, Listed("d06"), "held, and answered from the database");
+    }
+
+    private static readonly TimeSpan SaveEvery = TimeSpan.FromMilliseconds(300);
+
+    /// <summary>Until the tile has been told <paramref name="told"/> things, and two saves after, so that the last write is in what was saved.</summary>
+    private static async Task ToldAsync(ConcurrentQueue<string?> said, int told)
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        while (said.Count < told)
+        {
+            Assert.IsTrue(watch.Elapsed < TimeSpan.FromSeconds(20), $"told {said.Count} of {told}: " + string.Join(" | ", said));
+            await Task.Delay(20);
+        }
+
+        await Task.Delay(SaveEvery * 2);
     }
 
     [TestMethod]
