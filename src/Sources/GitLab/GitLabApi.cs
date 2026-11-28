@@ -160,18 +160,46 @@ internal sealed class GitLabApi : RequestCore
     public Task<HttpResponseMessage> OpenAsync(string relative, CancellationToken ct) => OpenAsync(new Uri(Address.Api, relative), relative, ct);
 
     /// <summary>
-    /// Bytes at an offset (relative to <c>/api/v4/</c>), asked for with a Range header: whether the server gave just them
-    /// (206), or ignored the range and sent everything (200), and what it sent.
+    /// Bytes at an offset (relative to <c>/api/v4/</c>), asked for with a Range header. A server that keeps to it (206)
+    /// sends just them. One that ignores it (200) sends everything: that is read as it comes and let go, all but what
+    /// lies from <paramref name="keepFrom"/> to the end, which is what comes back with Partial false. The whole answer
+    /// was taken into memory before: 574 MB for an archive of 257 MB (the review of 21-Nov-2026, P11). An answer that
+    /// breaks off part way is asked for again, as one that never came is.
     /// </summary>
-    public async Task<(bool Partial, byte[] Bytes)> RangeAsync(string relative, long offset, int length, CancellationToken ct)
+    public async Task<(bool Partial, byte[] Bytes)> RangeAsync(string relative, long offset, int length, long keepFrom, CancellationToken ct)
     {
-        using var response = await SendAsync(() =>
+        for (var breaks = 0; ;)
         {
-            var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Address.Api, relative));
-            request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(offset, offset + length - 1);
-            return request;
-        }, relative, ct).ConfigureAwait(false);
-        return (response.StatusCode == HttpStatusCode.PartialContent, await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false));
+            using var response = await SendAsync(() =>
+            {
+                var request = new HttpRequestMessage(HttpMethod.Get, new Uri(Address.Api, relative));
+                request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(offset, offset + length - 1);
+                return request;
+            }, relative, ct, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+            try
+            {
+                var partial = response.StatusCode == HttpStatusCode.PartialContent;
+                var body = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+                await using (body.ConfigureAwait(false))
+                {
+                    var bytes = await ResponseLength.FromAsync(body, partial ? 0 : keepFrom, response.Content.Headers.ContentLength, ct).ConfigureAwait(false);
+
+                    // what a fetch keeps something of is weighed by what was kept of the answer, not by all that was sent
+                    RequestCache.Received(bytes.Length);
+                    return (partial, bytes);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or HttpRequestException && !ct.IsCancellationRequested)
+            {
+                if (++breaks >= Attempts)
+                {
+                    throw new VfsException(VfsError.Unavailable, $"GitLab ({Address.Server.Host}) broke off its answer to {relative}: {ex.Message}", ex);
+                }
+
+                Logger.LogInformation("gitlab: {Host} broke off its answer to {What} ({Error}); asking again", Address.Server.Host, relative, ex.Message);
+                await Task.Delay(Pause(breaks, answered: false), ct).ConfigureAwait(false);
+            }
+        }
     }
 
     protected override string Product => "GitLab";

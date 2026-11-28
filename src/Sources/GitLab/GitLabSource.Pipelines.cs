@@ -85,31 +85,47 @@ public sealed partial class GitLabSource
             : Spool.OpenAsync($"gitlab:{Api.Address.Server.Host}:{project.Id}:log:{job.Id}:{length}", length,
                 async c => await ResponseStream.OpenAsync(await Api.OpenAsync($"projects/{project.Id}/jobs/{job.Id}/trace", c).ConfigureAwait(false), c).ConfigureAwait(false), ct);
 
+    // of an archive a server sent whole, at least this much of its end is kept: the directory of an archive of some
+    // tens of thousands of files, so that the one answer serves both the end record and the directory
+    private const int WholeArchiveEndKept = 4 * 1024 * 1024;
+
+    private long _wholeArchiveBytesKept;
+
+    /// <summary>How many bytes were kept of archives that came whole, their ends (for tests).</summary>
+    internal long WholeArchiveBytesKept => Interlocked.Read(ref _wholeArchiveBytesKept);
+
     /// <summary>
     /// A job's artifacts, from the archive's central directory read at its end with ranged requests (spike G: GitLab answers
-    /// them with 206), never the whole archive; a server that ignores Range sends the whole archive once, and the list is
-    /// read from that. Kept for good: a job's artifacts never change.
+    /// them with 206), never the whole archive. A server that ignores Range sends the whole archive: it is read as it
+    /// comes and its end alone kept, from which the list is read; a directory that begins before what was kept (one
+    /// longer than <see cref="WholeArchiveEndKept"/>) has the archive sent once more. Kept for good: a job's artifacts
+    /// never change.
     /// </summary>
     internal Task<IReadOnlyList<ZipEntry>> ArtifactsAsync(GlProject project, GlJob job, CancellationToken ct)
         => Cache.GetAsync($"artifacts:{project.Id}:{job.Id}", null, async c =>
         {
-            byte[]? whole = null;
+            // what was kept of an archive that came whole: its end, and where in the archive that begins
+            (long At, byte[] Bytes)? end = null;
             var relative = $"projects/{project.Id}/jobs/{job.Id}/artifacts";
             async Task<byte[]> ReadAsync(long offset, int length, CancellationToken token)
             {
-                if (whole is null)
+                if (end is not { } kept || offset < kept.At)
                 {
-                    var (partial, bytes) = await Api.RangeAsync(relative, offset, length, token).ConfigureAwait(false);
+                    var from = Math.Max(0, Math.Min(offset, (job.ArchiveSize ?? 0) - WholeArchiveEndKept));
+                    var (partial, bytes) = await Api.RangeAsync(relative, offset, length, from, token).ConfigureAwait(false);
                     if (partial)
                     {
                         return bytes;
                     }
 
-                    Logger.LogInformation("gitlab: {Project} job {Job}: the artifacts archive came whole ({Length:N0} bytes), not the range asked for", project.FullPath, job.Id, bytes.Length);
-                    whole = bytes;
+                    Logger.LogInformation("gitlab: {Project} job {Job}: the artifacts archive came whole, not the range asked for; its last {Length:N0} bytes kept", project.FullPath, job.Id, bytes.Length);
+                    Interlocked.Add(ref _wholeArchiveBytesKept, bytes.Length);
+                    kept = (from, bytes);
+                    end = kept;
                 }
 
-                return whole.AsSpan((int)offset, (int)Math.Min(length, whole.Length - offset)).ToArray();
+                var at = offset - kept.At;
+                return at >= kept.Bytes.Length ? [] : kept.Bytes.AsSpan((int)at, (int)Math.Min(length, kept.Bytes.Length - at)).ToArray();
             }
 
             try

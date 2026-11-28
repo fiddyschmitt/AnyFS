@@ -36,6 +36,42 @@ public static class ResponseLength
         => IsPart(response) ? response.Content.Headers.ContentRange?.Length : response.Content.Headers.ContentLength;
 
     /// <summary>
+    /// What <paramref name="body"/> holds from <paramref name="from"/> to its end, the bytes before that read and let go as
+    /// they come: for a server that ignores a range and sends the whole file where its end alone is wanted (a zip
+    /// archive's directory). The whole is still sent, as the server chose, but it is not held: taken whole into memory
+    /// first, an archive cost more than twice its size for as long as it was read, and one past 2 GB could not be read
+    /// at all (the review of 21-Nov-2026, P11).
+    /// </summary>
+    /// <param name="length">The body's length where the server gave one, to make room for what is kept at once.</param>
+    public static async Task<byte[]> FromAsync(Stream body, long from, long? length, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        ArgumentOutOfRangeException.ThrowIfNegative(from);
+        var room = length is { } whole && whole > from ? (int)Math.Min(whole - from, Array.MaxLength) : 0;
+        using var kept = new MemoryStream(room);
+        var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
+        try
+        {
+            long at = 0;
+            for (int n; (n = await body.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0; at += n)
+            {
+                if (at + n > from)
+                {
+                    var skip = (int)Math.Max(0, from - at);
+                    kept.Write(buffer, skip, n - skip);
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        // its own array where it came out as long as the server said, and no second copy made of it
+        return kept.Length == kept.Capacity && kept.TryGetBuffer(out var all) && all.Offset == 0 && all.Count == all.Array!.Length ? all.Array : kept.ToArray();
+    }
+
+    /// <summary>
     /// What is left of <paramref name="body"/> counted, nothing kept, on from the <paramref name="counted"/> bytes already
     /// read of it; null as soon as the count passes <paramref name="most"/> (where one is given), the rest left unread.
     /// </summary>

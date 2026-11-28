@@ -384,6 +384,9 @@ internal sealed partial class FakeGitLab
         /// <summary>Sent compressed: the client reads it unpacked and without a stated length, as .NET hands on a gzip answer.</summary>
         public bool Compressed { get; init; }
 
+        /// <summary>Half of the body arrives, and then the connection is lost.</summary>
+        public bool BreaksOff { get; init; }
+
         public static Response Json(JsonNode node, int status = 200, Dictionary<string, string>? headers = null) => new(status, Encoding.UTF8.GetBytes(node.ToJsonString()), "application/json", headers);
 
         public static Response Message(int status, string message) => Json(new JsonObject { ["message"] = message }, status);
@@ -1103,6 +1106,11 @@ internal sealed partial class FakeGitLab
         /// <summary>The body as the client gets it; a compressed answer's unpacked as it is read, so of no stated length.</summary>
         private static HttpContent Body(HttpRequestMessage message, Response answer)
         {
+            if (answer.BreaksOff && message.Method != HttpMethod.Head)
+            {
+                return new StreamContent(new BrokenOff(answer.Body));
+            }
+
             if (message.Method == HttpMethod.Head || !answer.Compressed)
             {
                 return new ByteArrayContent(message.Method == HttpMethod.Head ? [] : answer.Body);
@@ -1116,6 +1124,21 @@ internal sealed partial class FakeGitLab
 
             packed.Position = 0;
             return new StreamContent(new System.IO.Compression.GZipStream(packed, System.IO.Compression.CompressionMode.Decompress));
+        }
+
+        /// <summary>An answer's body of which half arrives, and then the connection is lost.</summary>
+        private sealed class BrokenOff(byte[] body) : MemoryStream(body, 0, body.Length / 2, writable: false)
+        {
+            // no length to go by: the answer was to be longer than what comes of it
+            public override bool CanSeek => false;
+
+            public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            {
+                var read = await base.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                return read > 0 ? read : throw new IOException("The response ended prematurely.");
+            }
+
+            public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
         }
     }
 }

@@ -2450,6 +2450,86 @@ public class GitLabPipelineTests
     }
 
     [TestMethod]
+    public async Task AnArchiveSentWholeIsReadAsItComesAndOnlyItsEndKept()
+    {
+        // The whole answer was taken into memory to read the directory at its end: 574 MB for an archive of 257 MB, and
+        // one past 2 GB could not be listed at all (the review of 21-Nov-2026, P11)
+        var fake = GitLabSeed.Lab();
+        fake.HonoursRanges = false;
+        var big = new byte[8 << 20];
+        new Random(7).NextBytes(big);
+        var job = JobOf(fake, 31);
+        job.Artifacts["out/big.bin"] = big;
+        Assert.IsTrue(job.Archive.Length > big.Length, "what cannot be packed");
+        await using var source = await StartAsync(fake);
+        var files = await ListAsync(source, "pipelines/2 main/build/artifacts/out");
+        CollectionAssert.AreEqual(new[] { "big.bin", "hello.txt", "sub" }, files.Select(e => e.Name).ToArray());
+        Assert.AreEqual(big.Length, files.Single(e => e.Name == "big.bin").Length);
+        Assert.AreEqual(1, fake.RangeRequests, "the end record and the directory from the one answer");
+        Assert.AreEqual(4 << 20, source.WholeArchiveBytesKept, "its end, and not the archive");
+    }
+
+    [TestMethod]
+    public async Task AnArchiveSentWholeWhoseDirectoryIsLongerThanWhatWasKeptIsSentOnceMore()
+    {
+        var fake = GitLabSeed.Lab();
+        fake.HonoursRanges = false;
+        var job = JobOf(fake, 31);
+        var name = new string('n', 200);
+        for (var n = 0; n < 20_000; n++)
+        {
+            job.Artifacts[$"many/{name}-{n:D5}.txt"] = [];
+        }
+
+        await using var source = await StartAsync(fake);
+        var files = await ListAsync(source, "pipelines/2 main/build/artifacts/many");
+        Assert.AreEqual(20_000, files.Count);
+        Assert.AreEqual($"{name}-00000.txt", files[0].Name);
+        Assert.AreEqual($"{name}-19999.txt", files[^1].Name);
+        Assert.AreEqual(2, fake.RangeRequests, "the directory begins before the end that was kept: sent once more, and kept from there");
+        Assert.IsTrue(source.WholeArchiveBytesKept < job.Archive.Length, $"{source.WholeArchiveBytesKept:N0} of {job.Archive.Length:N0}: the directory twice over at most, never the files before it");
+        CollectionAssert.AreEqual(new[] { "hello.txt", "sub" }, (await ListAsync(source, "pipelines/2 main/build/artifacts/out")).Select(e => e.Name).ToArray());
+        Assert.AreEqual(2, fake.RangeRequests, "listed once, for good");
+    }
+
+    [TestMethod]
+    public async Task AnArchiveWhoseAnswerBreaksOffIsAskedForAgain()
+    {
+        var fake = GitLabSeed.Lab();
+        fake.HonoursRanges = false;
+        fake.ArchiveBreaks = 1;
+        await using var source = await StartAsync(fake);
+        var files = await ListAsync(source, "pipelines/2 main/build/artifacts/out");
+        CollectionAssert.AreEqual(new[] { "hello.txt", "sub" }, files.Select(e => e.Name).ToArray());
+        Assert.AreEqual(2, fake.RangeRequests, "the one that broke off, and the one after it");
+        Assert.AreEqual(0, fake.ArchiveBreaks);
+    }
+
+    [TestMethod]
+    [DataRow(0, true)]
+    [DataRow(1, true)]
+    [DataRow(70_000, true)]
+    [DataRow(70_000, false)]
+    [DataRow(199_999, true)]
+    [DataRow(200_000, false)]
+    [DataRow(250_000, true)]
+    public async Task ABodysEndIsKeptFromAPlaceAndWhatComesBeforeItLetGo(int from, bool lengthGiven)
+    {
+        var whole = Enumerable.Range(0, 200_000).Select(i => (byte)(i * 31 % 251)).ToArray();
+
+        // in pieces of no even size, as a network gives them
+        using var body = new Pieces(whole, 7_001);
+        var kept = await AnyFS.Sources.Common.ResponseLength.FromAsync(body, from, lengthGiven ? whole.Length : null, CancellationToken.None);
+        CollectionAssert.AreEqual(whole.Skip(from).ToArray(), kept);
+    }
+
+    private sealed class Pieces(byte[] bytes, int most) : MemoryStream(bytes, writable: false)
+    {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            => base.ReadAsync(buffer[..Math.Min(buffer.Length, most)], cancellationToken);
+    }
+
+    [TestMethod]
     public async Task AJobsLogIsListedFromTheJobListAndAskedForOnlyWhenRead()
     {
         // 9-Nov-2026, the user: thousands of logs in the cache folder; every job's log was downloaded and kept to learn its

@@ -82,6 +82,9 @@ internal sealed partial class FakeGitLab
     /// <summary>How many requests for an archive came with a Range header.</summary>
     public int RangeRequests { get; private set; }
 
+    /// <summary>How many of the next answers that carry an archive break off half way, the connection lost.</summary>
+    public int ArchiveBreaks { get; set; }
+
     /// <summary>Whether a job's log comes compressed (nginx's gzip of text/plain), so unpacked and of no stated length.</summary>
     public bool LogsCompressed { get; set; }
 
@@ -155,6 +158,12 @@ internal sealed partial class FakeGitLab
                         return new Response(206, job.Archive[(int)start..(int)(end + 1)], "application/octet-stream",
                             new() { ["Content-Range"] = $"bytes {start}-{end}/{job.Archive.Length}" });
                     }
+                }
+
+                if (ArchiveBreaks > 0)
+                {
+                    ArchiveBreaks--;
+                    return new Response(200, job.Archive, "application/octet-stream") { BreaksOff = true };
                 }
 
                 return new Response(200, job.Archive, "application/octet-stream");
