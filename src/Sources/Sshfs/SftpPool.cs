@@ -22,8 +22,12 @@ internal sealed class SftpPool : IAsyncDisposable
     private readonly HostKeyStore _hostKeys;
     private readonly ReachMemory _reach;
     private readonly Slot[] _slots;
+    private readonly CancellationTokenSource _stopping = new();
     private int _next = -1;
     private bool _disposed;
+
+    // a login asked the person (a one-time code, a PIN): another connection would ask again, so none is made unasked
+    private volatile bool _asksThePerson;
 
     public SftpPool(SshfsSettings settings, ISourceContext context, HostKeyStore hostKeys, TimeProvider? time = null)
     {
@@ -40,11 +44,65 @@ internal sealed class SftpPool : IAsyncDisposable
     /// <summary>The first connection, made during initialisation so a bad login fails the source with a reason.</summary>
     public Task<SftpClient> ConnectFirstAsync(CancellationToken ct) => GetAsync(_slots[0], ct);
 
-    /// <summary>A connected client, round-robin over the pool; reconnects a dropped one (prompting again if the login needs it).</summary>
+    /// <summary>
+    /// A connected client, round-robin over the pool; reconnects a dropped one (prompting again if the login needs it). A
+    /// call whose turn falls on a slot not connected (yet, or any more) takes one that is, and the slot connects beside
+    /// it: a run's first calls each waited for a connection of their own though one was open, 200 ms each on the lab, for
+    /// as many calls as the source has connections (the review of 21-Nov-2026, N38). Not where a login asked the person.
+    /// </summary>
     public Task<SftpClient> GetAsync(CancellationToken ct)
     {
         var index = (int)((uint)Interlocked.Increment(ref _next) % (uint)_slots.Length);
-        return GetAsync(_slots[index], ct);
+        var slot = _slots[index];
+        if (slot.Client is { IsConnected: true } ready)
+        {
+            return Task.FromResult(ready);
+        }
+
+        if (!_asksThePerson && Open() is { } open)
+        {
+            _ = ConnectBesideAsync(slot);
+            return Task.FromResult(open);
+        }
+
+        return GetAsync(slot, ct);
+    }
+
+    /// <summary>A connected client of the pool's, or null where none is.</summary>
+    private SftpClient? Open()
+    {
+        foreach (var slot in _slots)
+        {
+            if (slot.Client is { IsConnected: true } client)
+            {
+                return client;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Connects a slot while the calls go on over the open ones; one connect at a time for a slot, nobody waiting on it.</summary>
+    private async Task ConnectBesideAsync(Slot slot)
+    {
+        if (Interlocked.Exchange(ref slot.Connecting, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await GetAsync(slot, _stopping.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // the open connections carry the calls; the slot is tried again when its turn next comes
+            _context.Logger.LogDebug("sshfs: another connection to {Host}:{Port} was not made ({Error}); the open ones carry the calls", _settings.Host, _settings.Port, ex.Message);
+        }
+        finally
+        {
+            Volatile.Write(ref slot.Connecting, 0);
+        }
     }
 
     /// <summary>A client whose connection turned out to be dead: dropped, so its slot reconnects on the next use.</summary>
@@ -63,6 +121,9 @@ internal sealed class SftpPool : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _disposed = true;
+
+        // a connect beside the calls gives up: nobody waits for it
+        await _stopping.CancelAsync().ConfigureAwait(false);
         foreach (var slot in _slots)
         {
             await slot.Gate.WaitAsync().ConfigureAwait(false);
@@ -123,6 +184,11 @@ internal sealed class SftpPool : IAsyncDisposable
             }
 
             _reach.Forget();
+            if (login.AskedThePerson)
+            {
+                _asksThePerson = true;
+            }
+
             if (ReferenceEquals(slot, _slots[0]) || Home == "/")
             {
                 Home = string.IsNullOrEmpty(client.WorkingDirectory) ? "/" : client.WorkingDirectory;
@@ -150,6 +216,9 @@ internal sealed class SftpPool : IAsyncDisposable
 
     private sealed class Slot
     {
+        /// <summary>1 while a connect beside the calls is under way for it.</summary>
+        public int Connecting;
+
         public SemaphoreSlim Gate { get; } = new(1, 1);
 
         public SftpClient? Client { get; set; }
@@ -169,6 +238,9 @@ internal sealed class SshLogin(SshfsSettings settings, ISourceContext context, H
     private bool _promptCancelled;
     private Exception? _promptFailure;
     private string? _hostKeyProblem;
+
+    /// <summary>The login put a question to the person (a prompt of the server's, a key's passphrase): another would ask again.</summary>
+    public bool AskedThePerson { get; private set; }
 
     public async Task<SftpClient> ConnectAsync(CancellationToken ct)
     {
@@ -269,6 +341,7 @@ internal sealed class SshLogin(SshfsSettings settings, ISourceContext context, H
             catch (SshPassPhraseNullOrEmptyException) when (attempt == 0)
             {
                 // the key is encrypted and no passphrase is stored: ask once
+                AskedThePerson = true;
                 var answer = await context.PromptAsync(new PromptRequest(PromptKind.Password, $"Passphrase for {Path.GetFileName(path)}", $"The private key for {settings.Username}@{settings.Host} is encrypted."), ct).ConfigureAwait(false);
                 if (!answer.Answered)
                 {
@@ -329,6 +402,7 @@ internal sealed class SshLogin(SshfsSettings settings, ISourceContext context, H
 
             try
             {
+                AskedThePerson = true;
                 var request = new PromptRequest(
                     decision == KeyboardInteractive.Answer.AskHidden ? PromptKind.Password : PromptKind.Text,
                     $"Log in to {settings.Host}",

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -71,6 +72,44 @@ public class SshfsLiveTests
         var source = (SshfsSource)new SshfsPlugin().CreateSource(settings);
         await source.InitialiseAsync(context ?? new TestSourceContext("sshfs"), None);
         return source;
+    }
+
+    /// <summary>
+    /// A run's first calls go over the connection that is open while the others connect beside them. Each waited for a
+    /// connection of its own, about 200 ms on the lab, for as many calls as the source has connections (the review of
+    /// 21-Nov-2026, N38). The others connect all the same.
+    /// </summary>
+    [TestMethod]
+    public async Task ARunsFirstCallsGoOverTheOpenConnectionWhileTheOthersConnectBesideThem()
+    {
+        SshTestServer.Require();
+        var settings = SshTestServer.Settings();
+        settings.Connections = 4;
+        using var context = new TestSourceContext("sshfs");
+        await using var source = await StartAsync(settings, context);
+        Assert.AreEqual(1, Connects(), "the start makes the first");
+
+        var calls = Stopwatch.StartNew();
+        foreach (var folder in new[] { "", "docs", "emptydir", "scratch" })
+        {
+            await foreach (var _ in source.ListAsync(folder, None))
+            {
+            }
+        }
+
+        var took = calls.Elapsed;
+        var still = context.UpstreamRequests.Requests.Count(r => r.What == "SSH connect" && !r.IsDone);
+        Console.WriteLine($"[test] four listings: {took.TotalMilliseconds:N0} ms, {still} connections still being made beside them");
+        Assert.IsTrue(still > 0, $"the four listings took {took.TotalMilliseconds:N0} ms, and no connection was still being made beside them: they waited for theirs");
+
+        var until = Stopwatch.StartNew();
+        while (Connects() < 4 || context.UpstreamRequests.Requests.Any(r => r.What == "SSH connect" && !r.IsDone))
+        {
+            Assert.IsTrue(until.Elapsed < TimeSpan.FromSeconds(30), $"the other connections are made: {Connects()} of 4");
+            await Task.Delay(50);
+        }
+
+        int Connects() => context.UpstreamRequests.Requests.Count(r => r.What == "SSH connect");
     }
 
     [TestMethod]
