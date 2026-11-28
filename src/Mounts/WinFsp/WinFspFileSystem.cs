@@ -657,6 +657,29 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         return base.ReadDirectory(fileNode, fileDesc, pattern, marker, buffer, length, out bytesTransferred);
     }
 
+    /// <summary>
+    /// One name in a folder, for a query that names it whole: FindFirstFile of a path, which is how Explorer, a command
+    /// prompt and many a program ask what a file is. The source is asked about that one name. Such a query listed the
+    /// folder: every entry read from the source, made into what the driver takes, and sorted, for the driver to pick
+    /// the one out (the review of 21-Nov-2026, P13).
+    /// </summary>
+    public override int GetDirInfoByName(object fileNode, object fileDesc, string fileName, out string normalizedName, out FileInfo fileInfo)
+    {
+        var desc = (Desc)fileDesc;
+        normalizedName = null!;
+        fileInfo = default;
+        var entry = Stat(VfsPath.Join(desc.Path, fileName), out var status);
+        if (entry is null)
+        {
+            return status;
+        }
+
+        // named as the source keeps it, whatever case it was asked in
+        normalizedName = entry.Name.Length > 0 ? entry.Name : fileName;
+        fileInfo = Info(entry);
+        return STATUS_SUCCESS;
+    }
+
     /// <summary>A folder's entries as a directory handle hands them over, in name order, with "." and ".." below the root; a listing that fails throws.</summary>
     private List<(string Name, FileInfo Info)> Snapshot(Desc desc)
     {
@@ -676,7 +699,9 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             }
         }
 
-        foreach (var child in Wait(ListAsync(path)))
+        var children = Wait(ListAsync(path));
+        list.EnsureCapacity(list.Count + children.Count);
+        foreach (var child in children)
         {
             list.Add((child.Name, Info(child)));
         }
@@ -702,11 +727,7 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             index = 0;
             if (marker is not null)
             {
-                index = desc.Entries.FindIndex(e => string.CompareOrdinal(e.Name, marker) > 0);
-                if (index < 0)
-                {
-                    index = desc.Entries.Count;
-                }
+                index = After(desc.Entries, marker);
             }
         }
         else
@@ -722,6 +743,32 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
         context = index + 1;
         (fileName, fileInfo) = desc.Entries[index];
         return true;
+    }
+
+    /// <summary>
+    /// Where a listing goes on after the name it last handed over: the first entry whose name comes after it, found by
+    /// halving, as the entries are in the order of their names. The driver takes a folder a few dozen entries at a time
+    /// and says each time where it was; looked for from the start each time, a folder of 100,000 files took 5.7 s to
+    /// list where one of 20,000 took 0.3 (the review of 21-Nov-2026, P13).
+    /// </summary>
+    internal static int After(List<(string Name, FileInfo Info)> entries, string marker)
+    {
+        var low = 0;
+        var high = entries.Count;
+        while (low < high)
+        {
+            var middle = low + ((high - low) / 2);
+            if (string.CompareOrdinal(entries[middle].Name, marker) > 0)
+            {
+                high = middle;
+            }
+            else
+            {
+                low = middle + 1;
+            }
+        }
+
+        return low;
     }
 
     // ----- helpers -----

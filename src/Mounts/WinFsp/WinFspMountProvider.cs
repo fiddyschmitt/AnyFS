@@ -197,6 +197,9 @@ internal sealed class WinFspMount(WinFspMountSettings settings, ICollectionInfo 
             PersistentAcls = false,
             PostCleanupWhenModifiedOnly = true,
             PassQueryDirectoryPattern = false,
+
+            // a query that names one file whole is asked of GetDirInfoByName, and its folder is not listed for it
+            PassQueryDirectoryFileName = true,
             FlushAndPurgeOnCleanup = false,
             VolumeCreationTime = (ulong)DateTime.UtcNow.ToFileTimeUtc(),
             VolumeSerialNumber = (uint)collection.Id.GetHashCode(),

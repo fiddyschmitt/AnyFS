@@ -356,6 +356,99 @@ public class WinFspMountTests
         public static extern bool CloseHandle(IntPtr handle);
     }
 
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential, CharSet = System.Runtime.InteropServices.CharSet.Unicode, Pack = 4)]
+    private struct FindData
+    {
+        public uint Attributes;
+        public long Created;
+        public long Accessed;
+        public long Written;
+        public uint SizeHigh;
+        public uint SizeLow;
+        public uint Reserved0;
+        public uint Reserved1;
+        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string Name;
+        [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.ByValTStr, SizeConst = 14)]
+        public string ShortName;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr FindFirstFileW(string name, out FindData data);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FindClose(IntPtr handle);
+
+    /// <summary>What FindFirstFile says of one path, as Explorer, a command prompt and many a program ask what a file is; null for nothing there.</summary>
+    private static (string Name, long Size)? Find(string path)
+    {
+        var handle = FindFirstFileW(path, out var data);
+        if (handle == new IntPtr(-1))
+        {
+            return null;
+        }
+
+        FindClose(handle);
+        return (data.Name, ((long)data.SizeHigh << 32) | data.SizeLow);
+    }
+
+    [TestMethod]
+    public async Task AQueryForOneNameInAFolderAsksAboutThatNameAndDoesNotListTheFolder()
+    {
+        // A query that names one file whole listed its folder: every entry read from the source, made into what the
+        // driver takes, and sorted, for the driver to pick the one out (the review of 21-Nov-2026, P13)
+        RequireWinFsp();
+        var listings = 0;
+        var (_, unc, source) = await MountAsync(wrap: vfs => new Faulty(vfs, (call, path, given) =>
+        {
+            if (call == "list" && path == "many" && given == 0)
+            {
+                Interlocked.Increment(ref listings);
+            }
+
+            return null;
+        }));
+        for (var n = 0; n < 2000; n++)
+        {
+            source.AddFile($"many/file {n:D4}.txt", "x" + n);
+        }
+
+        Assert.AreEqual(("file 1500.txt", 5L), Find(unc + @"\many\file 1500.txt"));
+        Assert.AreEqual(("file 0007.txt", 2L), Find(unc + @"\many\FILE 0007.TXT"), "by any case, and named as it is kept");
+        Assert.IsNull(Find(unc + @"\many\none.txt"));
+        Assert.AreEqual(("docs", 0L), Find(unc + @"\docs"), "a folder the same");
+        Assert.AreEqual(0, Volatile.Read(ref listings), "the folder was not listed for it");
+
+        // a pattern is a listing still, and finds what it found
+        Assert.AreEqual(100, Directory.GetFiles(unc + @"\many", "file 15*.txt").Length);
+        var all = Directory.GetFiles(unc + @"\many").Select(Path.GetFileName).ToList();
+        CollectionAssert.AreEqual(Enumerable.Range(0, 2000).Select(n => $"file {n:D4}.txt").ToList(), all, "each once, in the order of their names, though the driver takes them a few dozen at a time");
+        Assert.IsTrue(Volatile.Read(ref listings) >= 1);
+    }
+
+    [TestMethod]
+    public void WhereAListingGoesOnAfterANameIsFoundAmongTheNamesInTheirOrder()
+    {
+        // The driver takes a folder a few dozen entries at a time and says each time where it was. That place was
+        // looked for from the listing's start each time: 5.7 s to list 100,000 files where 20,000 took 0.3 (the review
+        // of 21-Nov-2026, P13)
+        if (!OperatingSystem.IsWindows())
+        {
+            Assert.Inconclusive("WinFsp is a Windows driver");
+            return;
+        }
+
+        var names = new[] { ".", "..", "A", "a", "b", "d" };
+        var entries = names.Select(n => (Name: n, Info: default(Fsp.Interop.FileInfo))).ToList();
+        CollectionAssert.AreEqual(names.Order(StringComparer.Ordinal).ToArray(), names, "as a handle's entries are kept");
+        foreach (var (marker, next) in new[] { (".", 1), ("..", 2), ("A", 3), ("a", 4), ("b", 5), ("c", 5), ("d", 6), ("z", 6), ("", 0), ("-", 0) })
+        {
+            Assert.AreEqual(next, WinFspFileSystem.After(entries, marker), $"after '{marker}'");
+        }
+
+        Assert.AreEqual(0, WinFspFileSystem.After([], "a"));
+    }
+
     /// <summary>A file system that counts what is opened in it.</summary>
     private sealed class OpenCounting(IVirtualFileSystem inner) : IVirtualFileSystem
     {
