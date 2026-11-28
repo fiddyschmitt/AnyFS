@@ -103,7 +103,17 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
             _task = new Lazy<Task<object>>(System.Threading.Tasks.Task.FromResult(value));
         }
 
+        /// <summary>The fetch's task, begun by the first who asks for it: for one who waits for the answer.</summary>
         public Task<object> Task => _task.Value;
+
+        /// <summary>
+        /// The fetch's task once it has ended, and null until then: for whoever looks at the entries (a trim, a look
+        /// for what is kept), which neither begins a fetch nor may ask for the task of one that is still being begun.
+        /// A fetch that had answered before its beginning was over went on in it and trimmed the cache, the trim asked
+        /// this entry for its task, and .NET refuses a task asked for from inside its own making: whoever had asked
+        /// was given "ValueFactory attempted to access the Value property of this instance" (28-Nov-2026).
+        /// </summary>
+        public Task<object>? Ended => _task.IsValueCreated && _task.Value is { IsCompleted: true } ended ? ended : null;
 
         public long At { get; }
 
@@ -247,7 +257,7 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
             }
 
             // not started until it wins its place: a loser of the race never asks upstream
-            var previous = kept is { Task.IsCompletedSuccessfully: true } ? kept.Task.Result as T : null;
+            var previous = kept?.Ended is { IsCompletedSuccessfully: true } before ? before.Result as T : null;
             var fresh = new Entry(this, token => Run(inner => fetch(previous, inner), token), _time.GetTimestamp(), NextUse(), ttl, stopping);
             if (kept is null ? _entries.TryAdd(key, fresh) : _entries.TryUpdate(key, fresh, kept))
             {
@@ -309,7 +319,7 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
     public T? Peek<T>(string key)
         where T : class
     {
-        if (_entries.TryGetValue(key, out var kept) && kept.Task.IsCompletedSuccessfully && Usable(kept) && kept.Task.Result is T value)
+        if (_entries.TryGetValue(key, out var kept) && kept.Ended is { IsCompletedSuccessfully: true } ended && Usable(kept) && ended.Result is T value)
         {
             kept.Touch(NextUse());
             return value;
@@ -360,7 +370,7 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
     }
 
     private bool Usable(Entry entry)
-        => !entry.Task.IsCompleted || entry.Task.IsCompletedSuccessfully && (entry.Ttl is not { } ttl || _time.GetElapsedTime(entry.At) < ttl);
+        => entry.Ended is not { } ended || ended.IsCompletedSuccessfully && (entry.Ttl is not { } ttl || _time.GetElapsedTime(entry.At) < ttl);
 
     private long NextUse() => Interlocked.Increment(ref _uses);
 
@@ -434,7 +444,7 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
             // what is past its time answers no one any more; but what the next read of it builds on is still that
             foreach (var old in all)
             {
-                if (!Usable(old.Value) && !(old.Value.Task.IsCompletedSuccessfully && old.Value.Task.Result is IBuiltOn))
+                if (!Usable(old.Value) && old.Value.Ended is not { IsCompletedSuccessfully: true, Result: IBuiltOn })
                 {
                     Drop(old.Key, old.Value);
                 }
@@ -456,7 +466,7 @@ public sealed class RequestCache(CancellationToken stopping, long maxBytes = Req
 
                 // one still on its way weighs nothing yet: letting it go frees nothing, and what it is fetching would
                 // be asked for again at once. It goes only where there are too many
-                if (many || old.Value.Task.IsCompleted)
+                if (many || old.Value.Ended is not null)
                 {
                     Drop(old.Key, old.Value);
                 }

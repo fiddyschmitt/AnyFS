@@ -360,6 +360,43 @@ public class RequestCacheTests
     }
 
     [TestMethod]
+    public async Task AnAnswerThatHasComeBeforeItsFetchIsDoneBeingBegunIsGivenAllTheSame()
+    {
+        // A fetch is begun in the making of its entry's task. One that had answered before that making was over went
+        // on in it: weighed its answer, trimmed the cache, and the trim asked every entry for its task, this one too,
+        // whose task was still being made. .NET refuses that ("ValueFactory attempted to access the Value property of
+        // this instance"), and whoever had asked got that for an answer. It takes a cache past its bound and an answer
+        // that comes before the thread that began the fetch has looked: met once in 430 runs of the tests here, and on
+        // Windows in CI (run 46102124741). Here the fetch is made to answer in place, by a context that runs at once
+        // what is posted to it.
+        var cache = new RequestCache(CancellationToken.None, maxBytes: 1);
+        var answer = new string('a', 64);
+        Task<string> asked;
+        var before = SynchronizationContext.Current;
+        SynchronizationContext.SetSynchronizationContext(new AtOnce());
+        try
+        {
+            asked = cache.GetAsync("key", null, _ => Task.FromResult(answer), CancellationToken.None);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(before);
+        }
+
+        Assert.AreSame(answer, await asked);
+
+        // and what is asked for after it finds the cache as it should be: one over its bound lets the last go
+        Assert.AreSame(answer, await cache.GetAsync("another", null, _ => Task.FromResult(answer), CancellationToken.None));
+        Assert.IsTrue(cache.Count <= 1, $"{cache.Count} kept");
+    }
+
+    /// <summary>A context that runs what is posted to it at once, where it is posted.</summary>
+    private sealed class AtOnce : SynchronizationContext
+    {
+        public override void Post(SendOrPostCallback d, object? state) => d(state);
+    }
+
+    [TestMethod]
     public async Task WhatIsBuiltOnIsNotLetGoForBeingPastItsTimeButAsWhatWasLongestUnaskedFor()
     {
         var time = new FakeTime();
