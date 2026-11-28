@@ -30,6 +30,7 @@ internal sealed record DavCredentials(string User, string Password);
 internal sealed partial class WebDavServer : IAsyncDisposable
 {
     private const string AllowHeader = "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, MOVE, COPY, LOCK, UNLOCK";
+    private const string NotWellFormed = "The request body is not well-formed XML: ";
     private static readonly object SinkKey = new();
     private readonly WebApplication _app;
     private readonly ILogger _logger;
@@ -148,6 +149,12 @@ internal sealed partial class WebDavServer : IAsyncDisposable
             {
                 await HandleRootAsync(ctx, method, ct).ConfigureAwait(false);
             }
+            catch (XmlException ex) when (!ctx.Response.HasStarted)
+            {
+                // as a collection answers it. It went on to the server framework, which answered 500 (seen in the review of
+                // 21-Nov-2026 and left)
+                await ErrorAsync(ctx, StatusCodes.Status400BadRequest, NotWellFormed + ex.Message, ct).ConfigureAwait(false);
+            }
             catch (DavBodyTooLargeException ex) when (!ctx.Response.HasStarted)
             {
                 await ErrorAsync(ctx, StatusCodes.Status413PayloadTooLarge, ex.Message, ct).ConfigureAwait(false);
@@ -231,7 +238,7 @@ internal sealed partial class WebDavServer : IAsyncDisposable
         }
         catch (XmlException ex) when (!ctx.Response.HasStarted)
         {
-            await ErrorAsync(ctx, StatusCodes.Status400BadRequest, "The request body is not well-formed XML: " + ex.Message, ct).ConfigureAwait(false);
+            await ErrorAsync(ctx, StatusCodes.Status400BadRequest, NotWellFormed + ex.Message, ct).ConfigureAwait(false);
         }
         catch (DavBodyTooLargeException ex) when (!ctx.Response.HasStarted)
         {

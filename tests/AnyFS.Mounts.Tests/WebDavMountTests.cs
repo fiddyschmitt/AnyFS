@@ -711,6 +711,32 @@ public class WebDavMountTests
         }
     }
 
+    /// <summary>
+    /// The root answers a body that is not well-formed XML as a collection does, with 400. A PROPFIND of the root went on
+    /// to the server framework with an exception nothing caught, and was answered 500 (seen in the review of 21-Nov-2026
+    /// and left). The root's other methods read no body, and one that is not XML changes nothing of their answers.
+    /// </summary>
+    [TestMethod]
+    public async Task TheRootAnswersABodyThatIsNotXmlWith400AsACollectionDoes()
+    {
+        var (_, _, client) = await StartAsync(Tree());
+        const string notXml = "<?xml version=\"1.0\"?><D:propfind xmlns:D=\"DAV:\"><D:prop><D:getcontentlength/></D:propfind>";
+
+        foreach (var (url, depth) in new[] { ("work/", "1"), ("work/", "0"), ("", "1"), ("", "0") })
+        {
+            using var answer = await client.SendAsync(Request("PROPFIND", url, notXml, ("Depth", depth)));
+            var text = await answer.Content.ReadAsStringAsync();
+            Assert.AreEqual(HttpStatusCode.BadRequest, answer.StatusCode, $"PROPFIND /{url}, depth {depth}: {text}");
+            StringAssert.Contains(text, "not well-formed XML", $"PROPFIND /{url}, depth {depth}");
+        }
+
+        foreach (var (method, expected) in new[] { ("OPTIONS", HttpStatusCode.OK), ("GET", HttpStatusCode.OK), ("HEAD", HttpStatusCode.OK), ("PROPPATCH", HttpStatusCode.Forbidden), ("LOCK", HttpStatusCode.Forbidden) })
+        {
+            using var answer = await client.SendAsync(Request(method, "", notXml, ("Depth", "0")));
+            Assert.AreEqual(expected, answer.StatusCode, $"{method} / with a body that is not XML");
+        }
+    }
+
     [TestMethod]
     public async Task TwoCollectionsShareOneServer()
     {
