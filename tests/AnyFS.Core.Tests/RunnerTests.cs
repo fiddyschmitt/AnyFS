@@ -100,6 +100,82 @@ public class SourceRunnerTests
         };
     }
 
+    /// <summary>
+    /// What a source that has stopped still says is not the status of the one in its place. After a Retry its runner has
+    /// started another; after an edit the runner of the edited source has the same handle. A file the stopped source had
+    /// open, closed after its settings were edited, failed through it and held the new source's tile Degraded, which,
+    /// having said Ready itself, had nothing new to say (the review of 21-Nov-2026, N4).
+    /// </summary>
+    [TestMethod]
+    public async Task WhatAStoppedSourceStillReportsIsNotTheStatusOfTheOneInItsPlace()
+    {
+        var plugin = new ContextsPlugin();
+        await using var first = Runner(new MemoryPluginSettings(), plugin: plugin);
+        first.Start();
+        await Wait.UntilAsync(() => first.Handle.Status.State == ComponentState.Ready, what: "ready");
+
+        await first.RetryNowAsync();
+        await Wait.UntilAsync(() => first.Handle.Status.State == ComponentState.Ready && plugin.Contexts.Count == 2, what: "ready again");
+        plugin.Contexts[0].ReportHealth(ComponentHealth.Degraded, "a write the stopped source had open failed");
+        plugin.Contexts[0].ReportProgress("still saying something");
+        Assert.AreEqual(ComponentState.Ready, first.Handle.Status.State, "after a Retry: " + first.Handle.Status.Text);
+
+        // an edit: the edited source has a runner of its own, on the same handle
+        await first.StopAsync();
+        await using var edited = new SourceRunner(first.Definition, plugin, new MemoryPluginSettings(), null, first.Handle, _paths, null, NoPromptHandler.Instance, NullLogger.Instance);
+        edited.Start();
+        await Wait.UntilAsync(() => first.Handle.Status.State == ComponentState.Ready && plugin.Contexts.Count == 3, what: "the edited one ready");
+        plugin.Contexts[1].ReportHealth(ComponentHealth.Degraded, "a write the stopped source had open failed");
+        Assert.AreEqual(ComponentState.Ready, first.Handle.Status.State, "after an edit: " + first.Handle.Status.Text);
+
+        plugin.Contexts[2].ReportHealth(ComponentHealth.Degraded, "the running one's own");
+        Assert.AreEqual(ComponentState.Degraded, first.Handle.Status.State, "the source running is heard as before");
+    }
+
+    /// <summary>A source of memory that keeps the context of each of its starts.</summary>
+    private sealed class ContextsPlugin : ISourcePlugin
+    {
+        private readonly List<ISourceContext> _contexts = [];
+
+        public List<ISourceContext> Contexts
+        {
+            get
+            {
+                lock (_contexts)
+                {
+                    return [.. _contexts];
+                }
+            }
+        }
+
+        public string TypeId => "memory";
+
+        public string DisplayName => "Contexts";
+
+        public string Description => "Keeps the context of each start";
+
+        public string TypeFolder => "contexts";
+
+        public Stream? OpenIcon() => null;
+
+        public Type SettingsType => typeof(MemoryPluginSettings);
+
+        public object CreateDefaultSettings() => new MemoryPluginSettings();
+
+        public ISource CreateSource(object settings) => new MemorySource
+        {
+            OnInitialise = (ctx, _) =>
+            {
+                lock (_contexts)
+                {
+                    _contexts.Add(ctx);
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+    }
+
     [TestMethod]
     public async Task WithATrackerEveryCallToTheSourceIsRecorded()
     {

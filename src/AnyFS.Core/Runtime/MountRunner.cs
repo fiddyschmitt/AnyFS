@@ -34,6 +34,10 @@ public sealed class MountRunner
     // what the last try that failed said, so that the log says it once and not at every try
     private string? _lastFailure;
 
+    // the context of the try under way or of the mount it brought up, under _gate: what any other says is not heard. A mount
+    // that has stopped, or a try given up, can still report, and that set the status of the runner that had moved on
+    private MountContextImpl? _live;
+
     public MountRunner(
         MountDefinition definition,
         IMountProviderPlugin? provider,
@@ -174,11 +178,17 @@ public sealed class MountRunner
     {
         Status = new ComponentStatus(ComponentState.Starting, attempt == 0 ? "Starting" : $"Retrying ({attempt})");
         IMount? mount = null;
+        MountContextImpl? context = null;
         var up = false;
         try
         {
             mount = _provider!.CreateMount(_settings ?? _provider.CreateDefaultSettings(_collection), _collection);
-            var context = new MountContextImpl(this, Definition, _collection, _paths, _shared, _stats, _logger);
+            context = new MountContextImpl(this, Definition, _collection, _paths, _shared, _stats, _logger);
+            lock (_gate)
+            {
+                _live = context;
+            }
+
             await mount.StartAsync(fs, context, ct).ConfigureAwait(false);
             up = true;
 
@@ -196,12 +206,14 @@ public sealed class MountRunner
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            Retire(context);
             await (up ? StopAndDisposeAsync(mount!) : DisposeQuietlyAsync(mount)).ConfigureAwait(false);
             Status = new ComponentStatus(ComponentState.Disabled, "Stopped");
             throw;
         }
         catch (Exception ex)
         {
+            Retire(context);
             await DisposeQuietlyAsync(mount).ConfigureAwait(false);
             var message = ex is VfsException ? ex.Message : ex.GetBaseException().Message;
             var delay = RetryDelay(attempt);
@@ -233,6 +245,9 @@ public sealed class MountRunner
             retries = _retries;
             _retrying = null;
             _retries = null;
+
+            // what the mount says as it stops is not its status: the runner says Stopping, then Stopped
+            _live = null;
         }
 
         if (retrying is not null)
@@ -314,14 +329,34 @@ public sealed class MountRunner
         return true;
     }
 
-    internal void OnHealth(ComponentHealth health, string? detail)
+    private void OnHealth(MountContextImpl from, ComponentHealth health, string? detail)
     {
+        lock (_gate)
+        {
+            if (!ReferenceEquals(from, _live))
+            {
+                return;
+            }
+        }
+
         Status = health switch
         {
             ComponentHealth.Degraded => new ComponentStatus(ComponentState.Degraded, detail ?? "Degraded"),
             ComponentHealth.Failed => new ComponentStatus(ComponentState.Failed, detail ?? "Failed"),
             _ => new ComponentStatus(ComponentState.Ready, detail ?? (AccessPaths.Count > 0 ? AccessPaths[0].Value : "Ready")),
         };
+    }
+
+    /// <summary>A try that failed, or was stopped: what its context says from now on is not heard.</summary>
+    private void Retire(MountContextImpl? context)
+    {
+        lock (_gate)
+        {
+            if (ReferenceEquals(_live, context))
+            {
+                _live = null;
+            }
+        }
     }
 
     private async Task DisposeQuietlyAsync(IMount? mount)
@@ -357,7 +392,7 @@ public sealed class MountRunner
 
         public IMountStatsSink Stats => this;
 
-        public void ReportHealth(ComponentHealth health, string? detail = null) => runner.OnHealth(health, detail);
+        public void ReportHealth(ComponentHealth health, string? detail = null) => runner.OnHealth(this, health, detail);
 
         public Task<ISharedLease<T>> AcquireSharedAsync<T>(string key, Func<CancellationToken, Task<T>> factory, CancellationToken ct)
             where T : class, IAsyncDisposable

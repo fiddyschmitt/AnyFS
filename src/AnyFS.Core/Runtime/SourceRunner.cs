@@ -48,6 +48,11 @@ public sealed class SourceRunner : IAsyncDisposable
     private ComponentHealth? _pendingHealth;
     private string? _pendingHealthDetail;
 
+    // the context of the start under way or of the source it brought up, under _gate: what any other says is not heard. A
+    // source that has stopped can still report (a file it had open, closed after its settings were edited, failing through
+    // it), and the handle it reported to was the one the source started in its place reports to (the review of 21-Nov-2026, N4)
+    private SourceContextImpl? _live;
+
     // while a count goes on, under _gate: what it last said of itself, and the status that follows it
     private ComponentStatus? _counting;
     private ComponentStatus? _afterCount;
@@ -155,6 +160,9 @@ public sealed class SourceRunner : IAsyncDisposable
             loop = _loop;
             _cts = null;
             _loop = null;
+
+            // what the source says as it stops is not its status: the runner says Stopping, then Stopped
+            _live = null;
         }
 
         if (cts is null)
@@ -186,10 +194,15 @@ public sealed class SourceRunner : IAsyncDisposable
 
     public ValueTask DisposeAsync() => new(StopAsync());
 
-    internal void OnProgress(string message, double? fraction)
+    private void OnProgress(SourceContextImpl from, string message, double? fraction)
     {
         lock (_gate)
         {
+            if (!ReferenceEquals(from, _live))
+            {
+                return;
+            }
+
             // while it starts, and while it counts its own files ("Counting files: 1,200 of 20,000 messages")
             if (Handle.Status.State is ComponentState.Starting or ComponentState.Enumerating)
             {
@@ -204,10 +217,15 @@ public sealed class SourceRunner : IAsyncDisposable
         }
     }
 
-    internal void OnHealth(ComponentHealth health, string? detail)
+    private void OnHealth(SourceContextImpl from, ComponentHealth health, string? detail)
     {
         lock (_gate)
         {
+            if (!ReferenceEquals(from, _live))
+            {
+                return;
+            }
+
             if (Handle.Current is null)
             {
                 _pendingHealth = health;
@@ -248,11 +266,17 @@ public sealed class SourceRunner : IAsyncDisposable
             Handle.ForgetListings();
             _pendingHealth = null;
             ISource? source = null;
+            SourceContextImpl? context = null;
             try
             {
                 // the first start of a run of them is the person's (the program started, or they added, edited or retried the
                 // source); the retries after a failure are the host's own, and show no sign-in window
-                var context = new SourceContextImpl(this, Definition, _paths, _secrets, _prompts, _logger) { Attended = attempt == 0 };
+                context = new SourceContextImpl(this, Definition, _paths, _secrets, _prompts, _logger) { Attended = attempt == 0 };
+                lock (_gate)
+                {
+                    _live = context;
+                }
+
                 var created = _plugin!.CreateSource(_settings ?? _plugin.CreateDefaultSettings());
                 var tracked = _operations is null ? null : new TrackedSource(created, Handle, _operations, () => Definition.SilenceLimitSeconds > 0 ? TimeSpan.FromSeconds(Definition.SilenceLimitSeconds) : null, _logger);
                 context.UpstreamWatcher = tracked?.UpstreamRows();
@@ -284,12 +308,14 @@ public sealed class SourceRunner : IAsyncDisposable
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 Handle.Current = null;
+                Retire(context);
                 await DisposeQuietlyAsync(source).ConfigureAwait(false);
                 throw;
             }
             catch (Exception ex)
             {
                 Handle.Current = null;
+                Retire(context);
                 await DisposeQuietlyAsync(source).ConfigureAwait(false);
                 var message = ex is VfsException or SourceFailedException ? ex.Message : ex.GetBaseException().Message;
                 if (ex is SourceFailedException { Permanent: true })
@@ -417,6 +443,18 @@ public sealed class SourceRunner : IAsyncDisposable
         await DisposeQuietlyAsync(current).ConfigureAwait(false);
     }
 
+    /// <summary>A start that failed, or was stopped: what its context says from now on is not heard.</summary>
+    private void Retire(SourceContextImpl? context)
+    {
+        lock (_gate)
+        {
+            if (ReferenceEquals(_live, context))
+            {
+                _live = null;
+            }
+        }
+    }
+
     private async Task DisposeQuietlyAsync(ISource? source)
     {
         if (source is null)
@@ -464,9 +502,9 @@ public sealed class SourceRunner : IAsyncDisposable
 
         public ISecretStore Secrets => _secrets.Value;
 
-        public void ReportProgress(string message, double? fraction = null) => _runner.OnProgress(message, fraction);
+        public void ReportProgress(string message, double? fraction = null) => _runner.OnProgress(this, message, fraction);
 
-        public void ReportHealth(ComponentHealth health, string? detail = null) => _runner.OnHealth(health, detail);
+        public void ReportHealth(ComponentHealth health, string? detail = null) => _runner.OnHealth(this, health, detail);
 
         public Task<PromptResult> PromptAsync(PromptRequest request, CancellationToken ct) => _prompts.PromptAsync(_definition.Name, request, ct);
 

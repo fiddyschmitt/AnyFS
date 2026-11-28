@@ -61,6 +61,9 @@ public class MountRunnerTests
         /// <summary>A stop waits for this.</summary>
         public TaskCompletionSource? HoldStop { get; set; }
 
+        /// <summary>The context each start was given, in order.</summary>
+        public List<IMountContext> Contexts { get; } = [];
+
         /// <summary>The mounts share one port: a start fails while another mount holds it, and a stop lets it go as it ends.</summary>
         public bool OnePort { get; init; }
 
@@ -97,6 +100,11 @@ public class MountRunnerTests
 
             public Task StartAsync(IVirtualFileSystem fs, IMountContext context, CancellationToken ct)
             {
+                lock (provider.Contexts)
+                {
+                    provider.Contexts.Add(context);
+                }
+
                 Interlocked.Increment(ref provider.Starts);
                 if (Interlocked.Decrement(ref provider.FailStarts) >= 0)
                 {
@@ -165,6 +173,29 @@ public class MountRunnerTests
         Assert.AreEqual("test://mount/", runner.AccessPaths.Single().Value);
         await runner.StopAsync();
         Assert.AreEqual(1, provider.StopsEnded, "only the one that came up had anything to stop");
+    }
+
+    /// <summary>
+    /// What a mount that has stopped still says of its health is not its runner's status: it said so over "Stopped", and
+    /// over the mount started in its place (the review of 21-Nov-2026, as N4 for a source).
+    /// </summary>
+    [TestMethod]
+    public async Task WhatAStoppedMountStillReportsIsNotItsRunnersStatus()
+    {
+        var provider = new TestProvider();
+        var runner = Runner(provider);
+        await runner.StartAsync(Fs(), CancellationToken.None);
+        await runner.StopAsync();
+        provider.Contexts[0].ReportHealth(ComponentHealth.Degraded, "late");
+        Assert.AreEqual(ComponentState.Disabled, runner.Status.State, "stopped: " + runner.Status.Text);
+
+        await runner.StartAsync(Fs(), CancellationToken.None);
+        Assert.AreEqual(ComponentState.Ready, runner.Status.State);
+        provider.Contexts[0].ReportHealth(ComponentHealth.Degraded, "late");
+        Assert.AreEqual(ComponentState.Ready, runner.Status.State, "started again: " + runner.Status.Text);
+        provider.Contexts[1].ReportHealth(ComponentHealth.Degraded, "its own");
+        Assert.AreEqual(ComponentState.Degraded, runner.Status.State, "the mount running is heard as before");
+        await runner.StopAsync();
     }
 
     [TestMethod]
