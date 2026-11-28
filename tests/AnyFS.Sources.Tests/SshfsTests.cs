@@ -74,6 +74,57 @@ public class SshfsLiveTests
     }
 
     [TestMethod]
+    public async Task OnAServerAStatAndAnOpenInAFolderWhoseListingIsLongAskAboutTheOnePath()
+    {
+        SshTestServer.Require();
+        using var context = new TestSourceContext("sshfs");
+        var source = (SshfsSource)new SshfsPlugin().CreateSource(SshTestServer.Settings());
+
+        // the fixture's root, a dozen entries, counts as long
+        source.LongListing = 2;
+        await source.InitialiseAsync(context, None);
+        await using var stopped = source;
+        var listed = new Dictionary<string, VfsEntry>(StringComparer.Ordinal);
+        await foreach (var entry in source.ListAsync("", None))
+        {
+            listed[entry.Name] = entry;
+        }
+
+        // the listing's two seconds over
+        await Task.Delay(2200);
+        var asked = context.UpstreamRequests;
+        var before = asked.Requests.Count;
+        Assert.AreEqual(listed["medium.bin"], await source.StatAsync("medium.bin", None), "a file as its listing has it");
+        Assert.AreEqual(listed["link-to-docs"], await source.StatAsync("link-to-docs", None), "a link by what it points at, as its listing has it");
+        Assert.IsNull(await source.StatAsync("not-there.bin", None));
+        await using (var file = await source.OpenAsync("medium.bin", VfsOpenMode.Read, None))
+        {
+            Assert.AreEqual(listed["medium.bin"].Length, file.Length);
+            var bytes = new byte[16];
+            Assert.AreEqual(16, await file.ReadAsync(0, bytes, None));
+        }
+
+        await Assert.ThrowsExactlyAsync<VfsException>(() => source.OpenAsync("not-there.bin", VfsOpenMode.Read, None));
+        var since = asked.Requests.Skip(before).ToList();
+        Assert.AreEqual(0, since.Count(r => r.What == "SFTP list"), "the folder was not listed again");
+        Assert.AreEqual(5, since.Count(r => r.What == "SFTP stat"), string.Join(", ", since.Select(r => r.What)));
+
+        // whoever lists it gets a listing, which answers while it is held
+        before = asked.Requests.Count;
+        var again = 0;
+        await foreach (var _ in source.ListAsync("", None))
+        {
+            again++;
+        }
+
+        Assert.AreEqual(listed.Count, again);
+        Assert.AreEqual(listed["medium.bin"], await source.StatAsync("medium.bin", None));
+        since = asked.Requests.Skip(before).ToList();
+        Assert.AreEqual(1, since.Count(r => r.What == "SFTP list"));
+        Assert.AreEqual(0, since.Count(r => r.What == "SFTP stat" && r.Target.EndsWith("/medium.bin", StringComparison.Ordinal)), "answered from the listing held");
+    }
+
+    [TestMethod]
     public async Task WhatTheServerIsAskedIsARowForEachCall()
     {
         SshTestServer.Require();
@@ -879,6 +930,83 @@ public class SshfsUnitTests
         Assert.AreEqual(2 * Files, folder.Stats, "the server is asked for the one file instead: as its time is set, and as it closes");
         CollectionAssert.AreEquivalent(folder.Entries().ToList(), (await cache.GetAsync("in", CancellationToken.None)).ToList(), "and the listing held says what the server says");
         Assert.AreEqual(1, folder.Listings);
+    }
+
+    [TestMethod]
+    [DataRow(1200, DisplayName = "a folder whose listing is long")]
+    [DataRow(40, DisplayName = "a folder of a few files")]
+    public async Task AStatInAFolderWhoseListingIsLongAsksAboutTheOnePathAndNotForTheListingAgain(int files)
+    {
+        // A stat or an open with no listing held listed the folder, whatever its size: in a folder of 20,000 files on
+        // the lab's server, 330 to 720 ms for each that came after the listing's two seconds, where the server's
+        // answer about one path takes 5 (the review of 21-Nov-2026, P12). The source's own steps are run here on a
+        // listing cache: no server is to be had in a test.
+        var folder = new CountingFolder();
+        for (var i = 0; i < files; i++)
+        {
+            folder.Make($"file-{i:0000}.txt");
+        }
+
+        var time = new FakeTime();
+        var longListings = new System.Collections.Concurrent.ConcurrentDictionary<string, int>(StringComparer.Ordinal);
+        var cache = new ListingCache(TimeSpan.FromSeconds(2), (path, _) => Noting(path), time: time);
+        async IAsyncEnumerable<VfsEntry> Noting(string path)
+        {
+            var count = 0;
+            await foreach (var entry in folder.ListAsync())
+            {
+                count++;
+                yield return entry;
+            }
+
+            SshfsSource.Listed(longListings, path, count, longFrom: 1000);
+        }
+
+        Task<VfsEntry?> KnownAsync(string name) => SshfsSource.KnownAsync(cache, "in/" + name, longListings.ContainsKey, () => folder.StatAsync(name), CancellationToken.None);
+
+        // the first look lists, as nothing is known of the folder; what follows within its two seconds is answered from that
+        Assert.AreEqual(folder.Entry("file-0001.txt"), await KnownAsync("file-0001.txt"));
+        Assert.AreEqual(folder.Entry("file-0002.txt"), await KnownAsync("file-0002.txt"));
+        Assert.AreEqual((1, 0), (folder.Listings, folder.Stats));
+
+        // each look after that comes when the listing is no longer held
+        for (var i = 3; i < 13; i++)
+        {
+            time.Advance(TimeSpan.FromSeconds(3));
+            Assert.AreEqual(folder.Entry($"file-{i:0000}.txt"), await KnownAsync($"file-{i:0000}.txt"));
+        }
+
+        time.Advance(TimeSpan.FromSeconds(3));
+        Assert.IsNull(await KnownAsync("not-there.txt"));
+        if (files >= 1000)
+        {
+            Assert.AreEqual((1, 11), (folder.Listings, folder.Stats), "the one path asked about each time, the folder not listed again");
+        }
+        else
+        {
+            Assert.AreEqual((12, 0), (folder.Listings, folder.Stats), "a short listing is the cheaper way, as it was");
+        }
+
+        // whoever lists the folder gets a listing, and while it is held it answers
+        var listings = folder.Listings;
+        var stats = folder.Stats;
+        Assert.AreEqual(files, (await cache.GetAsync("in", CancellationToken.None)).Count);
+        Assert.AreEqual(folder.Entry("file-0020.txt"), await KnownAsync("file-0020.txt"));
+        Assert.AreEqual((listings + (files >= 1000 ? 1 : 0), stats), (folder.Listings, folder.Stats));
+
+        // a folder that has shrunk is listed as any small one from then on
+        for (var i = 30; i < files; i++)
+        {
+            folder.Remove($"file-{i:0000}.txt");
+        }
+
+        time.Advance(TimeSpan.FromSeconds(3));
+        Assert.AreEqual(30, (await cache.GetAsync("in", CancellationToken.None)).Count);
+        time.Advance(TimeSpan.FromSeconds(3));
+        listings = folder.Listings;
+        stats = folder.Stats;
+        Assert.AreEqual(folder.Entry("file-0005.txt"), await KnownAsync("file-0005.txt"));
+        Assert.AreEqual((listings + 1, stats), (folder.Listings, folder.Stats));
     }
 
     [TestMethod]

@@ -86,7 +86,66 @@ public sealed class SshfsSource : SourceBase, ICountable
             return VfsEntry.Directory("");
         }
 
-        return await Listings.StatAsync(path, ct).ConfigureAwait(false);
+        return await KnownAsync(path, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>From how many entries a folder's listing is long (<see cref="KnownAsync(string, CancellationToken)"/>); a test's to lower.</summary>
+    internal int LongListing { get; set; } = 1000;
+
+    // the folders whose last listing was long, and how long
+    private readonly ConcurrentDictionary<string, int> _longListings = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// What is at <paramref name="path"/>, for a stat or an open (<see cref="KnownAsync(ListingCache, string, Func{string, bool}, Func{Task{VfsEntry}}, CancellationToken)"/>):
+    /// in a folder whose last listing was long and is no longer held, the server's answer about the one path.
+    /// </summary>
+    private Task<VfsEntry?> KnownAsync(string path, CancellationToken ct)
+        => KnownAsync(Listings, path, folder => _longListings.ContainsKey(folder) && !(_driveRoot && folder.Length == 0), () =>
+        {
+            var remote = Remote(path);
+            return RunAsync(path, async client =>
+            {
+                try
+                {
+                    // (as a listing says it: a link by what it points at)
+                    var found = await AttributesAsync(client, remote, ct).ConfigureAwait(false);
+                    return (VfsEntry?)ToEntry(VfsPath.Name(path), found.IsDirectory, found.Size, found.LastWriteTimeUtc, found.OwnerCanWrite || found.GroupCanWrite || found.OthersCanWrite);
+                }
+                catch (SftpPathNotFoundException)
+                {
+                    return null;
+                }
+            }, ct);
+        }, ct);
+
+    /// <summary>
+    /// What is at <paramref name="path"/>, for a stat or an open. From the listing held of its folder; where none is
+    /// held, from a listing made now, which then answers for everything in the folder for its two seconds. That is
+    /// the cheapest way through a folder of a few hundred files, and it was the only way: in a folder of 20,000 on
+    /// the lab's server each stat and each open that came after the two seconds listed the 20,000 again, 330 to 720 ms
+    /// each where the server's answer about one path takes 5 (the review of 21-Nov-2026, P12). So where the folder's
+    /// last listing was long (<paramref name="isLong"/>) and none is held, the server is asked about the one path
+    /// (<paramref name="one"/>); whoever lists the folder gets a listing as before, and that listing answers while held.
+    /// </summary>
+    internal static async Task<VfsEntry?> KnownAsync(ListingCache listings, string path, Func<string, bool> isLong, Func<Task<VfsEntry?>> one, CancellationToken ct)
+    {
+        var folder = VfsPath.Parent(path);
+        return isLong(folder) && listings.Held(folder) is null
+            ? await one().ConfigureAwait(false)
+            : await listings.StatAsync(path, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Notes how long a folder's listing came out, for the stats and opens after it.</summary>
+    internal static void Listed(ConcurrentDictionary<string, int> longListings, string folder, int entries, int longFrom)
+    {
+        if (entries >= longFrom)
+        {
+            longListings[folder] = entries;
+        }
+        else
+        {
+            longListings.TryRemove(folder, out _);
+        }
     }
 
     public override async IAsyncEnumerable<VfsEntry> ListAsync(string path, [EnumeratorCancellation] CancellationToken ct)
@@ -117,7 +176,7 @@ public sealed class SshfsSource : SourceBase, ICountable
         };
 
         // SFTP opens a folder for reading without complaint and fails on the first read; the (cached) stat says first
-        var known = await Listings.StatAsync(path, ct).ConfigureAwait(false);
+        var known = await KnownAsync(path, ct).ConfigureAwait(false);
         if (known is { IsDirectory: true })
         {
             throw VfsException.IsADirectory(path);
@@ -548,6 +607,7 @@ public sealed class SshfsSource : SourceBase, ICountable
             return (IReadOnlyList<VfsEntry>)result;
         }, ct).ConfigureAwait(false);
 
+        Listed(_longListings, path, entries.Count, LongListing);
         foreach (var entry in entries)
         {
             yield return entry;
