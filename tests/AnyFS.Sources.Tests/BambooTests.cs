@@ -305,6 +305,37 @@ public class BambooTests
     }
 
     [TestMethod]
+    public async Task AfterARestartAFileBambooServesIsOpenedFromTheKeptListingWithNothingElseAskedFor()
+    {
+        // The listings kept from the last run say where each file is and how long, but a file was opened by going
+        // down from the root: the build asked for again, each folder of the artifact, and a HEAD for every file beside
+        // the one wanted, once more in every run (the review of 21-Nov-2026, P12)
+        var fake = BambooSeed.Lab();
+        using var context = new TestSourceContext();
+        var settings = BambooSeed.Settings(fake, "/browse/ANYFS-BUILD");
+        await using (var first = await StartAsync(fake, settings, context))
+        {
+            await first.CountFilesAsync(CancellationToken.None);
+            await UpstreamRequestRows.AllEndAsync(context);
+        }
+
+        var before = fake.Requests.Count;
+        await using var second = await StartAsync(fake, settings, context);
+        Assert.AreEqual("body { color: black }\n", await TextAsync(second, "#1 Successful/Default Job/artifacts/Reports/css/style.css"));
+        CollectionAssert.AreEqual(BambooSeed.Large[700_000..], await ReadAsync(second, "#1 Successful/Default Job/artifacts/Reports/data/large.bin", 700_000));
+        StringAssert.Contains(await TextAsync(second, "#1 Successful/Default Job/ANYFS-BUILD-JOB1-1.log"), "Finished building ANYFS-BUILD-JOB1-1. Successful.");
+        CollectionAssert.AreEqual(new byte[] { 77, 90, 1, 2, 3 }, await ReadAsync(second, "#1 Successful/Default Job/artifacts/app.exe"));
+        var asked = fake.Requests.Skip(before).ToList();
+        Assert.AreEqual(0, asked.Count(r => r.StartsWith("HEAD ", StringComparison.Ordinal)), "sizes asked for: " + string.Join("; ", asked.Where(r => r.StartsWith("HEAD ", StringComparison.Ordinal))));
+        var pages = asked.Where(r => r.Contains("/artifact/", StringComparison.Ordinal) && !r.EndsWith("style.css", StringComparison.Ordinal) && !r.EndsWith("large.bin", StringComparison.Ordinal) && !r.EndsWith("app.exe", StringComparison.Ordinal)).ToList();
+        Assert.AreEqual(0, pages.Count, "an artifact's folders asked for: " + string.Join("; ", pages));
+
+        // what the listing does not name is looked for as before, and a file made from Bamboo's data is made as before
+        await Assert.ThrowsExactlyAsync<VfsException>(() => ReadAsync(second, "#1 Successful/Default Job/artifacts/Reports/css/none.css"));
+        StringAssert.Contains(await TextAsync(second, "#1 Successful/build.md"), "Successful");
+    }
+
+    [TestMethod]
     public async Task AFileWhoseLengthBambooDoesNotSayIsMeasuredAndNotShownEmpty()
     {
         // A file's size was what a HEAD said, and 0 where it said none: a server or a proxy that compresses as it sends

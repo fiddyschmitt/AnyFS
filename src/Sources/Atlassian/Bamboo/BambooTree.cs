@@ -45,10 +45,15 @@ internal sealed class BmText(string name, byte[] content, DateTimeOffset? modifi
     public override Task<IVfsFile> OpenAsync(BambooSource source, CancellationToken ct) => Task.FromResult<IVfsFile>(new MemoryFile(content, "a file made from Bamboo's data"));
 }
 
-/// <summary>A file Bamboo serves at an address (a job's log, an artifact's file), streamed as it is opened.</summary>
+/// <summary>
+/// A file Bamboo serves at an address (a job's log, an artifact's file), streamed as it is opened. Its entry carries the
+/// address (<see cref="VfsEntry.Key"/>), so the listing kept of its folder is enough to open it by.
+/// </summary>
 internal sealed class BmWebFile(Uri url, long size, string name, DateTimeOffset? time) : BmFile(name, size, time, time)
 {
     public Uri Url { get; } = url;
+
+    public override VfsEntry Entry => base.Entry with { Key = Url.AbsoluteUri };
 
     public override Task<IVfsFile> OpenAsync(BambooSource source, CancellationToken ct) => source.OpenWebAsync(Url, Length, ct);
 }

@@ -140,7 +140,8 @@ public sealed class BambooSource : SourceBase, ICountable
             // the listings last run saw open at once at the next start: for the same installation, account and scope, the
             // same settings that shape the tree, and the same documents (a file's size is a fact about how it is written)
             SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
-            SaveKey = $"{_session.Address.Server}|{_session.User?.Name}|{Scope.Kind}:{Scope.Value}|{_settings.Shape}|md{BambooDocuments.Format}",
+            // (keys1: a file Bamboo serves is kept with its address; listings kept without are not read back)
+            SaveKey = $"{_session.Address.Server}|{_session.User?.Name}|{Scope.Kind}:{Scope.Value}|{_settings.Shape}|md{BambooDocuments.Format}|keys1",
         });
 
         _session.Renewed += _kept.Cache.ForgetFailures;
@@ -206,8 +207,41 @@ public sealed class BambooSource : SourceBase, ICountable
             throw VfsException.NotSupported("writing to Bamboo");
         }
 
+        if (_settings.Keeps && !Walks.Current && KeptFile(path) is { } kept)
+        {
+            return await Guard(() => kept.OpenAsync(this, ct)).ConfigureAwait(false);
+        }
+
         var node = await ResolveAsync(path, ct).ConfigureAwait(false);
         return node is BmFile file ? await Guard(() => file.OpenAsync(this, ct)).ConfigureAwait(false) : throw VfsException.IsADirectory(path);
+    }
+
+    /// <summary>
+    /// A file Bamboo serves, from the listing kept of its folder alone: the entry carries the file's address and its
+    /// length, which is all an open takes. Found from the root a folder at a time, a file cost the build asked for
+    /// again, each folder of its artifact, and a HEAD for every file beside it, once more in every run, though the
+    /// kept listings had said where it was (the review of 21-Nov-2026, P12). Null where the folder's listing is not
+    /// held or does not name the file, and for a file made from Bamboo's data, which is made as before.
+    /// </summary>
+    private BmWebFile? KeptFile(string path)
+    {
+        var normalized = VfsPath.Normalize(path);
+        var slash = normalized.LastIndexOf('/');
+        if (normalized.Length == 0 || _kept?.Cache.Held(slash < 0 ? "" : normalized[..slash]) is not { } listing)
+        {
+            return null;
+        }
+
+        var name = normalized[(slash + 1)..];
+        foreach (var entry in listing)
+        {
+            if (!entry.IsDirectory && entry.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return entry.Key is { Length: > 0 } key && Uri.TryCreate(key, UriKind.Absolute, out var url) ? new BmWebFile(url, entry.Length, entry.Name, entry.Modified) : null;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>The node at <paramref name="path"/>, found a folder at a time from the root (a build by its number, not by listing them all).</summary>
