@@ -39,7 +39,7 @@ public sealed class BambooSource : SourceBase, ICountable
     private KeptListings? _kept;
     private SpoolCache? _spool;
     private BmFolder? _root;
-    private PlansCounted? _counted;
+    private PartsCounted? _counted;
 
     public BambooSource(BambooSettings settings)
         : this(settings, standIn: null)
@@ -565,7 +565,7 @@ public sealed class BambooSource : SourceBase, ICountable
         if (Scope.Kind != BambooScopeKind.Plan)
         {
             Context.ReportProgress("Counting files: listing the plans");
-            Volatile.Write(ref _counted, new PlansCounted(Context, await PlansToCountAsync(ct).ConfigureAwait(false)));
+            Volatile.Write(ref _counted, new PartsCounted(Context, await PlansToCountAsync(ct).ConfigureAwait(false), "plans"));
         }
 
         try
@@ -603,42 +603,6 @@ public sealed class BambooSource : SourceBase, ICountable
         }
     }
 
-    /// <summary>How far a count has got through the plans: each said once as the walk comes to it, one at a time, so what is said keeps the order of the count.</summary>
-    private sealed class PlansCounted(ISourceContext context, long? total)
-    {
-        private readonly HashSet<string> _reached = new(StringComparer.Ordinal);
-        private bool _over;
-
-        public void Reached(BmPlan plan)
-        {
-            lock (_reached)
-            {
-                if (_over || !_reached.Add(plan.Key))
-                {
-                    return;
-                }
-
-                long count = _reached.Count;
-                if (total is > 0 and var known)
-                {
-                    context.ReportProgress($"Counting files: {Math.Min(count, known):N0} of {known:N0} plans", (double)Math.Min(count - 1, known - 1) / known);
-                }
-                else
-                {
-                    context.ReportProgress($"Counting files: {count:N0} plans so far");
-                }
-            }
-        }
-
-        public void Over()
-        {
-            lock (_reached)
-            {
-                _over = true;
-            }
-        }
-    }
-
     /// <summary>The listings as kept, for tests.</summary>
     internal ListingCache Listings => Kept.Cache;
 
@@ -659,7 +623,7 @@ public sealed class BambooSource : SourceBase, ICountable
         switch (await ResolveAsync(path, ct).ConfigureAwait(false))
         {
             case BmPlanFolder { Plan.IsBranch: false } plan:
-                Volatile.Read(ref _counted)?.Reached(plan.Plan);
+                Volatile.Read(ref _counted)?.Reached(plan.Plan.Key);
                 return null;
             case BmBuildFolder build:
                 return $"{build.Result.Key}|{build.Result.LifeCycle}|{build.Result.State}";

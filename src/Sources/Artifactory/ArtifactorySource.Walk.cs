@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Sources.Artifactory;
@@ -26,7 +27,7 @@ public sealed partial class ArtifactorySource
     // the folders found to hold more than a read at once takes, by repository and path: not tried again in this run
     private readonly ConcurrentDictionary<string, byte> _tooBig = new(StringComparer.Ordinal);
 
-    private RepositoriesCounted? _counted;
+    private PartsCounted? _counted;
 
     /// <summary>
     /// What a walk learnt of a repository as it came to it: the time its kept listings were as of (<see cref="Floor"/>),
@@ -78,7 +79,7 @@ public sealed partial class ArtifactorySource
                 Logger.LogDebug("artifactory: how many repositories there are to count is not known: {Error}", ex.Message);
             }
 
-            Volatile.Write(ref _counted, new RepositoriesCounted(Context, total));
+            Volatile.Write(ref _counted, new PartsCounted(Context, total, "repositories"));
         }
 
         try
@@ -88,42 +89,6 @@ public sealed partial class ArtifactorySource
         finally
         {
             Interlocked.Exchange(ref _counted, null)?.Over();
-        }
-    }
-
-    /// <summary>How far a count has got through the repositories: each said once as the walk comes to it, one at a time, so what is said keeps the order of the count.</summary>
-    private sealed class RepositoriesCounted(ISourceContext context, long? total)
-    {
-        private readonly HashSet<string> _reached = new(StringComparer.Ordinal);
-        private bool _over;
-
-        public void Reached(ArtRepository repository)
-        {
-            lock (_reached)
-            {
-                if (_over || !_reached.Add(repository.Key))
-                {
-                    return;
-                }
-
-                long count = _reached.Count;
-                if (total is > 0 and var known)
-                {
-                    context.ReportProgress($"Counting files: {Math.Min(count, known):N0} of {known:N0} repositories", (double)Math.Min(count - 1, known - 1) / known);
-                }
-                else
-                {
-                    context.ReportProgress($"Counting files: {count:N0} repositories so far");
-                }
-            }
-        }
-
-        public void Over()
-        {
-            lock (_reached)
-            {
-                _over = true;
-            }
         }
     }
 
@@ -152,7 +117,7 @@ public sealed partial class ArtifactorySource
         var root = found.Path == found.Root;
         if (root && found.Repository is not null)
         {
-            Volatile.Read(ref _counted)?.Reached(found.Repository);
+            Volatile.Read(ref _counted)?.Reached(found.Repository.Key);
         }
 
         if (found.Repository is not { } repository || !Asked(repository))

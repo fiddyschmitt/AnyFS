@@ -47,7 +47,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     private KeptListings? _kept;
     private SpoolCache? _spool;
     private GlFolder? _root;
-    private ProjectsCounted? _counted;
+    private PartsCounted? _counted;
     // GraphQL does not give the files' sizes on this server (an old one, or one that refuses it): told by its first size
     // query, and for the run. Once one has been answered, a query that fails is that query's alone
     private volatile bool _graphQlRefused;
@@ -738,7 +738,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         if (Scope != ScopeKind.Project)
         {
             Context.ReportProgress("Counting files: listing the projects");
-            Volatile.Write(ref _counted, new ProjectsCounted(Context, await ProjectsToCountAsync(ct).ConfigureAwait(false)));
+            Volatile.Write(ref _counted, new PartsCounted(Context, await ProjectsToCountAsync(ct).ConfigureAwait(false), "projects", "GitLab"));
         }
 
         try
@@ -776,92 +776,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         }
     }
 
-    /// <summary>
-    /// How far a count has got through the projects: each said once as the walk comes to it (or someone opens it first), and
-    /// how much of the list is behind it. Projects come to at once ("Projects at a time") are said one at a time, so that
-    /// what is said keeps the order of the count: counted and said apart, a smaller number could be said after a larger one.
-    /// While the server has asked AnyFS to wait (<see cref="GitLabApi.Held"/>), the count says so too, with the server's reason,
-    /// so a tile that stands still says why.
-    /// </summary>
-    private sealed class ProjectsCounted(ISourceContext context, long? total)
-    {
-        private readonly HashSet<long> _reached = [];
-        private string? _said;
-        private double? _fraction;
-        private DateTime _heldUntil;
-        private string _why = "";
-
-        public long? Total => total;
-
-        public void Reached(GlProject project)
-        {
-            lock (_reached)
-            {
-                if (!_reached.Add(project.Id))
-                {
-                    return;
-                }
-
-                long count = _reached.Count;
-                if (total is > 0 and var known)
-                {
-                    // the one it has come to is not behind it yet: the bar is full only as the count ends
-                    _said = $"Counting files: {Math.Min(count, known):N0} of {known:N0} projects";
-                    _fraction = (double)Math.Min(count - 1, known - 1) / known;
-                }
-                else
-                {
-                    _said = $"Counting files: {count:N0} projects so far";
-                    _fraction = null;
-                }
-
-                Say();
-            }
-        }
-
-        /// <summary>The server asked AnyFS to wait: said with how far the count has got, until the wait is over, when the count is said plainly again.</summary>
-        public void Waiting(TimeSpan wait, string why)
-        {
-            lock (_reached)
-            {
-                _heldUntil = DateTime.UtcNow + wait;
-                _why = why;
-                if (_said is not null)
-                {
-                    Say();
-                }
-            }
-
-            _ = Task.Delay(wait + TimeSpan.FromMilliseconds(50)).ContinueWith(_ =>
-            {
-                lock (_reached)
-                {
-                    if (!_over && _said is not null && DateTime.UtcNow >= _heldUntil)
-                    {
-                        Say();
-                    }
-                }
-            }, TaskScheduler.Default);
-        }
-
-        /// <summary>The count is over: nothing more is said of it.</summary>
-        public void Over()
-        {
-            lock (_reached)
-            {
-                _over = true;
-            }
-        }
-
-        private bool _over;
-
-        private void Say()
-        {
-            var waiting = DateTime.UtcNow < _heldUntil ? $", waiting {Math.Ceiling((_heldUntil - DateTime.UtcNow).TotalSeconds):N0} s as GitLab asks ({_why})" : "";
-            context.ReportProgress(_said + waiting, _fraction);
-        }
-    }
-
     /// <summary>The listings as kept, for tests.</summary>
     internal ListingCache Listings => Kept.Cache;
 
@@ -882,7 +796,7 @@ public sealed partial class GitLabSource : SourceBase, ICountable
         switch (await ResolveAsync(path, ct).ConfigureAwait(false))
         {
             case ProjectFolder project:
-                Volatile.Read(ref _counted)?.Reached(project.Project);
+                Volatile.Read(ref _counted)?.Reached(project.Project.Id.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
                 // the root of a source of one project is the project as it was read at the start, and nothing lists it
                 // again: its last activity is asked for as it stands (the same answer its head is found by). Taken from

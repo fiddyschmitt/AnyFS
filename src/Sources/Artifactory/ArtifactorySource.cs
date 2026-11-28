@@ -381,7 +381,7 @@ public sealed partial class ArtifactorySource : SourceBase, ICountable
 
         if (found.Path == found.Root)
         {
-            Volatile.Read(ref _counted)?.Reached(repository);
+            Volatile.Read(ref _counted)?.Reached(repository.Key);
         }
 
         IReadOnlyList<VfsEntry> entries;

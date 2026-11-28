@@ -979,6 +979,18 @@ public class JiraTests
 
         // 3 project.md, 5 + 1 + 250 issue.md, 1 + 3 attachments
         Assert.AreEqual(3 + 256 + 4, source.Counters.FilesKnown);
+
+        // and says how far it has got through the projects, as the other servers' counts do (the review of 21-Nov-2026, C3)
+        List<string> said;
+        lock (context.Progress)
+        {
+            said = context.Progress.Where(p => p.Message.StartsWith("Counting files", StringComparison.Ordinal)).Select(p => p.Message).ToList();
+        }
+
+        Assert.AreEqual("Counting files: listing the projects", said[0]);
+        Assert.AreEqual("Counting files: 1 of 3 projects", said[1]);
+        Assert.AreEqual("Counting files: 3 of 3 projects", said[^1]);
+        Assert.AreEqual(4, said.Count, string.Join(" | ", said));
         var requests = fake.Requests.Count;
         var md = await NamesAsync(source, "AnyFS Lab (ANYFS)/ANYFS-3 Attachments with the same name/attachments");
         Assert.AreEqual(3, md.Count);

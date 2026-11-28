@@ -33,7 +33,7 @@ public sealed class BitbucketSource : SourceBase, ICountable
     private KeptListings? _kept;
     private SpoolCache? _spool;
     private BbFolder? _root;
-    private RepositoriesCounted? _counted;
+    private PartsCounted? _counted;
 
     public BitbucketSource(BitbucketSettings settings)
         : this(settings, standIn: null)
@@ -501,7 +501,7 @@ public sealed class BitbucketSource : SourceBase, ICountable
         if (Scope.Kind != BitbucketScopeKind.Repository)
         {
             Context.ReportProgress("Counting files: listing the repositories");
-            Volatile.Write(ref _counted, new RepositoriesCounted(Context, await RepositoriesToCountAsync(ct).ConfigureAwait(false)));
+            Volatile.Write(ref _counted, new PartsCounted(Context, await RepositoriesToCountAsync(ct).ConfigureAwait(false), "repositories"));
         }
 
         try
@@ -539,42 +539,6 @@ public sealed class BitbucketSource : SourceBase, ICountable
         }
     }
 
-    /// <summary>How far a count has got through the repositories: each said once as the walk comes to it, one at a time, so what is said keeps the order of the count.</summary>
-    private sealed class RepositoriesCounted(ISourceContext context, long? total)
-    {
-        private readonly HashSet<string> _reached = new(StringComparer.Ordinal);
-        private bool _over;
-
-        public void Reached(BbRepository repository)
-        {
-            lock (_reached)
-            {
-                if (_over || !_reached.Add(repository.Path))
-                {
-                    return;
-                }
-
-                long count = _reached.Count;
-                if (total is > 0 and var known)
-                {
-                    context.ReportProgress($"Counting files: {Math.Min(count, known):N0} of {known:N0} repositories", (double)Math.Min(count - 1, known - 1) / known);
-                }
-                else
-                {
-                    context.ReportProgress($"Counting files: {count:N0} repositories so far");
-                }
-            }
-        }
-
-        public void Over()
-        {
-            lock (_reached)
-            {
-                _over = true;
-            }
-        }
-    }
-
     /// <summary>The listings as kept, for tests.</summary>
     internal ListingCache Listings => Kept.Cache;
 
@@ -596,7 +560,7 @@ public sealed class BitbucketSource : SourceBase, ICountable
         switch (await ResolveAsync(path, ct).ConfigureAwait(false))
         {
             case BbRepositoryFolder repository:
-                Volatile.Read(ref _counted)?.Reached(repository.Repository);
+                Volatile.Read(ref _counted)?.Reached(repository.Repository.Path);
                 return null;
             case BbFilesFolder files:
                 return files.Head.LatestCommit;

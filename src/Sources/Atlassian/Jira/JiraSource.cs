@@ -515,9 +515,39 @@ public sealed class JiraSource : SourceBase, ICountable
     /// <summary>
     /// "Count files on start": the first walk of the tree (<see cref="KeptListings"/>), which lists every folder and keeps
     /// the listings, so they open at once afterwards: each project's issues whole, in bulk (<see cref="ListTreeAsync"/>);
-    /// with listings kept, a walk again every "Walk every folder every" minutes.
+    /// with listings kept, a walk again every "Walk every folder every" minutes. A server's count says how far it has
+    /// got through its projects.
     /// </summary>
-    public Task CountFilesAsync(CancellationToken ct) => Kept.CountAsync(ct);
+    public async Task CountFilesAsync(CancellationToken ct)
+    {
+        if (Scope.Kind == JiraScopeKind.Server)
+        {
+            Context.ReportProgress("Counting files: listing the projects");
+            long? total = null;
+            try
+            {
+                total = (await ProjectsAsync(ct).ConfigureAwait(false)).Count;
+            }
+            catch (VfsException ex)
+            {
+                Logger.LogDebug("jira: how many projects there are to count is not known: {Error}", ex.Message);
+            }
+
+            Volatile.Write(ref _counted, new PartsCounted(Context, total, "projects"));
+        }
+
+        try
+        {
+            await Kept.CountAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _counted, null)?.Over();
+        }
+    }
+
+    // how far a server's count has got through its projects, while one runs
+    private PartsCounted? _counted;
 
     /// <summary>The listings as kept, for tests.</summary>
     internal ListingCache Listings => Kept.Cache;
@@ -540,6 +570,11 @@ public sealed class JiraSource : SourceBase, ICountable
             if (await ResolveAsync(path, ct).ConfigureAwait(false) is not JiraIssuesFolder folder)
             {
                 return null;
+            }
+
+            if (folder is JiraProjectFolder reached)
+            {
+                Volatile.Read(ref _counted)?.Reached(reached.Project.Key);
             }
 
             using var doc = await SearchPageAsync((folder.Condition(this) is { Length: > 0 } c ? c + " " : "") + "ORDER BY updated DESC", ["updated"], 1, null, validate: true, ct).ConfigureAwait(false);

@@ -552,6 +552,19 @@ public class ConfluenceTests
         await using var source = await StartAsync(fake, ConfluenceSeed.Settings(fake), context);
         await source.CountFilesAsync(CancellationToken.None);
         await UpstreamRequestRows.AllEndAsync(context);
+
+        // the count said how far it had got through the spaces, as the other servers' counts do (the review of 21-Nov-2026, C3)
+        List<string> said;
+        lock (context.Progress)
+        {
+            said = context.Progress.Where(p => p.Message.StartsWith("Counting files", StringComparison.Ordinal)).Select(p => p.Message).ToList();
+        }
+
+        var spaces = (await NamesAsync(source, "")).Count;
+        Assert.AreEqual("Counting files: listing the spaces", said[0]);
+        Assert.AreEqual($"Counting files: 1 of {spaces} spaces", said[1]);
+        Assert.AreEqual($"Counting files: {spaces} of {spaces} spaces", said[^1]);
+        Assert.AreEqual(spaces + 1, said.Count, string.Join(" | ", said));
         var before = fake.Requests.Count;
         var folders = await ListEverything.OfAsync(source);
         Assert.IsTrue(folders > 10, folders.ToString());

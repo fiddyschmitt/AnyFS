@@ -629,8 +629,41 @@ public sealed class ConfluenceSource : SourceBase, ICountable
 
     // --- counting and walking ------------------------------------------------------------------------------------------
 
-    /// <summary>"Count files on start": the first walk of the tree (<see cref="KeptListings"/>), each space whole at once (<see cref="ListTreeAsync"/>).</summary>
-    public Task CountFilesAsync(CancellationToken ct) => Kept.CountAsync(ct);
+    /// <summary>
+    /// "Count files on start": the first walk of the tree (<see cref="KeptListings"/>), each space whole at once
+    /// (<see cref="ListTreeAsync"/>). A server's count says how far it has got through the spaces it shows.
+    /// </summary>
+    public async Task CountFilesAsync(CancellationToken ct)
+    {
+        if (_root is ConfluenceServerRoot)
+        {
+            Context.ReportProgress("Counting files: listing the spaces");
+            long? total = null;
+            try
+            {
+                // the ones the tree shows: the personal and the archived only where the settings show them
+                total = (await SpacesAsync(ct).ConfigureAwait(false)).Count(s => s.Archived ? _settings.ArchivedSpaces : !s.Personal || _settings.PersonalSpaces);
+            }
+            catch (VfsException ex)
+            {
+                Logger.LogDebug("confluence: how many spaces there are to count is not known: {Error}", ex.Message);
+            }
+
+            Volatile.Write(ref _counted, new PartsCounted(Context, total, "spaces"));
+        }
+
+        try
+        {
+            await Kept.CountAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _counted, null)?.Over();
+        }
+    }
+
+    // how far a server's count has got through its spaces, while one runs
+    private PartsCounted? _counted;
 
     /// <summary>The listings as kept, for tests.</summary>
     internal ListingCache Listings => Kept.Cache;
@@ -662,6 +695,11 @@ public sealed class ConfluenceSource : SourceBase, ICountable
             }
 
             node = found;
+        }
+
+        if (node is ConfluenceSpaceFolder reached)
+        {
+            Volatile.Read(ref _counted)?.Reached(reached.Space.Key);
         }
 
         var cql = node switch
