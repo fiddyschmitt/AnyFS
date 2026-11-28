@@ -1190,6 +1190,74 @@ public class FakeSharePointTests
     }
 
     /// <summary>
+    /// A file a client kept open while its source's settings were edited goes up, when it is closed, through the source
+    /// started in its place. Its close went through the source that had stopped, failed, and the bytes waited by their note
+    /// for AnyFS's next start (the review of 21-Nov-2026, N4). An upload that fails there waits in the source in its place,
+    /// and is tried again by it.
+    /// </summary>
+    [TestMethod]
+    [DataRow(false, DisplayName = "lands at its close")]
+    [DataRow(true, DisplayName = "fails once, then lands")]
+    public async Task AFileClosedAfterItsSourceWasReplacedGoesUpThroughTheSourceInItsPlace(bool failsOnce)
+    {
+        using var fake = FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "open/there.txt", "x"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        var uploads = Path.Combine(context.CacheDirectory, "uploads");
+        var first = await StartAsync(fake, FarmSettings(fake), context);
+        var file = await first.OpenAsync("Documents/open/new.txt", VfsOpenMode.CreateNew, None);
+        var written = "written while the settings were edited"u8.ToArray();
+        await file.WriteAsync(0, written, None);
+
+        // the settings edited: the host stops the source, and starts one in its place
+        await first.DisposeAsync();
+        await using var second = await StartAsync(fake, FarmSettings(fake), context);
+        second.UploadRetryAfter = _ => TimeSpan.FromMilliseconds(50);
+        if (failsOnce)
+        {
+            fake.Fail(r => r.Method == "POST" && r.RawPath.Contains("/Files/AddUsingPath", StringComparison.OrdinalIgnoreCase), 1,
+                _ => FakeSharePoint.Response.Json(500, FakeSharePoint.RestError("-2147467259, Microsoft.SharePoint.SPException", "The file could not be saved.")));
+            await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync(), "who closed it is told the upload failed");
+            Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth, "it waits in the source in its place");
+        }
+        else
+        {
+            await file.DisposeAsync();
+        }
+
+        await UntilAsync(() => documents.Root.Folder("open")?.File("new.txt")?.Content is { } landed && landed.SequenceEqual(written), "it went up");
+        await UntilAsync(() => Directory.GetFiles(uploads).Length == 0, "nothing of it is left here");
+        await UntilAsync(() => context.LastHealth != ComponentHealth.Degraded, "and the source in its place is not held Degraded");
+        Assert.AreEqual(written.Length, (await second.StatAsync("Documents/open/new.txt", None))!.Length, "which shows it");
+    }
+
+    /// <summary>
+    /// A file closed after its source stopped and before the one in its place has started waits by its note, and that
+    /// start takes it up: nothing serves the folder in between to hand it to.
+    /// </summary>
+    [TestMethod]
+    public async Task AFileClosedBeforeTheSourceInItsPlaceHasStartedGoesUpWhenItHas()
+    {
+        using var fake = FakeSharePoint.LabFarm();
+        var documents = fake.TestSite.Library("Documents");
+        fake.Seed(documents, "open/there.txt", "x"u8.ToArray());
+        using var context = new TestSourceContext("sharepoint");
+        var first = await StartAsync(fake, FarmSettings(fake), context);
+        var file = await first.OpenAsync("Documents/open/new.txt", VfsOpenMode.CreateNew, None);
+        var written = "closed between the stop and the start"u8.ToArray();
+        await file.WriteAsync(0, written, None);
+        await first.DisposeAsync();
+
+        var thrown = await Assert.ThrowsExactlyAsync<VfsException>(async () => await file.DisposeAsync());
+        StringAssert.Contains(thrown.Message, "uploaded when the source has started again");
+        Assert.IsNull(documents.Root.Folder("open")!.File("new.txt"));
+
+        await using var second = await StartAsync(fake, FarmSettings(fake), context);
+        await UntilAsync(() => documents.Root.Folder("open")?.File("new.txt")?.Content is { } landed && landed.SequenceEqual(written), "it went up once that source started");
+    }
+
+    /// <summary>
     /// A note beside a waiting upload with a value of another kind (a null for its version or its length) is no whole
     /// write: it goes, and the source starts. Read as the kind it should have been, it threw past the reading's catch and
     /// failed the start, at every try (the review of 21-Nov-2026, R16's rest).

@@ -456,17 +456,19 @@ internal sealed class PendingUploadFile : IVfsFile
         }
 
         handle?.Dispose();
-        NoLongerOpen();
         if (!upload)
         {
+            NoLongerOpen();
             End(discarded ? UploadEnd.Deleted : UploadEnd.Unchanged);
             return;
         }
 
         // from here these bytes are whole and are to land: an older write of the file that waited is done with, and the
-        // note says where these go, for a run after this one should this one end first
+        // note says where these go, for a run after this one should this one end first. Open here until the note is
+        // there: a source starting in another's place meanwhile took the bytes for half a file, with no note, and removed them
         Supersedes?.Drop();
         WriteNote();
+        NoLongerOpen();
         if (IsOver)
         {
             // deleted in this very moment: its end came before the note, which goes after it
@@ -497,7 +499,8 @@ internal sealed class PendingUploadFile : IVfsFile
         return await AttemptAsync(stop).ConfigureAwait(false) is null && HasLanded;
     }
 
-    private bool HasLanded
+    /// <summary>SharePoint has it: an upload of it landed.</summary>
+    public bool HasLanded
     {
         get
         {

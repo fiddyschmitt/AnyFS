@@ -6,6 +6,13 @@ namespace AnyFS.Sources.SharePoint;
 // Files written here whose upload did not land: kept, shown, read from here and tried again, in this run and the next.
 public abstract partial class SharePointSource
 {
+    // The source each uploads' folder is served by now, by the folder. A source replaced (its settings edited, a Retry)
+    // may have a file open still; closed later, the file's upload is the source's that started in its place (N4). The
+    // lock is that hand-over's: a start takes up what waits and becomes the folder's in one step, and a file closed is
+    // handed to the source serving the folder, or left to the start that comes, never neither, never both.
+    private static readonly Dictionary<string, SharePointSource> UploadsServed = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Lock UploadsHandover = new();
+
     // woken when a file starts to wait, so the retries' loop counts its time from then
     private readonly SemaphoreSlim _uploadsDue = new(0);
     private Task _uploadRetries = Task.CompletedTask;
@@ -27,6 +34,106 @@ public abstract partial class SharePointSource
     /// account or library names a place that is not there in this one, and is not this one's to upload.
     /// </summary>
     private string UploadsKey => $"{Target}|{SignedInAs}|{string.Join(",", (GivenSites ?? []).Select(s => s.ToString()))}|{PinnedLibrary}";
+
+    /// <summary>
+    /// At the start: what the last run, or the source this one starts in the place of, left in the uploads' folder is
+    /// taken up (<see cref="RecoverUploads"/>), and the folder is this one's from now, so that a file the one before had
+    /// open is this one's to upload when it is closed.
+    /// </summary>
+    private void ServeUploads()
+    {
+        lock (UploadsHandover)
+        {
+            RecoverUploads();
+            UploadsServed[_uploadDir] = this;
+        }
+    }
+
+    /// <summary>At the stop, first: the folder is no longer this one's to serve.</summary>
+    private void StopServingUploads()
+    {
+        lock (UploadsHandover)
+        {
+            if (UploadsServed.TryGetValue(_uploadDir, out var serving) && ReferenceEquals(serving, this))
+            {
+                UploadsServed.Remove(_uploadDir);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The source that serves this one's uploads' folder now, started in this one's place, where it serves the same
+    /// site(s), account and library: a note written for another is not its to upload (it stays, as at a start). Under
+    /// the hand-over's lock.
+    /// </summary>
+    private SharePointSource? InMyPlace()
+        => UploadsServed.TryGetValue(_uploadDir, out var serving) && !ReferenceEquals(serving, this) && serving.UploadsKey == UploadsKey ? serving : null;
+
+    /// <summary>
+    /// A file the source before this one had open, closed since: this one's from now, told how it ends and tried again by
+    /// this one. Where this one's start took the same bytes up from their note already (the close and the start came
+    /// together), that is the file, and is returned. Under the hand-over's lock.
+    /// </summary>
+    private PendingUploadFile TakeOver(PendingUploadFile file)
+    {
+        foreach (var held in _pending.Values)
+        {
+            if (string.Equals(held.TempPath, file.TempPath, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!ReferenceEquals(held, file))
+                {
+                    return held;
+                }
+
+                break;
+            }
+        }
+
+        file.Ended = UploadEnded;
+        file.Waits = UploadWaits;
+        file.NeverLands = UploadNeverLands;
+
+        // a write of the same file opened in this source since stays the one that waits
+        _pending.TryAdd(file.Path, file);
+        return file;
+    }
+
+    /// <summary>
+    /// The upload of a file closed after this source stopped: through the source in its place. It was tried through this
+    /// one, failed, and waited by its note for AnyFS's next start (the review of 21-Nov-2026, N4). With none in its place
+    /// yet (it is starting) the file waits by its note, which that start takes up; with one that serves something else,
+    /// it waits as a note written for another does.
+    /// </summary>
+    private async Task UploadHandedOverAsync(PendingUploadFile file, CancellationToken ct)
+    {
+        SharePointSource? next;
+        PendingUploadFile? held = null;
+        lock (UploadsHandover)
+        {
+            next = InMyPlace();
+            if (next is not null)
+            {
+                held = next.TakeOver(file);
+            }
+        }
+
+        if (next is null)
+        {
+            throw VfsException.Unavailable($"'{file.Path}' was closed after its source stopped: it is kept, and uploaded when the source has started again");
+        }
+
+        if (ReferenceEquals(held, file))
+        {
+            await next.UploadAsync(file, ct).ConfigureAwait(false);
+            return;
+        }
+
+        // the same bytes, taken up by that start from their note: its try is this close's
+        if (!await held!.TryAgainAsync(ct).ConfigureAwait(false) && !held.HasLanded)
+        {
+            throw VfsException.Unavailable($"'{file.Path}' could not be uploaded: {held.LastError ?? "it was not taken"}");
+        }
+    }
 
     /// <summary>
     /// At the start: what the last run left in the uploads' folder. A file with its note was closed then and had not
@@ -199,9 +306,28 @@ public abstract partial class SharePointSource
         SayWaiting();
     }
 
-    /// <summary>An upload failed and its file waits: said on the source, and the retries' loop told.</summary>
+    /// <summary>
+    /// An upload failed and its file waits: said on the source, and the retries' loop told. With this source stopped, it
+    /// is the source's in its place to try again, where there is one yet; else that one's start takes it up by its note.
+    /// </summary>
     private void UploadWaits(PendingUploadFile file, Exception error)
     {
+        if (_stopping.IsCancellationRequested)
+        {
+            SharePointSource? next;
+            lock (UploadsHandover)
+            {
+                next = InMyPlace();
+                if (next is not null && !ReferenceEquals(next.TakeOver(file), file))
+                {
+                    next = null;   // its start took the same bytes up from their note: that file is the one tried
+                }
+            }
+
+            next?.UploadWaits(file, error);
+            return;
+        }
+
         SayWaiting();
         _uploadsDue.Release();
     }

@@ -216,7 +216,7 @@ public abstract partial class SharePointSource : SourceBase, ICountable
         // with listings kept the whole tree is walked from the start, "Count files on start" or not
         _kept.StartWalks();
         _uploadDir = Directory.CreateDirectory(Path.Combine(Context.CacheDirectory, "uploads")).FullName;
-        RecoverUploads();
+        ServeUploads();
         _uploadRetries = Task.Run(() => RetryUploadsAsync(_stopping.Token), CancellationToken.None);
 
         if (site.Sites is { } opened)
@@ -598,6 +598,13 @@ public abstract partial class SharePointSource : SourceBase, ICountable
     // one under way, and the file waits by its note for the next start.
     private async Task UploadAsync(PendingUploadFile file, CancellationToken ct)
     {
+        if (_stopping.IsCancellationRequested)
+        {
+            // a file this source had open when it stopped, closed now, or one that waited here: the source's in its place
+            await UploadHandedOverAsync(file, ct).ConfigureAwait(false);
+            return;
+        }
+
         var path = file.Path;
         using var stopping = CancellationTokenSource.CreateLinkedTokenSource(ct, _stopping.Token);
         ct = stopping.Token;
@@ -966,6 +973,9 @@ public abstract partial class SharePointSource : SourceBase, ICountable
 
     public override async ValueTask DisposeAsync()
     {
+        // a file still open here is the upload of the source that starts in this one's place, once it is closed
+        StopServingUploads();
+
         // a lookup of the sites left out, and a walk, stop before the store goes
         await _stopping.CancelAsync().ConfigureAwait(false);
         Task retrying;
