@@ -101,6 +101,12 @@ public sealed class SpoolCache : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(openUpstream);
         ObjectDisposedException.ThrowIf(_disposed, this);
         ct.ThrowIfCancellationRequested();
+        if (length == 0)
+        {
+            // a file of no bytes is that, and nothing is asked for it: nine places said so before they came here, and one
+            // that did not asked its server for nothing (the review of 21-Nov-2026, C3)
+            return Task.FromResult<IVfsFile>(new BytesVfsFile(ReadOnlyMemory<byte>.Empty));
+        }
 
         Spool spool;
         var begins = false;

@@ -545,11 +545,6 @@ public sealed class BambooSource : SourceBase, ICountable
     /// <summary>A file Bamboo serves, spooled as it arrives and kept by its address (a build's files do not change).</summary>
     internal Task<IVfsFile> OpenWebAsync(Uri url, long length, CancellationToken ct)
     {
-        if (length == 0)
-        {
-            return Task.FromResult<IVfsFile>(new MemoryFile([]));
-        }
-
         return Spool.OpenAsync($"bamboo:{url.AbsoluteUri}", length, async c => await ResponseStream.OpenAsync(await Api.OpenAsync(url, "a file", c).ConfigureAwait(false), c).ConfigureAwait(false), ct);
     }
 

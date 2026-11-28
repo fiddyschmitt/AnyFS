@@ -709,11 +709,6 @@ public sealed partial class GitLabSource : SourceBase, ICountable
     /// <summary>A repository file's bytes, spooled from GitLab as they arrive and kept by its blob (or LFS object): the same file on two branches is one download.</summary>
     internal Task<IVfsFile> OpenBlobAsync(GlProject project, string commit, string path, TreeItem item, CancellationToken ct)
     {
-        if (item.L == 0)
-        {
-            return Task.FromResult<IVfsFile>(new MemoryFile([]));
-        }
-
         var key = $"gitlab:{Api.Address.Server.Host}:{project.Id}:{(item.F ? "lfs:" : "")}{item.S}";
         var relative = item.F
             ? $"projects/{project.Id}/repository/files/{Uri.EscapeDataString(path)}/raw?ref={Uri.EscapeDataString(commit)}&lfs=true"

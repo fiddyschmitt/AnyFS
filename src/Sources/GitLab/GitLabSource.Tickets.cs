@@ -245,11 +245,6 @@ public sealed partial class GitLabSource
     /// <summary>An upload's bytes, spooled and kept by its secret (an upload never changes).</summary>
     internal Task<IVfsFile> OpenUploadAsync(GlProject project, GlUpload upload, long length, CancellationToken ct)
     {
-        if (length == 0)
-        {
-            return Task.FromResult<IVfsFile>(new MemoryFile([]));
-        }
-
         return Spool.OpenAsync($"gitlab:{Api.Address.Server.Host}:{project.Id}:upload:{upload.Secret}/{upload.FileName}", length, async c =>
         {
             HttpResponseMessage response;

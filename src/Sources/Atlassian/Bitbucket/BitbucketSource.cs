@@ -412,11 +412,6 @@ public sealed class BitbucketSource : SourceBase, ICountable
     /// </summary>
     internal Task<IVfsFile> OpenBlobAsync(BbRepository repository, string commit, string path, long length, string? contentId, CancellationToken ct)
     {
-        if (length == 0)
-        {
-            return Task.FromResult<IVfsFile>(new MemoryFile([]));
-        }
-
         var url = Api.Rest($"{repository.Path}/raw{RepoPath(path)}?at={Uri.EscapeDataString(commit)}");
         var content = contentId is { Length: > 0 } ? $"#{contentId}" : $"@{commit}:{path}";
         return Spool.OpenAsync($"bitbucket:{Installation.Authority}{Installation.AbsolutePath}:{repository.Path}{content}", length,

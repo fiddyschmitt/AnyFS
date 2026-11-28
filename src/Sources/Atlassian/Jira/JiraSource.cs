@@ -425,11 +425,6 @@ public sealed class JiraSource : SourceBase, ICountable
     /// <summary>An attachment's bytes, spooled from Jira as they arrive and kept by its id (an attachment never changes).</summary>
     internal Task<IVfsFile> OpenAttachmentAsync(JiraAttachment attachment, CancellationToken ct)
     {
-        if (attachment.Size == 0)
-        {
-            return Task.FromResult<IVfsFile>(new MemoryFile([]));
-        }
-
         // the address at the source's own installation: Jira writes its configured base URL into the attachment's
         var url = Session.Address.Page($"secure/attachment/{attachment.Id}/{Uri.EscapeDataString(attachment.FileName)}");
         return Spool.OpenAsync($"jira:{Installation.Authority}{Installation.AbsolutePath}:attachment:{attachment.Id}", attachment.Size,

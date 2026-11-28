@@ -615,11 +615,6 @@ public sealed class ConfluenceSource : SourceBase, ICountable
     /// <summary>An attachment's bytes, spooled from Confluence as they arrive and kept by its id and version.</summary>
     internal Task<IVfsFile> OpenAttachmentAsync(ConfluenceAttachment attachment, CancellationToken ct)
     {
-        if (attachment.Size == 0)
-        {
-            return Task.FromResult<IVfsFile>(new MemoryFile([]));
-        }
-
         var url = attachment.Download is { Length: > 0 } download
             ? Next(download)
             : new Uri(Installation, $"download/attachments/{attachment.ContainerId}/{Uri.EscapeDataString(attachment.FileName)}?api=v2");

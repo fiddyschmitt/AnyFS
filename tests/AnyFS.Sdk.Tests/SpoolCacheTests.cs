@@ -28,6 +28,22 @@ public class SpoolCacheTests
     }
 
     [TestMethod]
+    public async Task AFileOfNoBytesIsThatAndNothingIsAskedForIt()
+    {
+        var asked = 0;
+        await using var cache = new SpoolCache(_dir, time: _time);
+        await using var file = await cache.OpenAsync("empty", 0, _ =>
+        {
+            asked++;
+            return Task.FromResult<Stream>(new MemoryStream());
+        }, CancellationToken.None);
+        Assert.AreEqual(0, file.Length);
+        Assert.AreEqual(0, await file.ReadAsync(0, new byte[16], CancellationToken.None));
+        Assert.AreEqual(0, asked);
+        Assert.AreEqual(0, Directory.GetFiles(_dir).Length, "and nothing is kept for it");
+    }
+
+    [TestMethod]
     public async Task SubRangeBeforeTheDownloadGetsThereBlocksThenReturns()
     {
         var upstream = new DrippingUpstream(Bytes(1000));

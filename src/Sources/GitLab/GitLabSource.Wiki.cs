@@ -63,8 +63,6 @@ public sealed partial class GitLabSource
 
     /// <summary>A wiki attachment's bytes (through the browser session), spooled and kept by its hash.</summary>
     internal Task<IVfsFile> OpenWikiUploadAsync(WikiOwner owner, GlWikiUpload upload, long length, CancellationToken ct)
-        => length == 0
-            ? Task.FromResult<IVfsFile>(new MemoryFile([]))
-            : Spool.OpenAsync($"gitlab:{Api.Address.Server.Host}:{owner.Key}:wiki:{upload.Hash}/{upload.FileName}", length,
+        => Spool.OpenAsync($"gitlab:{Api.Address.Server.Host}:{owner.Key}:wiki:{upload.Hash}/{upload.FileName}", length,
                 async c => await ResponseStream.OpenAsync(await Api.OpenAsync(WikiUploadUrl(owner, upload), "a wiki attachment", c).ConfigureAwait(false), c).ConfigureAwait(false), ct);
 }

@@ -80,9 +80,7 @@ public sealed partial class GitLabSource
     /// running job's grows: the key carries the length, so a longer listing reads anew).
     /// </summary>
     internal Task<IVfsFile> OpenLogAsync(GlProject project, GlJob job, long length, CancellationToken ct)
-        => length == 0
-            ? Task.FromResult<IVfsFile>(new MemoryFile([]))
-            : Spool.OpenAsync($"gitlab:{Api.Address.Server.Host}:{project.Id}:log:{job.Id}:{length}", length,
+        => Spool.OpenAsync($"gitlab:{Api.Address.Server.Host}:{project.Id}:log:{job.Id}:{length}", length,
                 async c => await ResponseStream.OpenAsync(await Api.OpenAsync($"projects/{project.Id}/jobs/{job.Id}/trace", c).ConfigureAwait(false), c).ConfigureAwait(false), ct);
 
     // of an archive a server sent whole, at least this much of its end is kept: the directory of an archive of some
@@ -142,11 +140,6 @@ public sealed partial class GitLabSource
     /// <summary>One file of a job's artifacts, which GitLab takes out of the archive; spooled and kept by the job and path.</summary>
     internal Task<IVfsFile> OpenArtifactAsync(GlProject project, GlJob job, ZipEntry entry, CancellationToken ct)
     {
-        if (entry.Size == 0)
-        {
-            return Task.FromResult<IVfsFile>(new MemoryFile([]));
-        }
-
         var path = string.Join('/', entry.Path.Split('/').Select(Uri.EscapeDataString));
         return Spool.OpenAsync($"gitlab:{Api.Address.Server.Host}:{project.Id}:job:{job.Id}:{entry.Path}", entry.Size,
             async c => await ResponseStream.OpenAsync(await Api.OpenAsync($"projects/{project.Id}/jobs/{job.Id}/artifacts/{path}", c).ConfigureAwait(false), c).ConfigureAwait(false), ct);
