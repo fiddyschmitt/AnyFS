@@ -141,6 +141,9 @@ internal sealed class MailTree
 
     public static MailTree Empty { get; } = new(new DirNode("", null, null, null), 0, 0, 0, new Dictionary<string, TreeNode>());
 
+    /// <summary>The entry beside the folders of a folder whose own items could not be read: opened, it says why.</summary>
+    public const string NotRead = "(could not be read)";
+
     public DirNode Root { get; }
 
     /// <summary>Each item's node (its folder, or a contact's file), by the item's id.</summary>
@@ -265,6 +268,14 @@ internal sealed class MailTree
 
             listed(folder.Name);
             await AddFoldersAsync(dir, folder.Folders, store, ct, listed, showEmpty, read).ConfigureAwait(false);
+
+            // One that could not be read and has folders of its own shows them, and beside them an entry that says why,
+            // when it is opened, its own items are not there: shown its folders alone, it seemed to hold nothing of its
+            // own and said nothing (the review of 21-Nov-2026, R12)
+            if (dir.Failure is { } refused && dir.Children.Count > 0)
+            {
+                dir.Add(new DirNode(dir.Unique(NotRead, isFile: false), null, null, null) { Failure = refused });
+            }
 
             // a folder that could not be read shows though it has nothing in it: that is where it says so
             if (showEmpty || dir.Children.Count > 0 || dir.Failure is not null)

@@ -303,6 +303,62 @@ public class OutlookItemListingTests
         }
     }
 
+    /// <summary>
+    /// A folder the server refuses that has folders of its own shows them, and beside them an entry that says, when it is
+    /// opened, why its own items are not there. Shown its folders alone, it seemed to hold nothing of its own and said
+    /// nothing (the review of 21-Nov-2026, R12).
+    /// </summary>
+    [TestMethod]
+    public async Task AFolderTheServerRefusesThatHasFoldersOfItsOwnSaysSoBesideThem()
+    {
+        var fake = WithMay(out _);
+        var inbox = fake.Folders.Values.Single(f => f.Distinguished == "inbox");
+        var projects = fake.Folders.Values.Single(f => f.Name == "Projects");
+        fake.AddMessage(projects, "The plan", ("Adele Vance", "adelev@fake.test"), new DateTimeOffset(2026, 5, 4, 9, 0, 0, TimeSpan.Zero), "<p>Plan.</p>", []);
+        fake.Intercept = (request, action) => action is "SyncFolderItems" or "FindItem" && Names(request, inbox.Id) ? Refused(action) : null;
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            var listed = (await OutlookFixtures.ListAsync(source, "Inbox")).Select(e => e.Name).ToList();
+            CollectionAssert.Contains(listed, "Projects", "its folders show");
+            CollectionAssert.Contains(listed, "(could not be read)", "and beside them what says why its own items do not: " + string.Join(", ", listed));
+            var ex = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ListAsync(source, "Inbox/(could not be read)"));
+            Assert.AreEqual(VfsError.AccessDenied, ex.Error);
+            StringAssert.Contains(ex.Message, "the folder Inbox could not be read");
+            StringAssert.Contains(ex.Message, "Access is denied");
+            Assert.AreEqual(1, (await ItemFoldersAsync(source, "Inbox/Projects/2026/05")).Count, "the folder within is read as ever");
+        }
+    }
+
+    /// <summary>
+    /// Exchange's answer about the one item asked for is that item's failure, whatever the answer. Six were taken so, and
+    /// any other (here a server error on one item) turned the tile until another call went well (the review of
+    /// 21-Nov-2026, R8). An answer that speaks of the mailbox as a whole still turns it.
+    /// </summary>
+    [TestMethod]
+    public async Task AnItemsOwnAnswerIsThatItemsFailureAndOneOfTheMailboxTurnsTheTile()
+    {
+        var fake = FakeExchange.Mailbox();
+        var contacts = fake.Folders.Values.Single(f => f.Distinguished == "contacts");
+        var bad = fake.AddContact(contacts, "Unreadable Card", "Unreadable", "Card", "card@fake.test", "Contoso", "None", "+1 555 0199");
+        var answer = "ErrorInternalServerError";
+        fake.Intercept = (request, action) => action == "GetItem" && Names(request, bad.Id) ? Refused(action, answer, "An internal server error occurred. The operation failed.") : null;
+        using var context = new TestSourceContext("outlook");
+        var source = await StartAsync(fake, context);
+        await using (source)
+        {
+            var failed = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, "Contacts/Unreadable Card.vcf"));
+            Assert.AreEqual(VfsError.IoError, failed.Error, failed.Message);
+            Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth, "the one item's failure, not the mailbox's");
+
+            answer = "ErrorMailboxMoveInProgress";
+            failed = await Assert.ThrowsExactlyAsync<VfsException>(() => OutlookFixtures.ReadAsync(source, "Contacts/Unreadable Card.vcf"));
+            Assert.AreEqual(VfsError.Unavailable, failed.Error, failed.Message);
+            Assert.AreEqual(ComponentHealth.Degraded, context.LastHealth, "the mailbox's own trouble turns the tile");
+        }
+    }
+
     [TestMethod]
     public async Task ARequestThatTimesOutIsTriedAgainNotLeftAsACancellation()
     {

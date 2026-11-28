@@ -1377,9 +1377,15 @@ public sealed class OutlookSource : SourceBase, ICountable
     /// </summary>
     private static bool ItsOwn(Exception failure) => failure is EwsException or PstException && !Systemic(failure);
 
-    /// <summary>What listing a folder comes to when its items could not be read and it has nothing else to show.</summary>
+    /// <summary>
+    /// What listing a folder comes to when its items could not be read and it has nothing else to show; or listing the
+    /// entry beside the folders of one that has them (<see cref="MailTree.NotRead"/>), which names that folder.
+    /// </summary>
     private static VfsException CouldNotRead(DirNode folder, Exception failure)
-        => new(failure is EwsException { Code: "ErrorAccessDenied" } ? VfsError.AccessDenied : VfsError.IoError, $"the folder {folder.Name} could not be read: {failure.Message}", failure);
+    {
+        var name = folder is { Folder: null, Parent: DirNode owner } ? owner.Name : folder.Name;
+        return new(failure is EwsException { Code: "ErrorAccessDenied" } ? VfsError.AccessDenied : VfsError.IoError, $"the folder {name} could not be read: {failure.Message}", failure);
+    }
 
     /// <summary>
     /// Starts the batch after the one an item is in, from the first item after it in its folder neither made nor being
@@ -1622,13 +1628,21 @@ public sealed class OutlookSource : SourceBase, ICountable
     // --- health -----------------------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Whether Exchange's answer speaks of the one thing asked for and of nothing else: an item refused to the account,
-    /// one the store finds corrupt or cannot turn into MIME, an id it does not take. Only the answers known to be so:
-    /// any other may be the mailbox's own trouble (an answer that is no Exchange answer at all, a store that is not
-    /// there), and turns the tile as it did.
+    /// Whether Exchange's answer speaks of the one thing asked for and of nothing else: any answer of Exchange's own (an
+    /// "Error" code) that is not one to try again later and does not speak of the mailbox, its server or the account
+    /// (<see cref="OfTheMailbox"/>). Six answers known to be an item's were taken so (refused, corrupt, no MIME, a
+    /// property, a malformed id), and any other answer about one item turned the tile, until another call went well (the
+    /// review of 21-Nov-2026, R8). An answer that is no Exchange answer at all (an HTTP status) still turns it.
     /// </summary>
     private static bool OfTheOneAsked(EwsException ex)
-        => ex.Code is "ErrorAccessDenied" or "ErrorItemCorrupt" or "ErrorCorruptData" or "ErrorMimeContentConversionFailed" or "ErrorItemPropertyRequestFailed" or "ErrorInvalidIdMalformed";
+        => ex.Code.StartsWith("Error", StringComparison.Ordinal) && !ex.Transient && !OfTheMailbox(ex.Code);
+
+    /// <summary>Exchange's answers that speak of the mailbox, its server or the account as a whole, and not of one item.</summary>
+    private static bool OfTheMailbox(string code)
+        => code.StartsWith("ErrorMailbox", StringComparison.Ordinal) || code.StartsWith("ErrorImpersonat", StringComparison.Ordinal)
+            || code is "ErrorNonExistentMailbox" or "ErrorADUnavailable" or "ErrorADOperation" or "ErrorConnectionFailed" or "ErrorProxyRequestProcessingFailed"
+                or "ErrorNoRespondingCASInDestinationSite" or "ErrorAccountDisabled" or "ErrorServerBusy" or "ErrorTimeoutExpired" or "ErrorInternalServerTransientError"
+                or "ErrorInsufficientResources" or "ErrorNotEnoughMemory" or "ErrorExceededConnectionCount";
 
     /// <summary>
     /// Runs a read of the store: trouble upstream becomes Unavailable and Degraded, something gone NotFound; a success clears
