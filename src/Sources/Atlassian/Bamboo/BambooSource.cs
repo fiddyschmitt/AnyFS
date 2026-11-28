@@ -384,13 +384,35 @@ public sealed class BambooSource : SourceBase, ICountable
         return doc is null ? null : BmBuild.Parse(doc.RootElement);
     }
 
-    /// <summary>The size of a file Bamboo serves (a log, an artifact's file), by HEAD; 0 where it says none. Kept for the run.</summary>
+    /// <summary>
+    /// The size of a file Bamboo serves (a log, an artifact's file), kept for the run: what a HEAD says, and where it
+    /// says none (a server or a proxy that compresses as it sends gives no length) the file itself, counted as it comes
+    /// and nothing of it kept. It was 0 there: the file was listed as empty and read as empty (the review of
+    /// 21-Nov-2026, P12).
+    /// </summary>
     internal async Task<long> SizeAsync(Uri url, CancellationToken ct)
     {
         var box = await Cache.GetAsync($"size:{url.AbsoluteUri}", null, async c =>
         {
-            using var response = await Api.HeadAsync(url, "a file's size", c).ConfigureAwait(false);
-            return new Box<long>(response.Content.Headers.ContentLength ?? 0);
+            using (var head = await Api.HeadAsync(url, "a file's size", c).ConfigureAwait(false))
+            {
+                if (head.Content.Headers.ContentLength is { } said)
+                {
+                    return new Box<long>(said);
+                }
+            }
+
+            using var response = await Api.OpenAsync(url, "a file's size", c).ConfigureAwait(false);
+            if (response.Content.Headers.ContentLength is { } given)
+            {
+                return new Box<long>(given);
+            }
+
+            var body = await response.Content.ReadAsStreamAsync(c).ConfigureAwait(false);
+            await using (body.ConfigureAwait(false))
+            {
+                return new Box<long>((await ResponseLength.CountAsync(body, 0, null, c).ConfigureAwait(false))!.Value);
+            }
         }, ct).ConfigureAwait(false);
         return box.Value;
     }

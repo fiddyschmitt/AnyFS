@@ -305,6 +305,31 @@ public class BambooTests
     }
 
     [TestMethod]
+    public async Task AFileWhoseLengthBambooDoesNotSayIsMeasuredAndNotShownEmpty()
+    {
+        // A file's size was what a HEAD said, and 0 where it said none: a server or a proxy that compresses as it sends
+        // gives no length, a log is the first thing it compresses, and the log was then listed and read as empty (the
+        // review of 21-Nov-2026, P12)
+        var fake = BambooSeed.Lab();
+        fake.SaysNoLength = url => url.AbsolutePath.EndsWith(".log", StringComparison.Ordinal) || url.AbsolutePath.EndsWith("/style.css", StringComparison.Ordinal);
+        await using var source = await StartAsync(fake, BambooSeed.Settings(fake, "/browse/ANYFS-BUILD"));
+        const string log = "#1 Successful/Default Job/ANYFS-BUILD-JOB1-1.log";
+        var listed = (await EntriesAsync(source, "#1 Successful/Default Job")).Single(e => e.Name == "ANYFS-BUILD-JOB1-1.log");
+        Assert.IsTrue(listed.Length > 100, $"{listed.Length} bytes listed");
+        var text = await TextAsync(source, log);
+        StringAssert.Contains(text, "Finished building ANYFS-BUILD-JOB1-1. Successful.");
+        Assert.AreEqual(Encoding.UTF8.GetByteCount(text), listed.Length, "the length it was measured to have");
+        Assert.AreEqual(1, fake.Requests.Count(r => r.StartsWith("HEAD ", StringComparison.Ordinal) && r.EndsWith("ANYFS-BUILD-JOB1-1.log", StringComparison.Ordinal)), "asked by HEAD first, once");
+
+        // an artifact's file the same; one whose length is said is not fetched to learn it
+        Assert.AreEqual("body { color: black }\n".Length, (await source.StatAsync("#1 Successful/Default Job/artifacts/Reports/css/style.css", CancellationToken.None))!.Length);
+        Assert.AreEqual("body { color: black }\n", await TextAsync(source, "#1 Successful/Default Job/artifacts/Reports/css/style.css"));
+        var before = fake.Requests.Count;
+        Assert.AreEqual(BambooSeed.Large.Length, (await source.StatAsync("#1 Successful/Default Job/artifacts/Reports/data/large.bin", CancellationToken.None))!.Length);
+        Assert.AreEqual(0, fake.Requests.Skip(before).Count(r => r.StartsWith("GET ", StringComparison.Ordinal) && r.EndsWith("large.bin", StringComparison.Ordinal)), "its length came by HEAD");
+    }
+
+    [TestMethod]
     [DataRow("token", DisplayName = "a personal access token")]
     [DataRow("basic", DisplayName = "Basic authentication")]
     [DataRow("session", DisplayName = "a web session")]

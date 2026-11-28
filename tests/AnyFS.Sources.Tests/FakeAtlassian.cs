@@ -51,6 +51,12 @@ internal abstract class FakeAtlassian
     /// <summary>Whether Seraph's login form is there (off where the server signs people in through single sign-on only).</summary>
     public bool LoginForm { get; set; } = true;
 
+    /// <summary>
+    /// The addresses whose answers come with no length said, as from a server or a proxy that compresses as it sends: a
+    /// HEAD's without a Content-Length, and a GET's body of a length known only when it has all come.
+    /// </summary>
+    public Func<Uri, bool>? SaysNoLength { get; set; }
+
     /// <summary>Whether Basic authentication is taken on REST calls (off by default in Jira 11 and new Confluence 10).</summary>
     public bool BasicAllowed { get; set; }
 
@@ -287,6 +293,12 @@ internal abstract class FakeAtlassian
         return new Response(200, content, type);
     }
 
+    /// <summary>A body whose length nothing says until it has all been read.</summary>
+    private sealed class OfNoLength(byte[] body) : MemoryStream(body, writable: false)
+    {
+        public override bool CanSeek => false;
+    }
+
     private sealed class InProcessHandler(FakeAtlassian fake) : HttpMessageHandler
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage message, CancellationToken ct)
@@ -322,13 +334,15 @@ internal abstract class FakeAtlassian
                 .ToDictionary(g => g.Key, g => g.First().Length > 1 ? Uri.UnescapeDataString(g.First()[1].Replace('+', ' ')) : "", StringComparer.Ordinal);
             var request = new Request(message.Method.Method, url, segments, query, headers, body);
             var answer = elsewhere ? fake.AnswerElsewhere(request) : fake.Answer(request);
-            var response = new HttpResponseMessage((HttpStatusCode)answer.Status) { RequestMessage = message, Content = new ByteArrayContent(message.Method == HttpMethod.Head ? [] : answer.Body) };
+            var noLength = fake.SaysNoLength?.Invoke(url) == true;
+            var sent = message.Method == HttpMethod.Head ? [] : answer.Body;
+            var response = new HttpResponseMessage((HttpStatusCode)answer.Status) { RequestMessage = message, Content = noLength ? new StreamContent(new OfNoLength(sent)) : new ByteArrayContent(sent) };
             if (answer.ContentType is not null)
             {
                 response.Content.Headers.TryAddWithoutValidation("Content-Type", answer.ContentType);
             }
 
-            if (message.Method == HttpMethod.Head)
+            if (message.Method == HttpMethod.Head && !noLength)
             {
                 // as a server answers HEAD: the size of what GET would give, no body
                 response.Content.Headers.ContentLength = answer.Body.Length;
