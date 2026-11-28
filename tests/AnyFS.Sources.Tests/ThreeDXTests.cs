@@ -705,6 +705,39 @@ public class ThreeDXSourceTests
     }
 
     [TestMethod]
+    public async Task ADocumentsMetadataIsLetGoAfterItsMinuteAndItsLengthIsStillListed()
+    {
+        // Each document's metadata was held for good once made, though it is made again when read after a minute: a
+        // search through every document's left all of it in memory (the review of 21-Nov-2026, P12)
+        using var fake = new Fake3DX();
+        for (var n = 0; n < 40; n++)
+        {
+            fake.Add($"DOC-{n:D3}", "A", $"Number {n}", "Document", ("a.txt", Bytes(10, n)));
+        }
+
+        using var context = new TestSourceContext("3dx");
+        await using var source = await StartAsync(ThreeDXSignInTests.Settings(fake), context);
+        var folders = (await ListAsync(source, "")).Select(e => e.Name).ToList();
+        var lengths = new Dictionary<string, long>();
+        foreach (var folder in folders)
+        {
+            lengths[folder] = (await ReadAllAsync(source, $"{folder}/_metadata.json")).Length;
+        }
+
+        Assert.AreEqual(40, source.MetadataHeld, "each for the reads after its open");
+        source.LetGoOfMetadata(DateTime.UtcNow.AddMinutes(2));
+        Assert.AreEqual(0, source.MetadataHeld, "none past its minute");
+        foreach (var folder in folders)
+        {
+            Assert.AreEqual(lengths[folder], (await ListAsync(source, folder)).Single(f => f.Name == "_metadata.json").Length, "the length it was made with is what a listing gives");
+        }
+
+        // read again, it is made again, as it was before
+        Assert.AreEqual(lengths[folders[0]], (await ReadAllAsync(source, $"{folders[0]}/_metadata.json")).Length);
+        Assert.AreEqual(1, source.MetadataHeld);
+    }
+
+    [TestMethod]
     public async Task TheLinkAndMetadataAreMadeAsMount3DXMakesThem()
     {
         using var fake = new Fake3DX();

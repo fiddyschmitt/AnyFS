@@ -28,7 +28,10 @@ public sealed class ThreeDXSource : SourceBase, ICountable
     private readonly SessionOptions? _options;
     private readonly CancellationTokenSource _stopping = new();
     private readonly SemaphoreSlim _refreshGate = new(1, 1);
+    // a document's metadata as it was made, for the minute after; and its length, for good, which a listing gives
     private readonly ConcurrentDictionary<string, (byte[] Content, DateTime At)> _metadata = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, long> _metadataLengths = new(StringComparer.OrdinalIgnoreCase);
+    private long _metadataLetGo;
     private readonly ConcurrentDictionary<string, long> _sizes = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, bool> _rangeIgnoredSaid = new(StringComparer.Ordinal);
     private volatile DocumentTree _tree = DocumentTree.Empty;
@@ -327,8 +330,8 @@ public sealed class ThreeDXSource : SourceBase, ICountable
         foreach (var item in found.Files)
         {
             var entry = found.EntryOf(item);
-            yield return item.Kind == FolderFileKind.Metadata && _metadata.TryGetValue(found.Document.Id, out var made)
-                ? entry with { Length = made.Content.Length }
+            yield return item.Kind == FolderFileKind.Metadata && _metadataLengths.TryGetValue(found.Document.Id, out var made)
+                ? entry with { Length = made }
                 : item.Kind == FolderFileKind.Document && item.File!.Size is null && _sizes.TryGetValue(item.ContentKey, out var size)
                     ? entry with { Length = size }
                     : entry;
@@ -448,7 +451,12 @@ public sealed class ThreeDXSource : SourceBase, ICountable
         return length.Value;
     }
 
-    /// <summary>A document's <see cref="ThreeDXNames.MetadataFile"/>: made from 3DX's answers, kept for a minute for the reads after the open.</summary>
+    /// <summary>
+    /// A document's <see cref="ThreeDXNames.MetadataFile"/>: made from 3DX's answers, kept for a minute for the reads
+    /// after the open, and then let go; its length is kept, which is what a listing gives of it afterwards. Each was
+    /// held for good once made, to be made again all the same when next read after its minute: a search through every
+    /// document's metadata left all of it in memory, 2 KB a document and more (the review of 21-Nov-2026, P12).
+    /// </summary>
     private async Task<byte[]> MetadataAsync(DocumentFolder folder, CancellationToken ct)
     {
         var id = folder.Document.Id;
@@ -458,8 +466,32 @@ public sealed class ThreeDXSource : SourceBase, ICountable
         }
 
         var content = await Run(() => Client.MetadataAsync(id, ct)).ConfigureAwait(false);
-        _metadata[id] = (content, DateTime.UtcNow);
+        var now = DateTime.UtcNow;
+        _metadata[id] = (content, now);
+        _metadataLengths[id] = content.Length;
+        LetGoOfMetadata(now);
         return content;
+    }
+
+    /// <summary>How many documents' metadata is held as made (for tests).</summary>
+    internal int MetadataHeld => _metadata.Count;
+
+    /// <summary>Lets go of the metadata made more than its minute before <paramref name="now"/>; looked through once a minute at most, as metadata is made.</summary>
+    internal void LetGoOfMetadata(DateTime now)
+    {
+        var last = Interlocked.Read(ref _metadataLetGo);
+        if (now.Ticks - last < MetadataFor.Ticks || Interlocked.CompareExchange(ref _metadataLetGo, now.Ticks, last) != last)
+        {
+            return;
+        }
+
+        foreach (var (id, made) in _metadata)
+        {
+            if (now - made.At >= MetadataFor)
+            {
+                _metadata.TryRemove(new KeyValuePair<string, (byte[] Content, DateTime At)>(id, made));
+            }
+        }
     }
 
     // --- health -----------------------------------------------------------------------------------------------------------
