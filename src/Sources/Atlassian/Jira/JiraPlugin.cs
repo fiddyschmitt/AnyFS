@@ -137,9 +137,15 @@ public sealed class JiraPlugin : ISourcePlugin, IValidatable, ITestable, ISettin
                 case JiraScopeKind.Filter:
                     using (var filter = await api.FindAsync($"filter/{scope.Value}", ct).ConfigureAwait(false))
                     {
-                        return filter is null
-                            ? new TestResult(false, $"{who} But there is no filter {scope.Value} that this account can see.")
-                            : new TestResult(true, $"{who} The source shows the issues of the filter {filter.RootElement.Str("name")}.");
+                        if (filter is null)
+                        {
+                            return new TestResult(false, $"{who} But there is no filter {scope.Value} that this account can see.");
+                        }
+
+                        // its query run as a board's is, so one Jira cannot run is told here and not at the source's start
+                        return filter.RootElement.Str("jql") is { Length: > 0 } jql
+                            ? await RunAsync(jql, $"filter {filter.RootElement.Str("name")}").ConfigureAwait(false)
+                            : new TestResult(false, $"{who} But the filter {filter.RootElement.Str("name")} has no query.");
                     }
 
                 case JiraScopeKind.Board:

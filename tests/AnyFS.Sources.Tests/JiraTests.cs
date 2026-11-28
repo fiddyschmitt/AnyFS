@@ -915,6 +915,25 @@ public class JiraTests
         await source.DisposeAsync();
     }
 
+    /// <summary>
+    /// A saved filter's query, and a board's, are asked of Jira at the start as a query in the address is, so one Jira cannot
+    /// run fails the start for good, in Jira's words. Theirs were first asked by a listing, with the source started and
+    /// saying Ready while it could show nothing (the review of 21-Nov-2026, R16's rest).
+    /// </summary>
+    [TestMethod]
+    [DataRow("/issues/?filter=10200", DisplayName = "a saved filter")]
+    [DataRow("/secure/RapidBoard.jspa?rapidView=7", DisplayName = "a board")]
+    public async Task AFiltersOrABoardsQueryJiraCannotRunFailsTheStartForGood(string path)
+    {
+        var fake = JiraSeed.Lab();
+        fake.Filters[10200] = ("Operations", "nonsense ~ 1");
+        var source = new JiraSource(JiraSeed.Settings(fake, path), fake.StandIn());
+        var ex = await Assert.ThrowsExactlyAsync<SourceFailedException>(() => source.InitialiseAsync(new TestSourceContext(), CancellationToken.None));
+        await source.DisposeAsync();
+        Assert.IsTrue(ex.Permanent, ex.Message);
+        StringAssert.Contains(ex.Message, "not one the fake knows");
+    }
+
     [TestMethod]
     public async Task AQueryJiraRejectsFailsTheStartForGoodAndAnAnswerCutShortDoesNot()
     {
@@ -1132,7 +1151,7 @@ public class JiraTests
     }
 
     [TestMethod]
-    public async Task TheTestRunsAQuerysAndABoardsQuerySoOneJiraCannotRunIsToldThere()
+    public async Task TheTestRunsAQuerysAFiltersAndABoardsQuerySoOneJiraCannotRunIsToldThere()
     {
         var fake = JiraSeed.Lab();
         Task<AnyFS.Sdk.TestResult> TestAsync(string path) => JiraPlugin.TestAsync(JiraSeed.Settings(fake, path), new Progress<string>(), fake.StandIn(), CancellationToken.None);
@@ -1146,12 +1165,20 @@ public class JiraTests
         StringAssert.Contains(nonsense.Message, "as Test Er (tester)");
         StringAssert.Contains(nonsense.Message, "not one the fake knows", "in Jira's words");
 
-        // a board's query is its filter's
+        // a saved filter's query is run (it was only looked up: the filter was there, its query never asked), and a board's
+        // query is its filter's
+        var filter = await TestAsync("/issues/?filter=10200");
+        Assert.IsTrue(filter.Success, filter.Message);
+        StringAssert.Contains(filter.Message, "the filter Operations");
+        Assert.AreEqual("project = OPS ORDER BY key ASC", fake.Searches.Last(), "the filter's query was run");
         var board = await TestAsync("/secure/RapidBoard.jspa?rapidView=7");
         Assert.IsTrue(board.Success, board.Message);
         Assert.AreEqual("project = OPS ORDER BY key ASC", fake.Searches.Last());
 
         fake.Filters[10200] = ("Operations", "nonsense ~ 1");
+        var brokenFilter = await TestAsync("/issues/?filter=10200");
+        Assert.IsFalse(brokenFilter.Success, brokenFilter.Message);
+        StringAssert.Contains(brokenFilter.Message, "not one the fake knows");
         var broken = await TestAsync("/secure/RapidBoard.jspa?rapidView=7");
         Assert.IsFalse(broken.Success, broken.Message);
         StringAssert.Contains(broken.Message, "not one the fake knows");

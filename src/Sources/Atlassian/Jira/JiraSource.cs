@@ -157,20 +157,29 @@ public sealed class JiraSource : SourceBase, ICountable
                 }
 
             case JiraScopeKind.Filter:
-                return new JiraQueryRoot(await FilterJqlAsync(Api, scope.Value, ct).ConfigureAwait(false));
+                return new JiraQueryRoot(await AskedAsync(await FilterJqlAsync(Api, scope.Value, ct).ConfigureAwait(false), ct).ConfigureAwait(false));
 
             case JiraScopeKind.Board:
-                return new JiraQueryRoot(await BoardJqlAsync(Api, scope.Value, ct).ConfigureAwait(false));
+                return new JiraQueryRoot(await AskedAsync(await BoardJqlAsync(Api, scope.Value, ct).ConfigureAwait(false), ct).ConfigureAwait(false));
 
             case JiraScopeKind.Jql:
-                // asked once, so a query Jira cannot run fails here with Jira's own words
-                using (await SearchPageAsync(scope.Value, [], 0, null, validate: true, ct).ConfigureAwait(false))
-                {
-                    return new JiraQueryRoot(scope.Value);
-                }
+                return new JiraQueryRoot(await AskedAsync(scope.Value, ct).ConfigureAwait(false));
 
             default:
                 return new JiraServerRoot();
+        }
+    }
+
+    /// <summary>
+    /// A query asked of Jira once, so one it cannot run fails the start here in Jira's own words: a saved filter's and a
+    /// board's as well as one in the address. Theirs were first asked by a listing, with the source started and saying
+    /// Ready (the review of 21-Nov-2026, R16's rest).
+    /// </summary>
+    private async Task<string> AskedAsync(string jql, CancellationToken ct)
+    {
+        using (await SearchPageAsync(jql, [], 0, null, validate: true, ct).ConfigureAwait(false))
+        {
+            return jql;
         }
     }
 
