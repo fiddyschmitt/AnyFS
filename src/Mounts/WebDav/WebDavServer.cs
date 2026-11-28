@@ -324,17 +324,66 @@ internal sealed partial class WebDavServer : IAsyncDisposable
 
         var wantsQuota = request.Names.Contains(DavXml.QuotaAvailable) || request.Names.Contains(DavXml.QuotaUsed);
         var space = wantsQuota ? await SpaceAsync(r.Fs, r.Path, ct).ConfigureAwait(false) : null;
-        var responses = new List<XElement> { ResponseFor(r, r.Path, entry, space, request) };
-        if (depth > 0 && entry.IsDirectory)
+        var own = ResponseFor(r, r.Path, entry, space, request);
+        if (depth == 0 || !entry.IsDirectory)
         {
-            await foreach (var child in r.Fs.ListAsync(r.Path, ct).ConfigureAwait(false))
-            {
-                responses.Add(ResponseFor(r, VfsPath.Join(r.Path, child.Name), child, space, request));
-            }
+            await WriteXmlAsync(r.Ctx, StatusCodes.Status207MultiStatus, DavXml.MultiStatus([own]), ct).ConfigureAwait(false);
+            return;
         }
 
-        await WriteXmlAsync(r.Ctx, StatusCodes.Status207MultiStatus, DavXml.MultiStatus(responses), ct).ConfigureAwait(false);
+        // A folder's listing is written as it is made: each entry's response goes to the client and is let go. All of
+        // them were made first, put into one document, the document into one string and the string into bytes: 780 MB
+        // allocated and 511 MB held at once to list 100,000 files, and nothing sent for three seconds (the review of
+        // 21-Nov-2026, P13). The first entry is asked for before anything is sent, so a folder that cannot be listed is
+        // still answered with its error; one whose listing breaks off part way has its answer broken off too, which no
+        // client takes for the whole folder.
+        var children = r.Fs.ListAsync(r.Path, ct).GetAsyncEnumerator(ct);
+        await using (children.ConfigureAwait(false))
+        {
+            var more = await children.MoveNextAsync().ConfigureAwait(false);
+            r.Ctx.Response.StatusCode = StatusCodes.Status207MultiStatus;
+            r.Ctx.Response.ContentType = "text/xml; charset=\"utf-8\"";
+            try
+            {
+                // written into a piece of memory, which is sent on each time it has filled
+                using var piece = new MemoryStream(ListingPiece + (ListingPiece / 4));
+                using var xml = XmlWriter.Create(piece, new XmlWriterSettings { Encoding = new UTF8Encoding(false), CloseOutput = false });
+                async ValueTask SendAsync()
+                {
+                    xml.Flush();
+                    await r.Ctx.Response.Body.WriteAsync(piece.GetBuffer().AsMemory(0, (int)piece.Length), ct).ConfigureAwait(false);
+                    piece.SetLength(0);
+                }
+
+                xml.WriteStartDocument();
+                xml.WriteStartElement("D", "multistatus", DavXml.D.NamespaceName);
+                own.WriteTo(xml);
+                while (more)
+                {
+                    var child = children.Current;
+                    ResponseFor(r, VfsPath.Join(r.Path, child.Name), child, space, request).WriteTo(xml);
+                    if (piece.Length >= ListingPiece)
+                    {
+                        await SendAsync().ConfigureAwait(false);
+                    }
+
+                    more = await children.MoveNextAsync().ConfigureAwait(false);
+                }
+
+                xml.WriteEndElement();
+                xml.WriteEndDocument();
+                await SendAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _logger.LogInformation("WebDAV: the listing of '{Path}' in {Collection} broke off part way ({Error}); so does its answer", r.Path, r.Collection, ex.Message);
+                r.Ctx.Abort();
+            }
+        }
     }
+
+    // how much of a listing is written before it is sent on
+    private const int ListingPiece = 64 * 1024;
 
     private XElement ResponseFor(DavRequest r, string path, VfsEntry entry, VfsSpace? space, PropfindRequest request)
     {

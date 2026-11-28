@@ -186,6 +186,66 @@ public class WebDavMountTests
     }
 
     [TestMethod]
+    public async Task AFoldersListingIsSentAsItIsMadeAndOneThatBreaksOffPartWayIsBrokenOffToo()
+    {
+        // Every entry's answer was made, put into one document, that into one string and that into bytes before any of
+        // it was sent: 780 MB allocated and 511 MB held at once to list 100,000 files (the review of 21-Nov-2026, P13)
+        var source = Tree();
+        for (var n = 0; n < 3000; n++)
+        {
+            source.AddFile($"many/file {n:D4}.txt", "x");
+        }
+
+        var breaksAt = long.MaxValue;
+        var (_, _, client) = await StartAsync(source, wrap: vfs => new Faulty(vfs, (call, path, given)
+            => call == "list" && path == "many" && given >= Volatile.Read(ref breaksAt) ? new IOException("the source's connection broke") : null));
+
+        using (var whole = await client.SendAsync(Request("PROPFIND", "work/many/", null, ("Depth", "1")), HttpCompletionOption.ResponseHeadersRead))
+        {
+            Assert.AreEqual((HttpStatusCode)207, whole.StatusCode);
+            Assert.IsNull(whole.Content.Headers.ContentLength, "sent in pieces, its length not known when it begins");
+            var doc = XDocument.Parse(await whole.Content.ReadAsStringAsync());
+            var hrefs = doc.Root!.Elements(D + "response").Select(r => r.Element(D + "href")!.Value).ToList();
+            Assert.AreEqual(3001, hrefs.Count, "the folder and its 3,000 files");
+            Assert.AreEqual("/work/many/", hrefs[0]);
+            CollectionAssert.Contains(hrefs, "/work/many/file%200000.txt");
+            CollectionAssert.Contains(hrefs, "/work/many/file%202999.txt");
+            Assert.AreEqual("1", Prop(ResponseFor(doc, "/work/many/file%201500.txt")!, "getcontentlength")!.Value);
+        }
+
+        // broken off part way: the answer has begun, and ends without its end
+        Volatile.Write(ref breaksAt, 2000);
+        using (var broken = await client.SendAsync(Request("PROPFIND", "work/many/", null, ("Depth", "1")), HttpCompletionOption.ResponseHeadersRead))
+        {
+            Assert.AreEqual((HttpStatusCode)207, broken.StatusCode);
+            var read = new MemoryStream();
+            var failed = false;
+            try
+            {
+                await (await broken.Content.ReadAsStreamAsync()).CopyToAsync(read);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or IOException)
+            {
+                failed = true;
+            }
+
+            var text = Encoding.UTF8.GetString(read.ToArray());
+            Assert.IsTrue(failed, $"the answer came to an end as if whole, {text.Length:N0} characters of it");
+            Assert.IsFalse(text.Contains("</D:multistatus>", StringComparison.Ordinal));
+        }
+
+        // broken before its first entry: answered with the error, as it was
+        Volatile.Write(ref breaksAt, 0);
+        using var refused = await client.SendAsync(Request("PROPFIND", "work/many/", null, ("Depth", "1")));
+        Assert.IsTrue((int)refused.StatusCode >= 500, $"{(int)refused.StatusCode}");
+
+        // and a folder with nothing in it is its own answer alone
+        Volatile.Write(ref breaksAt, long.MaxValue);
+        var empty = await XmlAsync(await client.SendAsync(Request("PROPFIND", "work/emptydir/", null, ("Depth", "1"))));
+        Assert.AreEqual(1, empty.Root!.Elements(D + "response").Count());
+    }
+
+    [TestMethod]
     public async Task PropfindDepthZeroOneAndRoot()
     {
         var (_, _, client) = await StartAsync(Tree());

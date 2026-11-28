@@ -1,11 +1,13 @@
+using System.Runtime.CompilerServices;
 using AnyFS.Sdk;
 
 namespace AnyFS.Mounts.Tests;
 
 /// <summary>
 /// A file system in which a test makes things go wrong, the way a source's own fault reaches a mount. The test is asked at
-/// each "stat" of a path, at each "read" of a file with the read's offset, and at a file's "close": what it gives is
-/// thrown in place of the call (a close is made first), and with nothing given the call goes through.
+/// each "stat" of a path, at each "read" of a file with the read's offset, at each entry a "list" of a folder comes to,
+/// with how many it has given, and at a file's "close": what it gives is thrown in place of the call (a close is made
+/// first), and with nothing given the call goes through.
 /// </summary>
 internal sealed class Faulty(IVirtualFileSystem inner, Func<string, string, long, Exception?> fault) : IVirtualFileSystem
 {
@@ -18,7 +20,19 @@ internal sealed class Faulty(IVirtualFileSystem inner, Func<string, string, long
     public Task<VfsEntry?> StatAsync(string path, CancellationToken ct)
         => fault("stat", VfsPath.Normalize(path), 0) is { } thrown ? throw thrown : inner.StatAsync(path, ct);
 
-    public IAsyncEnumerable<VfsEntry> ListAsync(string path, CancellationToken ct) => inner.ListAsync(path, ct);
+    public async IAsyncEnumerable<VfsEntry> ListAsync(string path, [EnumeratorCancellation] CancellationToken ct)
+    {
+        long given = 0;
+        await foreach (var entry in inner.ListAsync(path, ct))
+        {
+            if (fault("list", VfsPath.Normalize(path), given++) is { } thrown)
+            {
+                throw thrown;
+            }
+
+            yield return entry;
+        }
+    }
 
     public async Task<IVfsFile> OpenAsync(string path, VfsOpenMode mode, CancellationToken ct) => new File(await inner.OpenAsync(path, mode, ct), VfsPath.Normalize(path), fault);
 
