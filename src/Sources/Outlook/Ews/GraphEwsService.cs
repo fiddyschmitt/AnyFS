@@ -294,7 +294,9 @@ internal sealed class GraphEwsService : IEwsService, IDisposable
         }
 
         // a file's bytes come with it; by $value should they not
-        var content = Str(attachment, "contentBytes") is { } base64 ? Convert.FromBase64String(base64) : steps.Length == 2 ? await BytesAsync($"{path}/$value", "an attachment", ct).ConfigureAwait(false) : [];
+        var content = attachment.ValueKind == JsonValueKind.Object && attachment.TryGetProperty("contentBytes", out var base64) && base64.ValueKind == JsonValueKind.String
+            ? base64.GetBytesFromBase64()
+            : steps.Length == 2 ? await BytesAsync($"{path}/$value", "an attachment", ct).ConfigureAwait(false) : [];
         return new EwsAttachmentContent(name, contentType, content, null);
     });
 

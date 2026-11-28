@@ -340,7 +340,9 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
 
             using (response)
             {
-                var text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                // its bytes, and the XML made of them: read as a string first, an answer that carries an attachment was
+                // held twice its size more, as text, to be made into the same XML (the review of 21-Nov-2026, P9)
+                var answered = await response.Content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
                 if (response.StatusCode == HttpStatusCode.Unauthorized)
                 {
                     throw new EwsException("401", RefusedSignIn(_url.Host, response));
@@ -360,11 +362,12 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
                 XDocument document;
                 try
                 {
-                    document = XDocument.Parse(text);
+                    using var bytes = new MemoryStream(answered, writable: false);
+                    document = XDocument.Load(bytes);
                 }
                 catch (System.Xml.XmlException)
                 {
-                    throw new EwsException(((int)response.StatusCode).ToString(CultureInfo.InvariantCulture), $"{_url.Host} answered {operation} with something other than SOAP ({(int)response.StatusCode} {response.ReasonPhrase}; {Trim(text)})", transient: (int)response.StatusCode >= 500);
+                    throw new EwsException(((int)response.StatusCode).ToString(CultureInfo.InvariantCulture), $"{_url.Host} answered {operation} with something other than SOAP ({(int)response.StatusCode} {response.ReasonPhrase}; {Trim(Words(answered))})", transient: (int)response.StatusCode >= 500);
                 }
 
                 if (document.Descendants(S + "Fault").FirstOrDefault() is { } fault)
@@ -384,7 +387,7 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
                 var messages = document.Descendants(M + "ResponseMessages").FirstOrDefault()?.Elements().ToList() ?? [];
                 if (messages.Count == 0)
                 {
-                    throw new EwsException("NoResponse", $"{operation}: {_url.Host} answered without a response message ({Trim(text)})");
+                    throw new EwsException("NoResponse", $"{operation}: {_url.Host} answered without a response message ({Trim(Words(answered))})");
                 }
 
                 if (all)
@@ -434,6 +437,9 @@ internal sealed class SoapEwsService : IEwsService, IDisposable
     }
 
     private static bool IsTransient(string code) => code is "ErrorServerBusy" or "ErrorTimeoutExpired" or "ErrorInternalServerTransientError" or "ErrorMailboxStoreUnavailable" or "ErrorTooManyObjectsOpened" or "ErrorConnectionFailed";
+
+    /// <summary>The start of an answer as text, for what an error says of it.</summary>
+    private static string Words(byte[] answered) => Encoding.UTF8.GetString(answered, 0, Math.Min(answered.Length, 2048));
 
     private static string Trim(string text)
     {

@@ -280,7 +280,9 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
         }
 
         var a = attachments[0];
-        var content = a.TryGetProperty("Content", out var c) && c.ValueKind == JsonValueKind.String ? Convert.FromBase64String(c.GetString()!) : null;
+        // from the answer's bytes, not through a string of them: an attachment of 30 MB is 40 MB as base64 and was 80 MB
+        // more as the string it was decoded from (the review of 21-Nov-2026, P9)
+        var content = a.TryGetProperty("Content", out var c) && c.ValueKind == JsonValueKind.String ? c.GetBytesFromBase64() : null;
         var item = a.TryGetProperty("Item", out var i) && i.ValueKind == JsonValueKind.Object ? ItemOf(i) : null;
         return new EwsAttachmentContent(Str(a, "Name") ?? "", Str(a, "ContentType"), content, item);
     }
@@ -815,7 +817,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
             BccRecipients = Mailboxes(e, "BccRecipients"),
             Body = body.ValueKind == JsonValueKind.Object ? Str(body, "Value") : null,
             BodyIsHtml = body.ValueKind == JsonValueKind.Object && Str(body, "BodyType") == "HTML",
-            Mime = e.TryGetProperty("MimeContent", out var m) && m.ValueKind == JsonValueKind.Object && Str(m, "Value") is { } mime ? Convert.FromBase64String(mime) : null,
+            Mime = e.TryGetProperty("MimeContent", out var m) && m.ValueKind == JsonValueKind.Object && m.TryGetProperty("Value", out var mime) && mime.ValueKind == JsonValueKind.String ? mime.GetBytesFromBase64() : null,
             Attachments = e.TryGetProperty("Attachments", out var attachments) && attachments.ValueKind == JsonValueKind.Array
                 ? attachments.EnumerateArray().Select(a => new EwsAttachmentInfo(
                     a.GetProperty("AttachmentId").GetProperty("Id").GetString()!,
