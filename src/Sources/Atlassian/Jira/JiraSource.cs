@@ -104,10 +104,18 @@ public sealed class JiraSource : SourceBase, ICountable
         // the walk may have all of "Requests at a time" in flight (until 5-Nov-2026 half, the rest kept back for browsing, which
         // the API's gate shares out anyway)
         var walking = Math.Clamp(_settings.Concurrency, 1, 64);
+
+        // for the same installation, account and scope, the same settings that shape the tree, and the same documents
+        // (a file's size is a fact about how it is written)
+        _keptKey = $"{_session.Address.Server}|{_session.User?.Name}|{Scope.Kind}:{Scope.Value}|{_settings.Shape}|md{JiraDocuments.Format}";
         _kept = new KeptListings(ListFolderAsync, Counters, Logger, new KeptListingsOptions
         {
             Keep = _settings.Keeps,
-            Unsaved = why => HoldDegraded("listings", why),
+            Unsaved = why =>
+            {
+                Volatile.Write(ref _listingsUnkept, why is not null);
+                HoldDegraded("listings", why);
+            },
             UnkeptFor = TimeSpan.Zero,
             WalkEvery = _settings.WalkEvery,
             Parallelism = walking,
@@ -117,11 +125,19 @@ public sealed class JiraSource : SourceBase, ICountable
             KeepFailures = true,
             Name = "jira",
 
-            // the listings last run saw open at once at the next start: for the same installation, account and scope, the
-            // same settings that shape the tree, and the same documents (a file's size is a fact about how it is written)
+            // the listings last run saw open at once at the next start
             SaveTo = Path.Combine(Context.StateDirectory, "listings.json.gz"),
-            SaveKey = $"{_session.Address.Server}|{_session.User?.Name}|{Scope.Kind}:{Scope.Value}|{_settings.Shape}|md{JiraDocuments.Format}",
+            SaveKey = _keptKey,
         });
+
+        // and when each folder of issues was last read, so what changed since is all the first walk asks for
+        if (_settings.Keeps && JiraTreeReads.Load(TreeReadsFile, _keptKey) is { } reads)
+        {
+            foreach (var (folder, read) in reads)
+            {
+                _treeReads[folder] = read;
+            }
+        }
 
         _session.Renewed += _kept.Cache.ForgetFailures;
         _kept.StartWalksOfHeld();
@@ -560,11 +576,42 @@ public sealed class JiraSource : SourceBase, ICountable
         }).ConfigureAwait(false);
     }
 
-    /// <summary>When a folder of issues was last read whole, and last read at all (whole, or the changes since): where the next read's window starts.</summary>
-    private sealed record TreeRead(DateTimeOffset Whole, DateTimeOffset At);
+    // by path; kept between runs with the listings (JiraTreeReads)
+    private readonly ConcurrentDictionary<string, JiraTreeRead> _treeReads = new(StringComparer.Ordinal);
 
-    // by path, for the run (a restart reads a changed folder whole once)
-    private readonly ConcurrentDictionary<string, TreeRead> _treeReads = new(StringComparer.Ordinal);
+    // what the listings are kept under, and whether they cannot be kept just now
+    private string _keptKey = "";
+    private bool _listingsUnkept;
+
+    private string TreeReadsFile => Path.Combine(Context.StateDirectory, "tree-reads.json.gz");
+
+    /// <summary>
+    /// Keeps when each folder was last read for the next run, the listings having been saved; where they could not
+    /// be, nothing is left that speaks of a read the next run will not have.
+    /// </summary>
+    private void SaveTreeReads()
+    {
+        if (!_settings.Keeps || _keptKey.Length == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            if (Volatile.Read(ref _listingsUnkept))
+            {
+                File.Delete(TreeReadsFile);
+            }
+            else
+            {
+                JiraTreeReads.Save(TreeReadsFile, _keptKey, new Dictionary<string, JiraTreeRead>(_treeReads, StringComparer.Ordinal));
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Logger.LogDebug("jira: when the folders were last read could not be kept ({Error}); the next run reads what changed whole", ex.Message);
+        }
+    }
 
     private static readonly TimeSpan ReadWholeEvery = TimeSpan.FromDays(1);
 
@@ -587,7 +634,7 @@ public sealed class JiraSource : SourceBase, ICountable
         }
 
         listings[path] = entries;
-        _treeReads[path] = new TreeRead(started, started);
+        _treeReads[path] = new JiraTreeRead(started, started);
         Logger.LogDebug("jira: read {Folder} whole: {Count:N0} issues", path.Length == 0 ? "the scope" : path, count);
         return listings;
     }
@@ -612,7 +659,7 @@ public sealed class JiraSource : SourceBase, ICountable
     /// null where that cannot be trusted (nothing held, a last read too long ago, an issue count that does not add up),
     /// and the folder is read whole. The window starts from the last read.
     /// </summary>
-    private async Task<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?> ChangedTreeAsync(string path, JiraIssuesFolder folder, TreeRead read, CancellationToken ct)
+    private async Task<IReadOnlyDictionary<string, IReadOnlyList<VfsEntry>>?> ChangedTreeAsync(string path, JiraIssuesFolder folder, JiraTreeRead read, CancellationToken ct)
     {
         var started = DateTimeOffset.UtcNow;
         var held = Kept.Cache.Under(path);
@@ -707,6 +754,7 @@ public sealed class JiraSource : SourceBase, ICountable
         if (_kept is not null)
         {
             await _kept.DisposeAsync().ConfigureAwait(false);
+            SaveTreeReads();
         }
 
         if (_spool is not null)

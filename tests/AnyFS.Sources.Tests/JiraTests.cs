@@ -1040,6 +1040,52 @@ public class JiraTests
         CollectionAssert.DoesNotContain(names, "BULK-9 Bulk issue 9");
     }
 
+    [TestMethod]
+    public async Task AfterARestartAChangedProjectReadsOnlyWhatChangedSinceTheLastRunsRead()
+    {
+        // When a folder of issues was last read was known for the run alone, so the first walk of each run read every
+        // project that had changed whole: every issue with every field, a hundred a search (the review of
+        // 21-Nov-2026, P12)
+        var fake = JiraSeed.Lab();
+        var now = DateTimeOffset.UtcNow;
+        foreach (var issue in fake.Issues.Where(i => i.Project.Key == "BULK"))
+        {
+            issue.Updated = now.AddDays(-1);
+        }
+
+        using var context = new TestSourceContext();
+        var settings = JiraSeed.Settings(fake, "/projects/BULK");
+        await using (var first = await StartAsync(fake, settings, context))
+        {
+            await first.CountFilesAsync(CancellationToken.None);
+            await UpstreamRequestRows.AllEndAsync(context);
+        }
+
+        var seven = fake.IssueAt("BULK-7");
+        seven.Summary = "Bulk issue seven, renamed since";
+        seven.Updated = DateTimeOffset.UtcNow;
+        var before = fake.Searches.Count;
+        await using (var second = await StartAsync(fake, settings, context))
+        {
+            await second.WalkAsync(new SourceCounters(), full: false, CancellationToken.None);
+            var asked = fake.Searches.Skip(before).ToList();
+            Assert.IsTrue(asked.Any(q => q.Contains("updated >= -", StringComparison.Ordinal)), string.Join("\n", asked));
+            Assert.IsFalse(asked.Any(q => q.Contains(" AND id > ", StringComparison.Ordinal)), "read whole again: " + string.Join("\n", asked));
+            var names = (await second.Listings.GetAsync("", CancellationToken.None)).Select(e => e.Name).ToList();
+            CollectionAssert.Contains(names, "BULK-7 Bulk issue seven, renamed since");
+            CollectionAssert.DoesNotContain(names, "BULK-7 Bulk issue 7");
+            Assert.AreEqual(251, names.Count);
+            StringAssert.StartsWith(await TextAsync(second, "BULK-7 Bulk issue seven, renamed since/issue.md"), "# BULK-7 Bulk issue seven, renamed since\n");
+        }
+
+        // listings kept under other settings are not read back, and what was known of their reads goes with them
+        settings.Attachments = !settings.Attachments;
+        before = fake.Searches.Count;
+        await using var third = await StartAsync(fake, settings, context);
+        await third.CountFilesAsync(CancellationToken.None);
+        Assert.IsTrue(fake.Searches.Skip(before).Any(q => q.Contains(" AND id > ", StringComparison.Ordinal)), "read whole, as nothing is held");
+    }
+
     // --- the plugin ----------------------------------------------------------------------------------------------------
 
     [TestMethod]
