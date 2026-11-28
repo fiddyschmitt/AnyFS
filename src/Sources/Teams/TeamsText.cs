@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Text;
-using ReverseMarkdown;
+using AnyFS.Sources.Common;
 
 namespace AnyFS.Sources.Teams;
 
@@ -28,13 +28,6 @@ internal static class TeamsText
     /// </summary>
     public const int Format = 1;
 
-    private static readonly Lock ConverterGate = new();
-    private static readonly Converter Markdown = new(new Config
-    {
-        Tags = { Unknown = Config.UnknownTagsOption.Bypass },
-        Links = { SmartHref = true },
-        Formatting = { RemoveComments = true, ListBulletChar = '-', OutputLineEnding = "\n" },
-    });
 
     // a message's Markdown body, by the message itself: a fetched page's messages are reused for every naming and build
     // until the page is fetched again, so each is converted once (a posts folder named and built its roots three times)
@@ -646,10 +639,7 @@ internal static class TeamsText
             return message.Html.Trim();
         }
 
-        lock (ConverterGate)
-        {
-            return Markdown.Convert(message.Html).Trim();
-        }
+        return HtmlMarkdown.Convert(message.Html).Trim();
     }
 
     /// <summary>The first line of the opening message's text, cut at 80; null when it has none (an image-only post).</summary>

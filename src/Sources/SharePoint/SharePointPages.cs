@@ -5,7 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using AngleSharp.Html.Parser;
-using ReverseMarkdown;
+using AnyFS.Sources.Common;
 
 namespace AnyFS.Sources.SharePoint;
 
@@ -40,15 +40,6 @@ internal static partial class SharePointPages
     private const string PageExtension = ".aspx";
     private const string ShownExtension = ".md";
 
-    // the default flavour: its GitHub and CommonMark flavours keep a page's div blocks as raw HTML (ReverseMarkdown
-    // 6.2.1); the default writes tables, fenced code and nested lists the GitHub way all the same
-    private static readonly Lock ConverterGate = new();
-    private static readonly Converter MarkdownConverter = new(new Config
-    {
-        Tags = { Unknown = Config.UnknownTagsOption.Bypass },
-        Links = { SmartHref = true },
-        Formatting = { RemoveComments = true, ListBulletChar = '-', OutputLineEnding = "\n" },
-    });
 
     /// <summary>A page upstream: an .aspx file (anything else in a page library is left out).</summary>
     public static bool IsPage(string upstreamName) => upstreamName.Length > PageExtension.Length && upstreamName.EndsWith(PageExtension, StringComparison.OrdinalIgnoreCase);
@@ -81,12 +72,8 @@ internal static partial class SharePointPages
         var html = !string.IsNullOrWhiteSpace(canvasHtml) ? canvasHtml : wikiHtml;
         if (!string.IsNullOrWhiteSpace(html))
         {
-            string body;
-            lock (ConverterGate)
-            {
-                body = MarkdownConverter.Convert(Clean(html, pageUrl));
-            }
-
+            // the default flavour (HtmlMarkdown): its GitHub and CommonMark flavours keep a page's div blocks as raw HTML
+            var body = HtmlMarkdown.Deep(() => HtmlMarkdown.Convert(Clean(html, pageUrl)));
             body = BlankLines().Replace(body.Replace("\r\n", "\n"), "\n\n").Trim();
             if (body.Length > 0)
             {

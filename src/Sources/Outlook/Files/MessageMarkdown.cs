@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using AnyFS.Sources.Outlook.Mail;
-using ReverseMarkdown;
+using AnyFS.Sources.Common;
 
 namespace AnyFS.Sources.Outlook.Files;
 
@@ -14,14 +14,6 @@ namespace AnyFS.Sources.Outlook.Files;
 /// </summary>
 internal static partial class MessageMarkdown
 {
-    // the default flavour, as SharePointPages: tables, fenced code and nested lists the GitHub way
-    private static readonly Lock ConverterGate = new();
-    private static readonly Converter MarkdownConverter = new(new Config
-    {
-        Tags = { Unknown = Config.UnknownTagsOption.Bypass },
-        Links = { SmartHref = true },
-        Formatting = { RemoveComments = true, ListBulletChar = '-', OutputLineEnding = "\n" },
-    });
 
     /// <summary>The item's Markdown, UTF-8 without a byte order mark.</summary>
     /// <param name="attachments">The item's attachments with the names they show under in the attachments folder.</param>
@@ -130,11 +122,8 @@ internal static partial class MessageMarkdown
             html = CidReference().Replace(html, m => byContentId.TryGetValue(Uri.UnescapeDataString(m.Groups[2].Value), out var file) ? m.Groups[1].Value + Link(file) : m.Value);
         }
 
-        string markdown;
-        lock (ConverterGate)
-        {
-            markdown = MarkdownConverter.Convert(html);
-        }
+        // (a long thread of mail nests a reply in a reply: converted where that is safe, HtmlMarkdown)
+        var markdown = HtmlMarkdown.Convert(html);
 
         // ReverseMarkdown leaves the runs of blank lines a mail's HTML has
         return BlankLines().Replace(markdown.Replace("\r\n", "\n", StringComparison.Ordinal), "\n\n").Trim();

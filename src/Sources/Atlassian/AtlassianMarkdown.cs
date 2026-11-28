@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using AngleSharp.Dom;
 using AngleSharp.Html.Parser;
-using ReverseMarkdown;
+using AnyFS.Sources.Common;
 
 namespace AnyFS.Sources.Atlassian;
 
@@ -15,26 +15,17 @@ namespace AnyFS.Sources.Atlassian;
 /// </summary>
 internal static partial class AtlassianMarkdown
 {
-    // the default flavour, as SharePoint's: tables, fenced code and nested lists the GitHub way, div blocks unwrapped
-    private static readonly Lock ConverterGate = new();
-    private static readonly Converter MarkdownConverter = new(new Config
-    {
-        Tags = { Unknown = Config.UnknownTagsOption.Bypass },
-        Links = { SmartHref = true },
-        Formatting = { RemoveComments = true, ListBulletChar = '-', OutputLineEnding = "\n" },
-    });
 
     /// <summary>
     /// HTML as Markdown: each link's and image's address given to <paramref name="link"/> first (absolute, against
     /// <paramref name="baseUrl"/>), which may give another (a relative path to a file the source shows) or keep it.
     /// </summary>
     public static string FromHtml(string? html, Uri? baseUrl, Func<Uri, string?>? link = null)
-    {
-        if (string.IsNullOrWhiteSpace(html))
-        {
-            return "";
-        }
+        => string.IsNullOrWhiteSpace(html) ? "" : HtmlMarkdown.Deep(() => FromHtmlDeep(html, baseUrl, link));
 
+    // on the thread HTML is converted on, which goes as deep as the HTML nests (HtmlMarkdown): its parsing and its links here too
+    private static string FromHtmlDeep(string html, Uri? baseUrl, Func<Uri, string?>? link)
+    {
         var document = new HtmlParser().ParseDocument("<!DOCTYPE html><html><body>" + html + "</body></html>");
         var body = document.Body!;
         foreach (var element in body.QuerySelectorAll("script, style, noscript").ToList())
@@ -50,13 +41,7 @@ internal static partial class AtlassianMarkdown
             }
         }
 
-        string markdown;
-        lock (ConverterGate)
-        {
-            markdown = MarkdownConverter.Convert(body.InnerHtml);
-        }
-
-        return Tidy(markdown);
+        return Tidy(HtmlMarkdown.Convert(body.InnerHtml));
     }
 
     private static void Relink(IElement element, string attribute, Uri? baseUrl, Func<Uri, string?>? link)

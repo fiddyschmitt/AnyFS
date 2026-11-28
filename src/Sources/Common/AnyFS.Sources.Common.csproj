@@ -15,6 +15,8 @@
     <PackageReference Include="Selenium.WebDriver" />
     <!-- System.Threading.RateLimiting (MIT, the .NET runtime's own): the pace of requests to a service (RequestPace) -->
     <PackageReference Include="System.Threading.RateLimiting" />
+    <!-- ReverseMarkdown (MIT): a server's rich text as Markdown, converted in one place for every source (HtmlMarkdown) -->
+    <PackageReference Include="ReverseMarkdown" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\AnyFS.Sdk\AnyFS.Sdk.csproj" />
