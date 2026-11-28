@@ -303,6 +303,14 @@ internal sealed class WinFspFileSystem(IVirtualFileSystem fs, string label, stri
             {
                 Wait(file.DisposeAsync().AsTask());
             }
+            catch (VfsException ex) when (desc.HoldsItsOwn)
+            {
+                // What was made or written through the handle did not land (an upload its source refused or could not
+                // make). Windows told the program its close went well before this one came, and this one has no answer
+                // to give, so the log is the one place it shows: it said so at Debug, which the log leaves out (the
+                // review of 21-Nov-2026)
+                logger.LogWarning("winfsp: '{Path}' was written through the mount and its close failed: {Error}", desc.Path, ex.Message);
+            }
             catch (VfsException ex)
             {
                 logger.LogDebug("winfsp: close of '{Path}': {Error}", desc.Path, ex.Message);

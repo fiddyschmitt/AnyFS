@@ -96,7 +96,7 @@ internal sealed class SmbHost(IPAddress address, int port, ILogger logger) : IAs
 
             try
             {
-                _server.AddShare(new SmbShare(collection, new VfsShareFileSystem(fs, stats), fs.ReadOnly));
+                _server.AddShare(new SmbShare(collection, new VfsShareFileSystem(fs, stats, logger), fs.ReadOnly));
             }
             catch when (_server.Shares.Count == 0)
             {

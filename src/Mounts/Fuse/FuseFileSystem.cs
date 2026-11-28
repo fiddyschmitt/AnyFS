@@ -125,7 +125,7 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
             return opened;
         }
 
-        fileInfo.Context = new Handle(file!);
+        fileInfo.Context = new Handle(file!, path, write);
         return PosixResult.Success;
     }
 
@@ -148,7 +148,7 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
             return result;
         }
 
-        fileInfo.Context = new Handle(file!);
+        fileInfo.Context = new Handle(file!, path, writes: true);
         return PosixResult.Success;
     }
 
@@ -260,7 +260,28 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
                 handle.ReadAhead.Dispose();
             }
 
-            return Guard(() => { Wait(handle.File.DisposeAsync().AsTask()); return PosixResult.Success; });
+            try
+            {
+                Wait(handle.File.DisposeAsync().AsTask());
+            }
+            catch (VfsException ex) when (handle.Writes)
+            {
+                // What was written through the handle did not land (an upload its source refused or could not make). The
+                // kernel neither waits for a release nor passes on what it says, and close(2) returned before it came, so
+                // the log is the one place it shows: nothing said it (the review of 21-Nov-2026)
+                logger.LogWarning("fuse: '{Path}' was written through the mount and its close failed: {Error}", handle.Path, ex.Message);
+                return Translate(ex);
+            }
+            catch (VfsException ex)
+            {
+                logger.LogDebug("fuse: close of '{Path}': {Error}", handle.Path, ex.Message);
+                return Translate(ex);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "fuse: close of '{Path}' failed", handle.Path);
+                return PosixResult.EIO;
+            }
         }
 
         return PosixResult.Success;
@@ -484,9 +505,15 @@ internal sealed class FuseFileSystem(IVirtualFileSystem fs, uint uid, uint gid, 
     /// One open file handle (<see cref="FuseFileInfo.Context"/>): the VFS file and its read-ahead. Reads and writes on
     /// it run one at a time under <see cref="Gate"/>, so the read-ahead never holds what a write replaced.
     /// </summary>
-    private sealed class Handle(IVfsFile file)
+    private sealed class Handle(IVfsFile file, string path, bool writes)
     {
         public IVfsFile File { get; } = file;
+
+        /// <summary>The path it was opened by, for the log.</summary>
+        public string Path { get; } = path;
+
+        /// <summary>Opened to make or write the file: its close keeps what was written, and may fail to.</summary>
+        public bool Writes { get; } = writes;
 
         public Lock Gate { get; } = new();
 

@@ -1,6 +1,7 @@
 ﻿using System.Runtime.CompilerServices;
 using AnyFS.Sdk;
 using LibSmb;
+using Microsoft.Extensions.Logging;
 
 namespace AnyFS.Mounts.Smb;
 
@@ -11,7 +12,7 @@ namespace AnyFS.Mounts.Smb;
 /// writes are refused when tried. An open file reads through a <see cref="SequentialReadAhead"/>: clients read in
 /// pieces of 64 KiB, and on a source where a read is a round trip that caps a copy far below the link.
 /// </summary>
-internal sealed class VfsShareFileSystem(IVirtualFileSystem fs, IMountStatsSink stats) : ISmbFileSystem
+internal sealed class VfsShareFileSystem(IVirtualFileSystem fs, IMountStatsSink stats, ILogger logger) : ISmbFileSystem
 {
     /// <summary>Names are matched as they are spelt: the sources decide whether another case finds an entry.</summary>
     public bool CaseInsensitive => false;
@@ -85,7 +86,7 @@ internal sealed class VfsShareFileSystem(IVirtualFileSystem fs, IMountStatsSink 
                 }
             }
 
-            return (ISmbFile)new OpenVfsFile(file, stats);
+            return (ISmbFile)new OpenVfsFile(file, stats, path, vfsMode != VfsOpenMode.Read, logger);
         });
 
     public ValueTask CreateDirectoryAsync(string path, CancellationToken cancellationToken)
@@ -158,8 +159,11 @@ internal sealed class VfsShareFileSystem(IVirtualFileSystem fs, IMountStatsSink 
         }
     }
 
-    /// <summary>An open VFS file as an open of the share; its reads through the read-ahead, which a write or resize forgets.</summary>
-    private sealed class OpenVfsFile(IVfsFile file, IMountStatsSink stats) : ISmbFile
+    /// <summary>
+    /// An open VFS file as an open of the share; its reads through the read-ahead, which a write or resize forgets.
+    /// <paramref name="writes"/>: opened to make or write the file, so that its close keeps what was written, and may fail to.
+    /// </summary>
+    private sealed class OpenVfsFile(IVfsFile file, IMountStatsSink stats, string path, bool writes, ILogger logger) : ISmbFile
     {
         private readonly SequentialReadAhead _readAhead = new();
 
@@ -236,6 +240,14 @@ internal sealed class VfsShareFileSystem(IVirtualFileSystem fs, IMountStatsSink 
             }
             catch (VfsException ex)
             {
+                if (writes)
+                {
+                    // What was written through the open did not land (an upload its source refused or could not make).
+                    // The client is answered so, but Windows tells a program its close went well whatever the answer, so
+                    // the log is where it shows, and it said so at Debug (the review of 21-Nov-2026)
+                    logger.LogWarning("smb: '{Path}' was written through the mount and its close failed: {Error}", path, ex.Message);
+                }
+
                 throw Translate(ex);
             }
         }

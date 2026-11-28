@@ -56,7 +56,7 @@ public class WinFspMountTests
         }
     }
 
-    private async Task<(IMount Mount, string Unc, MemorySource Source)> MountAsync(bool readOnly = false, Func<IVirtualFileSystem, IVirtualFileSystem>? wrap = null)
+    private async Task<(IMount Mount, string Unc, MemorySource Source)> MountAsync(bool readOnly = false, Func<IVirtualFileSystem, IVirtualFileSystem>? wrap = null, ILogger? logger = null)
     {
         var name = "anyfs-test-" + Guid.NewGuid().ToString("N")[..8];
         var source = Tree();
@@ -64,7 +64,7 @@ public class WinFspMountTests
         var provider = new WinFspMountProvider();
         var settings = (WinFspMountSettings)provider.CreateDefaultSettings(new Collection(name));
         var mount = provider.CreateMount(settings, new Collection(name));
-        var context = new TestMountContext(name, "winfsp", logger: new ConsoleLogger());
+        var context = new TestMountContext(name, "winfsp", logger: logger ?? new ConsoleLogger());
         IVirtualFileSystem vfs = new SingleSourceVfs(source, name, readOnly);
         await mount.StartAsync(wrap?.Invoke(vfs) ?? vfs, context, CancellationToken.None);
         _cleanup.Add(mount);
@@ -1073,6 +1073,36 @@ public class WinFspMountTests
         CollectionAssert.AreEqual(new[] { "given up" }, told.Of("cancelled.bin"), string.Join(", ", told.Of("cancelled.bin")));
         Assert.IsFalse(File.Exists(Path.Combine(unc, "cancelled.bin")));
         Assert.IsNull(await source.StatAsync("cancelled.bin", CancellationToken.None));
+    }
+
+    /// <summary>
+    /// A file written through the mount whose close fails (its upload refused) is a warning in the log. Windows tells the
+    /// program its close went well before WinFsp's own close comes, and that has no answer to give, so the log is the one
+    /// place it shows; it said so at Debug, which the log leaves out (the review of 21-Nov-2026). A file only read whose
+    /// close fails stays at Debug.
+    /// </summary>
+    [TestMethod]
+    public async Task AFileWrittenThroughTheMountWhoseCloseFailsIsAWarningInTheLog()
+    {
+        RequireWinFsp();
+        var log = new RecordedLog();
+        var (_, unc, source) = await MountAsync(
+            wrap: vfs => new Faulty(vfs, (call, path, _) => call == "close" && path is "refused.txt" or "readme.txt" ? VfsException.Unavailable($"'{path}' could not be uploaded: the server said no") : null),
+            logger: log);
+
+        File.WriteAllText(Path.Combine(unc, "refused.txt"), "what I wrote");
+        Assert.AreEqual("hello readme", File.ReadAllText(Path.Combine(unc, "readme.txt")));
+
+        var until = Stopwatch.StartNew();
+        while (log.At(LogLevel.Debug, "readme.txt").Length == 0 || log.At(LogLevel.Warning, "refused.txt").Length == 0)
+        {
+            Assert.IsTrue(until.Elapsed < TimeSpan.FromSeconds(15), "both closes came: " + string.Join(" | ", log.Lines.Select(l => $"{l.Level} {l.Message}")));
+            await Task.Delay(50);
+        }
+
+        StringAssert.Contains(log.At(LogLevel.Warning, "refused.txt").Single(), "the server said no");
+        Assert.AreEqual(0, log.At(LogLevel.Warning, "readme.txt").Length, "only read: at Debug as before");
+        Assert.AreEqual("what I wrote", Encoding.UTF8.GetString(source.GetFile("refused.txt")!), "the close itself went through: the fault came after it");
     }
 
     /// <summary>The provider's log lines into the test output.</summary>

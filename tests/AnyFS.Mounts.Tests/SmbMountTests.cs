@@ -46,7 +46,7 @@ public class SmbMountTests
     }
 
     /// <summary>A collection mounted over SMB on a free port with the test login; the mount, its context and the port.</summary>
-    private async Task<(IMount Mount, TestMountContext Context, int Port)> MountAsync(IVirtualFileSystem fs, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool guest = false)
+    private async Task<(IMount Mount, TestMountContext Context, int Port)> MountAsync(IVirtualFileSystem fs, string collection = "work", int? port = null, TestMountContext? shareWith = null, bool guest = false, Microsoft.Extensions.Logging.ILogger? logger = null)
     {
         var provider = new SmbMountProvider();
         var settings = (SmbMountSettings)provider.CreateDefaultSettings(new Collection(collection));
@@ -55,7 +55,7 @@ public class SmbMountTests
         settings.User = guest ? null : User;
         settings.Password = guest ? null : Password;
         var mount = provider.CreateMount(settings, new Collection(collection));
-        var context = new TestMountContext(collection, "smb", shareWith: shareWith);
+        var context = new TestMountContext(collection, "smb", logger: logger, shareWith: shareWith);
         await mount.StartAsync(fs, context, CancellationToken.None);
         _cleanup.Add(mount);
         return (mount, context, settings.Port);
@@ -483,6 +483,28 @@ public class SmbMountTests
         CollectionAssert.AreEqual(new[] { "given up" }, told.Of("half.bin"), string.Join(", ", told.Of("half.bin")));
         CollectionAssert.AreEqual(new[] { "closed" }, told.Of("readme.txt"), "only read: closed");
         CollectionAssert.AreEqual(new[] { "closed" }, told.Of("whole.bin"), "closed by its client before: kept");
+    }
+
+    /// <summary>
+    /// A file written over SMB whose close fails (its upload refused) is a warning in the log. The client is answered so,
+    /// but Windows tells a program its close went well whatever the answer, so the log is where it shows; it said so at
+    /// Debug, which the log leaves out (the review of 21-Nov-2026). A file only read whose close fails is no warning.
+    /// </summary>
+    [TestMethod]
+    public async Task AFileWrittenOverSmbWhoseCloseFailsIsAWarningInTheLog()
+    {
+        var log = new RecordedLog();
+        var (_, _, port) = await MountAsync(new CloseFails(new CloseFails(await VfsAsync(Tree()), "refused.bin"), "readme.txt"), logger: log);
+        var (client, tree) = await ConnectAsync(port);
+
+        var written = await client.OpenAsync(tree, "refused.bin", write: true, disposition: Disposition.Create);
+        (await client.WriteAsync(tree, written, 0, new byte[1000])).EnsureSuccess();
+        Assert.AreNotEqual(Status.Success, (await client.CloseAsync(tree, written)).Status, "the client is answered that it failed");
+        var read = await client.OpenAsync(tree, "readme.txt");
+        Assert.AreNotEqual(Status.Success, (await client.CloseAsync(tree, read)).Status);
+
+        Assert.AreEqual(1, log.At(Microsoft.Extensions.Logging.LogLevel.Warning, "refused.bin").Length, string.Join(" | ", log.Lines.Select(l => $"{l.Level} {l.Message}")));
+        Assert.AreEqual(0, log.At(Microsoft.Extensions.Logging.LogLevel.Warning, "readme.txt").Length, "only read: no warning");
     }
 
     /// <summary>A collection where one file cannot be closed, as on a source whose upload at the close the server refuses.</summary>
