@@ -2,6 +2,7 @@
 using System.Net.Http.Headers;
 using System.Text.Json;
 using AnyFS.Sdk;
+using AnyFS.Sources.Common;
 
 namespace AnyFS.Sources.SharePoint;
 
@@ -27,7 +28,7 @@ internal static class GraphDrives
     {
         var name = item.GetProperty("name").GetString() ?? "";
         var isFolder = item.TryGetProperty("folder", out _);
-        var size = item.TryGetProperty("size", out var sizeElement) && sizeElement.TryGetInt64(out var s) ? s : 0;
+        var size = item.Long("size");
         var id = item.GetProperty("id").GetString() ?? "";
         var cTag = item.TryGetProperty("cTag", out var ct) ? ct.GetString() : null;
         var eTag = item.TryGetProperty("eTag", out var et) ? et.GetString() : null;
@@ -46,23 +47,11 @@ internal static class GraphDrives
         return (entry, new ItemRef(id, cTag, downloadUrl, size, isFolder));
     }
 
+    /// <summary>A drive; a quota or a number of it that is missing or given as null is none (it threw).</summary>
     public static DriveInfo ParseDrive(JsonElement drive)
     {
-        long? total = null, remaining = null;
-        if (drive.TryGetProperty("quota", out var quota))
-        {
-            if (quota.TryGetProperty("total", out var t) && t.TryGetInt64(out var tv))
-            {
-                total = tv;
-            }
-
-            if (quota.TryGetProperty("remaining", out var r) && r.TryGetInt64(out var rv))
-            {
-                remaining = rv;
-            }
-        }
-
-        return new DriveInfo(drive.GetProperty("id").GetString() ?? "", drive.GetProperty("name").GetString() ?? "", total, remaining);
+        var quota = drive.Obj("quota");
+        return new DriveInfo(drive.GetProperty("id").GetString() ?? "", drive.GetProperty("name").GetString() ?? "", quota.LongOrNull("total"), quota.LongOrNull("remaining"));
     }
 
     private static DateTimeOffset? ReadTime(JsonElement element, string property)

@@ -29,6 +29,13 @@ public static class Json
             _ => 0,
         } : 0;
 
+    /// <summary>
+    /// A whole number given as one, or null where it is missing, null or anything else: for a number whose absence means
+    /// something other than 0 (a quota a library has not got).
+    /// </summary>
+    public static long? LongOrNull(this JsonElement e, string name)
+        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var n) ? n : null;
+
     /// <summary>True for <c>true</c>, as a boolean or as the string.</summary>
     public static bool Bool(this JsonElement e, string name)
         => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && (v.ValueKind == JsonValueKind.True || v.ValueKind == JsonValueKind.String && v.GetString() == "true");

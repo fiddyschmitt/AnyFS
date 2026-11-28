@@ -651,7 +651,7 @@ internal sealed class GraphDocumentStore : IDocumentStore
     {
         var path = Display(library, itemPath);
         using var item = await _graph.TryGetJsonAsync($"{SharePointPaths.ItemAddress(library.Key, itemPath)}?$select=id,folder", path, ct).ConfigureAwait(false) ?? throw VfsException.NotFound(path);
-        if (item.RootElement.TryGetProperty("folder", out var folder) && folder.ValueKind == JsonValueKind.Object && folder.TryGetProperty("childCount", out var count) && count.TryGetInt32(out var children))
+        if (item.RootElement.TryGetProperty("folder", out var folder) && folder.ValueKind == JsonValueKind.Object && folder.TryGetProperty("childCount", out var count) && count.ValueKind == JsonValueKind.Number && count.TryGetInt32(out var children))
         {
             return children;
         }

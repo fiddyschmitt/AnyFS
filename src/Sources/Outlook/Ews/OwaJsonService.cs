@@ -124,7 +124,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
                 offset += list.GetArrayLength();
             }
 
-            if (!root.TryGetProperty("IncludesLastItemInRange", out var last) || last.GetBoolean() || offset == 0)
+            if (Flag(root, "IncludesLastItemInRange") is not false || offset == 0)
             {
                 return folders;
             }
@@ -144,7 +144,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
         }, ct).ConfigureAwait(false);
         var root = message.GetProperty("RootFolder");
         var items = root.TryGetProperty("Items", out var list) ? list.EnumerateArray().Select(ItemOf).ToList() : [];
-        return new EwsItemPage(items, Int(root, "TotalItemsInView"), !root.TryGetProperty("IncludesLastItemInRange", out var last) || last.GetBoolean());
+        return new EwsItemPage(items, Int(root, "TotalItemsInView"), Flag(root, "IncludesLastItemInRange") is not false);
     }
 
     public async Task<IReadOnlyList<EwsItem>> CalendarViewAsync(string folderId, DateTimeOffset from, DateTimeOffset to, CancellationToken ct)
@@ -159,7 +159,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
         }, ct).ConfigureAwait(false);
         var root = message.GetProperty("RootFolder");
         var items = root.TryGetProperty("Items", out var list) ? list.EnumerateArray().Select(ItemOf).ToList() : [];
-        if (root.TryGetProperty("IncludesLastItemInRange", out var last) && !last.GetBoolean() && to - from > TimeSpan.FromDays(1))
+        if (Flag(root, "IncludesLastItemInRange") is false && to - from > TimeSpan.FromDays(1))
         {
             // more than one answer holds: each half of the range on its own
             var middle = from + (to - from) / 2;
@@ -194,7 +194,7 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
                 }
                 else if (c.TryGetProperty("ItemId", out var id))
                 {
-                    changes.Add(new EwsChange(kind, id.GetProperty("Id").GetString()!, null, c.TryGetProperty("IsRead", out var read) ? read.GetBoolean() : null));
+                    changes.Add(new EwsChange(kind, id.GetProperty("Id").GetString()!, null, Flag(c, "IsRead")));
                 }
             }
         }
@@ -872,6 +872,13 @@ internal sealed class OwaJsonService : IEwsService, IAddressBookService, IDispos
     private static long Long(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var n) ? n : 0;
 
     private static bool Bool(JsonElement e, string name) => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True;
+
+    /// <summary>
+    /// A flag as given, or null where it is missing, null or not a flag: a null read as a flag threw, and failed the
+    /// listing it came in (the review of 21-Nov-2026).
+    /// </summary>
+    private static bool? Flag(JsonElement e, string name)
+        => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out var v) ? v.ValueKind switch { JsonValueKind.True => true, JsonValueKind.False => false, _ => null } : null;
 
     private static DateTimeOffset? Date(JsonElement e, string name)
         => Str(e, name) is { } s && DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var d) ? d : null;

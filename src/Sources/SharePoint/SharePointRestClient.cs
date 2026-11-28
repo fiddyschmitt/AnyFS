@@ -472,7 +472,7 @@ internal sealed partial class SharePointRestClient : IDisposable
             using var doc = await ReadJsonAsync(response, SiteUrl.ToString(), ct).ConfigureAwait(false);
             var root = doc.RootElement;
             var value = root.TryGetProperty("FormDigestValue", out var fdv) ? fdv.GetString() : null;
-            var seconds = root.TryGetProperty("FormDigestTimeoutSeconds", out var fts) && fts.TryGetInt32(out var s) ? s : 1800;
+            var seconds = root.TryGetProperty("FormDigestTimeoutSeconds", out var fts) && fts.ValueKind == JsonValueKind.Number && fts.TryGetInt32(out var s) ? s : 1800;
             _digest = value ?? throw new VfsException(VfsError.IoError, $"{SiteUrl}: contextinfo returned no request digest");
             _digestExpires = DateTimeOffset.UtcNow.AddSeconds(Math.Max(60, seconds - 120));
             return _digest;

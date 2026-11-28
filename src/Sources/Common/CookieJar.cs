@@ -103,7 +103,10 @@ public static class CookieJar
             using var doc = JsonDocument.Parse(text);
             foreach (var c in doc.RootElement.EnumerateArray())
             {
-                var expires = c.TryGetProperty("expires", out var e) && e.TryGetDateTime(out var when) ? when : DateTime.MinValue;
+                // A cookie with a value of another kind than it should have (a null for a time or a flag) is that cookie's
+                // to lose, not the jar's: it threw past the cookie and took every other with it, so the sign-in kept was
+                // gone (the review of 21-Nov-2026).
+                var expires = c.ValueKind == JsonValueKind.Object && c.TryGetProperty("expires", out var e) && e.ValueKind == JsonValueKind.String && e.TryGetDateTime(out var when) ? when : DateTime.MinValue;
                 if (expires != DateTime.MinValue && expires < DateTime.UtcNow)
                 {
                     continue;
@@ -111,10 +114,10 @@ public static class CookieJar
 
                 try
                 {
-                    var cookie = new Cookie(c.GetProperty("name").GetString()!, c.GetProperty("value").GetString() ?? "", c.GetProperty("path").GetString() ?? "/", c.GetProperty("domain").GetString() ?? host)
+                    var cookie = new Cookie(c.Str("name") ?? "", c.Str("value") ?? "", c.Str("path") ?? "/", c.Str("domain") ?? host)
                     {
-                        Secure = c.GetProperty("secure").GetBoolean(),
-                        HttpOnly = c.GetProperty("httpOnly").GetBoolean(),
+                        Secure = c.Bool("secure"),
+                        HttpOnly = c.Bool("httpOnly"),
                     };
                     if (expires != DateTime.MinValue)
                     {

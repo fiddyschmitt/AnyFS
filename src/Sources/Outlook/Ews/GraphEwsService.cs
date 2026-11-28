@@ -160,7 +160,7 @@ internal sealed class GraphEwsService : IEwsService, IDisposable
         var (_, id) = Split(folderId);
         using var doc = await GetAsync($"me/mailFolders/{Escape(id)}/messages?$top={count}&$skip={offset}&$count=true&$orderby=receivedDateTime desc&$select={MessageFields}", "a folder's messages", null, ct).ConfigureAwait(false);
         var items = doc.RootElement.GetProperty("value").EnumerateArray().Select(m => MessageOf(m)).ToList();
-        var total = doc.RootElement.TryGetProperty("@odata.count", out var c) && c.TryGetInt32(out var n) ? n : offset + items.Count;
+        var total = doc.RootElement.TryGetProperty("@odata.count", out var c) && c.ValueKind == JsonValueKind.Number && c.TryGetInt32(out var n) ? n : offset + items.Count;
         return new EwsItemPage(items, total, !doc.RootElement.TryGetProperty("@odata.nextLink", out _));
     });
 

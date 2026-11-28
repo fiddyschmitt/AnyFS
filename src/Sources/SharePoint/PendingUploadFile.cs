@@ -724,34 +724,36 @@ internal sealed class PendingUploadFile : IVfsFile
         path = null;
         try
         {
+            // each value looked at for its kind first: one of another kind (a null for a number) threw past the catch below,
+            // and so failed the source's start (the review of 21-Nov-2026)
             using var note = JsonDocument.Parse(File.ReadAllBytes(tempPath + NoteSuffix));
             var root = note.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("version", out var version) || !version.TryGetInt32(out var v) || v != NoteVersion)
+            if (root.ValueKind != JsonValueKind.Object || root.LongOrNull("version") != NoteVersion)
             {
                 return Recovered.Broken;
             }
 
-            path = root.TryGetProperty("path", out var p) ? p.GetString() : null;
-            var length = root.TryGetProperty("length", out var l) && l.TryGetInt64(out var n) ? n : -1;
+            path = root.TryGetProperty("path", out var p) && p.ValueKind == JsonValueKind.String ? p.GetString() : null;
+            var length = root.LongOrNull("length") ?? -1;
             if (string.IsNullOrEmpty(path) || length < 0 || new FileInfo(tempPath) is not { Exists: true } local || local.Length != length)
             {
                 return Recovered.Broken;
             }
 
-            if (!root.TryGetProperty("key", out var k) || !string.Equals(k.GetString(), key, StringComparison.Ordinal))
+            if (!string.Equals(root.Str("key"), key, StringComparison.Ordinal))
             {
                 return Recovered.NotOurs;
             }
 
-            var closed = root.TryGetProperty("closed", out var cl) && cl.TryGetDateTimeOffset(out var at) ? at : local.LastWriteTimeUtc;
-            DateTimeOffset? created = root.TryGetProperty("created", out var cr) && cr.TryGetDateTimeOffset(out var c) ? c : null;
-            DateTimeOffset? modified = root.TryGetProperty("modified", out var mo) && mo.TryGetDateTimeOffset(out var m) ? m : null;
-            file = new PendingUploadFile(path, tempPath, length, closed, created, modified, key, upload, logger);
+            file = new PendingUploadFile(path, tempPath, length, Time(root, "closed") ?? local.LastWriteTimeUtc, Time(root, "created"), Time(root, "modified"), key, upload, logger);
             return Recovered.Waiting;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
             return Recovered.Broken;
         }
+
+        static DateTimeOffset? Time(JsonElement note, string name)
+            => note.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String && value.TryGetDateTimeOffset(out var at) ? at : null;
     }
 }

@@ -160,7 +160,7 @@ internal sealed class RestDocumentStore : IDocumentStore
         {
             var title = list.TryGetProperty("Title", out var t) ? t.GetString() : null;
             var root = list.TryGetProperty("RootFolder", out var rf) && rf.TryGetProperty("ServerRelativeUrl", out var sru) ? sru.GetString() : null;
-            var pages = list.TryGetProperty("BaseTemplate", out var bt) && bt.TryGetInt32(out var template) && template == SharePointPages.PageLibraryTemplate;
+            var pages = list.TryGetProperty("BaseTemplate", out var bt) && TryLong(bt, out var template) && template == SharePointPages.PageLibraryTemplate;
             if (!string.IsNullOrEmpty(title) && !string.IsNullOrEmpty(root))
             {
                 libraries.Add(new LibraryInfo(root.TrimEnd('/'), title, null, null, web, Pages: pages));
@@ -387,9 +387,9 @@ internal sealed class RestDocumentStore : IDocumentStore
                 foreach (var change in told.EnumerateArray())
                 {
                     count++;
-                    var kind = change.TryGetProperty("ChangeType", out var k) && k.TryGetInt32(out var type) ? type : 0;
+                    var kind = change.TryGetProperty("ChangeType", out var k) && k.ValueKind == JsonValueKind.Number && k.TryGetInt32(out var type) ? type : 0;
                     var id = change.TryGetProperty("UniqueId", out var u) && u.ValueKind == JsonValueKind.String ? Id(u.GetString()) : null;
-                    if (id is null || !change.TryGetProperty("ItemId", out var n) || !n.TryGetInt32(out var number))
+                    if (id is null || !change.TryGetProperty("ItemId", out var n) || n.ValueKind != JsonValueKind.Number || !n.TryGetInt32(out var number))
                     {
                         return Everything("the change log does not name the items that changed");
                     }
@@ -540,7 +540,7 @@ internal sealed class RestDocumentStore : IDocumentStore
                 }
             }
 
-            var total = results.TryGetProperty("TotalRows", out var t) && t.TryGetInt32(out var n) ? n : 0;
+            var total = results.TryGetProperty("TotalRows", out var t) && t.ValueKind == JsonValueKind.Number && t.TryGetInt32(out var n) ? n : 0;
             if (rows.GetArrayLength() < Page || start + Page >= total)
             {
                 break;

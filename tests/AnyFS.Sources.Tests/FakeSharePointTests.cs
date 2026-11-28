@@ -1189,6 +1189,32 @@ public class FakeSharePointTests
         await first.DisposeAsync();
     }
 
+    /// <summary>
+    /// A note beside a waiting upload with a value of another kind (a null for its version or its length) is no whole
+    /// write: it goes, and the source starts. Read as the kind it should have been, it threw past the reading's catch and
+    /// failed the start, at every try (the review of 21-Nov-2026, R16's rest).
+    /// </summary>
+    [TestMethod]
+    public async Task ANoteWithANullInItIsNoWholeWriteAndTheSourceStillStarts()
+    {
+        using var fake = FakeSharePoint.LabFarm();
+        using var context = new TestSourceContext("sharepoint");
+        var uploads = Directory.CreateDirectory(Path.Combine(context.CacheDirectory, "uploads")).FullName;
+        foreach (var (name, note) in new[]
+        {
+            ("version", """{"version":null,"key":"","path":"Documents/a.txt","length":1}"""),
+            ("length", """{"version":1,"key":null,"path":5,"length":null,"closed":7}"""),
+        })
+        {
+            File.WriteAllBytes(Path.Combine(uploads, name + ".upload"), new byte[1]);
+            File.WriteAllText(Path.Combine(uploads, name + ".upload.json"), note);
+        }
+
+        await using var source = await StartAsync(fake, FarmSettings(fake), context);
+        Assert.AreEqual(0, Directory.GetFiles(uploads).Length, "neither is a whole write: both go");
+        Assert.AreNotEqual(ComponentHealth.Degraded, context.LastHealth, "and nothing waits");
+    }
+
     private static async Task<byte[]> ReadAllAsync(ISource source, string path)
     {
         await using var file = await source.OpenAsync(path, VfsOpenMode.Read, None);
