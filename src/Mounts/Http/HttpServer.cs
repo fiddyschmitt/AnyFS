@@ -230,23 +230,13 @@ internal sealed class HttpServer : IAsyncDisposable
         await result.ExecuteAsync(ctx).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// The stream a GET or a HEAD of a file is answered from. One that has no body (a HEAD, a client whose copy still
-    /// stands) is made of the file unopened: its length is the listing's, and it is opened only if the answer turns out
-    /// to want it after all. Any other is opened now, so the answer has the file's length as it is, and is read a
-    /// megabyte ahead unless a small piece of it is asked for. A HEAD and a "not modified" opened the file, a request
-    /// of the source's server each, and a download asked the source 64 KiB at a time (the review of 21-Nov-2026, P13).
-    /// </summary>
-    private static async Task<VfsFileStream> ServedAsync(HttpContext ctx, IVirtualFileSystem fs, string path, VfsEntry entry, string entityTag, CancellationToken ct)
+    /// <summary>The stream a GET or a HEAD of a file is answered from (<see cref="VfsFileStream.ForAnswerAsync"/>): unopened for a HEAD and for a client whose copy still stands.</summary>
+    private static Task<VfsFileStream> ServedAsync(HttpContext ctx, IVirtualFileSystem fs, string path, VfsEntry entry, string entityTag, CancellationToken ct)
     {
         var request = ctx.Request;
-        if (HttpMethods.IsHead(request.Method) || HttpValidators.NotModified(request.Headers.IfNoneMatch, request.Headers.IfModifiedSince, entityTag, entry.Modified))
-        {
-            return new VfsFileStream(entry.Length, c => fs.OpenAsync(path, VfsOpenMode.Read, c));
-        }
-
-        var small = request.GetTypedHeaders().Range is { Ranges.Count: 1 } range && range.Ranges.First() is { From: { } from, To: { } to } && to - from < SequentialReadAhead.DefaultThreshold;
-        return new VfsFileStream(await fs.OpenAsync(path, VfsOpenMode.Read, ct).ConfigureAwait(false), ownsFile: true, readAhead: !small);
+        var bodiless = HttpMethods.IsHead(request.Method) || HttpValidators.NotModified(request.Headers.IfNoneMatch, request.Headers.IfModifiedSince, entityTag, entry.Modified);
+        var piece = request.GetTypedHeaders().Range is { Ranges.Count: 1 } range && range.Ranges.First() is { From: { } from, To: { } to } ? to - from + 1 : (long?)null;
+        return VfsFileStream.ForAnswerAsync(fs, path, entry, bodiless, piece, ct);
     }
 
     private static async Task WriteDirectoryAsync(HttpContext ctx, Registration registration, string vfsPath, CancellationToken ct)

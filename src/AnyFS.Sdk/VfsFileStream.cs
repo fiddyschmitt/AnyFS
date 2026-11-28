@@ -47,6 +47,23 @@ public sealed class VfsFileStream : Stream
     /// <summary>Whether the file has been opened: always, but for a stream made of one not yet opened and never read.</summary>
     public bool IsOpened => _file is not null;
 
+    /// <summary>
+    /// The stream a mount answers a request for a file from. An answer that has no body (<paramref name="bodiless"/>:
+    /// a HEAD, a client whose copy still stands) is made of the file unopened: its length is the listing's, and the
+    /// file is opened only if the answer turns out to want it after all. Any other is opened now, so the answer has
+    /// the file's length as it is, and is read a megabyte ahead unless a small piece of it is all that is asked for
+    /// (<paramref name="piece"/>, its length). A HEAD and a "not modified" opened the file, a request of the source's
+    /// server each, and a download asked the source 64 KiB at a time (the review of 21-Nov-2026, P13).
+    /// </summary>
+    public static async Task<VfsFileStream> ForAnswerAsync(IVirtualFileSystem fs, string path, VfsEntry entry, bool bodiless, long? piece, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(fs);
+        ArgumentNullException.ThrowIfNull(entry);
+        return bodiless
+            ? new VfsFileStream(entry.Length, c => fs.OpenAsync(path, VfsOpenMode.Read, c))
+            : new VfsFileStream(await fs.OpenAsync(path, VfsOpenMode.Read, ct).ConfigureAwait(false), ownsFile: true, readAhead: piece is not < SequentialReadAhead.DefaultThreshold);
+    }
+
     public override bool CanRead => !_disposed;
 
     public override bool CanSeek => !_disposed;
