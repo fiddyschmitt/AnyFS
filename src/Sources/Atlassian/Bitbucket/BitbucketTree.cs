@@ -1,3 +1,5 @@
+using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using AnyFS.Sdk;
 
 namespace AnyFS.Sources.Atlassian.Bitbucket;
@@ -130,48 +132,82 @@ internal sealed class BbFilesFolder(BbRepository repository, BbRef head) : BbFol
 /// </summary>
 internal sealed class BbRefsFolder(BbRepository repository, bool isTags, string prefix, string name) : BbFolder(name)
 {
-    public override async Task<IReadOnlyList<BbNode>> ListAsync(BitbucketSource source, CancellationToken ct)
+    // what a list of refs shows at each prefix, made once for the list as the source holds it: a file opened under a
+    // ref comes through here, and three thousand names are not sorted and told apart again for each
+    private static readonly ConditionalWeakTable<List<BbRef>, ConcurrentDictionary<string, Level>> Levels = [];
+
+    /// <summary>One level of the refs: git's names in order, the names shown for them, and the ref each is (null: a folder a slash makes).</summary>
+    private sealed record Level(IReadOnlyList<string> Raw, IReadOnlyList<string> Names, IReadOnlyList<BbRef?> Refs);
+
+    private async Task<Level> LevelAsync(BitbucketSource source, CancellationToken ct)
     {
         var refs = isTags ? await source.TagsAsync(repository, ct).ConfigureAwait(false) : await source.BranchesAsync(repository, ct).ConfigureAwait(false);
-        var level = new SortedDictionary<string, BbRef?>(StringComparer.Ordinal);
-        foreach (var r in refs)
+        return Levels.GetOrCreateValue(refs).GetOrAdd(prefix, static (prefix, refs) =>
         {
-            if (!r.DisplayId.StartsWith(prefix, StringComparison.Ordinal) || r.DisplayId.Length == prefix.Length)
+            var level = new SortedDictionary<string, BbRef?>(StringComparer.Ordinal);
+            foreach (var r in refs)
             {
-                continue;
+                if (!r.DisplayId.StartsWith(prefix, StringComparison.Ordinal) || r.DisplayId.Length == prefix.Length)
+                {
+                    continue;
+                }
+
+                var rest = r.DisplayId[prefix.Length..];
+                var slash = rest.IndexOf('/');
+                if (slash < 0)
+                {
+                    level[rest] = r;
+                }
+                else
+                {
+                    level.TryAdd(rest[..slash], null);
+                }
             }
 
-            var rest = r.DisplayId[prefix.Length..];
-            var slash = rest.IndexOf('/');
-            if (slash < 0)
-            {
-                level[rest] = r;
-            }
-            else
-            {
-                level.TryAdd(rest[..slash], null);
-            }
-        }
+            var raw = level.Keys.ToList();
+            return new Level(raw, AtlassianNames.Unique(raw), level.Values.ToList());
+        }, refs);
+    }
 
-        var raw = level.Keys.ToList();
-        var names = AtlassianNames.Unique(raw);
-        var children = new List<BbNode>(raw.Count);
-        for (var i = 0; i < raw.Count; i++)
+    public override async Task<IReadOnlyList<BbNode>> ListAsync(BitbucketSource source, CancellationToken ct)
+    {
+        var level = await LevelAsync(source, ct).ConfigureAwait(false);
+
+        // each ref's commit, which dates its folder, asked for side by side: one after another they were 3,000 requests
+        // in turn for 3,000 tags (the review of 21-Nov-2026, P12). How many go at once is the source's settings' to say
+        var commits = await Task.WhenAll(level.Refs.Select(r => r is null ? Task.FromResult<BbCommit?>(null) : source.CommitAsync(repository, r.LatestCommit, ct))).ConfigureAwait(false);
+        var children = new List<BbNode>(level.Raw.Count);
+        for (var i = 0; i < level.Raw.Count; i++)
         {
-            if (level[raw[i]] is { } r)
-            {
-                // the ref's folder is the repository at its commit, dated by it
-                var commit = await source.CommitAsync(repository, r.LatestCommit, ct).ConfigureAwait(false);
-                children.Add(new BbTreeFolder(repository, r.LatestCommit, "", names[i], commit?.CommitTime));
-            }
-            else
-            {
-                children.Add(new BbRefsFolder(repository, isTags, prefix + raw[i] + "/", names[i]));
-            }
+            children.Add(Child(level, i, commits[i]));
         }
 
         return children;
     }
+
+    /// <summary>
+    /// One ref's folder by the name shown for it, with that ref's commit asked for and no other's. Found from the
+    /// listing, a file opened under one tag asked for the commit of every tag, at the first open in each run.
+    /// </summary>
+    public override async Task<BbNode?> FindAsync(BitbucketSource source, string name, CancellationToken ct)
+    {
+        var level = await LevelAsync(source, ct).ConfigureAwait(false);
+        for (var i = 0; i < level.Names.Count; i++)
+        {
+            if (level.Names[i].Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return Child(level, i, level.Refs[i] is { } r ? await source.CommitAsync(repository, r.LatestCommit, ct).ConfigureAwait(false) : null);
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>A ref's folder is the repository at its commit, dated by it; a name's part before a slash is a folder of refs.</summary>
+    private BbNode Child(Level level, int i, BbCommit? commit)
+        => level.Refs[i] is { } r
+            ? new BbTreeFolder(repository, r.LatestCommit, "", level.Names[i], commit?.CommitTime)
+            : new BbRefsFolder(repository, isTags, prefix + level.Raw[i] + "/", level.Names[i]);
 }
 
 /// <summary>A folder of the repository at a commit: never changes, so listed once and kept for the run.</summary>

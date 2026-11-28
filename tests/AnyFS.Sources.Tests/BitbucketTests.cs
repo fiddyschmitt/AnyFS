@@ -298,6 +298,103 @@ public class BitbucketTests
         Assert.AreEqual(BitbucketSeed.Day.AddDays(1), (await source.StatAsync("tags/release/2.0", CancellationToken.None))!.Modified, "dated by its commit");
     }
 
+    /// <summary>Forty tags more on the lab's Docs, each at a commit of its own that differs from main's in one file.</summary>
+    private static void FortyTags(FakeBitbucket.Repository docs)
+    {
+        var files = docs.Commits[docs.Branches["main"]].Files;
+        for (var n = 0; n < 40; n++)
+        {
+            var id = docs.Commit("release-line", new Dictionary<string, byte[]>(files, StringComparer.Ordinal) { ["VERSION"] = BitbucketSeed.Bytes($"{n}\n") }, BitbucketSeed.Day.AddDays(10 + n));
+            docs.Tags[$"n{n:D2}"] = id;
+        }
+    }
+
+    [TestMethod]
+    public async Task AFileUnderATagIsOpenedWithThatTagsCommitAskedForAndNoOthers()
+    {
+        // The folder of the tags was listed to find the one: every tag's commit asked for, one after another, at the
+        // first open under it in each run. 3,000 tags, 3,000 requests in turn (the review of 21-Nov-2026, P12)
+        var fake = BitbucketSeed.Lab();
+        FortyTags(fake.RepositoryAt("ANYFS", "docs"));
+        await using var source = await StartAsync(fake, BitbucketSeed.Settings(fake, "/projects/ANYFS/repos/docs"));
+        Assert.AreEqual("17\n", await TextAsync(source, "tags/n17/VERSION"));
+        Assert.AreEqual(1, fake.Count("/commits/"), string.Join("; ", fake.Requests.Where(r => r.Contains("/commits/", StringComparison.Ordinal))));
+        Assert.AreEqual(BitbucketSeed.Day.AddDays(27), (await source.StatAsync("tags/n17", CancellationToken.None))!.Modified, "dated by its commit as before");
+        Assert.AreEqual("on feature/x\n", await TextAsync(source, "tags/release/2.0/feature.txt"), "a tag a folder down");
+        Assert.AreEqual("on feature/x\n", await TextAsync(source, "branches/feature (2)/x/feature.txt"), "and a branch by the name its twin in case left it");
+        Assert.IsNull(await source.StatAsync("tags/n99", CancellationToken.None));
+        await Assert.ThrowsExactlyAsync<VfsException>(() => ReadAsync(source, "tags/n99/VERSION"));
+    }
+
+    [TestMethod]
+    public async Task TheCommitsOfAFoldersTagsAreAskedForSideBySide()
+    {
+        var fake = BitbucketSeed.Lab();
+        FortyTags(fake.RepositoryAt("ANYFS", "docs"));
+        var real = fake.StandIn();
+        var beside = new Beside("/commits/");
+        await using var source = await StartAsync(fake, BitbucketSeed.Settings(fake, "/projects/ANYFS/repos/docs"), standIn: real with { Handler = () => new Held(real.Handler(), beside) });
+        var tags = await EntriesAsync(source, "tags");
+        Assert.AreEqual(42, tags.Count);
+        Assert.AreEqual(BitbucketSeed.Day.AddDays(10), tags.Single(t => t.Name == "n00").Modified);
+        Assert.AreEqual(BitbucketSeed.Day.AddDays(49), tags.Single(t => t.Name == "n39").Modified);
+        Assert.IsTrue(beside.Most >= 2, $"{beside.Most} at once at the most");
+        Assert.IsTrue(beside.Most <= 4, $"{beside.Most} at once, where the settings allow two repositories by two requests");
+    }
+
+    /// <summary>How many requests of a kind were on their way at once, at the most.</summary>
+    private sealed class Beside(string what)
+    {
+        private int _now;
+        private int _most;
+
+        public string What => what;
+
+        public int Most => Volatile.Read(ref _most);
+
+        /// <summary>Set once two are on their way together.</summary>
+        public TaskCompletionSource Two { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Began()
+        {
+            var now = Interlocked.Increment(ref _now);
+            int seen;
+            while (now > (seen = Volatile.Read(ref _most)) && Interlocked.CompareExchange(ref _most, now, seen) != seen)
+            {
+            }
+
+            if (now >= 2)
+            {
+                Two.TrySetResult();
+            }
+        }
+
+        public void Ended() => Interlocked.Decrement(ref _now);
+    }
+
+    /// <summary>Holds each request of the kind until another is on its way beside it, or, where none comes, half a second.</summary>
+    private sealed class Held(HttpMessageHandler inner, Beside beside) : DelegatingHandler(inner)
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (!request.RequestUri!.AbsolutePath.Contains(beside.What, StringComparison.Ordinal))
+            {
+                return await base.SendAsync(request, cancellationToken);
+            }
+
+            beside.Began();
+            try
+            {
+                await Task.WhenAny(beside.Two.Task, Task.Delay(500, cancellationToken));
+                return await base.SendAsync(request, cancellationToken);
+            }
+            finally
+            {
+                beside.Ended();
+            }
+        }
+    }
+
     [TestMethod]
     public async Task WithoutBranchesAndTagsOrPullRequestsARepositoryHasItsFilesAlone()
     {
