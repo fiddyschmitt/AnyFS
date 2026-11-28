@@ -20,6 +20,8 @@
   </PropertyGroup>
   <ItemGroup>
     <None Include="README.md" Pack="true" PackagePath="\" />
+    <!-- a test reaches a race inside the listings' cache by two of its hooks, which plugins never see (R15d) -->
+    <InternalsVisibleTo Include="AnyFS.Sdk.Tests" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />

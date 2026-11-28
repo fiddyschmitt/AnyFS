@@ -41,6 +41,59 @@ public class ListingCacheTests
         }
     }
 
+    /// <summary>
+    /// A listing stored while a reader is making what it read of the one before is what answers after. A change moves the
+    /// version and then lets go of what was made of the listing; a reader in between finds the version moved and lets go
+    /// of what it made itself. The other way round, a reader between the two held the old listing, and that answered from
+    /// then on (the review of 21-Nov-2026, R15d). Brought about here by the cache's two hooks: the reader stops between
+    /// its reading and its making, and the change between its two steps.
+    /// </summary>
+    [TestMethod]
+    public void AListingStoredWhileAReaderMakesTheOneBeforeIsWhatAnswersAfter()
+    {
+        var cache = new ListingCache(TimeSpan.FromHours(1), ListAsync, time: _time);
+        cache.Keep("f", [VfsEntry.File("before.txt", 1)]);
+        var inReader = new ThreadLocal<bool>();
+        using var read = new ManualResetEventSlim();
+        using var go = new ManualResetEventSlim();
+        using var readerDone = new ManualResetEventSlim();
+        cache.ReadForHot = _ =>
+        {
+            if (inReader.Value)
+            {
+                read.Set();
+                go.Wait(TimeSpan.FromSeconds(10));
+            }
+        };
+        cache.MidChange = path =>
+        {
+            if (path == "f" && read.IsSet && !go.IsSet)
+            {
+                go.Set();
+                readerDone.Wait(TimeSpan.FromSeconds(10));
+            }
+        };
+
+        IReadOnlyList<VfsEntry>? readerSaw = null;
+        var reader = new Thread(() =>
+        {
+            inReader.Value = true;
+            readerSaw = cache.Held("f");
+            readerDone.Set();
+        });
+        reader.Start();
+        Assert.IsTrue(read.Wait(TimeSpan.FromSeconds(10)), "the reader has read the listing before");
+
+        // the change, made while the reader holds what it read: stopped by the hook between its two steps until the reader is done
+        cache.Keep("f", [VfsEntry.File("after.txt", 2)]);
+        Assert.IsTrue(reader.Join(TimeSpan.FromSeconds(10)));
+        Assert.AreEqual("before.txt", readerSaw!.Single().Name, "the reader answers what it read, as it was when it read it");
+
+        cache.ReadForHot = null;
+        cache.MidChange = null;
+        Assert.AreEqual("after.txt", cache.Held("f")!.Single().Name, "and what answers after is the listing stored");
+    }
+
     [TestMethod]
     public async Task CachesWithinTtlAndExpiresAfter()
     {

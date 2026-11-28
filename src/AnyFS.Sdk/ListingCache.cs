@@ -147,6 +147,7 @@ public sealed class ListingCache
             return null;
         }
 
+        ReadForHot?.Invoke(path);
         hot = new HotListing(stored.Entries(), stored);
         if (_hot.TryAdd(path, hot))
         {
@@ -413,9 +414,16 @@ public sealed class ListingCache
     private void Changed(string path)
     {
         Interlocked.Increment(ref _version);
+        MidChange?.Invoke(path);
         _hot.TryRemove(path, out _);
         _changes?.Add(path);
     }
+
+    /// <summary>For a test: told of a path between a reader's reading of what is stored and its making of it (R15d).</summary>
+    internal Action<string>? ReadForHot { get; set; }
+
+    /// <summary>For a test: told of a path between a change's two steps, the version moved and what was made of it let go (R15d).</summary>
+    internal Action<string>? MidChange { get; set; }
 
     /// <summary>
     /// Keeps the listings of <paramref name="root"/> and of every folder below it, as a walk that reads a whole subtree at once
